@@ -928,6 +928,11 @@ function New-RouteAcceptanceRunResult {
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = 0
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount = 0
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict = 'none'
+        runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRawCount = 0
+        runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingDistinctCount = 0
+        runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRecoveredCount = 0
+        runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingUnresolvedCount = 0
+        runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffVerdict = 'none'
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount = 0
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount = 0
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount = 0
@@ -2345,6 +2350,11 @@ function Assert-Phase4OperatorVerdict {
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count' -DefaultValue '0')
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count' -DefaultValue '0')
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict' -DefaultValue 'none'
+    $Result.runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_raw_count' -DefaultValue '0')
+    $Result.runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_distinct_count' -DefaultValue '0')
+    $Result.runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_recovered_count' -DefaultValue '0')
+    $Result.runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_unresolved_count' -DefaultValue '0')
+    $Result.runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_verdict' -DefaultValue 'none'
     $Result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count' -DefaultValue '0')
@@ -7293,6 +7303,11 @@ function New-RouteAcceptanceSummaryRunDto {
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict = [string]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict
+        runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRawCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRawCount
+        runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingDistinctCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingDistinctCount
+        runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRecoveredCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRecoveredCount
+        runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingUnresolvedCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingUnresolvedCount
+        runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffVerdict = [string]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffVerdict
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount = [int]$Result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount = [int]$Result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount = [int]$Result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount
@@ -7417,6 +7432,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount = 0
     $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = 0
     $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount = 0
+    $runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRawCount = 0
+    $runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingDistinctCount = 0
+    $runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRecoveredCount = 0
+    $runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingUnresolvedCount = 0
     $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount = 0
     $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount = 0
     $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount = 0
@@ -7433,6 +7452,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount
         $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount
         $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount
+        $runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRawCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRawCount
+        $runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingDistinctCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingDistinctCount
+        $runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRecoveredCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRecoveredCount
+        $runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingUnresolvedCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingUnresolvedCount
         $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount
         $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount
         $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount
@@ -7448,6 +7471,18 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     }
     elseif ($runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount -gt 0 -or
         @($runDtos | Where-Object { [string]$_.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict -eq 'pass' }).Count -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
+    }
+    $runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffVerdict = if (
+        $runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingUnresolvedCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffVerdict -eq 'fail' }).Count -gt 0) {
+        'fail'
+    }
+    elseif ($runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingDistinctCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffVerdict -eq 'pass' }).Count -gt 0) {
         'pass'
     }
     else {
@@ -7551,6 +7586,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRawCount),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingDistinctCount),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRecoveredCount),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_unresolved_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingUnresolvedCount),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_verdict={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffVerdict),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count={0}" -f $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count={0}" -f $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count={0}" -f $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount),
@@ -7624,6 +7664,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount)
         $textLines += ("{0}.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount)
         $textLines += ("{0}.runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict)
+        $textLines += ("{0}.runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_raw_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRawCount)
+        $textLines += ("{0}.runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_distinct_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingDistinctCount)
+        $textLines += ("{0}.runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRecoveredCount)
+        $textLines += ("{0}.runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_unresolved_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingUnresolvedCount)
+        $textLines += ("{0}.runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_verdict={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffVerdict)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount)
@@ -7762,6 +7807,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount = $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict = $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict
+        runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRawCount = $runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRawCount
+        runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingDistinctCount = $runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingDistinctCount
+        runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRecoveredCount = $runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRecoveredCount
+        runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingUnresolvedCount = $runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingUnresolvedCount
+        runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffVerdict = $runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffVerdict
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount = $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount = $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount = $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount

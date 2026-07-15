@@ -24412,6 +24412,1689 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetry_AnswerTimeoutJoinsRetainedRegularV4ClosureAndArmsFreshInitialContract()
+    {
+        FakeNknClient.ResetNetwork();
+        var previousOfferAnswerTimeout = NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests;
+        var previousRecoveryRequest = NknSignalingTransport.RuntimeUnlockOfferSendRecoveryRequestOverrideForTests;
+        var previousHelpeePriorityDelay = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
+        NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests = TimeSpan.FromMilliseconds(75);
+        NknSignalingTransport.RuntimeUnlockOfferSendRecoveryRequestOverrideForTests = (_, _, _) => false;
+        NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = TimeSpan.Zero;
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-closure-answer-timeout-join.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-closure-answer-timeout-join.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity(
+                    "host-runtime-unlock-closure-answer-timeout-join-id",
+                    hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity(
+                    "helper-runtime-unlock-closure-answer-timeout-join-id",
+                    helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            const string transferId = "transfer_runtime_unlock_closure_answer_timeout_join";
+            var authorityRequests = new ConcurrentQueue<RuntimeUnlockRetryDispatchAuthorityRequest>();
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
+                host,
+                statusSelector: request =>
+                {
+                    authorityRequests.Enqueue(request);
+                    return RuntimeUnlockRetryDispatchDecisionStatus.Granted;
+                });
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId, liveRouteEpoch: 1);
+
+            const string nonce = "ce11223344556677889900aabbccddee";
+            const long observedOfferGeneration = 101;
+            host.SeedRuntimeUnlockOfferCriticalSectionForTests(
+                sessionId,
+                nonce,
+                payerDecisionId: 31L,
+                generation: observedOfferGeneration,
+                observedSend: true,
+                observedLane: "control_to_bulk_endpoint",
+                peerReceived: false,
+                answerTimeoutScheduled: true);
+
+            // Establish the exact predecessor condition from the live artifact: a retry
+            // authority was granted and conclusively settled DispatchObserved.
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                100L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "regular_v4_repair_settled",
+                false);
+            Assert.Single(authorityRequests);
+            InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
+            Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(
+                observedOfferGeneration,
+                nonce));
+            Assert.True(host.BeginRuntimeUnlockRetryDispatchSendForTests());
+            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+                host,
+                "MarkRuntimeUnlockRecoveryContractRetryObserved",
+                sessionId,
+                observedOfferGeneration,
+                "control_to_bulk_endpoint")));
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(0).Contains(
+                    "event=runtime_unlock_retry_dispatch_observed;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3));
+
+            var predecessorState = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(predecessorState);
+            var predecessorContractGeneration = Assert.IsType<long>(
+                predecessorState!.GetType().GetProperty("ContractGeneration")!.GetValue(predecessorState));
+            var predecessorSettlementReport = Assert.IsType<RuntimeUnlockRetryDispatchSettlementReport>(
+                predecessorState.GetType().GetProperty("LastAppliedDispatchSettlementReport")!
+                    .GetValue(predecessorState));
+
+            var recoveryRequest = AttachRegularV4RecoveryAuthorityForTests(
+                new FileTransferReceiveRecoveryRequest(
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Outbound,
+                    "session_liveness_timeout_pending")
+                {
+                    RouteToken = FileTransferRouteResolver.RegularNknV4FastToken,
+                    ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    LiveRouteEpoch = 1,
+                    TransferLegGeneration = 1,
+                    AuthorityReason = "regular_v4_receive_recovery_pending",
+                });
+            InvokePrivateMethod(
+                host,
+                "MarkFileTransferRegularV4RecoveryLivenessStarted",
+                recoveryRequest,
+                sessionId,
+                transferId,
+                "session_liveness_timeout_pending");
+            var joinLogStart = GetOperationalLogLength();
+            InvokePrivateMethod(
+                host,
+                "MarkFileTransferRegularV4RecoveryLivenessBridgeRecoveryLifecycle",
+                "completed",
+                "test_regular_v4_recovery_completed");
+
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(joinLogStart).Contains(
+                    "event=runtime_unlock_regular_v4_recovery_lease_closure_retained;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3));
+
+            InvokePrivateMethod(host, "ScheduleAccelerationOfferAnswerTimeout", nonce);
+
+            await WaitUntilAsync(
+                () =>
+                {
+                    var tail = ReadOperationalLogTail(joinLogStart);
+                    return tail.Contains(
+                               "event=runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_joined;",
+                               StringComparison.Ordinal) &&
+                           tail.Contains(
+                               "event=runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_retry_armed;",
+                               StringComparison.Ordinal);
+                },
+                TimeSpan.FromSeconds(4));
+
+            var beforeProofTail = ReadOperationalLogTail(joinLogStart);
+            Assert.Contains(
+                "event=tuna_activation_control_send_recovery_joined_existing;",
+                beforeProofTail,
+                StringComparison.Ordinal);
+            Assert.Single(authorityRequests);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_regular_v4_recovery_lease_closure_adopted;",
+                beforeProofTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_regular_v4_recovery_lease_closure_consumed;",
+                beforeProofTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_retry_dispatch_authority_granted;",
+                beforeProofTail,
+                StringComparison.Ordinal);
+
+            var joinedState = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(joinedState);
+            var joinedStateType = joinedState!.GetType();
+            Assert.True(Assert.IsType<long>(
+                joinedStateType.GetProperty("ContractGeneration")!.GetValue(joinedState)) >
+                predecessorContractGeneration);
+            Assert.Equal(
+                observedOfferGeneration,
+                Assert.IsType<long>(joinedStateType.GetProperty("RetiredOfferGeneration")!.GetValue(joinedState)));
+            Assert.Equal(
+                1,
+                Assert.IsType<int>(joinedStateType.GetProperty("DispatchAttemptGeneration")!.GetValue(joinedState)));
+            Assert.Equal(
+                0,
+                Assert.IsType<int>(joinedStateType.GetProperty("MissingDispatchSuccessorGeneration")!.GetValue(joinedState)));
+            Assert.True(Assert.IsType<bool>(
+                joinedStateType.GetProperty("BlockedByRegularV4ReceiveRecovery")!.GetValue(joinedState)));
+            Assert.Equal(
+                1,
+                Assert.IsType<int>(joinedStateType.GetProperty("RegularV4RecoveryLivenessGeneration")!.GetValue(joinedState)));
+            Assert.Null(joinedStateType.GetProperty("DispatchContract")!.GetValue(joinedState));
+            Assert.Null(joinedStateType.GetProperty("DispatchPredecessorContract")!.GetValue(joinedState));
+            Assert.Null(joinedStateType.GetProperty("PendingDispatchSuccessorIntent")!.GetValue(joinedState));
+            Assert.False(Assert.IsType<bool>(
+                joinedStateType.GetProperty("RetryAuthorityGranted")!.GetValue(joinedState)));
+
+            InvokePrivateMethod(
+                host,
+                "MarkFileTransferRegularV4RecoveryLivenessReceiveProofReceived",
+                sessionId,
+                transferId,
+                "test_receive_proof",
+                "control");
+
+            await WaitUntilAsync(
+                () => authorityRequests.Count == 2 &&
+                      ReadOperationalLogTail(joinLogStart).Contains(
+                          "event=runtime_unlock_regular_v4_recovery_lease_closure_consumed;",
+                          StringComparison.Ordinal),
+                TimeSpan.FromSeconds(4));
+
+            var requests = authorityRequests.ToArray();
+            var joinedRequest = requests[1];
+            Assert.Equal(1, joinedRequest.DispatchAttemptGeneration);
+            Assert.Equal(0, joinedRequest.MissingDispatchSuccessorGeneration);
+            Assert.Null(joinedRequest.PredecessorAuthorityId);
+            Assert.False(joinedRequest.RequestActivePredecessorSupersession);
+            Assert.Equal(1, joinedRequest.RegularV4LivenessGeneration);
+            Assert.Equal(1, joinedRequest.BridgeDecisionGeneration);
+
+            var grantedState = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(grantedState);
+            var grantedContract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+                grantedState!.GetType().GetProperty("DispatchContract")!.GetValue(grantedState));
+            Assert.Equal(1, grantedContract.Authority.DispatchAttemptGeneration);
+            Assert.Equal(0, grantedContract.Authority.MissingDispatchSuccessorGeneration);
+            Assert.Null(grantedContract.Authority.PredecessorAuthorityId);
+
+            var historicalSettlement = GetPrivateField(
+                host,
+                "runtimeUnlockRetryDispatchHistoricalSettlement");
+            Assert.NotNull(historicalSettlement);
+            Assert.Equal(
+                predecessorSettlementReport,
+                historicalSettlement!.GetType().GetProperty("Report")!.GetValue(historicalSettlement));
+            Assert.Null(
+                grantedState.GetType().GetProperty("DispatchPredecessorContract")!.GetValue(grantedState));
+            var freshLastAppliedSettlement =
+                grantedState.GetType().GetProperty("LastAppliedDispatchSettlementReport")!
+                    .GetValue(grantedState);
+            var duplicateSettlementLogStart = GetOperationalLogLength();
+
+            // A late exact duplicate for the retired DispatchObserved predecessor is
+            // historical/idempotent only; it cannot attach itself to or mutate the
+            // fresh closure-backed 1/0 chain.
+            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+                host,
+                "PublishRuntimeUnlockRetryDispatchSettlementReport",
+                predecessorSettlementReport)));
+            var duplicateSettlementTail = ReadOperationalLogTail(duplicateSettlementLogStart);
+            Assert.Contains(
+                "event=runtime_unlock_retry_dispatch_settlement_decided;",
+                duplicateSettlementTail,
+                StringComparison.Ordinal);
+            Assert.Contains("decision_status=Idempotent", duplicateSettlementTail, StringComparison.Ordinal);
+            Assert.Same(grantedState, GetPrivateField(host, "runtimeUnlockRecoveryRetryState"));
+            Assert.Same(
+                grantedContract,
+                grantedState.GetType().GetProperty("DispatchContract")!.GetValue(grantedState));
+            Assert.Equal(
+                freshLastAppliedSettlement,
+                grantedState.GetType().GetProperty("LastAppliedDispatchSettlementReport")!
+                    .GetValue(grantedState));
+            Assert.Null(
+                grantedState.GetType().GetProperty("DispatchPredecessorContract")!.GetValue(grantedState));
+            Assert.Equal(2, authorityRequests.Count);
+
+            InvokePrivateMethod(
+                host,
+                "MarkFileTransferRegularV4RecoveryLivenessReceiveProofReceived",
+                sessionId,
+                transferId,
+                "duplicate_receive_proof",
+                "control");
+            InvokePrivateMethod(
+                host,
+                "MarkFileTransferRegularV4RecoveryLivenessBridgeRecoveryLifecycle",
+                "receive_resumed",
+                "duplicate_receive_resumed");
+            await Task.Delay(100, cts.Token);
+
+            var finalTail = ReadOperationalLogTail(joinLogStart);
+            static int CountEvent(string log, string eventName)
+                => log.Split($"event={eventName};", StringSplitOptions.None).Length - 1;
+            Assert.Equal(
+                1,
+                CountEvent(
+                    finalTail,
+                    "runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_joined"));
+            Assert.Equal(
+                1,
+                CountEvent(
+                    finalTail,
+                    "runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_retry_armed"));
+            Assert.Equal(
+                1,
+                CountEvent(finalTail, "runtime_unlock_regular_v4_recovery_lease_closure_adopted"));
+            Assert.Equal(
+                1,
+                CountEvent(finalTail, "runtime_unlock_regular_v4_recovery_lease_closure_consumed"));
+            Assert.Equal(1, CountEvent(finalTail, "runtime_unlock_retry_dispatch_authority_granted"));
+            Assert.Equal(2, authorityRequests.Count);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_retry_dispatch_current_authority_rejected;",
+                finalTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "retry_dispatch_initial_attempt_generation_mismatch",
+                finalTail,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests = previousOfferAnswerTimeout;
+            NknSignalingTransport.RuntimeUnlockOfferSendRecoveryRequestOverrideForTests = previousRecoveryRequest;
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = previousHelpeePriorityDelay;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Theory]
+    [Trait("Category", "Smoke")]
+    [InlineData("offer_answer", "answer_timeout_without_peer_response", true)]
+    [InlineData("offer_peer_response", "peer_response_timeout_without_peer_response", false)]
+    public async Task RuntimeUnlockRetry_ClosureJoinSurvivesLocalProofRaceAndPeerResponseBoundary(
+        string purpose,
+        string trigger,
+        bool adoptBeforeArm)
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            var options = NknTransportOptions.Load();
+            var suffix = purpose.Replace('_', '-');
+            var hostClient = new FakeNknClient($"host.runtime-unlock-closure-race-{suffix}.address");
+            var helperClient = new FakeNknClient($"helper.runtime-unlock-closure-race-{suffix}.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity($"host-runtime-unlock-closure-race-{suffix}-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity($"helper-runtime-unlock-closure-race-{suffix}-id", helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            var transferId = $"transfer_runtime_unlock_closure_race_{purpose}";
+            var authorityRequests = new ConcurrentQueue<RuntimeUnlockRetryDispatchAuthorityRequest>();
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
+                host,
+                statusSelector: request =>
+                {
+                    authorityRequests.Enqueue(request);
+                    return RuntimeUnlockRetryDispatchDecisionStatus.Granted;
+                });
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId, liveRouteEpoch: 1);
+
+            const string nonce = "d111223344556677889900aabbccddee";
+            const long offerGeneration = 121;
+            host.SeedRuntimeUnlockOfferCriticalSectionForTests(
+                sessionId,
+                nonce,
+                payerDecisionId: 51L,
+                generation: offerGeneration,
+                observedSend: true,
+                observedLane: "control_to_bulk_endpoint",
+                peerReceived: false,
+                answerTimeoutScheduled: true);
+            await EstablishDispatchObservedRuntimeUnlockRetryForClosureJoinAsync(
+                host,
+                authorityRequests,
+                sessionId,
+                retiredOfferGeneration: offerGeneration - 1,
+                observedOfferGeneration: offerGeneration,
+                offerNonce: nonce);
+
+            await RetainRuntimeUnlockRegularV4RecoveryClosureForJoinAsync(
+                host,
+                sessionId,
+                transferId,
+                liveRouteEpoch: 1);
+            var capture = CaptureRuntimeUnlockRegularV4RecoveryRetryJoinIntentForTests(
+                host,
+                sessionId,
+                nonce,
+                offerPayerDecisionId: 51L,
+                offerGeneration,
+                purpose,
+                trigger);
+            Assert.False(capture.Duplicate);
+            var boundaryLogStart = GetOperationalLogLength();
+
+            if (adoptBeforeArm)
+            {
+                InvokePrivateMethod(
+                    host,
+                    "MarkFileTransferRegularV4RecoveryLivenessReceiveProofReceived",
+                    sessionId,
+                    transferId,
+                    "receive_proof_between_join_capture_and_arm",
+                    "control");
+                Assert.Contains(
+                    "event=runtime_unlock_regular_v4_recovery_lease_closure_adopted;",
+                    ReadOperationalLogTail(boundaryLogStart),
+                    StringComparison.Ordinal);
+            }
+
+            var requestsBeforeArm = authorityRequests.Count;
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRegularV4RecoveryClosureJoin",
+                capture.Intent,
+                false);
+
+            if (!adoptBeforeArm)
+            {
+                Assert.Single(authorityRequests);
+                var beforeProofTail = ReadOperationalLogTail(boundaryLogStart);
+                Assert.Contains(
+                    "event=runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_retry_armed;",
+                    beforeProofTail,
+                    StringComparison.Ordinal);
+                Assert.DoesNotContain(
+                    "event=runtime_unlock_retry_dispatch_authority_granted;",
+                    beforeProofTail,
+                    StringComparison.Ordinal);
+                InvokePrivateMethod(
+                    host,
+                    "MarkFileTransferRegularV4RecoveryLivenessReceiveProofReceived",
+                    sessionId,
+                    transferId,
+                    "receive_proof_after_join_arm",
+                    "control");
+            }
+
+            await WaitUntilAsync(
+                () => authorityRequests.Count == requestsBeforeArm + 1 &&
+                      ReadOperationalLogTail(boundaryLogStart).Contains(
+                          "event=runtime_unlock_regular_v4_recovery_lease_closure_consumed;",
+                          StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3));
+
+            var request = authorityRequests.ToArray()[^1];
+            Assert.Equal(1, request.DispatchAttemptGeneration);
+            Assert.Equal(0, request.MissingDispatchSuccessorGeneration);
+            Assert.Null(request.PredecessorAuthorityId);
+            Assert.False(request.RequestActivePredecessorSupersession);
+            Assert.Equal(1, request.RegularV4LivenessGeneration);
+            Assert.Equal(1, request.BridgeDecisionGeneration);
+
+            // Replaying either side of the race is state-idempotent and cannot mint
+            // another closure-backed authority.
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRegularV4RecoveryClosureJoin",
+                capture.Intent,
+                false);
+            InvokePrivateMethod(
+                host,
+                "MarkFileTransferRegularV4RecoveryLivenessReceiveProofReceived",
+                sessionId,
+                transferId,
+                "duplicate_receive_proof_after_join",
+                "control");
+            await Task.Delay(75, cts.Token);
+
+            var tail = ReadOperationalLogTail(boundaryLogStart);
+            static int CountEvent(string log, string eventName)
+                => log.Split($"event={eventName};", StringSplitOptions.None).Length - 1;
+            Assert.Equal(1, CountEvent(tail, "runtime_unlock_regular_v4_recovery_lease_closure_adopted"));
+            Assert.Equal(1, CountEvent(tail, "runtime_unlock_regular_v4_recovery_lease_closure_consumed"));
+            Assert.Equal(1, CountEvent(tail, "runtime_unlock_retry_dispatch_authority_granted"));
+            Assert.Equal(1, CountEvent(
+                tail,
+                "runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_retry_armed"));
+            Assert.Contains($"timeout_purpose={purpose}", tail, StringComparison.Ordinal);
+            Assert.Equal(requestsBeforeArm + 1, authorityRequests.Count);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Theory]
+    [Trait("Category", "Smoke")]
+    [InlineData("terminal")]
+    [InlineData("grant")]
+    [InlineData("dispatch_observed")]
+    [InlineData("missing_dispatch")]
+    public async Task RuntimeUnlockRetry_ClosureJoinPostInstallRaceCannotResurrectPredecessor(
+        string progression)
+    {
+        FakeNknClient.ResetNetwork();
+        NknSignalingTransport.RuntimeUnlockRegularV4RecoveryRetryJoinPostInstallBarrierForTests =
+            null;
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            var options = NknTransportOptions.Load();
+            var suffix = progression.Replace('_', '-');
+            var hostClient = new FakeNknClient(
+                $"host.runtime-unlock-closure-post-install-{suffix}.address");
+            var helperClient = new FakeNknClient(
+                $"helper.runtime-unlock-closure-post-install-{suffix}.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity(
+                    $"host-runtime-unlock-closure-post-install-{suffix}-id",
+                    hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity(
+                    $"helper-runtime-unlock-closure-post-install-{suffix}-id",
+                    helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            var transferId = $"transfer_runtime_unlock_closure_post_install_{suffix}";
+            var authorityRequests = new ConcurrentQueue<RuntimeUnlockRetryDispatchAuthorityRequest>();
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
+                host,
+                statusSelector: request =>
+                {
+                    authorityRequests.Enqueue(request);
+                    if (string.Equals(
+                            progression,
+                            "missing_dispatch",
+                            StringComparison.Ordinal) &&
+                        authorityRequests.Count >= 3)
+                    {
+                        return RuntimeUnlockRetryDispatchDecisionStatus.Held;
+                    }
+
+                    return RuntimeUnlockRetryDispatchDecisionStatus.Granted;
+                });
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId, liveRouteEpoch: 1);
+
+            const string nonce = "d311223344556677889900aabbccddee";
+            const long offerGeneration = 141;
+            host.SeedRuntimeUnlockOfferCriticalSectionForTests(
+                sessionId,
+                nonce,
+                payerDecisionId: 71L,
+                generation: offerGeneration,
+                observedSend: true,
+                observedLane: "control_to_bulk_endpoint",
+                peerReceived: false,
+                answerTimeoutScheduled: true);
+            await EstablishDispatchObservedRuntimeUnlockRetryForClosureJoinAsync(
+                host,
+                authorityRequests,
+                sessionId,
+                retiredOfferGeneration: offerGeneration - 1,
+                observedOfferGeneration: offerGeneration,
+                offerNonce: nonce);
+
+            var predecessorState = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(predecessorState);
+            var predecessorStateType = predecessorState!.GetType();
+            var predecessorContract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+                predecessorStateType.GetProperty("DispatchContract")!.GetValue(predecessorState));
+            var predecessorSettlement = Assert.IsType<RuntimeUnlockRetryDispatchSettlementReport>(
+                predecessorStateType.GetProperty("LastAppliedDispatchSettlementReport")!
+                    .GetValue(predecessorState));
+            Assert.Equal(
+                RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved,
+                predecessorSettlement.Outcome);
+
+            await RetainRuntimeUnlockRegularV4RecoveryClosureForJoinAsync(
+                host,
+                sessionId,
+                transferId,
+                liveRouteEpoch: 1);
+            var capture = CaptureRuntimeUnlockRegularV4RecoveryRetryJoinIntentForTests(
+                host,
+                sessionId,
+                nonce,
+                offerPayerDecisionId: 71L,
+                offerGeneration);
+            Assert.False(capture.Duplicate);
+            var requestCountBeforeArm = authorityRequests.Count;
+            var offerGenerationBeforeArm = Assert.IsType<long>(
+                GetPrivateField(host, "outboundAccelerationOfferGeneration"));
+            var logStart = GetOperationalLogLength();
+            object? installedState = null;
+
+            NknSignalingTransport.RuntimeUnlockRegularV4RecoveryRetryJoinPostInstallBarrierForTests =
+                transport =>
+                {
+                    installedState = GetPrivateField(
+                        transport,
+                        "runtimeUnlockRecoveryRetryState");
+                    Assert.NotNull(installedState);
+                    Assert.NotSame(predecessorState, installedState);
+                    if (!string.Equals(progression, "terminal", StringComparison.Ordinal))
+                    {
+                        InvokePrivateMethod(
+                            transport,
+                            "MarkFileTransferRegularV4RecoveryLivenessReceiveProofReceived",
+                            sessionId,
+                            transferId,
+                            "receive_proof_inside_retry_join_post_install_barrier",
+                            "control");
+                        if (string.Equals(progression, "grant", StringComparison.Ordinal))
+                        {
+                            return;
+                        }
+
+                        const long progressedOfferGeneration = offerGeneration + 1;
+                        const string progressedOfferNonce =
+                            "d411223344556677889900aabbccddee";
+                        Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+                            transport,
+                            "MarkRuntimeUnlockRecoveryContractRetryDispatched",
+                            "runtime_unlock")));
+                        Assert.True(transport.BindRuntimeUnlockRetryDispatchOfferAliasForTests(
+                            progressedOfferGeneration,
+                            progressedOfferNonce));
+                        Assert.True(transport.BeginRuntimeUnlockRetryDispatchSendForTests());
+                        if (string.Equals(
+                                progression,
+                                "dispatch_observed",
+                                StringComparison.Ordinal))
+                        {
+                            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+                                transport,
+                                "MarkRuntimeUnlockRecoveryContractRetryObserved",
+                                sessionId,
+                                progressedOfferGeneration,
+                                "control_to_bulk_endpoint")));
+                        }
+                        else
+                        {
+                            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+                                transport,
+                                "TrySettleRuntimeUnlockRetryDispatchMissingIfCurrent",
+                                sessionId,
+                                progressedOfferGeneration,
+                                "missing_dispatch_inside_retry_join_post_install_barrier")));
+                        }
+                        return;
+                    }
+
+                    Assert.IsAssignableFrom<IFileTransferTerminalObserver>(transport)
+                        .ObserveFileTransferTerminal(
+                            new FileTransferTerminalNotification(
+                                sessionId,
+                                transferId,
+                                FileTransferDirection.Outbound,
+                                FileTransferRouteResolver.RegularNknV4FastToken,
+                                FileTransferProtocol.ProtocolVersionV4,
+                                FileTransferTransferState.Failed,
+                                "test_terminal",
+                                "terminal_inside_retry_join_post_install_barrier"));
+                };
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRegularV4RecoveryClosureJoin",
+                capture.Intent,
+                false);
+            NknSignalingTransport.RuntimeUnlockRegularV4RecoveryRetryJoinPostInstallBarrierForTests =
+                null;
+
+            Assert.NotNull(installedState);
+            var currentState = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.Same(installedState, currentState);
+            Assert.NotSame(predecessorState, currentState);
+            Assert.Equal(
+                offerGenerationBeforeArm,
+                Assert.IsType<long>(GetPrivateField(host, "outboundAccelerationOfferGeneration")));
+            Assert.Null(GetPrivateField(
+                host,
+                "pendingRuntimeUnlockRegularV4RecoveryRetryJoinIntent"));
+
+            var historicalSettlement = GetPrivateField(
+                host,
+                "runtimeUnlockRetryDispatchHistoricalSettlement");
+            Assert.NotNull(historicalSettlement);
+            Assert.Equal(
+                predecessorSettlement,
+                historicalSettlement!.GetType().GetProperty("Report")!.GetValue(historicalSettlement));
+            Assert.Same(
+                predecessorContract,
+                predecessorStateType.GetProperty("DispatchContract")!.GetValue(predecessorState));
+
+            var currentStateType = currentState!.GetType();
+            var tail = ReadOperationalLogTail(logStart);
+            if (!string.Equals(progression, "terminal", StringComparison.Ordinal))
+            {
+                var expectedRequestCount = string.Equals(
+                    progression,
+                    "missing_dispatch",
+                    StringComparison.Ordinal)
+                    ? requestCountBeforeArm + 2
+                    : requestCountBeforeArm + 1;
+                await WaitUntilAsync(
+                    () => authorityRequests.Count == expectedRequestCount &&
+                          ReadOperationalLogTail(logStart).Contains(
+                              "event=runtime_unlock_regular_v4_recovery_lease_closure_consumed;",
+                              StringComparison.Ordinal),
+                    TimeSpan.FromSeconds(3));
+
+                var freshContract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+                    currentStateType.GetProperty("DispatchContract")!.GetValue(currentState));
+                Assert.NotSame(predecessorContract, freshContract);
+                Assert.Equal(
+                    RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure,
+                    freshContract.Authority.ReleaseKind);
+                Assert.Equal(1, freshContract.Authority.DispatchAttemptGeneration);
+                Assert.Equal(0, freshContract.Authority.MissingDispatchSuccessorGeneration);
+                Assert.Null(freshContract.Authority.PredecessorAuthorityId);
+                Assert.NotEqual(
+                    SessionRecoveryContractState.Failed,
+                    Assert.IsType<SessionRecoveryContractState>(
+                        currentStateType.GetProperty("ContractState")!.GetValue(currentState)));
+                Assert.NotNull(
+                    currentStateType.GetProperty("RegularV4RecoveryRetryJoinIntent")!
+                        .GetValue(currentState));
+                Assert.Contains(
+                    "decision_reason=fresh_independent_retry_committed_during_post_install_validation",
+                    tail,
+                    StringComparison.Ordinal);
+                Assert.DoesNotContain(
+                    "event=runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_join_discarded;",
+                    tail,
+                    StringComparison.Ordinal);
+                if (string.Equals(progression, "grant", StringComparison.Ordinal))
+                {
+                    Assert.False(freshContract.Lifecycle.IsSettled);
+                    Assert.True(Assert.IsType<bool>(
+                        currentStateType.GetProperty("RetryAuthorityGranted")!
+                            .GetValue(currentState)));
+                }
+                else if (string.Equals(
+                             progression,
+                             "dispatch_observed",
+                             StringComparison.Ordinal))
+                {
+                    Assert.True(freshContract.Lifecycle.IsSettled);
+                    Assert.Equal(
+                        RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved,
+                        freshContract.Lifecycle.SettlementOutcome);
+                    Assert.True(Assert.IsType<bool>(
+                        currentStateType.GetProperty("DispatchObserved")!.GetValue(currentState)));
+                    Assert.Equal(
+                        SessionRecoveryContractState.RetryDispatched,
+                        Assert.IsType<SessionRecoveryContractState>(
+                            currentStateType.GetProperty("ContractState")!.GetValue(currentState)));
+                }
+                else
+                {
+                    Assert.True(freshContract.Lifecycle.IsSettled);
+                    Assert.Equal(
+                        RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch,
+                        freshContract.Lifecycle.SettlementOutcome);
+                    Assert.Equal(
+                        SessionRecoveryContractState.RecoverySettled,
+                        Assert.IsType<SessionRecoveryContractState>(
+                            currentStateType.GetProperty("ContractState")!.GetValue(currentState)));
+                    Assert.NotNull(
+                        currentStateType.GetProperty("PendingDispatchSuccessorIntent")!
+                            .GetValue(currentState));
+                }
+            }
+            else
+            {
+                Assert.Equal(requestCountBeforeArm, authorityRequests.Count);
+                Assert.Equal(
+                    SessionRecoveryContractState.Completed,
+                    Assert.IsType<SessionRecoveryContractState>(
+                        currentStateType.GetProperty("ContractState")!.GetValue(currentState)));
+                Assert.Null(currentStateType.GetProperty("DispatchContract")!.GetValue(currentState));
+                Assert.Null(
+                    currentStateType.GetProperty("PendingDispatchAuthorityRequest")!
+                        .GetValue(currentState));
+                Assert.Null(
+                    currentStateType.GetProperty("RegularV4RecoveryRetryJoinIntent")!
+                        .GetValue(currentState));
+                Assert.False(Assert.IsType<bool>(
+                    currentStateType.GetProperty("RetryQueued")!.GetValue(currentState)));
+                Assert.False(Assert.IsType<bool>(
+                    currentStateType.GetProperty("RetryDispatched")!.GetValue(currentState)));
+                Assert.False(Assert.IsType<bool>(
+                    currentStateType.GetProperty("RetryAuthorityGranted")!.GetValue(currentState)));
+                Assert.Equal(
+                    0,
+                    Assert.IsType<long>(
+                        currentStateType.GetProperty("RetryDeadlineUtcMs")!.GetValue(currentState)));
+                Assert.Equal(
+                    0,
+                    Assert.IsType<long>(
+                        currentStateType.GetProperty("LivenessDeferralDeadlineUtcMs")!
+                            .GetValue(currentState)));
+                Assert.Equal(
+                    0,
+                    Assert.IsType<long>(
+                        currentStateType.GetProperty("DispatchDeadlineUtcMs")!
+                            .GetValue(currentState)));
+                Assert.DoesNotContain(
+                    "event=runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_retry_armed;",
+                    tail,
+                    StringComparison.Ordinal);
+                Assert.DoesNotContain(
+                    "event=runtime_unlock_retry_dispatch_authority_granted;",
+                    tail,
+                    StringComparison.Ordinal);
+                Assert.DoesNotContain(
+                    "event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;",
+                    tail,
+                    StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            NknSignalingTransport.RuntimeUnlockRegularV4RecoveryRetryJoinPostInstallBarrierForTests =
+                null;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetry_ScheduledPeerResponseTimeoutJoinsClosureFromActiveCutThrough()
+    {
+        FakeNknClient.ResetNetwork();
+        var previousPeerResponseTimeout =
+            NknSignalingTransport.RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests;
+        NknSignalingTransport.RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests =
+            TimeSpan.FromMilliseconds(75);
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-closure-peer-scheduled.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-closure-peer-scheduled.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity(
+                    "host-runtime-unlock-closure-peer-scheduled-id",
+                    hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity(
+                    "helper-runtime-unlock-closure-peer-scheduled-id",
+                    helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            const string transferId = "transfer_runtime_unlock_closure_peer_scheduled";
+            var authorityRequests = new ConcurrentQueue<RuntimeUnlockRetryDispatchAuthorityRequest>();
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
+                host,
+                statusSelector: request =>
+                {
+                    authorityRequests.Enqueue(request);
+                    return RuntimeUnlockRetryDispatchDecisionStatus.Granted;
+                });
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId, liveRouteEpoch: 1);
+
+            const string nonce = "d311223344556677889900aabbccddee";
+            const long offerGeneration = 141;
+            host.SeedRuntimeUnlockOfferCriticalSectionForTests(
+                sessionId,
+                nonce,
+                payerDecisionId: 71L,
+                generation: offerGeneration,
+                observedSend: true,
+                observedLane: "control_to_bulk_endpoint",
+                peerReceived: false,
+                answerTimeoutScheduled: true);
+            var predecessorContractGeneration =
+                await EstablishDispatchObservedRuntimeUnlockRetryForClosureJoinAsync(
+                    host,
+                    authorityRequests,
+                    sessionId,
+                    retiredOfferGeneration: offerGeneration - 1,
+                    observedOfferGeneration: offerGeneration,
+                    offerNonce: nonce);
+            var predecessorState = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(predecessorState);
+            predecessorState!.GetType().GetProperty("CutThroughPending")!.SetValue(predecessorState, false);
+            predecessorState.GetType().GetProperty("CutThroughActive")!.SetValue(predecessorState, true);
+            predecessorState.GetType().GetProperty("CutThroughAttempt")!.SetValue(predecessorState, 1);
+
+            await RetainRuntimeUnlockRegularV4RecoveryClosureForJoinAsync(
+                host,
+                sessionId,
+                transferId,
+                liveRouteEpoch: 1);
+            var logStart = GetOperationalLogLength();
+
+            InvokePrivateMethod(
+                host,
+                "ScheduleRuntimeUnlockOfferPeerResponseTimeout",
+                nonce,
+                71L,
+                offerGeneration,
+                sessionId,
+                "control_to_bulk_endpoint");
+            // Model the real race where the outbound runtime-unlock trigger is
+            // retired after scheduling but before the peer-response callback.
+            // The callback must still use its captured offer identity and join
+            // the exact retained closure.
+            SetPrivateField(
+                host,
+                "outboundAccelerationOfferTrigger",
+                "test_trigger_retired_before_peer_timeout");
+
+            await WaitUntilAsync(
+                () =>
+                {
+                    var tail = ReadOperationalLogTail(logStart);
+                    return tail.Contains(
+                               "event=tuna_acceleration_runtime_unlock_offer_peer_response_timeout;",
+                               StringComparison.Ordinal) &&
+                           tail.Contains(
+                               "event=runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_retry_armed;",
+                               StringComparison.Ordinal);
+                },
+                TimeSpan.FromSeconds(4));
+
+            var beforeProofTail = ReadOperationalLogTail(logStart);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_offer_peer_response_timeout_pending_answer_preserved;",
+                beforeProofTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "purpose=offer_peer_response",
+                beforeProofTail,
+                StringComparison.Ordinal);
+            Assert.Single(authorityRequests);
+            var joinedState = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(joinedState);
+            Assert.NotSame(predecessorState, joinedState);
+            Assert.True(Assert.IsType<long>(
+                joinedState!.GetType().GetProperty("ContractGeneration")!.GetValue(joinedState)) >
+                predecessorContractGeneration);
+            Assert.True(Assert.IsType<bool>(
+                joinedState.GetType().GetProperty("BlockedByRegularV4ReceiveRecovery")!
+                    .GetValue(joinedState)));
+            Assert.False(Assert.IsType<bool>(
+                joinedState.GetType().GetProperty("RetryAuthorityGranted")!.GetValue(joinedState)));
+
+            InvokePrivateMethod(
+                host,
+                "MarkFileTransferRegularV4RecoveryLivenessReceiveProofReceived",
+                sessionId,
+                transferId,
+                "scheduled_peer_response_timeout_receive_proof",
+                "control");
+            await WaitUntilAsync(
+                () => authorityRequests.Count == 2 &&
+                      ReadOperationalLogTail(logStart).Contains(
+                          "event=runtime_unlock_regular_v4_recovery_lease_closure_consumed;",
+                          StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3));
+            var freshRequest = authorityRequests.ToArray()[^1];
+            Assert.Equal(1, freshRequest.DispatchAttemptGeneration);
+            Assert.Equal(0, freshRequest.MissingDispatchSuccessorGeneration);
+            Assert.Null(freshRequest.PredecessorAuthorityId);
+            Assert.Equal(1, freshRequest.RegularV4LivenessGeneration);
+            Assert.Equal(1, freshRequest.BridgeDecisionGeneration);
+        }
+        finally
+        {
+            NknSignalingTransport.RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests =
+                previousPeerResponseTimeout;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetry_ClosureJoinDuplicateIsIdempotentAndChangedTupleReplacesPendingIntent()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-closure-join-tuple.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-closure-join-tuple.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-closure-join-tuple-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-closure-join-tuple-id", helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            const string transferId = "transfer_runtime_unlock_closure_join_tuple";
+            var authorityRequests = new ConcurrentQueue<RuntimeUnlockRetryDispatchAuthorityRequest>();
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
+                host,
+                statusSelector: request =>
+                {
+                    authorityRequests.Enqueue(request);
+                    return RuntimeUnlockRetryDispatchDecisionStatus.Granted;
+                });
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId, liveRouteEpoch: 1);
+
+            const string nonce = "d411223344556677889900aabbccddee";
+            const long offerGeneration = 151;
+            host.SeedRuntimeUnlockOfferCriticalSectionForTests(
+                sessionId,
+                nonce,
+                payerDecisionId: 81L,
+                generation: offerGeneration,
+                observedSend: true,
+                observedLane: "control_to_bulk_endpoint",
+                peerReceived: false,
+                answerTimeoutScheduled: true);
+            var predecessorGeneration =
+                await EstablishDispatchObservedRuntimeUnlockRetryForClosureJoinAsync(
+                    host,
+                    authorityRequests,
+                    sessionId,
+                    retiredOfferGeneration: offerGeneration - 1,
+                    observedOfferGeneration: offerGeneration,
+                    offerNonce: nonce);
+            var predecessorState = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(predecessorState);
+            await RetainRuntimeUnlockRegularV4RecoveryClosureForJoinAsync(
+                host,
+                sessionId,
+                transferId,
+                liveRouteEpoch: 1);
+
+            var first = CaptureRuntimeUnlockRegularV4RecoveryRetryJoinIntentForTests(
+                host,
+                sessionId,
+                nonce,
+                offerPayerDecisionId: 81L,
+                offerGeneration);
+            Assert.False(first.Duplicate);
+            var logStart = GetOperationalLogLength();
+            var exactDuplicate = CaptureRuntimeUnlockRegularV4RecoveryRetryJoinIntentForTests(
+                host,
+                sessionId,
+                nonce,
+                offerPayerDecisionId: 81L,
+                offerGeneration);
+            Assert.True(exactDuplicate.Duplicate);
+            Assert.Equal(first.Intent, exactDuplicate.Intent);
+            var firstGeneration = Assert.IsType<long>(
+                first.Intent.GetType().GetProperty("JoinGeneration")!.GetValue(first.Intent));
+            Assert.Equal(
+                firstGeneration,
+                Assert.IsType<long>(exactDuplicate.Intent.GetType()
+                    .GetProperty("JoinGeneration")!
+                    .GetValue(exactDuplicate.Intent)));
+
+            var changedTuple = CaptureRuntimeUnlockRegularV4RecoveryRetryJoinIntentForTests(
+                host,
+                sessionId,
+                nonce,
+                offerPayerDecisionId: 81L,
+                offerGeneration,
+                purpose: "offer_peer_response",
+                trigger: "peer_response_timeout_without_peer_response");
+            Assert.False(changedTuple.Duplicate);
+            Assert.NotEqual(first.Intent, changedTuple.Intent);
+            Assert.True(Assert.IsType<long>(changedTuple.Intent.GetType()
+                .GetProperty("JoinGeneration")!
+                .GetValue(changedTuple.Intent)) > firstGeneration);
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRegularV4RecoveryClosureJoin",
+                first.Intent,
+                false);
+            Assert.Same(predecessorState, GetPrivateField(host, "runtimeUnlockRecoveryRetryState"));
+            Assert.Single(authorityRequests);
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRegularV4RecoveryClosureJoin",
+                changedTuple.Intent,
+                false);
+            var joinedState = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(joinedState);
+            Assert.NotSame(predecessorState, joinedState);
+            Assert.True(Assert.IsType<long>(joinedState!.GetType()
+                .GetProperty("ContractGeneration")!
+                .GetValue(joinedState)) > predecessorGeneration);
+            Assert.True(Assert.IsType<bool>(joinedState.GetType()
+                .GetProperty("BlockedByRegularV4ReceiveRecovery")!
+                .GetValue(joinedState)));
+            Assert.Single(authorityRequests);
+
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains("decision_reason=retry_join_intent_replaced", tail, StringComparison.Ordinal);
+            Assert.Equal(
+                2,
+                tail.Split(
+                    "event=runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_join_discarded;",
+                    StringSplitOptions.None).Length - 1);
+            Assert.Contains(
+                "event=runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_retry_armed;",
+                tail,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetry_AnswerTimeoutWithoutRetainedClosureKeepsExistingNoAuthorityBehavior()
+    {
+        FakeNknClient.ResetNetwork();
+        var previousOfferAnswerTimeout = NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests;
+        var previousRecoveryRequest = NknSignalingTransport.RuntimeUnlockOfferSendRecoveryRequestOverrideForTests;
+        NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests = TimeSpan.FromMilliseconds(75);
+        NknSignalingTransport.RuntimeUnlockOfferSendRecoveryRequestOverrideForTests = (_, _, _) => false;
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-answer-timeout-no-closure.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-answer-timeout-no-closure.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity(
+                    "host-runtime-unlock-answer-timeout-no-closure-id",
+                    hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity(
+                    "helper-runtime-unlock-answer-timeout-no-closure-id",
+                    helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            const string transferId = "transfer_runtime_unlock_answer_timeout_no_closure";
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId, liveRouteEpoch: 1);
+            const string nonce = "cf11223344556677889900aabbccddee";
+            host.SeedRuntimeUnlockOfferCriticalSectionForTests(
+                sessionId,
+                nonce,
+                payerDecisionId: 32L,
+                generation: 102L,
+                observedSend: true,
+                observedLane: "control_to_bulk_endpoint",
+                peerReceived: false,
+                answerTimeoutScheduled: true);
+            var logStart = GetOperationalLogLength();
+
+            InvokePrivateMethod(host, "ScheduleAccelerationOfferAnswerTimeout", nonce);
+
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=tuna_acceleration_activation_offer_not_observed;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3));
+
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains("retry_scheduled=1", tail, StringComparison.Ordinal);
+            Assert.Contains("retry_after_recovery_armed=0", tail, StringComparison.Ordinal);
+            Assert.Contains("recovery_requested=0", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_joined;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_retry_armed;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "join_reason=regular_v4_recovery_lease_closure_awaiting_local_proof",
+                tail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_retry_dispatch_authority_granted;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.Null(GetPrivateField(host, "runtimeUnlockRecoveryRetryState"));
+        }
+        finally
+        {
+            NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests = previousOfferAnswerTimeout;
+            NknSignalingTransport.RuntimeUnlockOfferSendRecoveryRequestOverrideForTests = previousRecoveryRequest;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Theory]
+    [Trait("Category", "Smoke")]
+    [InlineData("route_replaced")]
+    [InlineData("owner_epoch_replaced")]
+    [InlineData("recovery_replaced")]
+    [InlineData("deadline_expired")]
+    [InlineData("adopted_deadline_expired")]
+    [InlineData("closure_consumed")]
+    [InlineData("terminal")]
+    [InlineData("missing_subscriber")]
+    public async Task RuntimeUnlockRetry_AnswerTimeoutClosureJoinInvalidationFailsClosed(
+        string invalidation)
+    {
+        FakeNknClient.ResetNetwork();
+        var previousOfferAnswerTimeout = NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests;
+        var previousRecoveryRequest = NknSignalingTransport.RuntimeUnlockOfferSendRecoveryRequestOverrideForTests;
+        NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests = TimeSpan.FromMilliseconds(50);
+        NknSignalingTransport.RuntimeUnlockOfferSendRecoveryRequestOverrideForTests = (_, _, _) => false;
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var suffix = invalidation.Replace('_', '-');
+            var hostClient = new FakeNknClient($"host.runtime-unlock-closure-join-{suffix}.address");
+            var helperClient = new FakeNknClient($"helper.runtime-unlock-closure-join-{suffix}.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity($"host-runtime-unlock-closure-join-{suffix}-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity($"helper-runtime-unlock-closure-join-{suffix}-id", helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            var transferId = $"transfer_runtime_unlock_closure_join_{invalidation}";
+            var authorityRequests = new ConcurrentQueue<RuntimeUnlockRetryDispatchAuthorityRequest>();
+            if (!string.Equals(invalidation, "missing_subscriber", StringComparison.Ordinal))
+            {
+                InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
+                    host,
+                    statusSelector: request =>
+                    {
+                        authorityRequests.Enqueue(request);
+                        return RuntimeUnlockRetryDispatchDecisionStatus.Granted;
+                    });
+            }
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId, liveRouteEpoch: 1);
+
+            const string nonce = "d011223344556677889900aabbccddee";
+            host.SeedRuntimeUnlockOfferCriticalSectionForTests(
+                sessionId,
+                nonce,
+                payerDecisionId: 41L,
+                generation: 111L,
+                observedSend: true,
+                observedLane: "control_to_bulk_endpoint",
+                peerReceived: false,
+                answerTimeoutScheduled: true);
+            if (!string.Equals(invalidation, "missing_subscriber", StringComparison.Ordinal))
+            {
+                await EstablishDispatchObservedRuntimeUnlockRetryForClosureJoinAsync(
+                    host,
+                    authorityRequests,
+                    sessionId,
+                    retiredOfferGeneration: 110L,
+                    observedOfferGeneration: 111L,
+                    offerNonce: nonce);
+                Assert.NotNull(GetPrivateField(host, "runtimeUnlockRecoveryRetryState"));
+            }
+
+            FileTransferReceiveRecoveryRequest CreateRecoveryRequest(
+                int leaseGeneration,
+                int bridgeDecisionGeneration,
+                int liveRouteEpoch = 1)
+                => AttachRegularV4RecoveryAuthorityForTests(
+                    new FileTransferReceiveRecoveryRequest(
+                        sessionId,
+                        transferId,
+                        FileTransferDirection.Outbound,
+                        "session_liveness_timeout_pending")
+                    {
+                        RouteToken = FileTransferRouteResolver.RegularNknV4FastToken,
+                        ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                        LiveRouteEpoch = liveRouteEpoch,
+                        TransferLegGeneration = 1,
+                        AuthorityReason = "regular_v4_receive_recovery_pending",
+                        BridgeRecoveryAuthority = new FileTransferBridgeRecoveryAuthority(
+                            sessionId,
+                            transferId,
+                            FileTransferDirection.Outbound,
+                            FileTransferRouteResolver.RegularNknV4FastToken,
+                            FileTransferProtocol.ProtocolVersionV4,
+                            liveRouteEpoch,
+                            RuntimeGeneration: 1,
+                            TerminalGeneration: 0,
+                            TransferLegGeneration: 1,
+                            TransportEpoch: 0,
+                            BridgeRecoveryGeneration: 0,
+                            bridgeDecisionGeneration,
+                            nameof(BridgeRecoveryKind.BridgeReceiveStallRecovery),
+                            "session_liveness_timeout_pending"),
+                    },
+                    leaseGeneration);
+
+            InvokePrivateMethod(
+                host,
+                "MarkFileTransferRegularV4RecoveryLivenessStarted",
+                CreateRecoveryRequest(leaseGeneration: 1, bridgeDecisionGeneration: 1),
+                sessionId,
+                transferId,
+                "session_liveness_timeout_pending");
+            var logStart = GetOperationalLogLength();
+            InvokePrivateMethod(
+                host,
+                "MarkFileTransferRegularV4RecoveryLivenessBridgeRecoveryLifecycle",
+                "completed",
+                "test_regular_v4_recovery_completed");
+
+            if (string.Equals(invalidation, "missing_subscriber", StringComparison.Ordinal))
+            {
+                await WaitUntilAsync(
+                    () => ReadOperationalLogTail(logStart).Contains(
+                        "event=runtime_unlock_regular_v4_recovery_lifecycle_report_failed_closed;",
+                        StringComparison.Ordinal),
+                    TimeSpan.FromSeconds(3));
+            }
+            else
+            {
+                await WaitUntilAsync(
+                    () => ReadOperationalLogTail(logStart).Contains(
+                        "event=runtime_unlock_regular_v4_recovery_lease_closure_retained;",
+                        StringComparison.Ordinal),
+                    TimeSpan.FromSeconds(3));
+            }
+
+            var boundaryLogStart = GetOperationalLogLength();
+            object? capturedIntent = null;
+            if (!string.Equals(invalidation, "missing_subscriber", StringComparison.Ordinal))
+            {
+                var capture = CaptureRuntimeUnlockRegularV4RecoveryRetryJoinIntentForTests(
+                    host,
+                    sessionId,
+                    nonce,
+                    offerPayerDecisionId: 41L,
+                    offerGeneration: 111L);
+                Assert.False(capture.Duplicate);
+                capturedIntent = capture.Intent;
+            }
+
+            switch (invalidation)
+            {
+                case "route_replaced":
+                    InvokePrivateMethod(
+                        host,
+                        "TrackAuthorizedFileTransferRouteHintForTests",
+                        transferId,
+                        FileTransferRouteResolver.FileTunaV4Token,
+                        FileTransferProtocol.ProtocolVersionV4,
+                        "test_route_replaced_before_closure_join",
+                        false,
+                        "unknown",
+                        "unknown",
+                        false,
+                        0L,
+                        null,
+                        2);
+                    break;
+                case "owner_epoch_replaced":
+                    TrackAuthorizedRegularV4RouteForTests(host, transferId, liveRouteEpoch: 2);
+                    break;
+                case "recovery_replaced":
+                    InvokePrivateMethod(
+                        host,
+                        "MarkFileTransferRegularV4RecoveryLivenessStarted",
+                        CreateRecoveryRequest(leaseGeneration: 2, bridgeDecisionGeneration: 2),
+                        sessionId,
+                        transferId,
+                        "replacement_regular_v4_recovery");
+                    break;
+                case "deadline_expired":
+                {
+                    var livenessState = GetPrivateField(
+                        host,
+                        "fileTransferRegularV4RecoveryLivenessState");
+                    Assert.NotNull(livenessState);
+                    livenessState!.GetType()
+                        .GetProperty("LivenessDeferralDeadlineUtcMs")!
+                        .SetValue(livenessState, DateTimeOffset.UtcNow.AddSeconds(-1).ToUnixTimeMilliseconds());
+                    break;
+                }
+                case "adopted_deadline_expired":
+                {
+                    InvokePrivateMethod(
+                        host,
+                        "MarkFileTransferRegularV4RecoveryLivenessReceiveProofReceived",
+                        sessionId,
+                        transferId,
+                        "receive_proof_before_join_deadline_expiry",
+                        "control");
+                    var livenessState = GetPrivateField(
+                        host,
+                        "fileTransferRegularV4RecoveryLivenessState");
+                    Assert.NotNull(livenessState);
+                    livenessState!.GetType()
+                        .GetProperty("LivenessDeferralDeadlineUtcMs")!
+                        .SetValue(livenessState, DateTimeOffset.UtcNow.AddSeconds(-1).ToUnixTimeMilliseconds());
+                    break;
+                }
+                case "closure_consumed":
+                {
+                    var livenessState = GetPrivateField(
+                        host,
+                        "fileTransferRegularV4RecoveryLivenessState");
+                    Assert.NotNull(livenessState);
+                    livenessState!.GetType()
+                        .GetProperty("LeaseClosureConsumed")!
+                        .SetValue(livenessState, true);
+                    break;
+                }
+                case "terminal":
+                    Assert.IsAssignableFrom<IFileTransferTerminalObserver>(host)
+                        .ObserveFileTransferTerminal(
+                            new FileTransferTerminalNotification(
+                                sessionId,
+                                transferId,
+                                FileTransferDirection.Outbound,
+                                FileTransferRouteResolver.RegularNknV4FastToken,
+                                FileTransferProtocol.ProtocolVersionV4,
+                                FileTransferTransferState.Failed,
+                                "test_terminal",
+                                "terminal_before_closure_join"));
+                    break;
+            }
+
+            var authorityRequestCountBeforeArm = authorityRequests.Count;
+            var retryStateBeforeArm = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+
+            if (capturedIntent is not null)
+            {
+                InvokePrivateMethod(
+                    host,
+                    "ArmRuntimeUnlockRetryAfterRegularV4RecoveryClosureJoin",
+                    capturedIntent,
+                    false);
+            }
+            else
+            {
+                InvokePrivateMethod(host, "ScheduleAccelerationOfferAnswerTimeout", nonce);
+                await Task.Delay(250, cts.Token);
+            }
+
+            var tail = ReadOperationalLogTail(boundaryLogStart);
+            if (capturedIntent is not null)
+            {
+                Assert.Contains(
+                    "event=runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_joined;",
+                    tail,
+                    StringComparison.Ordinal);
+                Assert.Contains(
+                    "event=runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_join_discarded;",
+                    tail,
+                    StringComparison.Ordinal);
+                Assert.DoesNotContain(
+                    "decision_reason=dispatch_observed_settlement_replaced_before_retry_install",
+                    tail,
+                    StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.DoesNotContain(
+                    "event=runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_joined;",
+                    tail,
+                    StringComparison.Ordinal);
+            }
+            Assert.DoesNotContain(
+                "event=runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_retry_armed;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_retry_dispatch_authority_granted;",
+                tail,
+                StringComparison.Ordinal);
+            if (capturedIntent is not null)
+            {
+                Assert.Equal(authorityRequestCountBeforeArm, authorityRequests.Count);
+                var currentState = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+                Assert.Same(retryStateBeforeArm, currentState);
+            }
+            else
+            {
+                Assert.Null(GetPrivateField(host, "runtimeUnlockRecoveryRetryState"));
+            }
+        }
+        finally
+        {
+            NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests = previousOfferAnswerTimeout;
+            NknSignalingTransport.RuntimeUnlockOfferSendRecoveryRequestOverrideForTests = previousRecoveryRequest;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Theory]
+    [Trait("Category", "Smoke")]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RuntimeUnlockRetry_ClosureJoinPreservesUnsettledAndMissingDispatchPhaseOneChains(
+        bool settleMissingDispatch)
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var options = NknTransportOptions.Load();
+            var suffix = settleMissingDispatch ? "missing" : "unsettled";
+            var hostClient = new FakeNknClient($"host.runtime-unlock-closure-phase1-{suffix}.address");
+            var helperClient = new FakeNknClient($"helper.runtime-unlock-closure-phase1-{suffix}.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity($"host-runtime-unlock-closure-phase1-{suffix}-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity($"helper-runtime-unlock-closure-phase1-{suffix}-id", helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            var transferId = $"transfer_runtime_unlock_closure_phase1_{suffix}";
+            var authorityRequests = new ConcurrentQueue<RuntimeUnlockRetryDispatchAuthorityRequest>();
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
+                host,
+                statusSelector: request =>
+                {
+                    authorityRequests.Enqueue(request);
+                    return authorityRequests.Count == 1
+                        ? RuntimeUnlockRetryDispatchDecisionStatus.Granted
+                        : RuntimeUnlockRetryDispatchDecisionStatus.Held;
+                });
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId, liveRouteEpoch: 1);
+
+            const string nonce = "d211223344556677889900aabbccddee";
+            const long offerGeneration = 131;
+            host.SeedRuntimeUnlockOfferCriticalSectionForTests(
+                sessionId,
+                nonce,
+                payerDecisionId: 61L,
+                generation: offerGeneration,
+                observedSend: true,
+                observedLane: "control_to_bulk_endpoint",
+                peerReceived: false,
+                answerTimeoutScheduled: true);
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                offerGeneration - 1,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "regular_v4_repair_settled",
+                false);
+            Assert.Single(authorityRequests);
+
+            var state = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(state);
+            var stateType = state!.GetType();
+            var predecessor = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+                stateType.GetProperty("DispatchContract")!.GetValue(state));
+            if (settleMissingDispatch)
+            {
+                InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
+                Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(
+                    offerGeneration,
+                    nonce));
+                Assert.True(host.BeginRuntimeUnlockRetryDispatchSendForTests());
+                Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+                    host,
+                    "TrySettleRuntimeUnlockRetryDispatchMissingIfCurrent",
+                    sessionId,
+                    offerGeneration,
+                    "test_join_must_preserve_missing_dispatch")));
+                Assert.Equal(2, authorityRequests.Count);
+                Assert.True(predecessor.Lifecycle.IsSettled);
+                Assert.Equal(
+                    RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch,
+                    predecessor.Lifecycle.SettlementOutcome);
+                Assert.NotNull(stateType.GetProperty("PendingDispatchSuccessorIntent")!.GetValue(state));
+            }
+            else
+            {
+                Assert.False(predecessor.Lifecycle.IsSettled);
+            }
+
+            await RetainRuntimeUnlockRegularV4RecoveryClosureForJoinAsync(
+                host,
+                sessionId,
+                transferId,
+                liveRouteEpoch: 1);
+            var capture = CaptureRuntimeUnlockRegularV4RecoveryRetryJoinIntentForTests(
+                host,
+                sessionId,
+                nonce,
+                offerPayerDecisionId: 61L,
+                offerGeneration);
+            var requestCountBeforeJoin = authorityRequests.Count;
+            var logStart = GetOperationalLogLength();
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRegularV4RecoveryClosureJoin",
+                capture.Intent,
+                false);
+
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "decision_reason=phase1_dispatch_contract_owns_successor",
+                tail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_retry_armed;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.Equal(requestCountBeforeJoin, authorityRequests.Count);
+            Assert.Same(state, GetPrivateField(host, "runtimeUnlockRecoveryRetryState"));
+            Assert.Same(
+                predecessor,
+                stateType.GetProperty("DispatchContract")!.GetValue(state));
+            Assert.Equal(
+                0,
+                Assert.IsType<int>(stateType.GetProperty("MissingDispatchSuccessorGeneration")!.GetValue(state)));
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task TransportAccelerationAnswer_RuntimeUnlockPendingAnswerAfterPayerYieldResetRequiresCurrentLease()
     {
         FakeNknClient.ResetNetwork();
@@ -29776,6 +31459,135 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         };
     }
 
+    private static async Task<long> EstablishDispatchObservedRuntimeUnlockRetryForClosureJoinAsync(
+        NknSignalingTransport transport,
+        ConcurrentQueue<RuntimeUnlockRetryDispatchAuthorityRequest> authorityRequests,
+        string sessionId,
+        long retiredOfferGeneration,
+        long observedOfferGeneration,
+        string offerNonce)
+    {
+        var logStart = GetOperationalLogLength();
+        InvokePrivateMethod(
+            transport,
+            "ArmRuntimeUnlockRetryAfterRecovery",
+            retiredOfferGeneration,
+            sessionId,
+            "runtime_unlock_offer_send_not_observed",
+            "regular_v4_repair_settled",
+            false);
+        Assert.Single(authorityRequests);
+        InvokePrivateMethod(transport, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
+        Assert.True(transport.BindRuntimeUnlockRetryDispatchOfferAliasForTests(
+            observedOfferGeneration,
+            offerNonce));
+        Assert.True(transport.BeginRuntimeUnlockRetryDispatchSendForTests());
+        Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+            transport,
+            "MarkRuntimeUnlockRecoveryContractRetryObserved",
+            sessionId,
+            observedOfferGeneration,
+            "control_to_bulk_endpoint")));
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains(
+                "event=runtime_unlock_retry_dispatch_observed;",
+                StringComparison.Ordinal),
+            TimeSpan.FromSeconds(3));
+
+        var state = GetPrivateField(transport, "runtimeUnlockRecoveryRetryState");
+        Assert.NotNull(state);
+        var contract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+            state!.GetType().GetProperty("DispatchContract")!.GetValue(state));
+        Assert.True(contract.Lifecycle.IsSettled);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved,
+            contract.Lifecycle.SettlementOutcome);
+        Assert.NotNull(state.GetType().GetProperty("LastAppliedDispatchSettlementReport")!.GetValue(state));
+        return Assert.IsType<long>(
+            state.GetType().GetProperty("ContractGeneration")!.GetValue(state));
+    }
+
+    private static async Task<FileTransferReceiveRecoveryRequest>
+        RetainRuntimeUnlockRegularV4RecoveryClosureForJoinAsync(
+            NknSignalingTransport transport,
+            string sessionId,
+            string transferId,
+            int liveRouteEpoch)
+    {
+        var request = AttachRegularV4RecoveryAuthorityForTests(
+            new FileTransferReceiveRecoveryRequest(
+                sessionId,
+                transferId,
+                FileTransferDirection.Outbound,
+                "session_liveness_timeout_pending")
+            {
+                RouteToken = FileTransferRouteResolver.RegularNknV4FastToken,
+                ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                LiveRouteEpoch = liveRouteEpoch,
+                TransferLegGeneration = 1,
+                AuthorityReason = "regular_v4_receive_recovery_pending",
+            });
+        InvokePrivateMethod(
+            transport,
+            "MarkFileTransferRegularV4RecoveryLivenessStarted",
+            request,
+            sessionId,
+            transferId,
+            "session_liveness_timeout_pending");
+        var logStart = GetOperationalLogLength();
+        InvokePrivateMethod(
+            transport,
+            "MarkFileTransferRegularV4RecoveryLivenessBridgeRecoveryLifecycle",
+            "completed",
+            "test_regular_v4_recovery_completed");
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains(
+                "event=runtime_unlock_regular_v4_recovery_lease_closure_retained;",
+                StringComparison.Ordinal),
+            TimeSpan.FromSeconds(3));
+        return request;
+    }
+
+    private static (object Intent, bool Duplicate)
+        CaptureRuntimeUnlockRegularV4RecoveryRetryJoinIntentForTests(
+            NknSignalingTransport transport,
+            string sessionId,
+            string offerNonce,
+            long offerPayerDecisionId,
+            long offerGeneration,
+            string purpose = "offer_answer",
+            string trigger = "answer_timeout_without_peer_response",
+            string retryReason = "runtime_unlock_offer_peer_response_timeout",
+            string recoveryReason = "tuna_activation_offer_peer_response_timeout")
+    {
+        var method = Assert.Single(
+            typeof(NknSignalingTransport)
+                .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+                .Where(candidate =>
+                    string.Equals(
+                        candidate.Name,
+                        "TryCaptureRuntimeUnlockRegularV4RecoveryRetryJoinIntent",
+                        StringComparison.Ordinal) &&
+                    candidate.GetParameters().Length == 10));
+        object?[] arguments =
+        [
+            purpose,
+            sessionId,
+            trigger,
+            offerNonce,
+            offerPayerDecisionId,
+            offerGeneration,
+            retryReason,
+            recoveryReason,
+            null,
+            false,
+        ];
+        var captured = Assert.IsType<bool>(method.Invoke(transport, arguments));
+        Assert.True(captured);
+        Assert.NotNull(arguments[8]);
+        return (arguments[8]!, Assert.IsType<bool>(arguments[9]));
+    }
+
     private static (object State, RuntimeUnlockRetryDispatchAuthorityRequest Request)
         SeedHeldFallbackTailRuntimeUnlockRetryForTests(
             NknSignalingTransport transport,
@@ -30569,7 +32381,17 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             string releaseOutcome;
             if (coordinatorState.RouteSelection.Route == FileTransferRoute.RegularNknV4Fast)
             {
-                if (coordinatorState.LastRuntimeUnlockRegularV4RecoverySettlement is
+                if ((request.RegularV4LivenessGeneration > 0 ||
+                     request.BridgeDecisionGeneration > 0) &&
+                    coordinatorState.RuntimeUnlockRecoveryLeaseClosureAvailable &&
+                    coordinatorState.LastRetiredRecoveryLivenessLease is { } closureLease)
+                {
+                    releaseKind = RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure;
+                    releaseAuthorityId = closureLease.AuthorityId;
+                    releaseGeneration = closureLease.LeaseGeneration;
+                    releaseOutcome = RecoveryLivenessLeaseState.Retired.ToString();
+                }
+                else if (coordinatorState.LastRuntimeUnlockRegularV4RecoverySettlement is
                     {
                         Disposition: RuntimeUnlockRegularV4RecoverySettlementDisposition.Consumed,
                     } handoff)
@@ -30653,6 +32475,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         NknSignalingTransport.RuntimeUnlockOfferDirectObservedLaneBlockerOverrideForTests = null;
         NknSignalingTransport.RuntimeUnlockOfferSendRecoveryRequestOverrideForTests = null;
         NknSignalingTransport.RuntimeUnlockRetryFallbackTailUnblockRecheckBarrierForTests = null;
+        NknSignalingTransport.RuntimeUnlockRegularV4RecoveryRetryJoinPostInstallBarrierForTests =
+            null;
     }
 
     private sealed class RecordingTunaListenerSidecarSupervisor : INknTunaListenerSidecarSupervisor

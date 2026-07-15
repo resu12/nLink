@@ -8530,6 +8530,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRawCount),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingDistinctCount),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRecoveredCount),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingUnresolvedCount),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_verdict={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffVerdict),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount),
@@ -10213,6 +10218,623 @@ function Get-FileTransferRuntimeUnlockRegularV4RecoveryLeaseCorrelation {
     }
 }
 
+function Test-FileTransferRegularV4RecoveryClosureOfferTimeoutTupleMatch {
+    param(
+        [Parameter(Mandatory = $true)]$Receipt,
+        [Parameter(Mandatory = $true)]$Candidate,
+        [switch]$RequireCompleteRecoveryTuple
+    )
+
+    $receiptSession = Get-FileTransferEventField -Event $Receipt -Name 'session_id' -Default ''
+    $candidateSession = Get-FileTransferEventField -Event $Candidate -Name 'session_id' -Default ''
+    if ([string]::IsNullOrWhiteSpace($receiptSession) -or
+        [string]::IsNullOrWhiteSpace($candidateSession) -or
+        -not [string]::Equals($receiptSession, $candidateSession, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+
+    $candidateTransfer = Get-FileTransferEventField -Event $Candidate -Name 'transfer_id' -Default ''
+    if (-not [string]::IsNullOrWhiteSpace($candidateTransfer) -and
+        $candidateTransfer -notin @('(none)', 'none', 'runtime_unlock')) {
+        $receiptTransfer = Get-FileTransferEventField -Event $Receipt -Name 'transfer_id' -Default ''
+        if ([string]::IsNullOrWhiteSpace($receiptTransfer) -or
+            -not [string]::Equals($receiptTransfer, $candidateTransfer, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+
+    $candidateDirection = Get-FileTransferEventField -Event $Candidate -Name 'direction' -Default ''
+    if (-not [string]::IsNullOrWhiteSpace($candidateDirection) -and
+        $candidateDirection -notin @('(none)', 'none')) {
+        $receiptDirection = Get-FileTransferEventField -Event $Receipt -Name 'direction' -Default ''
+        if (-not [string]::Equals($receiptDirection, $candidateDirection, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+
+    $fieldAliases = [ordered]@{
+        route = @('route')
+        protocol_version = @('protocol_version')
+        live_route_epoch = @('live_route_epoch')
+        runtime_generation = @('runtime_generation')
+        terminal_generation = @('terminal_generation')
+        leg_generation = @('leg_generation')
+        transport_epoch = @('transport_epoch')
+        bridge_recovery_generation = @('bridge_recovery_generation')
+        bridge_decision_generation = @('bridge_decision_generation')
+        regular_v4_liveness_generation = @(
+            'regular_v4_liveness_generation',
+            'recovery_liveness_lease_generation',
+            'lease_generation')
+        lease_authority_id = @(
+            'lease_authority_id',
+            'recovery_liveness_lease_authority_id')
+    }
+    foreach ($receiptField in $fieldAliases.Keys) {
+        $receiptValue = Get-FileTransferRegularV4RecoveryLeaseField `
+            -Event $Receipt `
+            -Names @($receiptField)
+        $candidateValue = Get-FileTransferRegularV4RecoveryLeaseField `
+            -Event $Candidate `
+            -Names $fieldAliases[$receiptField]
+        if ([string]::IsNullOrWhiteSpace($candidateValue)) {
+            if ($RequireCompleteRecoveryTuple) {
+                return $false
+            }
+
+            continue
+        }
+
+        if ([string]::IsNullOrWhiteSpace($receiptValue) -or
+            -not [string]::Equals($receiptValue, $candidateValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+
+    if ($RequireCompleteRecoveryTuple) {
+        $publicationFieldAliases = [ordered]@{
+            session_id = 'source_publication_session_id'
+            transfer_id = 'source_publication_transfer_id'
+            direction = 'source_publication_direction'
+            route = 'source_publication_route'
+            protocol_version = 'source_publication_protocol_version'
+            live_route_epoch = 'source_publication_live_route_epoch'
+            runtime_generation = 'source_publication_runtime_generation'
+            terminal_generation = 'source_publication_terminal_generation'
+            leg_generation = 'source_publication_leg_generation'
+        }
+        foreach ($receiptField in $publicationFieldAliases.Keys) {
+            $receiptValue = Get-FileTransferEventField -Event $Receipt -Name $receiptField -Default ''
+            $publicationValue = Get-FileTransferEventField `
+                -Event $Candidate `
+                -Name $publicationFieldAliases[$receiptField] `
+                -Default ''
+            if ([string]::IsNullOrWhiteSpace($receiptValue) -or
+                [string]::IsNullOrWhiteSpace($publicationValue) -or
+                -not [string]::Equals($receiptValue, $publicationValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        if ([int64](Get-FileTransferEventField `
+                -Event $Candidate `
+                -Name 'source_publication_route_publication_generation' `
+                -Default '0') -le 0) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Test-FileTransferRegularV4RecoveryClosureOfferTimeoutStalePredecessorMatch {
+    param(
+        [Parameter(Mandatory = $true)]$Receipt,
+        [Parameter(Mandatory = $true)]$RejectedAuthority
+    )
+
+    if (-not (Test-FileTransferRegularV4RecoveryLeaseIdentityMatch `
+            -Left $Receipt `
+            -Right $RejectedAuthority `
+            -IncludeDirection)) {
+        return $false
+    }
+
+    if ((Get-FileTransferEventField -Event $RejectedAuthority -Name 'mismatch_field' -Default '') -ne
+            'infra_current_binding' -or
+        (Get-FileTransferEventField -Event $RejectedAuthority -Name 'decision_reason' -Default '') -ne
+            'runtime_unlock_retry_dispatch_authority_tuple_mismatch') {
+        return $false
+    }
+
+    foreach ($field in @(
+            'route',
+            'protocol_version',
+            'live_route_epoch',
+            'runtime_generation',
+            'terminal_generation',
+            'leg_generation',
+            'transport_epoch',
+            'bridge_recovery_generation')) {
+        $receiptValue = Get-FileTransferEventField -Event $Receipt -Name $field -Default ''
+        $authorityValue = Get-FileTransferEventField -Event $RejectedAuthority -Name $field -Default ''
+        if ([string]::IsNullOrWhiteSpace($receiptValue) -or
+            [string]::IsNullOrWhiteSpace($authorityValue) -or
+            -not [string]::Equals($receiptValue, $authorityValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+
+    $receiptBridgeDecisionGeneration = [int64](Get-FileTransferEventField `
+        -Event $Receipt `
+        -Name 'bridge_decision_generation' `
+        -Default '0')
+    $authorityBridgeDecisionGeneration = [int64](Get-FileTransferEventField `
+        -Event $RejectedAuthority `
+        -Name 'bridge_decision_generation' `
+        -Default '0')
+    $receiptLeaseGeneration = [int64](Get-FileTransferRegularV4RecoveryLeaseField `
+        -Event $Receipt `
+        -Names @('lease_generation', 'regular_v4_liveness_generation') `
+        -Default '0')
+    $authorityReleaseGeneration = [int64](Get-FileTransferEventField `
+        -Event $RejectedAuthority `
+        -Name 'release_generation' `
+        -Default '0')
+    if ($receiptBridgeDecisionGeneration -le 0 -or
+        $receiptLeaseGeneration -le 0 -or
+        $authorityBridgeDecisionGeneration -le 0 -or
+        $authorityReleaseGeneration -le 0 -or
+        $authorityBridgeDecisionGeneration -ge $receiptBridgeDecisionGeneration -or
+        $authorityReleaseGeneration -ge $receiptLeaseGeneration) {
+        return $false
+    }
+
+    return (Get-FileTransferEventField -Event $RejectedAuthority -Name 'release_kind' -Default '') -eq
+            'ReceiveRecoveryLeaseClosure' -and
+        (Get-FileTransferEventField -Event $RejectedAuthority -Name 'release_outcome' -Default '') -eq 'Retired'
+}
+
+function Test-FileTransferRegularV4RecoveryClosureOfferTimeoutOfferIdentityMatch {
+    param(
+        [Parameter(Mandatory = $true)]$Timeout,
+        [Parameter(Mandatory = $true)]$Candidate,
+        $Join = $null
+    )
+
+    $timeoutSession = Get-FileTransferEventField -Event $Timeout -Name 'session_id' -Default ''
+    $candidateSession = Get-FileTransferRegularV4RecoveryLeaseField `
+        -Event $Candidate `
+        -Names @('offer_session_id', 'session_id')
+    if ([string]::IsNullOrWhiteSpace($timeoutSession) -or
+        [string]::IsNullOrWhiteSpace($candidateSession) -or
+        -not [string]::Equals($timeoutSession, $candidateSession, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+
+    $timeoutInterruptionReason = Get-FileTransferEventField `
+        -Event $Timeout `
+        -Name 'interruption_reason' `
+        -Default ''
+    $expectedTimeoutPurpose = switch ($timeoutInterruptionReason) {
+        'offer_answer_timeout' { 'offer_answer'; break }
+        'offer_peer_response_timeout' { 'offer_peer_response'; break }
+        'runtime_unlock_offer_peer_response_timeout' { 'offer_peer_response'; break }
+        default { ''; break }
+    }
+    $candidateTimeoutPurpose = Get-FileTransferEventField `
+        -Event $Candidate `
+        -Name 'timeout_purpose' `
+        -Default ''
+    if ([string]::IsNullOrWhiteSpace($expectedTimeoutPurpose) -or
+        [string]::IsNullOrWhiteSpace($candidateTimeoutPurpose) -or
+        -not [string]::Equals(
+            $expectedTimeoutPurpose,
+            $candidateTimeoutPurpose,
+            [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+
+    $timeoutPayerDecisionId = Get-FileTransferEventField -Event $Timeout -Name 'payer_decision_id' -Default ''
+    $candidatePayerDecisionId = Get-FileTransferEventField -Event $Candidate -Name 'payer_decision_id' -Default ''
+    $timeoutOfferGeneration = Get-FileTransferEventField -Event $Timeout -Name 'generation' -Default ''
+    $candidateOfferGeneration = Get-FileTransferRegularV4RecoveryLeaseField `
+        -Event $Candidate `
+        -Names @('offer_generation', 'generation')
+    if ([string]::IsNullOrWhiteSpace($timeoutPayerDecisionId) -or
+        [string]::IsNullOrWhiteSpace($candidatePayerDecisionId) -or
+        $timeoutPayerDecisionId -ne $candidatePayerDecisionId -or
+        [string]::IsNullOrWhiteSpace($timeoutOfferGeneration) -or
+        [string]::IsNullOrWhiteSpace($candidateOfferGeneration) -or
+        $timeoutOfferGeneration -ne $candidateOfferGeneration) {
+        return $false
+    }
+
+    $timeoutNonce = Get-FileTransferRegularV4RecoveryLeaseField `
+        -Event $Timeout `
+        -Names @('offer_nonce', 'nonce')
+    $candidateNonce = Get-FileTransferRegularV4RecoveryLeaseField `
+        -Event $Candidate `
+        -Names @('offer_nonce', 'nonce')
+    if (-not [string]::IsNullOrWhiteSpace($timeoutNonce) -and
+        ([string]::IsNullOrWhiteSpace($candidateNonce) -or
+            -not [string]::Equals($timeoutNonce, $candidateNonce, [System.StringComparison]::Ordinal))) {
+        return $false
+    }
+
+    if ($null -ne $Join) {
+        $joinGeneration = Get-FileTransferEventField -Event $Join -Name 'join_generation' -Default ''
+        $candidateJoinGeneration = Get-FileTransferEventField -Event $Candidate -Name 'join_generation' -Default ''
+        if ([string]::IsNullOrWhiteSpace($joinGeneration) -or
+            [string]::IsNullOrWhiteSpace($candidateJoinGeneration) -or
+            $joinGeneration -ne $candidateJoinGeneration) {
+            return $false
+        }
+
+        foreach ($aliases in @(
+                [pscustomobject]@{ Join = @('offer_session_id', 'session_id'); Candidate = @('offer_session_id', 'session_id') },
+                [pscustomobject]@{ Join = @('offer_nonce', 'nonce'); Candidate = @('offer_nonce', 'nonce') },
+                [pscustomobject]@{ Join = @('payer_decision_id'); Candidate = @('payer_decision_id') },
+                [pscustomobject]@{ Join = @('offer_generation', 'generation'); Candidate = @('offer_generation', 'generation') })) {
+            $joinValue = Get-FileTransferRegularV4RecoveryLeaseField -Event $Join -Names $aliases.Join
+            $candidateValue = Get-FileTransferRegularV4RecoveryLeaseField -Event $Candidate -Names $aliases.Candidate
+            if ([string]::IsNullOrWhiteSpace($joinValue) -or
+                [string]::IsNullOrWhiteSpace($candidateValue) -or
+                -not [string]::Equals($joinValue, $candidateValue, [System.StringComparison]::Ordinal)) {
+                return $false
+            }
+        }
+    }
+
+    return $true
+}
+
+function Test-FileTransferRegularV4RecoveryClosureOfferTimeoutFreshArm {
+    param(
+        [Parameter(Mandatory = $true)]$Arm
+    )
+
+    $contractGeneration = [int64](Get-FileTransferEventField `
+        -Event $Arm `
+        -Name 'contract_generation' `
+        -Default '0')
+    $predecessorAuthorityId = Get-FileTransferEventField `
+        -Event $Arm `
+        -Name 'predecessor_authority_id' `
+        -Default '(none)'
+    return $contractGeneration -gt 0 -and
+        (Get-FileTransferEventField -Event $Arm -Name 'dispatch_attempt_generation' -Default '') -eq '1' -and
+        (Get-FileTransferEventField -Event $Arm -Name 'missing_dispatch_successor_generation' -Default '') -eq '0' -and
+        $predecessorAuthorityId -in @('', '(none)', 'none')
+}
+
+function Test-FileTransferRegularV4RecoveryClosureOfferTimeoutGrantBinding {
+    param(
+        [Parameter(Mandatory = $true)]$Arm,
+        [Parameter(Mandatory = $true)]$Consumption,
+        [Parameter(Mandatory = $true)]$Grant
+    )
+
+    if (-not (Test-FileTransferRegularV4RecoveryClosureOfferTimeoutFreshArm -Arm $Arm)) {
+        return $false
+    }
+
+    $armContractGeneration = Get-FileTransferEventField -Event $Arm -Name 'contract_generation' -Default ''
+    $grantContractGeneration = Get-FileTransferEventField -Event $Grant -Name 'contract_generation' -Default ''
+    $grantPredecessorAuthorityId = Get-FileTransferEventField `
+        -Event $Grant `
+        -Name 'predecessor_authority_id' `
+        -Default '(none)'
+    if ([string]::IsNullOrWhiteSpace($armContractGeneration) -or
+        [string]::IsNullOrWhiteSpace($grantContractGeneration) -or
+        $armContractGeneration -ne $grantContractGeneration -or
+        (Get-FileTransferEventField -Event $Grant -Name 'dispatch_attempt_generation' -Default '') -ne '1' -or
+        (Get-FileTransferEventField -Event $Grant -Name 'missing_dispatch_successor_generation' -Default '') -ne '0' -or
+        $grantPredecessorAuthorityId -notin @('', '(none)', 'none')) {
+        return $false
+    }
+
+    $grantAuthorityId = Get-FileTransferEventField -Event $Grant -Name 'authority_id' -Default ''
+    $consumedAuthorityId = Get-FileTransferEventField `
+        -Event $Consumption `
+        -Name 'retry_authority_id' `
+        -Default ''
+    return -not [string]::IsNullOrWhiteSpace($grantAuthorityId) -and
+        -not [string]::IsNullOrWhiteSpace($consumedAuthorityId) -and
+        [string]::Equals($grantAuthorityId, $consumedAuthorityId, [System.StringComparison]::OrdinalIgnoreCase) -and
+        (Get-FileTransferEventField -Event $Consumption -Name 'dispatch_attempt_generation' -Default '') -eq '1' -and
+        (Get-FileTransferEventField -Event $Consumption -Name 'missing_dispatch_successor_generation' -Default '') -eq '0'
+}
+
+function Test-FileTransferRegularV4RecoveryClosureOfferTimeoutInvalidationDiscard {
+    param(
+        [Parameter(Mandatory = $true)]$Discard
+    )
+
+    $decisionReason = Get-FileTransferEventField -Event $Discard -Name 'decision_reason' -Default ''
+    return $decisionReason -in @(
+        'retry_join_intent_replaced',
+        'regular_v4_recovery_retry_join_intent_replaced',
+        'regular_v4_recovery_state_missing',
+        'regular_v4_recovery_lease_closure_already_consumed',
+        'regular_v4_recovery_lease_closure_stale',
+        'regular_v4_recovery_lease_closure_deadline_expired',
+        'regular_v4_recovery_route_replaced',
+        'regular_v4_recovery_route_publication_replaced',
+        'current_filetransfer_owner_authority_mismatch',
+        'missing_current_filetransfer_route_publication_authority',
+        'ambiguous_current_filetransfer_owner_authority',
+        'missing_session_id',
+        'phase1_dispatch_contract_owns_successor',
+        'dispatch_observed_settlement_not_applied',
+        'dispatch_observed_settlement_replaced_before_retry_install',
+        'regular_v4_peer_visible_window_failed',
+        'existing_regular_v4_receive_recovery_deferral_owned_timeout')
+}
+
+function Get-FileTransferRuntimeUnlockRegularV4RecoveryClosureOfferTimeoutCorrelation {
+    param(
+        [AllowEmptyCollection()][object[]]$Events = @()
+    )
+
+    [object[]]$orderedEvents = @($Events | Where-Object { $null -ne $_ } | Sort-Object Sequence, LineNumber)
+    [object[]]$receipts = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_regular_v4_recovery_lease_closure_retained' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'regular_nkn_v4_fast' -and
+        (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq '4' -and
+        (Get-FileTransferEventField -Event $_ -Name 'lifecycle_outcome' -Default '') -in @('Completed', 'ReceiveProofObserved') -and
+        (Get-FileTransferEventField -Event $_ -Name 'lifecycle_decision_status' -Default '') -in @('Accepted', 'Idempotent')
+    })
+    [object[]]$timeouts = @($orderedEvents | Where-Object {
+        if ($_.EventName -ne 'tuna_acceleration_activation_offer_not_observed') {
+            return $false
+        }
+
+        $interruption = Get-FileTransferEventField -Event $_ -Name 'interruption_reason' -Default ''
+        $recoveryReason = Get-FileTransferEventField -Event $_ -Name 'recovery_reason' -Default ''
+        $retryReason = Get-FileTransferEventField -Event $_ -Name 'retry_reason' -Default ''
+        return $interruption -in @(
+                'offer_answer_timeout',
+                'offer_peer_response_timeout',
+                'runtime_unlock_offer_peer_response_timeout') -and
+            (Get-FileTransferEventField -Event $_ -Name 'peer_received' -Default '') -eq '0' -and
+            ($recoveryReason -like '*runtime_unlock*' -or
+                $retryReason -like '*runtime_unlock*' -or
+                $recoveryReason -in @(
+                    'tuna_activation_offer_peer_response_timeout',
+                    'tuna_activation_offer_answer_timeout'))
+    })
+    [object[]]$joinedEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_joined'
+    })
+    [object[]]$armedEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_retry_armed'
+    })
+    [object[]]$discardedEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_join_discarded'
+    })
+    [object[]]$adoptedEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_regular_v4_recovery_lease_closure_adopted'
+    })
+    [object[]]$consumedEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_regular_v4_recovery_lease_closure_consumed'
+    })
+    [object[]]$grantEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_authority_granted' -and
+        (Get-FileTransferEventField -Event $_ -Name 'release_kind' -Default '') -eq 'ReceiveRecoveryLeaseClosure' -and
+        (Get-FileTransferEventField -Event $_ -Name 'dispatch_attempt_generation' -Default '') -eq '1' -and
+        (Get-FileTransferEventField -Event $_ -Name 'missing_dispatch_successor_generation' -Default '') -eq '0' -and
+        (Get-FileTransferEventField -Event $_ -Name 'predecessor_authority_id' -Default '(none)') -in @('', '(none)', 'none')
+    })
+    [object[]]$staleAuthorityEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_current_authority_rejected' -and
+        (Get-FileTransferEventField -Event $_ -Name 'mismatch_field' -Default '') -eq 'infra_current_binding' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq
+            'runtime_unlock_retry_dispatch_authority_tuple_mismatch'
+    })
+    [object[]]$terminalEvents = @($orderedEvents | Where-Object {
+        $_.EventName -in @(
+            'transfer_terminal',
+            'file_transfer_inbound_terminal',
+            'file_transfer_outbound_terminal',
+            'filetransfer_runtime_terminalized')
+    })
+    [object[]]$replacementAuthorities = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_bridge_recovery_authority_granted'
+    })
+
+    $rawCandidates = New-Object System.Collections.Generic.List[object]
+    $distinctCandidates = New-Object System.Collections.Generic.List[object]
+    $recoveredCandidates = New-Object System.Collections.Generic.List[object]
+    $unresolvedCandidates = New-Object System.Collections.Generic.List[object]
+    $correlatedStaleAuthorityEvents = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+
+    foreach ($receipt in @($receipts | Sort-Object Sequence, LineNumber)) {
+        $receiptSequence = [int64]$receipt.Sequence
+        $boundarySequence = [int64]::MaxValue
+
+        $terminal = @($terminalEvents | Where-Object {
+            [int64]$_.Sequence -gt $receiptSequence -and
+            (Test-FileTransferRegularV4RecoveryTerminalMatch -Receipt $receipt -Terminal $_)
+        } | Select-Object -First 1)
+        if ($terminal.Count -gt 0) {
+            $boundarySequence = [int64]$terminal[0].Sequence
+        }
+
+        $replacement = @($replacementAuthorities | Where-Object {
+            [int64]$_.Sequence -gt $receiptSequence -and
+            (Test-FileTransferRegularV4RecoveryAuthorityReplacesClosure -Receipt $receipt -Authority $_)
+        } | Select-Object -First 1)
+        if ($replacement.Count -gt 0 -and [int64]$replacement[0].Sequence -lt $boundarySequence) {
+            $boundarySequence = [int64]$replacement[0].Sequence
+        }
+
+        $nextReceipt = @($receipts | Where-Object {
+            [int64]$_.Sequence -gt $receiptSequence -and
+            (Test-FileTransferRegularV4RecoveryLeaseIdentityMatch -Left $receipt -Right $_ -IncludeDirection)
+        } | Select-Object -First 1)
+        if ($nextReceipt.Count -gt 0 -and [int64]$nextReceipt[0].Sequence -lt $boundarySequence) {
+            $boundarySequence = [int64]$nextReceipt[0].Sequence
+        }
+
+        foreach ($timeout in @($timeouts | Where-Object {
+                    [int64]$_.Sequence -gt $receiptSequence -and
+                    [int64]$_.Sequence -lt $boundarySequence -and
+                    (Test-FileTransferRegularV4RecoveryClosureOfferTimeoutTupleMatch `
+                        -Receipt $receipt `
+                        -Candidate $_)
+                } | Sort-Object Sequence, LineNumber)) {
+            $timeoutSequence = [int64]$timeout.Sequence
+            $adoptionBeforeTimeout = @($adoptedEvents | Where-Object {
+                [int64]$_.Sequence -gt $receiptSequence -and
+                [int64]$_.Sequence -lt $timeoutSequence -and
+                (Test-FileTransferRegularV4RecoveryBoundaryTupleMatch -Receipt $receipt -Candidate $_)
+            } | Select-Object -First 1)
+            if ($adoptionBeforeTimeout.Count -gt 0) {
+                continue
+            }
+
+            $matchingJoin = @($joinedEvents | Where-Object {
+                [int64]$_.Sequence -gt $receiptSequence -and
+                [int64]$_.Sequence -le $timeoutSequence -and
+                [int64]$_.Sequence -lt $boundarySequence -and
+                (Test-FileTransferRegularV4RecoveryClosureOfferTimeoutTupleMatch `
+                    -Receipt $receipt `
+                    -Candidate $_ `
+                    -RequireCompleteRecoveryTuple) -and
+                (Test-FileTransferRegularV4RecoveryClosureOfferTimeoutOfferIdentityMatch `
+                    -Timeout $timeout `
+                    -Candidate $_)
+            } | Select-Object -First 1)
+            $matchingArm = @($armedEvents | Where-Object {
+                [int64]$_.Sequence -ge $timeoutSequence -and
+                [int64]$_.Sequence -lt $boundarySequence -and
+                (Test-FileTransferRegularV4RecoveryClosureOfferTimeoutTupleMatch `
+                    -Receipt $receipt `
+                    -Candidate $_ `
+                    -RequireCompleteRecoveryTuple) -and
+                (Test-FileTransferRegularV4RecoveryClosureOfferTimeoutOfferIdentityMatch `
+                    -Timeout $timeout `
+                    -Candidate $_ `
+                    -Join $(if ($matchingJoin.Count -gt 0) { $matchingJoin[0] } else { $null })) -and
+                (Test-FileTransferRegularV4RecoveryClosureOfferTimeoutFreshArm -Arm $_)
+            } | Select-Object -First 1)
+            $matchingInvalidationDiscard = @($discardedEvents | Where-Object {
+                [int64]$_.Sequence -ge $timeoutSequence -and
+                [int64]$_.Sequence -lt $boundarySequence -and
+                (Test-FileTransferRegularV4RecoveryClosureOfferTimeoutTupleMatch `
+                    -Receipt $receipt `
+                    -Candidate $_) -and
+                (Test-FileTransferRegularV4RecoveryClosureOfferTimeoutOfferIdentityMatch `
+                    -Timeout $timeout `
+                    -Candidate $_ `
+                    -Join $(if ($matchingJoin.Count -gt 0) { $matchingJoin[0] } else { $null })) -and
+                (Test-FileTransferRegularV4RecoveryClosureOfferTimeoutInvalidationDiscard -Discard $_)
+            } | Select-Object -First 1)
+            $matchingStaleAuthority = @($staleAuthorityEvents | Where-Object {
+                [int64]$_.Sequence -gt $timeoutSequence -and
+                [int64]$_.Sequence -lt $boundarySequence -and
+                (Test-FileTransferRegularV4RecoveryClosureOfferTimeoutStalePredecessorMatch `
+                    -Receipt $receipt `
+                    -RejectedAuthority $_)
+            } | Select-Object -First 1)
+
+            $hasLegacyFailureShape =
+                (Get-FileTransferEventField -Event $timeout -Name 'recovery_requested' -Default '') -eq '0' -and
+                (Get-FileTransferEventField -Event $timeout -Name 'retry_after_recovery_armed' -Default '') -eq '0' -and
+                $matchingJoin.Count -eq 0 -and
+                $matchingStaleAuthority.Count -gt 0
+            $hasExplicitJoinShape = $matchingJoin.Count -gt 0 -or
+                $matchingArm.Count -gt 0
+            if (-not $hasLegacyFailureShape -and -not $hasExplicitJoinShape) {
+                continue
+            }
+            if ($matchingInvalidationDiscard.Count -gt 0) {
+                continue
+            }
+
+            $rawCandidates.Add($timeout) | Out-Null
+            $key = (Get-FileTransferRegularV4RecoveryLeaseTupleKey -Event $receipt) + '|' +
+                (Get-FileTransferEventField -Event $timeout -Name 'payer_decision_id' -Default '(missing)') + '|' +
+                (Get-FileTransferEventField -Event $timeout -Name 'generation' -Default '(missing)') + '|' +
+                (Get-FileTransferEventField -Event $timeout -Name 'interruption_reason' -Default '(missing)')
+            if ($seen.ContainsKey($key)) {
+                continue
+            }
+
+            $seen[$key] = $true
+            $distinctCandidates.Add($timeout) | Out-Null
+            if ($matchingStaleAuthority.Count -gt 0) {
+                $correlatedStaleAuthorityEvents.Add($matchingStaleAuthority[0]) | Out-Null
+            }
+
+            $matchingAdoption = @($adoptedEvents | Where-Object {
+                [int64]$_.Sequence -gt $timeoutSequence -and
+                [int64]$_.Sequence -lt $boundarySequence -and
+                (Test-FileTransferRegularV4RecoveryBoundaryTupleMatch -Receipt $receipt -Candidate $_)
+            } | Select-Object -First 1)
+            $matchingConsumption = @($consumedEvents | Where-Object {
+                [int64]$_.Sequence -gt $timeoutSequence -and
+                [int64]$_.Sequence -lt $boundarySequence -and
+                (Test-FileTransferRegularV4RecoveryBoundaryTupleMatch -Receipt $receipt -Candidate $_)
+            } | Select-Object -First 1)
+            $matchingGrant = @($grantEvents | Where-Object {
+                [int64]$_.Sequence -gt $timeoutSequence -and
+                [int64]$_.Sequence -lt $boundarySequence -and
+                $matchingConsumption.Count -gt 0 -and
+                [int64]$_.Sequence -ge [int64]$matchingConsumption[0].Sequence -and
+                (Test-FileTransferRegularV4RecoveryClosureGrantMatch -Receipt $receipt -Grant $_) -and
+                $matchingArm.Count -gt 0 -and
+                (Test-FileTransferRegularV4RecoveryClosureOfferTimeoutGrantBinding `
+                    -Arm $matchingArm[0] `
+                    -Consumption $matchingConsumption[0] `
+                    -Grant $_)
+            } | Select-Object -First 1)
+
+            if ($matchingJoin.Count -gt 0 -and
+                $matchingArm.Count -gt 0 -and
+                $matchingAdoption.Count -gt 0 -and
+                $matchingConsumption.Count -gt 0 -and
+                $matchingGrant.Count -gt 0 -and
+                [int64]$matchingJoin[0].Sequence -le [int64]$matchingArm[0].Sequence -and
+                [int64]$matchingJoin[0].Sequence -lt [int64]$matchingAdoption[0].Sequence -and
+                [int64]$matchingArm[0].Sequence -lt [int64]$matchingConsumption[0].Sequence -and
+                [int64]$matchingAdoption[0].Sequence -lt [int64]$matchingConsumption[0].Sequence -and
+                [int64]$matchingConsumption[0].Sequence -le [int64]$matchingGrant[0].Sequence) {
+                $recoveredCandidates.Add($timeout) | Out-Null
+            }
+            else {
+                $unresolvedCandidates.Add($timeout) | Out-Null
+            }
+        }
+    }
+
+    $verdict = if ($unresolvedCandidates.Count -gt 0) {
+        'fail'
+    }
+    elseif ($distinctCandidates.Count -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
+    }
+
+    return [pscustomobject]@{
+        RawCount = $rawCandidates.Count
+        DistinctCount = $distinctCandidates.Count
+        RecoveredCount = $recoveredCandidates.Count
+        UnresolvedCount = $unresolvedCandidates.Count
+        Verdict = $verdict
+        RawCandidateEvents = @($rawCandidates.ToArray())
+        DistinctCandidateEvents = @($distinctCandidates.ToArray())
+        RecoveredCandidateEvents = @($recoveredCandidates.ToArray())
+        UnresolvedCandidateEvents = @($unresolvedCandidates.ToArray())
+        CorrelatedStaleAuthorityEvents = @($correlatedStaleAuthorityEvents.ToArray())
+    }
+}
+
 function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation {
     param(
         [AllowEmptyCollection()][object[]]$Events = @()
@@ -10941,6 +11563,8 @@ function Get-FileTransferRecoveryFailureClassification {
     })
     $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof =
         Get-FileTransferRuntimeUnlockRegularV4RecoveryLeaseCorrelation -Events $events
+    $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof =
+        Get-FileTransferRuntimeUnlockRegularV4RecoveryClosureOfferTimeoutCorrelation -Events $events
     $runtimeUnlockRetryFallbackTailUnblockRecheckProof =
         Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation -Events $events
     $runtimeUnlockRegularV4RecoverySettlementProtocolObserved =
@@ -10978,6 +11602,15 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockRetryDispatchCurrentAuthorityRejectedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_retry_dispatch_current_authority_rejected'
     })
+    [int64[]]$runtimeUnlockClosureOfferTimeoutCorrelatedStaleSequences = @(
+        $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.CorrelatedStaleAuthorityEvents |
+            ForEach-Object { [int64]$_.Sequence }
+    )
+    $runtimeUnlockRetryDispatchCurrentAuthorityRejectedClassificationEvents = @(
+        $runtimeUnlockRetryDispatchCurrentAuthorityRejectedEvents | Where-Object {
+            [int64]$_.Sequence -notin $runtimeUnlockClosureOfferTimeoutCorrelatedStaleSequences
+        }
+    )
     $runtimeUnlockRetrySourcePublicationMismatchEvents = @($runtimeUnlockRetryDispatchAuthorityRejectedEvents | Where-Object {
         (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq 'retry_dispatch_source_publication_mismatch'
     })
@@ -14258,6 +14891,12 @@ function Get-FileTransferRecoveryFailureClassification {
         -Events @($runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureLivenessUnresolvedCandidateEvents) `
         -DefaultReason 'recovery_liveness_lease_missing' `
         -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing' `
+        -Events @($runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.UnresolvedCandidateEvents) `
+        -DefaultReason 'regular_v4_recovery_closure_window_join_missing' `
+        -UseDefaultReason
 
     $grantBypassSequences = @(
         @($runtimeUnlockRetryDispatchGrantBypassedByRetryBudgetEvents) +
@@ -14285,7 +14924,7 @@ function Get-FileTransferRecoveryFailureClassification {
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_retry_dispatch_authority_tuple_mismatch' `
-        -Events @($runtimeUnlockRetryDispatchDecisionTupleRejectedEvents + $runtimeUnlockRetryDispatchCurrentAuthorityRejectedEvents)
+        -Events @($runtimeUnlockRetryDispatchDecisionTupleRejectedEvents + $runtimeUnlockRetryDispatchCurrentAuthorityRejectedClassificationEvents)
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_retry_dispatch_held_after_authority_granted' `
@@ -14544,8 +15183,11 @@ function Get-FileTransferRecoveryFailureClassification {
     elseif ($runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchCount -gt 0) {
         $class = 'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch'
     }
+    elseif ($runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.UnresolvedCount -gt 0) {
+        $class = 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing'
+    }
     elseif ($runtimeUnlockRetryDispatchDecisionTupleRejectedEvents.Count -gt 0 -or
-        $runtimeUnlockRetryDispatchCurrentAuthorityRejectedEvents.Count -gt 0) {
+        $runtimeUnlockRetryDispatchCurrentAuthorityRejectedClassificationEvents.Count -gt 0) {
         $class = 'runtime_unlock_retry_dispatch_authority_tuple_mismatch'
     }
     elseif ($publicationAuthorityFieldCoverageProof.Verdict -eq 'fail') {
@@ -14989,6 +15631,11 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureLivenessRecoveredCount
         RuntimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureLivenessUnresolvedCount
         RuntimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureLivenessVerdict
+        RuntimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRawCount = $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.RawCount
+        RuntimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingDistinctCount = $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.DistinctCount
+        RuntimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRecoveredCount = $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.RecoveredCount
+        RuntimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingUnresolvedCount = $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.UnresolvedCount
+        RuntimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffVerdict = $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.Verdict
         RuntimeUnlockProbeRecoveryTriggerCount = $runtimeUnlockTransactionPathProbeSidecarClosedEvents.Count
         RuntimeUnlockProbeRecoveryAuthorityLostRawCount = $runtimeUnlockProbeRecoveryAuthorityLostRawEvents.Count
         RuntimeUnlockProbeRecoveryAuthorityLostDistinctCount = $runtimeUnlockProbeRecoveryAuthorityLostDistinctEvents.Count
@@ -15419,6 +16066,11 @@ function New-FileTransferInvariantLedgerObject {
         runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount
         runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount
         runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict = $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict
+        runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_raw_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRawCount
+        runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_distinct_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingDistinctCount
+        runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_recovered_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRecoveredCount
+        runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_unresolved_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingUnresolvedCount
+        runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_verdict = $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffVerdict
         runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount
         runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount
         runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount
@@ -15593,6 +16245,7 @@ function Write-FileTransferDiagnosticsArtifacts {
             'runtime_unlock_regular_v4_recovery_lease_not_issued',
             'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted',
             'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved',
+            'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing',
             'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing') -and
         $effectiveGateStatus -ne 'fail') {
         $effectiveVerdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
@@ -15651,6 +16304,10 @@ function Write-FileTransferDiagnosticsArtifacts {
                 'recovery: regular-V4 closure-window session liveness was not preserved while awaiting local receive proof'
                 break
             }
+            'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing' {
+                'recovery: runtime-unlock offer timeout did not join the retained regular-V4 recovery closure window'
+                break
+            }
             'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing' {
                 'recovery: coordinator-held runtime unlock retry was not rechecked after fallback-tail recovery'
                 break
@@ -15684,6 +16341,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRawCount),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingDistinctCount),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRecoveredCount),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingUnresolvedCount),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_verdict={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffVerdict),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount),
@@ -15696,7 +16358,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("gate_status={0}" -f $effectiveGateStatus),
         ("transfer_id={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.TransferId)) { '(none)' } else { $Summary.TransferId }))),
         ("next_artifact={0}" -f $effectiveNextArtifact),
-        ("acceptance_failure_class={0}" -f ($(if ($recoveryClassification.Class -in @('runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing')) { 'route_runtime' } elseif ($invariantMayOwnAcceptanceFailure) { $combinedInvariant.FailureClass } else { 'none' }))),
+        ("acceptance_failure_class={0}" -f ($(if ($recoveryClassification.Class -in @('runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing')) { 'route_runtime' } elseif ($invariantMayOwnAcceptanceFailure) { $combinedInvariant.FailureClass } else { 'none' }))),
         ("release_route_law_verdict={0}" -f $releaseRouteLaw.Verdict),
         ("terminal_lifecycle_invariant_verdict={0}" -f $terminalLifecycleInvariant.Verdict),
         ("control_priority_invariant_verdict={0}" -f $controlPriorityInvariant.Verdict),
