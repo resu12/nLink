@@ -881,6 +881,72 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_count"]);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_ZeroOfferMissingDispatchSuccessorRejected_SelectsExactFirstEdge(bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_zero_offer_successor_rejected";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockZeroOfferSuccessorCurrentArtifactFixture(transferId, rejectSuccessor: true),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("runtime_unlock_retry_dispatch_zero_offer_successor_rejected", verdict["recovery_failure_class"]);
+        Assert.Equal("runtime_unlock_retry_dispatch_zero_offer_successor_rejected", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("runtime_unlock_retry_successor_intent_rejected", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("retry_dispatch_successor_retired_offer_mismatch", verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("8390", verdict["first_proof_chain_failure_sequence"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_rejected_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_rejected_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_rejected_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_rejected_unresolved_count"]);
+        Assert.Equal("fail", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_ZeroOfferMissingDispatchSuccessorGranted_IsValidLifecycle(bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_zero_offer_successor_granted";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockZeroOfferSuccessorCurrentArtifactFixture(transferId, rejectSuccessor: false),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.NotEqual("runtime_unlock_retry_dispatch_zero_offer_successor_rejected", verdict["recovery_failure_class"]);
+        Assert.NotEqual("runtime_unlock_retry_dispatch_missing_after_authority_granted", verdict["recovery_failure_class"]);
+        Assert.NotEqual("runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch", verdict["recovery_failure_class"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_rejected_raw_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_rejected_unresolved_count"]);
+        Assert.Equal("none", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_verdict"]);
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RuntimeUnlockRetryMissingDispatchIgnoresLegacyRejectionAndOppositeTerminal()
@@ -4912,6 +4978,93 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
     private static string RuntimeUnlockRetryDispatchMissingAfterAuthorityGrantedLine(string transferId)
         => $"event=runtime_unlock_retry_dispatch_missing_after_authority_granted; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; contract_generation=7; retired_generation=11; offer_generation=12; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; regular_v4_liveness_generation=3; bridge_decision_generation=5; queued_behind_active_negotiation=0; decision_reason=runtime_unlock_retry_dispatch_missing_after_authority_granted";
+
+    private static string[] BuildRuntimeUnlockZeroOfferSuccessorCurrentArtifactFixture(
+        string transferId,
+        bool rejectSuccessor)
+    {
+        string ZeroOfferLine(
+            string eventName,
+            int attempt,
+            int missingGeneration,
+            string predecessorAuthorityId = "(none)",
+            string suffix = "",
+            string decisionReason = "accepted")
+            => RuntimeUnlockRetrySchema2Line(
+                    eventName,
+                    transferId,
+                    suffix: suffix,
+                    predecessorAuthorityId: predecessorAuthorityId,
+                    retiredGeneration: 0,
+                    dispatchAttemptGeneration: attempt,
+                    missingDispatchSuccessorGeneration: missingGeneration,
+                    decisionReason: decisionReason)
+                .Replace("offer_generation=12", "offer_generation=0", StringComparison.Ordinal)
+                .Replace("offer_nonce=nonce-1", "offer_nonce=(none)", StringComparison.Ordinal);
+
+        var lines = new List<string>
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_runtime_unlock_dispatch_proof; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; selection_reason=regular_nkn_default_v4", secondsOffset: 0),
+            LogLine(ZeroOfferLine("runtime_unlock_retry_dispatch_authority_granted", 1, 0), secondsOffset: 1),
+            LogLine(ZeroOfferLine(
+                "runtime_unlock_retry_dispatch_missing_after_authority_granted",
+                1,
+                0,
+                decisionReason: "runtime_unlock_retry_dispatch_missing_after_authority_granted"), secondsOffset: 2),
+            LogLine(ZeroOfferLine(
+                "runtime_unlock_retry_dispatch_contract_settled",
+                1,
+                0,
+                suffix: "; settlement_outcome=MissingDispatch; dispatch_observed=0",
+                decisionReason: "runtime_unlock_retry_dispatch_missing_after_authority_granted"), secondsOffset: 3),
+            LogLine(ZeroOfferLine(
+                "runtime_unlock_retry_dispatch_settlement_reported",
+                1,
+                0,
+                suffix: "; settlement_outcome=MissingDispatch; settlement_reason=runtime_unlock_retry_dispatch_missing_after_authority_granted; subscriber_present=1",
+                decisionReason: "reported_to_core"), secondsOffset: 4),
+            LogLine(ZeroOfferLine(
+                "runtime_unlock_retry_dispatch_settlement_decided",
+                1,
+                0,
+                suffix: "; settlement_outcome=MissingDispatch; settlement_reason=runtime_unlock_retry_dispatch_missing_after_authority_granted; decision_status=Accepted",
+                decisionReason: "retry_dispatch_settlement_accepted"), secondsOffset: 5)
+        };
+
+        while (rejectSuccessor && lines.Count < 8389)
+        {
+            lines.Add(LogLine(
+                $"event=runtime_unlock_recovery_diagnostic_sample; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; sample_index={lines.Count + 1}; decision_reason=diagnostic_only",
+                secondsOffset: lines.Count));
+        }
+
+        if (rejectSuccessor)
+        {
+            var rejectionLine = ZeroOfferLine(
+                "runtime_unlock_retry_successor_intent_rejected",
+                1,
+                0,
+                suffix: "; requested_predecessor_authority_id=fta2-runtime-unlock-test-1; requested_retired_generation=0; requested_dispatch_attempt_generation=2; requested_missing_dispatch_successor_generation=1; request_active_predecessor_supersession=0; intent_disposition=Rejected",
+                decisionReason: "retry_dispatch_successor_retired_offer_mismatch")
+                .Replace(
+                    "offer_generation=0; offer_nonce=(none); ",
+                    string.Empty,
+                    StringComparison.Ordinal);
+            lines.Add(LogLine(rejectionLine, secondsOffset: lines.Count));
+        }
+        else
+        {
+            lines.Add(LogLine(ZeroOfferLine(
+                "runtime_unlock_retry_dispatch_authority_granted",
+                2,
+                1,
+                predecessorAuthorityId: "fta2-runtime-unlock-test-1"), secondsOffset: lines.Count));
+        }
+
+        lines.Add(LogLine($"event=file_transfer_inbound_terminal; role=Helper; direction=inbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; state=Completed; error_code=(none); sha256_match=1; integrity_ok=1", secondsOffset: lines.Count));
+        lines.Add(LogLine($"event=file_transfer_outbound_terminal; role=Helpee; direction=outbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; state=Completed; error_code=(none); sha256_match=1; integrity_ok=1", secondsOffset: lines.Count));
+        return lines.ToArray();
+    }
 
     private static string RuntimeUnlockRetryDispatchRejectedLine(string transferId)
         => $"event=runtime_unlock_retry_dispatch_authority_rejected; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; contract_generation=7; retired_generation=11; offer_generation=12; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; regular_v4_liveness_generation=3; bridge_decision_generation=5; queued_behind_active_negotiation=1; decision_reason=terminal_retry_contract";

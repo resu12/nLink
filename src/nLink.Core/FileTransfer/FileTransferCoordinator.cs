@@ -3835,6 +3835,13 @@ internal static class FileTransferCoordinator
                 "retry_dispatch_missing_successor_generation_invalid");
         }
 
+        if (request.RetiredOfferGeneration < 0)
+        {
+            return Decision(
+                RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
+                "retry_dispatch_retired_offer_generation_invalid");
+        }
+
         if (!string.Equals(request.SessionId, state.SessionId, StringComparison.Ordinal) ||
             !string.Equals(request.TransferId, state.TransferId, StringComparison.Ordinal) ||
             request.Direction != state.Direction)
@@ -4059,8 +4066,7 @@ internal static class FileTransferCoordinator
                 var predecessorRetiredOfferGeneration = predecessor.OfferGeneration > 0
                     ? predecessor.OfferGeneration
                     : predecessor.Authority.RetiredOfferGeneration;
-                if (predecessorRetiredOfferGeneration <= 0 ||
-                    request.RetiredOfferGeneration != predecessorRetiredOfferGeneration)
+                if (request.RetiredOfferGeneration != predecessorRetiredOfferGeneration)
                 {
                     return Decision(
                         RuntimeUnlockRetryDispatchDecisionStatus.Rejected,

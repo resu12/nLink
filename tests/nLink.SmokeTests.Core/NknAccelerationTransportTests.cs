@@ -13586,7 +13586,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             InvokePrivateMethod(
                 host,
                 "ArmRuntimeUnlockRetryAfterRecovery",
-                930L,
+                0L,
                 sessionId,
                 "runtime_unlock_offer_send_not_observed",
                 "regular_v4_repair_settled",
@@ -13594,9 +13594,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             var state = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
             var first = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
                 state!.GetType().GetProperty("DispatchContract")!.GetValue(state));
-            Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(
-                931L,
-                "nonce-first-missing-dispatch"));
+            Assert.Equal(0, first.Authority.RetiredOfferGeneration);
+            Assert.Equal(0, first.OfferGeneration);
 
             Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
                 host,
@@ -13611,10 +13610,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             var successor = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
                 state!.GetType().GetProperty("DispatchContract")!.GetValue(state));
             Assert.NotEqual(first.Authority.AuthorityId, successor.Authority.AuthorityId);
+            Assert.Equal(0, successor.Authority.RetiredOfferGeneration);
+            Assert.Equal(0, successor.OfferGeneration);
             Assert.Equal(1, successor.Authority.MissingDispatchSuccessorGeneration);
-            Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(
-                932L,
-                "nonce-second-missing-dispatch"));
 
             Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
                 host,

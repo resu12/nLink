@@ -497,22 +497,24 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         using var fixture = await CreateFixtureAsync(
             "session_retry_bounded",
             "transfer_retry_bounded");
-        var predecessor = Grant(fixture, fixture.InitialRequest);
-        var predecessorReport = SettleMissingDispatch(predecessor, offerGeneration: 201);
+        var zeroOfferInitialRequest = fixture.InitialRequest with { RetiredOfferGeneration = 0 };
+        var predecessor = Grant(fixture, zeroOfferInitialRequest);
+        var predecessorReport = SettleMissingDispatchBeforeOffer(predecessor);
         fixture.Bridge.RaiseSettlementReport(predecessorReport);
         Assert.Equal(
             RuntimeUnlockRetryDispatchSettlementDecisionStatus.Accepted,
             fixture.Bridge.DequeueSettlementDecision().Status);
 
-        var successorRequest = fixture.InitialRequest with
+        var successorRequest = zeroOfferInitialRequest with
         {
-            RetiredOfferGeneration = predecessor.OfferGeneration,
             DispatchAttemptGeneration = 2,
             MissingDispatchSuccessorGeneration = 1,
             PredecessorAuthorityId = predecessor.Authority.AuthorityId,
         };
         var successor = Grant(fixture, successorRequest);
-        var successorReport = SettleMissingDispatch(successor, offerGeneration: 202);
+        Assert.Equal(0, successor.Authority.RetiredOfferGeneration);
+        Assert.Equal(0, successor.OfferGeneration);
+        var successorReport = SettleMissingDispatchBeforeOffer(successor);
         fixture.Bridge.RaiseSettlementReport(successorReport);
         Assert.Equal(
             RuntimeUnlockRetryDispatchSettlementDecisionStatus.Accepted,
@@ -557,6 +559,17 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         Assert.True(contract.TryBindOfferAlias(offerGeneration, $"nonce-{offerGeneration}"));
         Assert.True(contract.TryBeginSend(out var attempt));
         Assert.True(contract.TryCompleteMissingDispatch(attempt, "retry_dispatch_not_observed"));
+        Assert.True(contract.TryCreateSettlementReport(out var report));
+        return report;
+    }
+
+    private static RuntimeUnlockRetryDispatchSettlementReport SettleMissingDispatchBeforeOffer(
+        RuntimeUnlockRetryDispatchContract contract)
+    {
+        Assert.Equal(0, contract.OfferGeneration);
+        Assert.True(contract.TrySettle(
+            RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch,
+            "retry_dispatch_not_observed_before_offer"));
         Assert.True(contract.TryCreateSettlementReport(out var report));
         return report;
     }
