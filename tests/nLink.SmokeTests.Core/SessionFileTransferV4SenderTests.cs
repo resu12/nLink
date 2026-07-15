@@ -1459,6 +1459,399 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
+    public void RegularNknV4PeerSilenceSafetyReplay_SettledMissingDispatchRearmsUnprovenFrontier()
+    {
+        const string transferId = "transfer_regular_v4_peer_silence_unproven_frontier";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 0,
+            chunksAcceptedForTransport: 411,
+            remoteGrantedUntilExclusive: 512,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        SetPrivateProperty(context, "PullSourceCanSeek", true);
+        SetPrivateProperty(context, "PullV4LastPeerFrameReceivedUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var schedule = typeof(SessionFileTransferService)
+            .GetMethod("MaybeQueueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var requeue = typeof(SessionFileTransferService)
+            .GetMethod("TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var repairQueue = context.GetType()
+            .GetProperty("PullV4SenderPumpRepairQueue", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!
+            .GetValue(context)!;
+        var queuedChunkIndices = context.GetType()
+            .GetProperty("PullV4SenderPumpRepairQueuedChunkIndices", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!
+            .GetValue(context)!;
+
+        Assert.True((bool)schedule.Invoke(service, [context, "unit_test_initial_replay"])!);
+        var initial = Assert.Single(GetQueuedV4RepairSends(context));
+        Assert.Equal(0, GetIntProperty(initial, "FirstStartChunkIndex"));
+        Assert.Equal(64, GetIntProperty(initial, "LastEndChunkExclusive"));
+        Assert.Equal("regular_v4_peer_silence_safety_replay:0:0:64:1", GetStringProperty(initial, "RepairRequestKey"));
+
+        var firstTimedOut = repairQueue.GetType().GetMethod("Dequeue")!.Invoke(repairQueue, null)!;
+        queuedChunkIndices.GetType().GetMethod("Clear")!.Invoke(queuedChunkIndices, null);
+        var requeueArgs = new object?[] { context, firstTimedOut, 0, null, false };
+        Assert.True((bool)requeue.Invoke(service, requeueArgs)!);
+        Assert.False(Assert.IsType<bool>(requeueArgs[4]));
+        var successor = Assert.Single(GetQueuedV4RepairSends(context));
+        Assert.Equal(0, GetIntProperty(successor, "FirstStartChunkIndex"));
+        Assert.Equal(64, GetIntProperty(successor, "LastEndChunkExclusive"));
+        Assert.Equal("regular_v4_peer_silence_safety_replay:0:0:64:2", GetStringProperty(successor, "RepairRequestKey"));
+
+        var secondTimedOut = repairQueue.GetType().GetMethod("Dequeue")!.Invoke(repairQueue, null)!;
+        queuedChunkIndices.GetType().GetMethod("Clear")!.Invoke(queuedChunkIndices, null);
+        requeueArgs = [context, secondTimedOut, 0, null, false];
+        Assert.False((bool)requeue.Invoke(service, requeueArgs)!);
+        Assert.True(Assert.IsType<bool>(requeueArgs[4]));
+        Assert.Empty(GetQueuedV4RepairSends(context));
+
+        SetPrivateProperty(context, "ChunksAcceptedForTransport", 414);
+        SetPrivateProperty(context, "PullRegularNknV4LastPeerSilenceSafetyReplayUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        Assert.True((bool)schedule.Invoke(service, [context, "unit_test_accepted_tail_growth"])!);
+
+        var thirdAttempt = Assert.Single(GetQueuedV4RepairSends(context));
+        Assert.Equal(0, GetIntProperty(thirdAttempt, "FirstStartChunkIndex"));
+        Assert.Equal(64, GetIntProperty(thirdAttempt, "LastEndChunkExclusive"));
+        Assert.Equal("regular_v4_peer_silence_safety_replay:0:0:64:3", GetStringProperty(thirdAttempt, "RepairRequestKey"));
+        Assert.DoesNotContain(
+            GetQueuedV4RepairSends(context),
+            repair => string.Equals(
+                GetStringProperty(repair, "RepairRequestKey"),
+                "regular_v4_peer_silence_safety_replay:0:64:64:3",
+                StringComparison.Ordinal));
+
+        var cursor = GetPrivatePropertyValue(context, "OutboundRegularV4PeerSilenceReplayCursor");
+        Assert.NotNull(cursor);
+        Assert.Equal(0, GetPrivateProperty<int>(cursor!, "PeerFrontierChunkIndex"));
+        Assert.Equal(0, GetPrivateProperty<int>(cursor, "DispatchProvenEndChunkIndex"));
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_regular_v4_peer_silence_replay_range_rotation_rejected;", log, StringComparison.Ordinal);
+        Assert.Contains("decision_reason=scheduled_end_not_dispatch_proven", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
+    public void RegularNknV4PeerSilenceSafetyReplay_DispatchedSweepStillRotates()
+    {
+        const string transferId = "transfer_regular_v4_peer_silence_dispatched_rotation";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 0,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        SetPrivateProperty(context, "PullSourceCanSeek", true);
+        SetPrivateProperty(context, "PullV4LastPeerFrameReceivedUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var schedule = typeof(SessionFileTransferService)
+            .GetMethod("MaybeQueueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        Assert.True((bool)schedule.Invoke(service, [context, "unit_test_initial_replay"])!);
+        var initial = Assert.Single(GetQueuedV4RepairSends(context));
+        var contract = GetPrivatePropertyValue(initial, "RegularV4RepairContract");
+        Assert.NotNull(contract);
+        Assert.True((bool)typeof(SessionFileTransferService)
+            .GetMethod("TryMarkRegularV4FrontierRepairDispatched", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [contract])!);
+        Assert.True((bool)typeof(SessionFileTransferService)
+            .GetMethod("TryAdvanceOutboundRegularV4PeerSilenceReplayCursorLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, initial, contract])!);
+
+        var cursor = GetPrivatePropertyValue(context, "OutboundRegularV4PeerSilenceReplayCursor");
+        Assert.NotNull(cursor);
+        Assert.Equal(64, GetPrivateProperty<int>(cursor!, "DispatchProvenEndChunkIndex"));
+        var advancedCursorGeneration = GetPrivateProperty<int>(cursor, "CursorGeneration");
+        Assert.False((bool)typeof(SessionFileTransferService)
+            .GetMethod("TryAdvanceOutboundRegularV4PeerSilenceReplayCursorLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, initial, contract])!);
+        cursor = GetPrivatePropertyValue(context, "OutboundRegularV4PeerSilenceReplayCursor");
+        Assert.NotNull(cursor);
+        Assert.Equal(advancedCursorGeneration, GetPrivateProperty<int>(cursor!, "CursorGeneration"));
+        Assert.True((bool)typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Single(method =>
+                method.Name == "TrySettleRegularV4FrontierRepairContract" &&
+                method.GetParameters().Length == 6)
+            .Invoke(
+                service,
+                [
+                    contract,
+                    FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved,
+                    64,
+                    "unit_test_dispatch_observed",
+                    null,
+                    false,
+                ])!);
+
+        var repairQueue = context.GetType()
+            .GetProperty("PullV4SenderPumpRepairQueue", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!
+            .GetValue(context)!;
+        repairQueue.GetType().GetMethod("Dequeue")!.Invoke(repairQueue, null);
+        var queuedChunkIndices = context.GetType()
+            .GetProperty("PullV4SenderPumpRepairQueuedChunkIndices", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!
+            .GetValue(context)!;
+        queuedChunkIndices.GetType().GetMethod("Clear")!.Invoke(queuedChunkIndices, null);
+        SetPrivateProperty(context, "PullRegularNknV4LastPeerSilenceSafetyReplayUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+
+        Assert.True((bool)schedule.Invoke(service, [context, "unit_test_next_dispatch_proven_sweep"])!);
+        var next = Assert.Single(GetQueuedV4RepairSends(context));
+        Assert.Equal(64, GetIntProperty(next, "FirstStartChunkIndex"));
+        Assert.Equal(128, GetIntProperty(next, "LastEndChunkExclusive"));
+        Assert.Contains(
+            "event=filetransfer_regular_v4_peer_silence_replay_cursor_advanced;",
+            ReadOperationalLogTail(logStart),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
+    public void RegularNknV4PeerSilenceSafetyReplay_DispatchProvenSweepWrapStartsNewCursorCycle()
+    {
+        const string transferId = "transfer_regular_v4_peer_silence_dispatch_proven_wrap";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 0,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        SetPrivateProperty(context, "PullSourceCanSeek", true);
+        SetPrivateProperty(context, "PullV4LastPeerFrameReceivedUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var schedule = typeof(SessionFileTransferService)
+            .GetMethod("MaybeQueueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var markDispatched = typeof(SessionFileTransferService)
+            .GetMethod("TryMarkRegularV4FrontierRepairDispatched", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var advanceCursor = typeof(SessionFileTransferService)
+            .GetMethod("TryAdvanceOutboundRegularV4PeerSilenceReplayCursorLocked", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var settle = typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Single(method =>
+                method.Name == "TrySettleRegularV4FrontierRepairContract" &&
+                method.GetParameters().Length == 6);
+        var repairQueue = context.GetType()
+            .GetProperty("PullV4SenderPumpRepairQueue", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!
+            .GetValue(context)!;
+        var queuedChunkIndices = context.GetType()
+            .GetProperty("PullV4SenderPumpRepairQueuedChunkIndices", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!
+            .GetValue(context)!;
+
+        void DispatchSettleAndClear(object replay)
+        {
+            var contract = GetPrivatePropertyValue(replay, "RegularV4RepairContract");
+            Assert.NotNull(contract);
+            Assert.True((bool)markDispatched.Invoke(null, [contract])!);
+            Assert.True((bool)advanceCursor.Invoke(service, [context, replay, contract])!);
+            Assert.True((bool)settle.Invoke(
+                service,
+                [
+                    contract,
+                    FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved,
+                    GetIntProperty(replay, "RequestedChunkCount"),
+                    "unit_test_dispatch_proven_sweep",
+                    null,
+                    false,
+                ])!);
+            repairQueue.GetType().GetMethod("Dequeue")!.Invoke(repairQueue, null);
+            queuedChunkIndices.GetType().GetMethod("Clear")!.Invoke(queuedChunkIndices, null);
+            SetPrivateProperty(
+                context,
+                "PullRegularNknV4LastPeerSilenceSafetyReplayUtc",
+                DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        }
+
+        foreach (var expectedStart in new[] { 0, 64, 128, 192 })
+        {
+            Assert.True((bool)schedule.Invoke(service, [context, "unit_test_dispatch_proven_sweep"])!);
+            var replay = Assert.Single(GetQueuedV4RepairSends(context));
+            Assert.Equal(expectedStart, GetIntProperty(replay, "FirstStartChunkIndex"));
+            Assert.Equal(expectedStart + 64, GetIntProperty(replay, "LastEndChunkExclusive"));
+            DispatchSettleAndClear(replay);
+        }
+
+        var completedSweepCursor = GetPrivatePropertyValue(context, "OutboundRegularV4PeerSilenceReplayCursor");
+        Assert.NotNull(completedSweepCursor);
+        Assert.Equal(256, GetPrivateProperty<int>(completedSweepCursor!, "DispatchProvenEndChunkIndex"));
+
+        Assert.True((bool)schedule.Invoke(service, [context, "unit_test_dispatch_proven_wrap"])!);
+        var wrapped = Assert.Single(GetQueuedV4RepairSends(context));
+        Assert.Equal(0, GetIntProperty(wrapped, "FirstStartChunkIndex"));
+        Assert.Equal(64, GetIntProperty(wrapped, "LastEndChunkExclusive"));
+        DispatchSettleAndClear(wrapped);
+
+        Assert.True((bool)schedule.Invoke(service, [context, "unit_test_post_wrap_next_window"])!);
+        var postWrap = Assert.Single(GetQueuedV4RepairSends(context));
+        Assert.Equal(64, GetIntProperty(postWrap, "FirstStartChunkIndex"));
+        Assert.Equal(128, GetIntProperty(postWrap, "LastEndChunkExclusive"));
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("decision_reason=dispatch_proven_sweep_wrapped_to_frontier", log, StringComparison.Ordinal);
+        Assert.Contains("wrapped_to_frontier=1", log, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("partial")]
+    [InlineData("gapped")]
+    [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
+    public void RegularNknV4PeerSilenceSafetyReplay_NonContiguousDispatchDoesNotAdvanceCursor(string coverage)
+    {
+        const string transferId = "transfer_regular_v4_peer_silence_noncontiguous";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 0,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        SetPrivateProperty(context, "PullSourceCanSeek", true);
+        SetPrivateProperty(context, "PullV4LastPeerFrameReceivedUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        Assert.True((bool)typeof(SessionFileTransferService)
+            .GetMethod("MaybeQueueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "unit_test_noncontiguous_dispatch"])!);
+        var replay = Assert.Single(GetQueuedV4RepairSends(context));
+        var contract = GetPrivatePropertyValue(replay, "RegularV4RepairContract");
+        Assert.NotNull(contract);
+        var chunks = Assert.IsType<List<int>>(GetPrivatePropertyValue(replay, "ChunkIndices"));
+        if (string.Equals(coverage, "partial", StringComparison.Ordinal))
+        {
+            chunks.RemoveRange(1, chunks.Count - 1);
+        }
+        else
+        {
+            chunks[1] = chunks[0] + 2;
+        }
+
+        Assert.True((bool)typeof(SessionFileTransferService)
+            .GetMethod("TryMarkRegularV4FrontierRepairDispatched", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [contract])!);
+        Assert.False((bool)typeof(SessionFileTransferService)
+            .GetMethod("TryAdvanceOutboundRegularV4PeerSilenceReplayCursorLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, replay, contract])!);
+        var cursor = GetPrivatePropertyValue(context, "OutboundRegularV4PeerSilenceReplayCursor");
+        Assert.NotNull(cursor);
+        Assert.Equal(0, GetPrivateProperty<int>(cursor!, "DispatchProvenEndChunkIndex"));
+    }
+
+    [Theory]
+    [InlineData("peer_frontier")]
+    [InlineData("route")]
+    [InlineData("runtime_owner")]
+    [InlineData("publication")]
+    [InlineData("terminal")]
+    [InlineData("leg")]
+    [InlineData("transport")]
+    [InlineData("bridge")]
+    [InlineData("data_session")]
+    [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
+    public void RegularNknV4PeerSilenceSafetyReplay_ScopeReplacementInvalidatesCursor(string replacement)
+    {
+        const string transferId = "transfer_regular_v4_peer_silence_cursor_scope";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 0,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        SetPrivateProperty(context, "PullSourceCanSeek", true);
+        SetPrivateProperty(context, "PullV4LastPeerFrameReceivedUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        Assert.True((bool)typeof(SessionFileTransferService)
+            .GetMethod("MaybeQueueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "unit_test_cursor_scope"])!);
+        Assert.NotNull(GetPrivatePropertyValue(context, "OutboundRegularV4PeerSilenceReplayCursor"));
+
+        var peerFrontier = 0;
+        switch (replacement)
+        {
+            case "peer_frontier":
+                peerFrontier = 1;
+                SetPrivateProperty(context, "RemoteNextExpectedChunkIndex", peerFrontier);
+                break;
+            case "route":
+            {
+                var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+                SetPrivateProperty(context, "RouteSelection", tuna);
+                SetPrivateProperty(context, "RouteRuntime", tuna.RuntimeDescriptor);
+                break;
+            }
+            case "runtime_owner":
+                SetPrivateProperty(context, "CurrentRuntimeOwner", null);
+                break;
+            case "publication":
+                SetPrivateProperty(context, "CurrentRoutePublicationToken", null);
+                break;
+            case "terminal":
+                SetPrivateProperty(context, "State", FileTransferTransferState.Completed);
+                break;
+            case "leg":
+            {
+                var leg = GetPrivateProperty<FileTransferLeg>(context, "CurrentTransferLeg");
+                SetPrivateProperty(leg, "Generation", leg.Generation + 1);
+                break;
+            }
+            case "transport":
+            {
+                var leg = GetPrivateProperty<FileTransferLeg>(context, "CurrentTransferLeg");
+                leg.TransportEpochId++;
+                break;
+            }
+            case "bridge":
+            {
+                var leg = GetPrivateProperty<FileTransferLeg>(context, "CurrentTransferLeg");
+                leg.BridgeRecoveryGeneration++;
+                break;
+            }
+            case "data_session":
+                SetPrivateProperty(context, "DataSessionGeneration", 1L);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(replacement), replacement, "Unknown cursor scope replacement.");
+        }
+
+        var current = typeof(SessionFileTransferService)
+            .GetMethod("GetCurrentOutboundRegularV4PeerSilenceReplayCursorLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, peerFrontier]);
+        Assert.Null(current);
+        Assert.Null(GetPrivatePropertyValue(context, "OutboundRegularV4PeerSilenceReplayCursor"));
+        Assert.Contains(
+            "event=filetransfer_regular_v4_peer_silence_replay_cursor_reset;",
+            ReadOperationalLogTail(logStart),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
     public void RegularNknV4PeerSilenceSafetyReplay_RequeuesAfterSendTimeout()
     {
         const string transferId = "transfer_regular_v4_peer_silence_replay_requeue";

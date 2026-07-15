@@ -8429,6 +8429,13 @@ public sealed partial class SessionFileTransferService
                                 pumpInstall,
                                 dataSession) &&
                             TryMarkRegularV4FrontierRepairDispatched(regularV4RepairContractForDispatch);
+                        if (regularDispatchMarked && regularV4RepairContractForDispatch is not null)
+                        {
+                            TryAdvanceOutboundRegularV4PeerSilenceReplayCursorLocked(
+                                context,
+                                repairSend,
+                                regularV4RepairContractForDispatch);
+                        }
                     }
 
                     if (regularDispatchMarked)
@@ -8574,6 +8581,235 @@ public sealed partial class SessionFileTransferService
         QueueOutboundV4TransportRebindSafetyReplayLocked(context, reason, allowRepeatForSameGeneration: true);
     }
 
+    private bool IsOutboundRegularV4PeerSilenceReplayCursorCurrentLocked(
+        OutboundTransferContext context,
+        OutboundRegularV4PeerSilenceReplayCursor cursor,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (!ReferenceEquals(outboundTransfer, context))
+        {
+            rejectionReason = "transfer_context_replaced";
+            return false;
+        }
+
+        if (context.IsTerminal)
+        {
+            rejectionReason = "transfer_terminal";
+            return false;
+        }
+
+        if (!context.RouteRuntime.UsesRegularNknV4FastRuntime ||
+            context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            context.RouteRuntime.FrameFamily != FileTransferFrameFamily.V4)
+        {
+            rejectionReason = "regular_v4_runtime_replaced";
+            return false;
+        }
+
+        if (context.CurrentRuntimeOwner is not { IsDefault: false } owner ||
+            owner != cursor.RuntimeOwner)
+        {
+            rejectionReason = "runtime_owner_replaced";
+            return false;
+        }
+
+        if (context.CurrentRoutePublicationToken is not { IsDefault: false } publication ||
+            publication != cursor.RoutePublication)
+        {
+            rejectionReason = "route_publication_replaced";
+            return false;
+        }
+
+        if (context.CurrentTransferLeg is not { } leg ||
+            context.TerminalGeneration != cursor.TerminalGeneration ||
+            leg.Generation != cursor.LegGeneration ||
+            leg.TransportEpochId != cursor.TransportEpoch ||
+            leg.BridgeRecoveryGeneration != cursor.BridgeRecoveryGeneration ||
+            (context.CurrentBridgeRecoveryDecision?.BridgeDecisionGeneration ?? 0) != cursor.BridgeDecisionGeneration ||
+            context.DataSessionGeneration != cursor.DataSessionGeneration)
+        {
+            rejectionReason = "runtime_scope_replaced";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static string FormatOutboundRegularV4PeerSilenceReplayCursorTuple(
+        OutboundRegularV4PeerSilenceReplayCursor cursor)
+    {
+        var owner = cursor.RuntimeOwner;
+        var publication = cursor.RoutePublication;
+        return $"cursor_generation={cursor.CursorGeneration}; session_id={FormatProtocolLogValue(owner.SessionId)}; transfer_id={FormatProtocolLogValue(owner.TransferId)}; direction=outbound; route={FormatProtocolLogValue(publication.RouteToken)}; protocol_version={publication.ProtocolVersion}; live_route_epoch={publication.LiveRouteEpoch}; runtime_generation={publication.RuntimeGeneration}; terminal_generation={cursor.TerminalGeneration}; leg_generation={cursor.LegGeneration}; transport_epoch={cursor.TransportEpoch}; bridge_recovery_generation={cursor.BridgeRecoveryGeneration}; bridge_decision_generation={cursor.BridgeDecisionGeneration}; route_publication_generation={publication.PublicationGeneration}; route_commit_generation={publication.RouteCommitGeneration ?? 0}; data_session_generation={cursor.DataSessionGeneration}; peer_frontier_chunk_index={cursor.PeerFrontierChunkIndex}; dispatch_proven_end_chunk_exclusive={cursor.DispatchProvenEndChunkIndex}; proving_authority_id={FormatProtocolLogValue(cursor.ProvingAuthorityId?.ToString() ?? "(none)")}; proving_repair_request_key={FormatProtocolLogValue(cursor.ProvingRepairKey ?? "(none)")}; proving_decision_generation={cursor.ProvingDecisionGeneration}";
+    }
+
+    private static void ResetOutboundRegularV4PeerSilenceReplayCursorLocked(
+        OutboundTransferContext context,
+        OutboundRegularV4PeerSilenceReplayCursor cursor,
+        int nextPeerFrontierChunkIndex,
+        string reason)
+    {
+        if (context.OutboundRegularV4PeerSilenceReplayCursor != cursor)
+        {
+            return;
+        }
+
+        context.OutboundRegularV4PeerSilenceReplayCursor = null;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_regular_v4_peer_silence_replay_cursor_reset; {FormatOutboundRegularV4PeerSilenceReplayCursorTuple(cursor)}; next_peer_frontier_chunk_index={nextPeerFrontierChunkIndex}; decision_reason={FormatProtocolLogValue(reason)}");
+    }
+
+    private OutboundRegularV4PeerSilenceReplayCursor? GetCurrentOutboundRegularV4PeerSilenceReplayCursorLocked(
+        OutboundTransferContext context,
+        int peerFrontierChunkIndex)
+    {
+        if (context.OutboundRegularV4PeerSilenceReplayCursor is not { } cursor)
+        {
+            return null;
+        }
+
+        if (!IsOutboundRegularV4PeerSilenceReplayCursorCurrentLocked(context, cursor, out var rejectionReason))
+        {
+            ResetOutboundRegularV4PeerSilenceReplayCursorLocked(
+                context,
+                cursor,
+                peerFrontierChunkIndex,
+                rejectionReason);
+            return null;
+        }
+
+        if (cursor.PeerFrontierChunkIndex != peerFrontierChunkIndex)
+        {
+            ResetOutboundRegularV4PeerSilenceReplayCursorLocked(
+                context,
+                cursor,
+                peerFrontierChunkIndex,
+                "peer_frontier_advanced");
+            return null;
+        }
+
+        return cursor;
+    }
+
+    private OutboundRegularV4PeerSilenceReplayCursor? RetainOutboundRegularV4PeerSilenceReplayCursorLocked(
+        OutboundTransferContext context,
+        RegularV4FrontierRepairContract contract,
+        int peerFrontierChunkIndex,
+        int scheduledStartChunkIndex,
+        int scheduledEndChunkExclusive,
+        string reason)
+    {
+        var cursor = GetCurrentOutboundRegularV4PeerSilenceReplayCursorLocked(context, peerFrontierChunkIndex);
+        if (cursor is null)
+        {
+            if (contract.RepairDecision.RoutePublicationToken is not { IsDefault: false } publication)
+            {
+                return null;
+            }
+
+            var owner = contract.RepairDecision.RuntimeOwner;
+            if (owner.IsDefault)
+            {
+                return null;
+            }
+
+            var cursorGeneration = Math.Max(
+                1,
+                context.LastOutboundRegularV4PeerSilenceReplayCursorGeneration + 1);
+            cursor = new OutboundRegularV4PeerSilenceReplayCursor(
+                cursorGeneration,
+                owner,
+                publication,
+                contract.Authority.TerminalGeneration,
+                contract.Authority.LegGeneration,
+                contract.Authority.TransportEpoch,
+                contract.Authority.BridgeRecoveryGeneration,
+                contract.Authority.BridgeDecisionGeneration,
+                context.DataSessionGeneration,
+                peerFrontierChunkIndex,
+                peerFrontierChunkIndex,
+                ProvingAuthorityId: null,
+                ProvingRepairKey: null,
+                ProvingDecisionGeneration: 0);
+            context.LastOutboundRegularV4PeerSilenceReplayCursorGeneration = cursorGeneration;
+            context.OutboundRegularV4PeerSilenceReplayCursor = cursor;
+        }
+
+        var authority = contract.Authority;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_regular_v4_peer_silence_replay_cursor_retained; {FormatOutboundRegularV4PeerSilenceReplayCursorTuple(cursor)}; authority_id={FormatProtocolLogValue(authority.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(authority.PredecessorAuthorityId?.ToString() ?? "(none)")}; repair_generation={authority.DecisionGeneration}; repair_request_key={FormatProtocolLogValue(authority.RepairKey)}; scheduled_start_chunk_index={scheduledStartChunkIndex}; scheduled_end_chunk_exclusive={scheduledEndChunkExclusive}; dispatch_observed={(contract.Lifecycle.DispatchObserved ? 1 : 0)}; settlement_outcome={FormatProtocolLogValue(contract.Lifecycle.SettlementOutcome?.ToString() ?? "(none)")}; decision_reason={FormatProtocolLogValue(reason)}");
+        return cursor;
+    }
+
+    private bool TryAdvanceOutboundRegularV4PeerSilenceReplayCursorLocked(
+        OutboundTransferContext context,
+        PullV4QueuedRepairSend repairSend,
+        RegularV4FrontierRepairContract contract)
+    {
+        if (!string.Equals(
+                repairSend.DeliveryEscalationReason,
+                "regular_v4_peer_silence_safety_replay",
+                StringComparison.Ordinal) ||
+            !contract.Lifecycle.DispatchObserved ||
+            !ReferenceEquals(context.CurrentRegularV4FrontierRepairContract, contract))
+        {
+            return false;
+        }
+
+        var peerFrontier = Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, context.ChunkCount);
+        var cursor = GetCurrentOutboundRegularV4PeerSilenceReplayCursorLocked(context, peerFrontier);
+        if (cursor is null ||
+            contract.RepairDecision.RuntimeOwner != cursor.RuntimeOwner ||
+            contract.RepairDecision.RoutePublicationToken != cursor.RoutePublication)
+        {
+            return false;
+        }
+
+        var chunkIndices = repairSend.ChunkIndices;
+        var contiguous = chunkIndices.Count == repairSend.RequestedChunkCount &&
+                         chunkIndices.Count > 0 &&
+                         chunkIndices[0] == cursor.DispatchProvenEndChunkIndex &&
+                         repairSend.FirstStartChunkIndex == cursor.DispatchProvenEndChunkIndex &&
+                         repairSend.LastEndChunkExclusive == cursor.DispatchProvenEndChunkIndex + chunkIndices.Count;
+        for (var index = 1; contiguous && index < chunkIndices.Count; index++)
+        {
+            contiguous = chunkIndices[index] == chunkIndices[index - 1] + 1;
+        }
+
+        if (!contiguous)
+        {
+            RetainOutboundRegularV4PeerSilenceReplayCursorLocked(
+                context,
+                contract,
+                peerFrontier,
+                repairSend.FirstStartChunkIndex,
+                repairSend.LastEndChunkExclusive,
+                "dispatch_coverage_not_contiguous_from_cursor");
+            return false;
+        }
+
+        var cursorGeneration = Math.Max(
+            cursor.CursorGeneration + 1,
+            context.LastOutboundRegularV4PeerSilenceReplayCursorGeneration + 1);
+        var advanced = cursor with
+        {
+            CursorGeneration = cursorGeneration,
+            DispatchProvenEndChunkIndex = repairSend.LastEndChunkExclusive,
+            ProvingAuthorityId = contract.Authority.AuthorityId,
+            ProvingRepairKey = contract.Authority.RepairKey,
+            ProvingDecisionGeneration = contract.Authority.DecisionGeneration,
+        };
+        context.LastOutboundRegularV4PeerSilenceReplayCursorGeneration = cursorGeneration;
+        context.OutboundRegularV4PeerSilenceReplayCursor = advanced;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_regular_v4_peer_silence_replay_cursor_advanced; {FormatOutboundRegularV4PeerSilenceReplayCursorTuple(advanced)}; authority_id={FormatProtocolLogValue(contract.Authority.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(contract.Authority.PredecessorAuthorityId?.ToString() ?? "(none)")}; repair_generation={contract.Authority.DecisionGeneration}; repair_request_key={FormatProtocolLogValue(contract.Authority.RepairKey)}; dispatched_start_chunk_index={repairSend.FirstStartChunkIndex}; dispatched_end_chunk_exclusive={repairSend.LastEndChunkExclusive}; dispatched_chunk_count={chunkIndices.Count}; decision_reason=dispatch_observed_contiguous_range");
+        return true;
+    }
+
     private bool MaybeQueueOutboundRegularNknV4PeerSilenceSafetyReplayLocked(
         OutboundTransferContext context,
         string reason)
@@ -8650,19 +8886,35 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        var replayStartChunkIndex = remoteFrontier;
+        var replayCursor = GetCurrentOutboundRegularV4PeerSilenceReplayCursorLocked(context, remoteFrontier);
+        var replayStartChunkIndex = replayCursor?.DispatchProvenEndChunkIndex ?? remoteFrontier;
         var wrappedToFrontier = false;
-        if (context.PullRegularNknV4LastPeerSilenceSafetyReplayFrontierChunkIndex == remoteFrontier &&
-            context.PullRegularNknV4LastPeerSilenceSafetyReplayEndChunkIndex > remoteFrontier)
+        if (replayStartChunkIndex >= acceptedUntil)
         {
-            if (context.PullRegularNknV4LastPeerSilenceSafetyReplayEndChunkIndex < acceptedUntil)
+            wrappedToFrontier = replayCursor is not null &&
+                                replayCursor.DispatchProvenEndChunkIndex > remoteFrontier;
+            if (wrappedToFrontier)
             {
-                replayStartChunkIndex = context.PullRegularNknV4LastPeerSilenceSafetyReplayEndChunkIndex;
+                ResetOutboundRegularV4PeerSilenceReplayCursorLocked(
+                    context,
+                    replayCursor!,
+                    remoteFrontier,
+                    "dispatch_proven_sweep_wrapped_to_frontier");
+                replayCursor = null;
             }
-            else
-            {
-                wrappedToFrontier = true;
-            }
+
+            replayStartChunkIndex = remoteFrontier;
+        }
+
+        if (replayCursor is { } retainedCursor &&
+            context.PullRegularNknV4LastPeerSilenceSafetyReplayFrontierChunkIndex == remoteFrontier &&
+            context.PullRegularNknV4LastPeerSilenceSafetyReplayEndChunkIndex > retainedCursor.DispatchProvenEndChunkIndex &&
+            context.PullRegularNknV4LastPeerSilenceSafetyReplayEndChunkIndex < acceptedUntil)
+        {
+            var previousContract = context.PullRegularNknV4PeerSilenceMissingDispatchSettlementContract;
+            LocalOperationalLog.Warn(
+                "FileTransferService",
+                $"event=filetransfer_regular_v4_peer_silence_replay_range_rotation_rejected; {FormatOutboundRegularV4PeerSilenceReplayCursorTuple(retainedCursor)}; authority_id={FormatProtocolLogValue(previousContract?.Authority.AuthorityId.ToString() ?? "(none)")}; predecessor_authority_id={FormatProtocolLogValue(previousContract?.Authority.PredecessorAuthorityId?.ToString() ?? "(none)")}; repair_generation={previousContract?.Authority.DecisionGeneration ?? 0}; repair_request_key={FormatProtocolLogValue(previousContract?.Authority.RepairKey ?? "(none)")}; attempted_start_chunk_index={context.PullRegularNknV4LastPeerSilenceSafetyReplayEndChunkIndex}; retained_start_chunk_index={replayStartChunkIndex}; chunks_accepted_for_transport={acceptedUntil}; dispatch_observed={(previousContract?.Lifecycle.DispatchObserved == true ? 1 : 0)}; settlement_outcome={FormatProtocolLogValue(previousContract?.Lifecycle.SettlementOutcome?.ToString() ?? "(none)")}; decision_reason=scheduled_end_not_dispatch_proven");
         }
 
         var maxChunksByBytes = Math.Max(1, PullTransportRebindSafetyReplayMaxBytes / Math.Max(1, context.ChunkSizeBytes));
@@ -8757,6 +9009,13 @@ public sealed partial class SessionFileTransferService
         context.PullRegularNknV4LastPeerSilenceSafetyReplayFrontierChunkIndex = remoteFrontier;
         context.PullRegularNknV4LastPeerSilenceSafetyReplayEndChunkIndex = replayEndExclusive;
         context.PullRegularNknV4PeerSilenceSafetyReplayCount = replayOrdinal;
+        RetainOutboundRegularV4PeerSilenceReplayCursorLocked(
+            context,
+            regularContract,
+            remoteFrontier,
+            replayStartChunkIndex,
+            replayEndExclusive,
+            "repair_authorized_without_dispatch_proof");
         context.PullV4SenderPumpRepairQueue.Enqueue(
             new PullV4QueuedRepairSend(
                 chunkIndices,
@@ -9146,6 +9405,13 @@ public sealed partial class SessionFileTransferService
         context.PullRegularNknV4PeerSilenceMissingDispatchUtc = DateTimeOffset.UtcNow;
         context.PullRegularNknV4PeerSilenceMissingDispatchSettlementContract = regularContract;
         context.PullRegularNknV4PeerSilenceMissingDispatchSettledStalledRepairKey = null;
+        RetainOutboundRegularV4PeerSilenceReplayCursorLocked(
+            context,
+            regularContract,
+            remoteFrontier,
+            firstStartChunkIndex,
+            lastEndChunkExclusive,
+            "send_timeout_successor_authorized_without_dispatch_proof");
         successorAuthority = regularAuthority;
         context.PullV4SenderPumpRepairQueue.Enqueue(
             revalidatedRepair with

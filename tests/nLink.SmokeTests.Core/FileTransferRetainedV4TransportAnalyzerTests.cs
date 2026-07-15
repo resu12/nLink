@@ -2948,6 +2948,190 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
         Assert.Equal("1", verdict["regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count"]);
     }
 
+    [Fact]
+    [Trait("RetainedV4Suite", "PeerSilenceReplayRange")]
+    public async Task AnalyzeRetained_RegularV4PeerSilenceReplayRotatesAfterMissingDispatch_FullAndCompactAgree()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRegularV4PeerSilenceReplayCurrentArtifactFixture("transfer_peer_silence_rotation");
+        var full = await RunAnalyzeFixtureAsync(lines);
+        var compact = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: new Dictionary<string, string>
+            {
+                ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+            });
+
+        Assert.Equal(0, full.Script.ExitCode);
+        Assert.Equal(0, compact.Script.ExitCode);
+        var fullVerdict = ReadArtifactReport(full.ArtifactDir, "filetransfer-operator-verdict.txt");
+        var compactVerdict = ReadArtifactReport(compact.ArtifactDir, "filetransfer-operator-verdict.txt");
+        foreach (var field in new[]
+                 {
+                     "recovery_failure_class",
+                     "first_proof_chain_failure_class",
+                     "first_proof_chain_failure_event",
+                     "first_proof_chain_failure_reason",
+                     "first_proof_chain_failure_sequence",
+                     "regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_raw_count",
+                     "regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_distinct_count",
+                     "regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count",
+                     "regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_unresolved_count",
+                     "regular_v4_peer_silence_replay_missing_dispatch_range_preservation_verdict"
+                 })
+        {
+            Assert.Equal(fullVerdict[field], compactVerdict[field]);
+        }
+
+        Assert.Equal("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved", fullVerdict["recovery_failure_class"]);
+        Assert.Equal("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved", fullVerdict["first_proof_chain_failure_class"]);
+        Assert.Equal("filetransfer_regular_v4_frontier_repair_authority_granted", fullVerdict["first_proof_chain_failure_event"]);
+        Assert.Equal("peer_silence_replay_range_rotated_after_missing_dispatch", fullVerdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("2898", fullVerdict["first_proof_chain_failure_sequence"]);
+        Assert.Equal("1", fullVerdict["regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_raw_count"]);
+        Assert.Equal("1", fullVerdict["regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_distinct_count"]);
+        Assert.Equal("0", fullVerdict["regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count"]);
+        Assert.Equal("1", fullVerdict["regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_unresolved_count"]);
+        Assert.Equal("fail", fullVerdict["regular_v4_peer_silence_replay_missing_dispatch_range_preservation_verdict"]);
+    }
+
+    [Fact]
+    [Trait("RetainedV4Suite", "PeerSilenceReplayRange")]
+    public async Task AnalyzeRetained_RegularV4PeerSilenceReplayExactDispatch_RecoversRotatedRangeCandidate()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_peer_silence_rotation_recovered";
+        var lines = BuildRegularV4PeerSilenceReplaySettledMissingDispatchFixture(transferId);
+        while (lines.Count < 2897)
+        {
+            lines.Add(LogLine($"event=peer_silence_rotation_fixture_noise; transfer_id={transferId}; session_id=sess_a; ordinal={lines.Count + 1}"));
+        }
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_authority_granted; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=regular_v4_peer_silence_safety_replay; stage=schedule; repair_request_key=regular_v4_peer_silence_safety_replay:0:64:64:3; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn; frontier_chunk_index=0; durable_received_highest_chunk_index=-1; pending_repair_count=64; decision_generation=3; range_count=1; requested_chunk_count=64; scheduled_chunk_count=64; decision_reason=session_liveness_timeout_pending"));
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_dispatched; direction=outbound; transfer_id={transferId}; session_id=sess_a; repair_request_key=regular_v4_peer_silence_safety_replay:0:0:64:4; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn; frontier_chunk_index=0; requested_chunk_count=64; sent_chunk_count=64; decision_generation=4"));
+
+        var full = await RunAnalyzeFixtureAsync(lines);
+        var compact = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: new Dictionary<string, string>
+            {
+                ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+            });
+
+        Assert.Equal(0, full.Script.ExitCode);
+        Assert.Equal(0, compact.Script.ExitCode);
+        var fullVerdict = ReadArtifactReport(full.ArtifactDir, "filetransfer-operator-verdict.txt");
+        var compactVerdict = ReadArtifactReport(compact.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", fullVerdict["regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_distinct_count"]);
+        Assert.Equal("1", fullVerdict["regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count"]);
+        Assert.Equal("0", fullVerdict["regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_unresolved_count"]);
+        Assert.Equal("pass", fullVerdict["regular_v4_peer_silence_replay_missing_dispatch_range_preservation_verdict"]);
+        Assert.Equal(fullVerdict["regular_v4_peer_silence_replay_missing_dispatch_range_preservation_verdict"], compactVerdict["regular_v4_peer_silence_replay_missing_dispatch_range_preservation_verdict"]);
+        Assert.NotEqual("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved", fullVerdict["first_proof_chain_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("RetainedV4Suite", "PeerSilenceReplayRange")]
+    public async Task AnalyzeRetained_RegularV4PeerSilenceReplaySameRangeSuccessor_DoesNotClassifyRotation()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_peer_silence_same_range";
+        var lines = BuildRegularV4PeerSilenceReplaySettledMissingDispatchFixture(transferId);
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_authority_granted; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=regular_v4_peer_silence_safety_replay; stage=schedule; repair_request_key=regular_v4_peer_silence_safety_replay:0:0:64:3; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn; frontier_chunk_index=0; durable_received_highest_chunk_index=-1; pending_repair_count=64; decision_generation=3; range_count=1; requested_chunk_count=64; scheduled_chunk_count=64; decision_reason=session_liveness_timeout_pending"));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("0", verdict["regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_raw_count"]);
+        Assert.Equal("0", verdict["regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_unresolved_count"]);
+        Assert.Equal("none", verdict["regular_v4_peer_silence_replay_missing_dispatch_range_preservation_verdict"]);
+    }
+
+    [Fact]
+    [Trait("RetainedV4Suite", "PeerSilenceReplayRange")]
+    public async Task AnalyzeRetained_RegularV4PeerSilenceReplayScopeLessDispatchSettlement_DoesNotRecoverAcrossTransfers()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_peer_silence_scope_collision";
+        const string sharedKey = "regular_v4_peer_silence_safety_replay:0:0:64:1";
+        var lines = BuildRegularV4PeerSilenceReplayCurrentArtifactFixture(transferId);
+        lines.Insert(0, LogLine($"event=filetransfer_regular_v4_frontier_repair_authority_granted; direction=outbound; transfer_id=transfer_peer_silence_other; session_id=sess_other; source=regular_v4_peer_silence_safety_replay; stage=schedule; repair_request_key={sharedKey}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn; frontier_chunk_index=0; durable_received_highest_chunk_index=-1; pending_repair_count=64; decision_generation=1; range_count=1; requested_chunk_count=64; scheduled_chunk_count=64; decision_reason=session_liveness_timeout_pending"));
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_contract_settled; authority_schema=2; authority_id=repair-ambiguous; successor_authority_id=(none); repair_request_key={sharedKey}; settlement_outcome=DispatchObserved; dispatch_observed=1; decision_reason=repair_dispatch_observed"));
+
+        var full = await RunAnalyzeFixtureAsync(lines);
+        var compact = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: new Dictionary<string, string>
+            {
+                ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+            });
+
+        Assert.Equal(0, full.Script.ExitCode);
+        Assert.Equal(0, compact.Script.ExitCode);
+        var fullVerdict = ReadArtifactReport(full.ArtifactDir, "filetransfer-operator-verdict.txt");
+        var compactVerdict = ReadArtifactReport(compact.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", fullVerdict["regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_unresolved_count"]);
+        Assert.Equal("0", fullVerdict["regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count"]);
+        Assert.Equal(fullVerdict["regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_unresolved_count"], compactVerdict["regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_unresolved_count"]);
+        Assert.Equal(fullVerdict["regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count"], compactVerdict["regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count"]);
+    }
+
+    private static List<string> BuildRegularV4PeerSilenceReplaySettledMissingDispatchFixture(string transferId)
+    {
+        const string firstKey = "regular_v4_peer_silence_safety_replay:0:0:64:1";
+        const string successorKey = "regular_v4_peer_silence_safety_replay:0:0:64:2";
+        return
+        [
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=1; route_commit_generation=0"),
+            LogLine($"event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=1; route_commit_generation=0"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_authority_granted; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=regular_v4_peer_silence_safety_replay; stage=schedule; repair_request_key={firstKey}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn; frontier_chunk_index=0; durable_received_highest_chunk_index=-1; pending_repair_count=64; decision_generation=1; range_count=1; requested_chunk_count=64; scheduled_chunk_count=64; decision_reason=session_liveness_timeout_pending"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_missing_dispatch; direction=outbound; transfer_id={transferId}; session_id=sess_a; stage=send; repair_request_key={firstKey}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn; decision_generation=1; scheduled_chunk_count=64; remote_next_expected_chunk_index=0; chunks_accepted_for_transport=411; decision_reason=repair_dispatch_not_observed"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_contract_settled; authority_schema=2; authority_id=repair-1; successor_authority_id=repair-2; repair_request_key={firstKey}; settlement_outcome=Superseded; dispatch_observed=0; decision_reason=send_timeout_successor_authorized"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_authority_granted; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=regular_v4_peer_silence_safety_replay; stage=requeue; repair_request_key={successorKey}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn; frontier_chunk_index=0; durable_received_highest_chunk_index=-1; pending_repair_count=64; decision_generation=2; range_count=1; requested_chunk_count=64; scheduled_chunk_count=64; decision_reason=requeue_after_send_timeout"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_successor_authorized; direction=outbound; transfer_id={transferId}; session_id=sess_a; predecessor_repair_request_key={firstKey}; predecessor_decision_generation=1; successor_repair_request_key={successorKey}; successor_decision_generation=2; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn; frontier_chunk_index=0; decision_reason=send_timeout_successor_authorized"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_missing_dispatch; direction=outbound; transfer_id={transferId}; session_id=sess_a; stage=send; repair_request_key={successorKey}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn; decision_generation=2; scheduled_chunk_count=64; remote_next_expected_chunk_index=0; chunks_accepted_for_transport=411; decision_reason=repair_dispatch_not_observed"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_settled_stalled; direction=outbound; transfer_id={transferId}; session_id=sess_a; repair_request_key={successorKey}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=1; target_transport=regular_nkn; reason=peer_silence_requeue_missing_dispatch_settled; frontier_chunk_index=0; durable_received_highest_chunk_index=-1; requested_chunk_count=64; attempt_count=2; settlement=stalled; decision_reason=regular_v4_frontier_repair_missing_dispatch_settled"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_contract_settled; authority_schema=2; authority_id=repair-2; successor_authority_id=(none); repair_request_key={successorKey}; settlement_outcome=SettledStalled; dispatch_observed=0; decision_reason=regular_v4_frontier_repair_missing_dispatch_settled"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_settlement_accepted; source=nkn_bridge_pressure; stage=settlement; session_id=sess_a; transfer_id={transferId}; direction=outbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn; repair_request_key={successorKey}; frontier_chunk_index=0; durable_received_highest_chunk_index=-1; requested_chunk_count=64; decision_generation=2; outcome=settled_stalled; settlement_reason=regular_v4_frontier_repair_missing_dispatch_settled; decision_reason=regular_v4_frontier_repair_missing_dispatch_settled"),
+            LogLine($"event=runtime_unlock_regular_v4_frontier_repair_settlement_handoff_adopted; authority_id=repair-2; successor_authority_id=(none); session_id=sess_a; transfer_id={transferId}; direction=outbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn; repair_request_key={successorKey}; frontier_chunk_index=0; durable_received_highest_chunk_index=-1; requested_chunk_count=64; settlement_decision_generation=2; settlement_outcome=settled_stalled; adopted_recovery_liveness_generation=1; adopted_bridge_decision_generation=1; handoff_disposition=Adopted; decision_reason=adopted_by_receive_recovery")
+        ];
+    }
+
+    private static List<string> BuildRegularV4PeerSilenceReplayCurrentArtifactFixture(string transferId)
+    {
+        var lines = BuildRegularV4PeerSilenceReplaySettledMissingDispatchFixture(transferId);
+        while (lines.Count < 2897)
+        {
+            lines.Add(LogLine($"event=peer_silence_rotation_fixture_noise; transfer_id={transferId}; session_id=sess_a; ordinal={lines.Count + 1}"));
+        }
+
+        const string rotatedKey = "regular_v4_peer_silence_safety_replay:0:64:64:3";
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_authority_granted; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=regular_v4_peer_silence_safety_replay; stage=schedule; repair_request_key={rotatedKey}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn; frontier_chunk_index=0; durable_received_highest_chunk_index=-1; pending_repair_count=64; decision_generation=3; range_count=1; requested_chunk_count=64; scheduled_chunk_count=64; decision_reason=session_liveness_timeout_pending"));
+        lines.Add(LogLine($"event=filetransfer_regular_v4_peer_silence_safety_replay_started; transfer_id={transferId}; session_id=sess_a; reason=session_liveness_timeout_pending; route=regular_nkn_v4_fast; protocol_version=4; replay_ordinal=3; remote_next_expected_chunk_index=0; replay_start_chunk_index=64; replay_end_chunk_exclusive=128; requested_chunk_count=64; scheduled_chunk_count=64; frontier_lag_chunks=414; wrapped_to_frontier=0"));
+        while (lines.Count < 3234)
+        {
+            lines.Add(LogLine($"event=peer_silence_rotation_fixture_noise; transfer_id={transferId}; session_id=sess_a; ordinal={lines.Count + 1}"));
+        }
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_stalled; direction=outbound; transfer_id={transferId}; session_id=sess_a; repair_request_key={rotatedKey}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; target_transport=regular_nkn; reason=retry_interval_without_frontier_progress; frontier_chunk_index=0; durable_received_highest_chunk_index=-1; requested_chunk_count=64; attempt_count=3"));
+        return lines;
+    }
+
     private static IEnumerable<string> BuildRegularV4ProjectionCandidateFixture(string transferId)
     {
         foreach (var line in BuildRegularV4ProjectionCandidateFixtureWithoutOmission(transferId))

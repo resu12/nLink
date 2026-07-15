@@ -6759,6 +6759,11 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairMissingRangeNotPreservedRecoveredCount)) | Out-Null
     $lines.Add(("regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount)) | Out-Null
     $lines.Add(("regular_v4_frontier_repair_missing_range_preservation_verdict={0}" -f $RecoveryClassification.RegularV4FrontierRepairMissingRangePreservationVerdict)) | Out-Null
+    $lines.Add(("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_raw_count={0}" -f $RecoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRawCount)) | Out-Null
+    $lines.Add(("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_distinct_count={0}" -f $RecoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedDistinctCount)) | Out-Null
+    $lines.Add(("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count={0}" -f $RecoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRecoveredCount)) | Out-Null
+    $lines.Add(("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_unresolved_count={0}" -f $RecoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedUnresolvedCount)) | Out-Null
+    $lines.Add(("regular_v4_peer_silence_replay_missing_dispatch_range_preservation_verdict={0}" -f $RecoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangePreservationVerdict)) | Out-Null
     $lines.Add(("route_consistency_verdict={0}" -f ($(if ($null -ne $routeConsistency) { $routeConsistency.Verdict } else { 'legacy' })))) | Out-Null
     $lines.Add(("route_selected_count={0}" -f $routeSelectedEvents.Length)) | Out-Null
     $lines.Add(("route_aware_event_count={0}" -f $routeAwareEvents.Length)) | Out-Null
@@ -8519,6 +8524,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={0}" -f $recoveryClassification.RegularV4FrontierRepairMissingRangeNotPreservedRecoveredCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count={0}" -f $recoveryClassification.RegularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount),
         ("regular_v4_frontier_repair_missing_range_preservation_verdict={0}" -f $recoveryClassification.RegularV4FrontierRepairMissingRangePreservationVerdict),
+        ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_raw_count={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRawCount),
+        ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_distinct_count={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedDistinctCount),
+        ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRecoveredCount),
+        ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_unresolved_count={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedUnresolvedCount),
+        ("regular_v4_peer_silence_replay_missing_dispatch_range_preservation_verdict={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangePreservationVerdict),
         ("runtime_unlock_regular_v4_recovery_lease_closure_retained_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureRetainedCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_adopted_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureAdoptedCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureRejectedCount),
@@ -13086,6 +13096,383 @@ function Get-FileTransferRegularV4MissingRangePreservationProof {
     }
 }
 
+function Get-FileTransferRegularV4PeerSilenceReplayRange {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    $repairKey = Get-FileTransferEventField -Event $Event -Name 'repair_request_key' -Default ''
+    if ([string]::IsNullOrWhiteSpace($repairKey) -or $repairKey -in @('(none)', 'none')) {
+        $repairKey = Get-FileTransferEventField -Event $Event -Name 'successor_repair_request_key' -Default ''
+    }
+
+    if ($repairKey -match '^regular_v4_peer_silence_safety_replay:(?<frontier>\d+):(?<start>\d+):(?<count>\d+):(?<ordinal>\d+)$') {
+        $start = [int64]$Matches['start']
+        $count = [int64]$Matches['count']
+        return [pscustomobject]@{
+            Valid = $count -gt 0
+            RepairKey = $repairKey
+            Frontier = [int64]$Matches['frontier']
+            Start = $start
+            End = $start + $count
+            Ordinal = [int64]$Matches['ordinal']
+        }
+    }
+
+    $frontier = Get-FileTransferEventInt64Field -Event $Event -Name 'remote_next_expected_chunk_index' -Default -1
+    if ($frontier -lt 0) {
+        $frontier = Get-FileTransferEventInt64Field -Event $Event -Name 'frontier_chunk_index' -Default -1
+    }
+    $start = Get-FileTransferEventInt64Field -Event $Event -Name 'replay_start_chunk_index' -Default -1
+    if ($start -lt 0) {
+        $start = Get-FileTransferEventInt64Field -Event $Event -Name 'start_chunk_index' -Default -1
+    }
+    $end = Get-FileTransferEventInt64Field -Event $Event -Name 'replay_end_chunk_exclusive' -Default -1
+    if ($end -lt 0 -and $start -ge 0) {
+        $count = Get-FileTransferEventInt64Field -Event $Event -Name 'scheduled_chunk_count' -Default 0
+        if ($count -le 0) {
+            $count = Get-FileTransferEventInt64Field -Event $Event -Name 'requested_chunk_count' -Default 0
+        }
+        if ($count -le 0) {
+            $count = Get-FileTransferEventInt64Field -Event $Event -Name 'sent_chunk_count' -Default 0
+        }
+        if ($count -gt 0) {
+            $end = $start + $count
+        }
+    }
+
+    return [pscustomobject]@{
+        Valid = $frontier -ge 0 -and $start -ge 0 -and $end -gt $start
+        RepairKey = if ([string]::IsNullOrWhiteSpace($repairKey)) { '(none)' } else { $repairKey }
+        Frontier = $frontier
+        Start = $start
+        End = $end
+        Ordinal = Get-FileTransferEventInt64Field -Event $Event -Name 'replay_ordinal' -Default 0
+    }
+}
+
+function Test-FileTransferRegularV4PeerSilenceReplayScopeMatch {
+    param(
+        [Parameter(Mandatory = $true)]$Anchor,
+        [Parameter(Mandatory = $true)]$Candidate
+    )
+
+    if (-not (Test-FileTransferRegularV4RepairProjectionScopeMatch -Anchor $Anchor -Candidate $Candidate)) {
+        return $false
+    }
+
+    $anchorDirection = Get-FileTransferEventField -Event $Anchor -Name 'direction' -Default ''
+    $candidateDirection = Get-FileTransferEventField -Event $Candidate -Name 'direction' -Default ''
+    return [string]::IsNullOrWhiteSpace($anchorDirection) -or
+        [string]::IsNullOrWhiteSpace($candidateDirection) -or
+        [string]::Equals($anchorDirection, $candidateDirection, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-FileTransferRegularV4PeerSilenceReplayMissingDispatchRangeProof {
+    param([AllowEmptyCollection()][object[]]$Events = @())
+
+    [object[]]$orderedEvents = @($Events | Where-Object { $null -ne $_ } | Sort-Object Sequence, LineNumber)
+    $grantRecords = New-Object System.Collections.Generic.List[object]
+    $grantByCorrelationKey = @{}
+    $missingDispatchByCorrelationKey = @{}
+    $activeUnresolvedRanges = New-Object System.Collections.Generic.List[object]
+    $activeRangeByLogicalKey = @{}
+    $rawCandidates = New-Object System.Collections.Generic.List[object]
+    $distinctCandidateRecords = New-Object System.Collections.Generic.List[object]
+    $seenCandidateLogicalTuples = @{}
+
+    foreach ($event in $orderedEvents) {
+        $eventName = [string]$event.EventName
+        $sequence = [int64]$event.Sequence
+
+        if ($eventName -in @(
+                'transfer_terminal',
+                'file_transfer_inbound_terminal',
+                'file_transfer_outbound_terminal',
+                'filetransfer_runtime_terminalized',
+                'filetransfer_manifest_received',
+                'filetransfer_manifest_replaced',
+                'filetransfer_session_replaced',
+                'filetransfer_data_session_recreated',
+                'filetransfer_route_selected',
+                'filetransfer_route_transitioned',
+                'filetransfer_live_route_epoch_started',
+                'filetransfer_runtime_started',
+                'filetransfer_runtime_owner_changed')) {
+            $isUnconditionalBoundary = $eventName -in @(
+                'transfer_terminal',
+                'file_transfer_inbound_terminal',
+                'file_transfer_outbound_terminal',
+                'filetransfer_runtime_terminalized',
+                'filetransfer_manifest_received',
+                'filetransfer_manifest_replaced',
+                'filetransfer_session_replaced',
+                'filetransfer_data_session_recreated')
+            foreach ($range in @($activeUnresolvedRanges.ToArray())) {
+                if (-not (Test-FileTransferRegularV4RepairProjectionTransferMatch -Anchor $range.ScopeAnchor -Candidate $event)) {
+                    continue
+                }
+                if ($isUnconditionalBoundary -or
+                    (Test-FileTransferRegularV4RepairProjectionScopeReplacement -Anchor $range.ScopeAnchor -Candidate $event)) {
+                    $activeUnresolvedRanges.Remove($range) | Out-Null
+                    $activeRangeByLogicalKey.Remove([string]$range.LogicalKey)
+                }
+            }
+            foreach ($candidate in $distinctCandidateRecords.ToArray()) {
+                if ($sequence -le [int64]$candidate.Event.Sequence -or
+                    [int64]$candidate.InvalidationSequence -ne [int64]::MaxValue -or
+                    -not (Test-FileTransferRegularV4RepairProjectionTransferMatch -Anchor $candidate.ScopeAnchor -Candidate $event)) {
+                    continue
+                }
+                if ($isUnconditionalBoundary -or
+                    (Test-FileTransferRegularV4RepairProjectionScopeReplacement -Anchor $candidate.ScopeAnchor -Candidate $event)) {
+                    $candidate.InvalidationSequence = $sequence
+                }
+            }
+            continue
+        }
+
+        if ($eventName -eq 'filetransfer_regular_v4_frontier_repair_authority_granted') {
+            $source = Get-FileTransferEventField -Event $event -Name 'source' -Default ''
+            $direction = Get-FileTransferEventField -Event $event -Name 'direction' -Default ''
+            $route = Get-FileTransferEventField -Event $event -Name 'route' -Default 'regular_nkn_v4_fast'
+            $protocol = Get-FileTransferEventField -Event $event -Name 'protocol_version' -Default '4'
+            $range = Get-FileTransferRegularV4PeerSilenceReplayRange -Event $event
+            if ($source -ne 'regular_v4_peer_silence_safety_replay' -or
+                $direction -ne 'outbound' -or
+                $route -ne 'regular_nkn_v4_fast' -or
+                $protocol -ne '4' -or
+                -not $range.Valid) {
+                continue
+            }
+
+            $scopeKey = Get-FileTransferRegularV4RepairProjectionScopeKey -Event $event -Frontier $range.Frontier
+            $correlationKey = ('{0}|{1}' -f $scopeKey, $range.RepairKey)
+            if (-not $grantByCorrelationKey.ContainsKey($correlationKey)) {
+                $grantRecord = [pscustomobject]@{
+                    CorrelationKey = $correlationKey
+                    ScopeKey = $scopeKey
+                    Event = $event
+                    Range = $range
+                }
+                $grantByCorrelationKey[$correlationKey] = $grantRecord
+                $grantRecords.Add($grantRecord) | Out-Null
+            }
+
+            foreach ($unresolved in @($activeUnresolvedRanges.ToArray())) {
+                if ($range.Frontier -ne [int64]$unresolved.Frontier -or
+                    $range.Start -le [int64]$unresolved.Start -or
+                    -not (Test-FileTransferRegularV4PeerSilenceReplayScopeMatch -Anchor $unresolved.ScopeAnchor -Candidate $event)) {
+                    continue
+                }
+
+                $rawCandidates.Add($event) | Out-Null
+                $decisionGeneration = Get-FileTransferEventField -Event $event -Name 'decision_generation' -Default '0'
+                $logicalTuple = ('{0}|{1}|{2}|{3}|{4}|{5}|{6}' -f
+                    $unresolved.ScopeKey,
+                    $unresolved.Frontier,
+                    $unresolved.Start,
+                    $unresolved.End,
+                    $unresolved.RepairKey,
+                    $range.RepairKey,
+                    $decisionGeneration)
+                if (-not $seenCandidateLogicalTuples.ContainsKey($logicalTuple)) {
+                    $candidateRecord = [pscustomobject]@{
+                        Event = $event
+                        LogicalTuple = $logicalTuple
+                        ScopeAnchor = $unresolved.ScopeAnchor
+                        Frontier = [int64]$unresolved.Frontier
+                        Start = [int64]$unresolved.Start
+                        End = [int64]$unresolved.End
+                        Recovered = $false
+                        InvalidationSequence = [int64]::MaxValue
+                    }
+                    $seenCandidateLogicalTuples[$logicalTuple] = $candidateRecord
+                    $distinctCandidateRecords.Add($candidateRecord) | Out-Null
+                }
+                break
+            }
+            continue
+        }
+
+        if ($eventName -eq 'filetransfer_regular_v4_frontier_repair_missing_dispatch') {
+            $range = Get-FileTransferRegularV4PeerSilenceReplayRange -Event $event
+            if ($range.Valid) {
+                $matchingGrant = @($grantRecords.ToArray() | Where-Object {
+                    $_.Range.RepairKey -eq $range.RepairKey -and
+                    [int64]$_.Event.Sequence -lt $sequence -and
+                    (Test-FileTransferRegularV4PeerSilenceReplayScopeMatch -Anchor $_.Event -Candidate $event)
+                } | Sort-Object @{ Expression = { [int64]$_.Event.Sequence } } | Select-Object -Last 1)
+                if ($matchingGrant.Count -gt 0) {
+                    $missingDispatchByCorrelationKey[[string]$matchingGrant[0].CorrelationKey] = $event
+                }
+            }
+            continue
+        }
+
+        if ($eventName -in @(
+                'filetransfer_regular_v4_frontier_repair_contract_settled',
+                'filetransfer_regular_v4_frontier_repair_settled_stalled',
+                'filetransfer_regular_v4_frontier_repair_settlement_accepted') -and
+            -not ($eventName -eq 'filetransfer_regular_v4_frontier_repair_contract_settled' -and
+                (Get-FileTransferEventField -Event $event -Name 'dispatch_observed' -Default '0') -eq '1')) {
+            $range = Get-FileTransferRegularV4PeerSilenceReplayRange -Event $event
+            if (-not $range.Valid) {
+                continue
+            }
+
+            [object[]]$matchingGrants = @($grantRecords.ToArray() | Where-Object {
+                $_.Range.RepairKey -eq $range.RepairKey -and
+                [int64]$_.Event.Sequence -lt $sequence -and
+                $missingDispatchByCorrelationKey.ContainsKey([string]$_.CorrelationKey) -and
+                (Test-FileTransferRegularV4PeerSilenceReplayScopeMatch -Anchor $_.Event -Candidate $event)
+            } | Sort-Object @{ Expression = { [int64]$_.Event.Sequence } })
+            if ($matchingGrants.Count -eq 0 -or
+                ($eventName -eq 'filetransfer_regular_v4_frontier_repair_contract_settled' -and
+                    $matchingGrants.Count -ne 1)) {
+                continue
+            }
+
+            $outcome = Get-FileTransferEventField -Event $event -Name 'settlement_outcome' -Default ''
+            if ([string]::IsNullOrWhiteSpace($outcome)) {
+                $outcome = Get-FileTransferEventField -Event $event -Name 'outcome' -Default ''
+            }
+            if ([string]::IsNullOrWhiteSpace($outcome) -and
+                $eventName -eq 'filetransfer_regular_v4_frontier_repair_settled_stalled') {
+                $outcome = 'SettledStalled'
+            }
+            $dispatchObserved = Get-FileTransferEventField -Event $event -Name 'dispatch_observed' -Default '0'
+            if ($outcome.ToLowerInvariant() -notin @('missingdispatch', 'missing_dispatch', 'settledstalled', 'settled_stalled') -or
+                $dispatchObserved -eq '1') {
+                continue
+            }
+
+            $grantRecord = $matchingGrants[-1]
+            $scopeAnchor = $grantRecord.Event
+            $range = $grantRecord.Range
+            $scopeKey = [string]$grantRecord.ScopeKey
+            $logicalKey = ('{0}|{1}|{2}|{3}' -f $scopeKey, $range.Frontier, $range.Start, $range.End)
+            if (-not $activeRangeByLogicalKey.ContainsKey($logicalKey)) {
+                $unresolved = [pscustomobject]@{
+                    LogicalKey = $logicalKey
+                    ScopeKey = $scopeKey
+                    ScopeAnchor = $scopeAnchor
+                    Frontier = $range.Frontier
+                    Start = $range.Start
+                    End = $range.End
+                    RepairKey = $range.RepairKey
+                    Settlement = $event
+                }
+                $activeRangeByLogicalKey[$logicalKey] = $unresolved
+                $activeUnresolvedRanges.Add($unresolved) | Out-Null
+            }
+            else {
+                $unresolved = $activeRangeByLogicalKey[$logicalKey]
+                if ([int64]$event.Sequence -gt [int64]$unresolved.Settlement.Sequence) {
+                    $unresolved.ScopeKey = $scopeKey
+                    $unresolved.ScopeAnchor = $scopeAnchor
+                    $unresolved.RepairKey = $range.RepairKey
+                    $unresolved.Settlement = $event
+                }
+            }
+            continue
+        }
+
+        if ($eventName -in @(
+                'filetransfer_regular_v4_frontier_repair_dispatched',
+                'filetransfer_regular_v4_frontier_repair_contract_settled')) {
+            if ($eventName -eq 'filetransfer_regular_v4_frontier_repair_contract_settled' -and
+                (Get-FileTransferEventField -Event $event -Name 'dispatch_observed' -Default '0') -ne '1') {
+                continue
+            }
+            $range = Get-FileTransferRegularV4PeerSilenceReplayRange -Event $event
+            if (-not $range.Valid) {
+                continue
+            }
+            [object[]]$matchingGrants = @($grantRecords.ToArray() | Where-Object {
+                $_.Range.RepairKey -eq $range.RepairKey -and
+                [int64]$_.Event.Sequence -lt $sequence -and
+                (Test-FileTransferRegularV4PeerSilenceReplayScopeMatch -Anchor $_.Event -Candidate $event)
+            } | Sort-Object @{ Expression = { [int64]$_.Event.Sequence } })
+            if ($eventName -eq 'filetransfer_regular_v4_frontier_repair_contract_settled' -and
+                $matchingGrants.Count -ne 1) {
+                continue
+            }
+            $scopeAnchor = if ($matchingGrants.Count -gt 0) { $matchingGrants[-1].Event } else { $event }
+            foreach ($unresolved in @($activeUnresolvedRanges.ToArray())) {
+                if ($range.Start -le [int64]$unresolved.Start -and
+                    $range.End -ge [int64]$unresolved.End -and
+                    (Test-FileTransferRegularV4PeerSilenceReplayScopeMatch -Anchor $unresolved.ScopeAnchor -Candidate $scopeAnchor)) {
+                    $activeUnresolvedRanges.Remove($unresolved) | Out-Null
+                    $activeRangeByLogicalKey.Remove([string]$unresolved.LogicalKey)
+                }
+            }
+            foreach ($candidate in $distinctCandidateRecords.ToArray()) {
+                if (-not $candidate.Recovered -and
+                    $sequence -gt [int64]$candidate.Event.Sequence -and
+                    $sequence -lt [int64]$candidate.InvalidationSequence -and
+                    $range.Start -le [int64]$candidate.Start -and
+                    $range.End -ge [int64]$candidate.End -and
+                    (Test-FileTransferRegularV4PeerSilenceReplayScopeMatch -Anchor $candidate.ScopeAnchor -Candidate $scopeAnchor)) {
+                    $candidate.Recovered = $true
+                }
+            }
+            continue
+        }
+
+        if ($eventName -eq 'filetransfer_v4_state_received' -and
+            (Get-FileTransferEventField -Event $event -Name 'applied' -Default '0') -eq '1') {
+            $peerFrontier = Get-FileTransferEventInt64Field -Event $event -Name 'contiguous_committed_chunk_index' -Default -1
+            foreach ($unresolved in @($activeUnresolvedRanges.ToArray())) {
+                if ($peerFrontier -ge [int64]$unresolved.End -and
+                    (Test-FileTransferRegularV4PeerSilenceReplayScopeMatch -Anchor $unresolved.ScopeAnchor -Candidate $event)) {
+                    $activeUnresolvedRanges.Remove($unresolved) | Out-Null
+                    $activeRangeByLogicalKey.Remove([string]$unresolved.LogicalKey)
+                }
+            }
+            foreach ($candidate in $distinctCandidateRecords.ToArray()) {
+                if (-not $candidate.Recovered -and
+                    $sequence -gt [int64]$candidate.Event.Sequence -and
+                    $sequence -lt [int64]$candidate.InvalidationSequence -and
+                    $peerFrontier -ge [int64]$candidate.End -and
+                    (Test-FileTransferRegularV4PeerSilenceReplayScopeMatch -Anchor $candidate.ScopeAnchor -Candidate $event)) {
+                    $candidate.Recovered = $true
+                }
+            }
+        }
+    }
+
+    [object[]]$recoveredCandidateEvents = @(
+        $distinctCandidateRecords.ToArray() |
+            Where-Object { $_.Recovered } |
+            ForEach-Object { $_.Event }
+    )
+    [object[]]$unresolvedCandidateEvents = @(
+        $distinctCandidateRecords.ToArray() |
+            Where-Object { -not $_.Recovered } |
+            ForEach-Object { $_.Event }
+    )
+    $verdict = if ($unresolvedCandidateEvents.Count -gt 0) {
+        'fail'
+    }
+    elseif ($distinctCandidateRecords.Count -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
+    }
+
+    return [pscustomobject]@{
+        RawCount = $rawCandidates.Count
+        DistinctCount = $distinctCandidateRecords.Count
+        RecoveredCount = $recoveredCandidateEvents.Count
+        UnresolvedCount = $unresolvedCandidateEvents.Count
+        Verdict = $verdict
+        RawCandidateEvents = @($rawCandidates.ToArray())
+        DistinctCandidateEvents = @($distinctCandidateRecords.ToArray() | ForEach-Object { $_.Event })
+        RecoveredCandidateEvents = $recoveredCandidateEvents
+        UnresolvedCandidateEvents = $unresolvedCandidateEvents
+    }
+}
+
 function Get-FileTransferRecoveryFailureClassification {
     param(
         [Parameter(Mandatory = $true)]$Summary
@@ -13174,6 +13561,8 @@ function Get-FileTransferRecoveryFailureClassification {
         Get-FileTransferRuntimeUnlockRetryZeroOfferSuccessorCorrelation -Events $events
     $regularV4FrontierRepairMissingRangePreservationProof =
         Get-FileTransferRegularV4MissingRangePreservationProof -Events $events
+    $regularV4PeerSilenceReplayMissingDispatchRangeProof =
+        Get-FileTransferRegularV4PeerSilenceReplayMissingDispatchRangeProof -Events $events
     $runtimeUnlockRegularV4RecoverySettlementProtocolObserved =
         $runtimeUnlockRegularV4RecoverySettlementReportedEvents.Count -gt 0 -or
         $runtimeUnlockRegularV4RecoverySettlementDecidedEvents.Count -gt 0
@@ -16533,6 +16922,12 @@ function Get-FileTransferRecoveryFailureClassification {
         -UseDefaultReason
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
+        -Class 'regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved' `
+        -Events @($regularV4PeerSilenceReplayMissingDispatchRangeProof.UnresolvedCandidateEvents) `
+        -DefaultReason 'peer_silence_replay_range_rotated_after_missing_dispatch' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
         -Class 'regular_v4_frontier_repair_missing_range_not_preserved' `
         -Events @($regularV4FrontierRepairMissingRangePreservationProof.UnresolvedCandidateEvents) `
         -DefaultReason 'unresolved_frontier_repair_missing_range_omitted' `
@@ -16859,6 +17254,9 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.UnresolvedCount -gt 0) {
         $class = 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing'
+    }
+    elseif ($regularV4PeerSilenceReplayMissingDispatchRangeProof.UnresolvedCount -gt 0) {
+        $class = 'regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved'
     }
     elseif ($runtimeUnlockRetryDispatchDecisionTupleRejectedEvents.Count -gt 0 -or
         $runtimeUnlockRetryDispatchCurrentAuthorityRejectedClassificationEvents.Count -gt 0) {
@@ -17440,6 +17838,11 @@ function Get-FileTransferRecoveryFailureClassification {
         RegularV4FrontierRepairMissingRangeNotPreservedRecoveredCount = $regularV4FrontierRepairMissingRangePreservationProof.RecoveredCount
         RegularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount = $regularV4FrontierRepairMissingRangePreservationProof.UnresolvedCount
         RegularV4FrontierRepairMissingRangePreservationVerdict = $regularV4FrontierRepairMissingRangePreservationProof.Verdict
+        RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRawCount = $regularV4PeerSilenceReplayMissingDispatchRangeProof.RawCount
+        RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedDistinctCount = $regularV4PeerSilenceReplayMissingDispatchRangeProof.DistinctCount
+        RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRecoveredCount = $regularV4PeerSilenceReplayMissingDispatchRangeProof.RecoveredCount
+        RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedUnresolvedCount = $regularV4PeerSilenceReplayMissingDispatchRangeProof.UnresolvedCount
+        RegularV4PeerSilenceReplayMissingDispatchRangePreservationVerdict = $regularV4PeerSilenceReplayMissingDispatchRangeProof.Verdict
         RegularV4RecoveryPredecessorSettlementClosedSuccessorCount = $regularV4RecoveryPredecessorSettlementClosedSuccessorEvents.Count
         RegularV4FrontierRepairVerdict = if ($regularV4FrontierRepairSendDeferred -or $regularV4FrontierRepairStalled -or $regularV4RepairLivenessAuthorityMissing) {
             'fail'
@@ -17750,6 +18153,11 @@ function New-FileTransferInvariantLedgerObject {
         regular_v4_frontier_repair_missing_range_not_preserved_recovered_count = [string]$recoveryClassification.RegularV4FrontierRepairMissingRangeNotPreservedRecoveredCount
         regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count = [string]$recoveryClassification.RegularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount
         regular_v4_frontier_repair_missing_range_preservation_verdict = $recoveryClassification.RegularV4FrontierRepairMissingRangePreservationVerdict
+        regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_raw_count = [string]$recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRawCount
+        regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_distinct_count = [string]$recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedDistinctCount
+        regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count = [string]$recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRecoveredCount
+        regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_unresolved_count = [string]$recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedUnresolvedCount
+        regular_v4_peer_silence_replay_missing_dispatch_range_preservation_verdict = $recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangePreservationVerdict
         runtime_unlock_regular_v4_recovery_lease_closure_rejected_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureRejectedCount
         runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseNotIssuedRawCount
         runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseNotIssuedDistinctCount
@@ -18278,6 +18686,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={0}" -f $recoveryClassification.RegularV4FrontierRepairMissingRangeNotPreservedRecoveredCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count={0}" -f $recoveryClassification.RegularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount),
         ("regular_v4_frontier_repair_missing_range_preservation_verdict={0}" -f $recoveryClassification.RegularV4FrontierRepairMissingRangePreservationVerdict),
+        ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_raw_count={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRawCount),
+        ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_distinct_count={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedDistinctCount),
+        ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRecoveredCount),
+        ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_unresolved_count={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedUnresolvedCount),
+        ("regular_v4_peer_silence_replay_missing_dispatch_range_preservation_verdict={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangePreservationVerdict),
         ("regular_v4_recovery_predecessor_settlement_closed_successor_count={0}" -f $recoveryClassification.RegularV4RecoveryPredecessorSettlementClosedSuccessorCount),
         ("regular_v4_frontier_repair_verdict={0}" -f $recoveryClassification.RegularV4FrontierRepairVerdict),
         ("regular_v4_repair_cache_pressure_count={0}" -f $recoveryClassification.RegularV4RepairCachePressureCount),

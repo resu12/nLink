@@ -8834,6 +8834,14 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.PullRegularNknV4LastPeerSilenceSafetyReplayFrontierChunkIndex = -1;
         context.PullRegularNknV4LastPeerSilenceSafetyReplayEndChunkIndex = -1;
         context.PullRegularNknV4PeerSilenceSafetyReplayCount = 0;
+        if (context.OutboundRegularV4PeerSilenceReplayCursor is { } peerSilenceReplayCursor)
+        {
+            ResetOutboundRegularV4PeerSilenceReplayCursorLocked(
+                context,
+                peerSilenceReplayCursor,
+                Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, context.ChunkCount),
+                $"runtime_owner_retired_{reason}");
+        }
         context.PullRegularNknV4PeerSilenceMissingDispatchFrontierChunkIndex = -1;
         context.PullRegularNknV4PeerSilenceMissingDispatchAcceptedUntilExclusive = -1;
         context.PullRegularNknV4PeerSilenceMissingDispatchRepairKey = null;
@@ -18311,6 +18319,22 @@ public sealed partial class SessionFileTransferService : IDisposable
         int RangeCount,
         FileTransferTransportKind ReceivedTransportKind);
 
+    private sealed record OutboundRegularV4PeerSilenceReplayCursor(
+        int CursorGeneration,
+        RuntimeOwnerToken RuntimeOwner,
+        RoutePublicationToken RoutePublication,
+        int TerminalGeneration,
+        long LegGeneration,
+        long TransportEpoch,
+        int BridgeRecoveryGeneration,
+        int BridgeDecisionGeneration,
+        long DataSessionGeneration,
+        int PeerFrontierChunkIndex,
+        int DispatchProvenEndChunkIndex,
+        FileTransferAuthorityId? ProvingAuthorityId,
+        string? ProvingRepairKey,
+        int ProvingDecisionGeneration);
+
     private sealed class OutboundTransferContext
     {
         private TaskCompletionSource<bool> controlSignal = CreateSignal();
@@ -18886,6 +18910,10 @@ public sealed partial class SessionFileTransferService : IDisposable
         public int PullRegularNknV4LastPeerSilenceSafetyReplayEndChunkIndex { get; set; } = -1;
 
         public int PullRegularNknV4PeerSilenceSafetyReplayCount { get; set; }
+
+        public int LastOutboundRegularV4PeerSilenceReplayCursorGeneration { get; set; }
+
+        public OutboundRegularV4PeerSilenceReplayCursor? OutboundRegularV4PeerSilenceReplayCursor { get; set; }
 
         public int PullRegularNknV4PeerSilenceMissingDispatchFrontierChunkIndex { get; set; } = -1;
 
