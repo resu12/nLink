@@ -19312,6 +19312,23 @@ public sealed partial class SessionFileTransferService : IDisposable
         RegularV4FrontierRepairContract SourceContract,
         InboundRegularV4FrontierRepairProjectionKind Kind);
 
+    private sealed record InboundRegularV4FrontierRepairProjectionRefreshSource(
+        InboundRegularV4FrontierRepairProjection Projection,
+        string SessionId,
+        string TransferId,
+        string RouteToken,
+        int ProtocolVersion,
+        int LiveRouteEpoch,
+        int RuntimeGeneration,
+        int TerminalGeneration,
+        int LegGeneration,
+        long TransportEpoch,
+        int BridgeRecoveryGeneration,
+        int BridgeDecisionGeneration,
+        int RoutePublicationGeneration,
+        int? RouteCommitGeneration,
+        long DataSessionGeneration);
+
     private sealed class V4SenderRepairRequestState
     {
         public bool Queued { get; set; }
@@ -19682,6 +19699,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public int V4RegularFrontierRepairSpamCoalescedCountTotal { get; set; }
 
         public InboundRegularV4FrontierRepairProjection? V4RegularFrontierRepairProjection { get; set; }
+
+        public InboundRegularV4FrontierRepairProjectionRefreshSource? V4RegularFrontierRepairProjectionRefreshSource { get; set; }
 
         public int LastV4RegularFrontierRepairProjectionGeneration { get; set; }
 

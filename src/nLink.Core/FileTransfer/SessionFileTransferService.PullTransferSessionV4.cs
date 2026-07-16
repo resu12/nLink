@@ -15283,6 +15283,53 @@ public sealed partial class SessionFileTransferService
             GetCurrentRegularV4FrontierRepairAuthority(context, repairRequestKey)));
     }
 
+    private bool TryObserveRegularV4ReceiverFrontierRepairProjectionPressure(
+        InboundTransferContext context,
+        string repairRequestKey,
+        int frontierLagChunks,
+        int pendingRepairCount)
+    {
+        if (!IsCurrentV4FrontierRepairRuntime(context) ||
+            context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            context.IsTerminal ||
+            pendingRepairCount <= 0 ||
+            GetCurrentRegularV4FrontierRepairAuthority(context, repairRequestKey) is not { } authority)
+        {
+            return false;
+        }
+
+        IFileTransferRegularV4ControlFeedbackPressureObserver? observer;
+        lock (gate)
+        {
+            observer = transport as IFileTransferRegularV4ControlFeedbackPressureObserver;
+        }
+
+        if (observer is null)
+        {
+            return false;
+        }
+
+        var pressureReason = IsCurrentFileTunaV4FrontierRepairLeg(context.CurrentTransferLeg)
+            ? "file_tuna_v4_receiver_frontier_repair_due"
+            : "regular_v4_receiver_frontier_repair_due";
+        try
+        {
+            observer.ObserveRegularV4ControlFeedbackPressure(new FileTransferRegularV4ControlFeedbackPressure(
+                context.SessionId,
+                context.TransferId,
+                CreditExhaustedTimeMs: 0,
+                Math.Max(0, frontierLagChunks),
+                pendingRepairCount,
+                pressureReason,
+                authority));
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private bool TrySettleInboundRegularV4FrontierRepairStalledLocked(
         InboundTransferContext context,
         string repairRequestKey,
@@ -18657,7 +18704,7 @@ public sealed partial class SessionFileTransferService
             {
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_regular_v4_frontier_repair_projection_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id=(none); predecessor_authority_id=(none); direction=inbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}; runtime_generation={context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; terminal_generation={context.CurrentRuntimeOwner?.TerminalGeneration ?? 0}; leg_generation={context.CurrentTransferLeg?.Generation ?? 0}; transport_epoch={context.CurrentTransferLeg?.TransportEpochId ?? 0}; bridge_recovery_generation={context.CurrentTransferLeg?.BridgeRecoveryGeneration ?? 0}; route_publication_generation={context.CurrentRoutePublicationToken?.PublicationGeneration ?? 0}; route_commit_generation={context.CurrentRoutePublicationToken?.RouteCommitGeneration ?? 0}; source_repair_request_key=(none); projected_repair_request_key=(none); source_ranges=(none); projected_ranges=(none); projection_generation={context.LastV4RegularFrontierRepairProjectionGeneration}; projection_kind=unknown; source_authority_lifecycle=missing; source_authority_settlement=(none); frontier_chunk_index={context.NextChunkIndex}; durable_received_highest_chunk_index={context.PullHighestReceivedChunkIndex}; state_reason={FormatProtocolLogValue(reason)}; state_epoch={state.Epoch}; decision_reason=fresh_projection_required_before_unrestricted_state");
+                    $"event=filetransfer_regular_v4_frontier_repair_projection_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id=(none); predecessor_authority_id=(none); direction=inbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}; runtime_generation={context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; terminal_generation={context.CurrentRuntimeOwner?.TerminalGeneration ?? 0}; leg_generation={context.CurrentTransferLeg?.Generation ?? 0}; transport_epoch={context.CurrentTransferLeg?.TransportEpochId ?? 0}; bridge_recovery_generation={context.CurrentTransferLeg?.BridgeRecoveryGeneration ?? 0}; {FormatInboundRegularV4FrontierRepairProjectionRefreshTupleLocked(context)}; route_publication_generation={context.CurrentRoutePublicationToken?.PublicationGeneration ?? 0}; route_commit_generation={context.CurrentRoutePublicationToken?.RouteCommitGeneration ?? 0}; source_repair_request_key=(none); projected_repair_request_key=(none); source_ranges=(none); projected_ranges=(none); projection_generation={context.LastV4RegularFrontierRepairProjectionGeneration}; projection_kind=unknown; source_authority_lifecycle=missing; source_authority_settlement=(none); frontier_chunk_index={context.NextChunkIndex}; durable_received_highest_chunk_index={context.PullHighestReceivedChunkIndex}; state_reason={FormatProtocolLogValue(reason)}; state_epoch={state.Epoch}; decision_reason=fresh_projection_required_before_unrestricted_state");
                 return false;
             }
             if (requireMissingRange && state.MissingRanges.Count == 0)
@@ -20103,20 +20150,94 @@ public sealed partial class SessionFileTransferService
         return $"authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(authority.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(authority.PredecessorAuthorityId?.ToString() ?? "(none)")}; direction=inbound; transfer_id={FormatProtocolLogValue(authority.TransferId)}; session_id={FormatProtocolLogValue(authority.SessionId)}; route={FormatProtocolLogValue(authority.RouteToken)}; protocol_version={authority.ProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.LegGeneration}; transport_epoch={authority.TransportEpoch}; bridge_recovery_generation={authority.BridgeRecoveryGeneration}; bridge_decision_generation={authority.BridgeDecisionGeneration}; data_session_generation={projection.DataSessionGeneration}; route_publication_generation={authority.RoutePublicationGeneration}; route_commit_generation={authority.RouteCommitGeneration ?? 0}; repair_generation={authority.DecisionGeneration}; source_repair_request_key={FormatProtocolLogValue(projection.SourceRepairKey)}; projected_repair_request_key={FormatProtocolLogValue(projection.ProjectedRepairKey)}; source_range_fingerprint={FormatProtocolLogValue(projection.SourceRangeFingerprint)}; projected_range_fingerprint={FormatProtocolLogValue(projection.ProjectedRangeFingerprint)}; source_ranges={FormatProtocolLogValue(FormatInboundRegularV4FrontierRepairProjectionRanges(projection.SourceRanges))}; projected_ranges={FormatProtocolLogValue(FormatInboundRegularV4FrontierRepairProjectionRanges(projection.ProjectedRanges))}; projection_generation={projection.ProjectionGeneration}; projection_kind={FormatInboundRegularV4FrontierRepairProjectionKind(projection.Kind)}; source_authority_lifecycle={(lifecycle.IsSettled ? "retired" : "active")}; source_authority_settlement={FormatProtocolLogValue(lifecycle.SettlementOutcome?.ToString() ?? "(none)")}; source_authority_settlement_reason={FormatProtocolLogValue(lifecycle.SettlementReason ?? "(none)")}; frontier_chunk_index={projection.FrontierChunkIndex}; durable_received_highest_chunk_index={projection.DurableReceivedHighestChunkIndex}; source_range_count={projection.SourceRanges.Count}; projected_range_count={projection.ProjectedRanges.Count}; projected_chunk_count={projection.ProjectedRanges.Sum(static range => range.ChunkCount)}; target_transport={FormatFileTransferTransportKind(authority.TargetTransport)}";
     }
 
+    private static InboundRegularV4FrontierRepairProjectionRefreshSource?
+        CreateInboundRegularV4FrontierRepairProjectionRefreshSourceLocked(
+            InboundTransferContext context,
+            InboundRegularV4FrontierRepairProjection projection)
+    {
+        if (context.CurrentRuntimeOwner is not { } owner ||
+            context.CurrentRoutePublicationToken is not { IsDefault: false } publication ||
+            context.CurrentTransferLeg is not { } leg)
+        {
+            return null;
+        }
+
+        return new InboundRegularV4FrontierRepairProjectionRefreshSource(
+            projection,
+            context.SessionId,
+            context.TransferId,
+            publication.RouteToken,
+            publication.ProtocolVersion,
+            publication.LiveRouteEpoch,
+            owner.RuntimeGeneration,
+            owner.TerminalGeneration,
+            leg.Generation,
+            leg.TransportEpochId,
+            leg.BridgeRecoveryGeneration,
+            context.CurrentBridgeRecoveryDecision?.BridgeDecisionGeneration ?? 0,
+            publication.PublicationGeneration,
+            publication.RouteCommitGeneration,
+            context.DataSessionGeneration);
+    }
+
+    private static bool IsInboundRegularV4FrontierRepairProjectionRefreshSourceCurrentLocked(
+        InboundTransferContext context,
+        InboundRegularV4FrontierRepairProjectionRefreshSource refreshSource)
+        => !context.IsTerminal &&
+           IsCurrentRegularV4FrontierRepairRuntime(context) &&
+           context.CurrentRuntimeOwner is { } owner &&
+           context.CurrentRoutePublicationToken is { IsDefault: false } publication &&
+           context.CurrentTransferLeg is { } leg &&
+           string.Equals(context.SessionId, refreshSource.SessionId, StringComparison.Ordinal) &&
+           string.Equals(context.TransferId, refreshSource.TransferId, StringComparison.Ordinal) &&
+           string.Equals(publication.RouteToken, refreshSource.RouteToken, StringComparison.Ordinal) &&
+           publication.ProtocolVersion == refreshSource.ProtocolVersion &&
+           publication.LiveRouteEpoch == refreshSource.LiveRouteEpoch &&
+           owner.RuntimeGeneration == refreshSource.RuntimeGeneration &&
+           owner.TerminalGeneration == refreshSource.TerminalGeneration &&
+           leg.Generation == refreshSource.LegGeneration &&
+           leg.TransportEpochId == refreshSource.TransportEpoch &&
+           leg.BridgeRecoveryGeneration == refreshSource.BridgeRecoveryGeneration &&
+           (context.CurrentBridgeRecoveryDecision?.BridgeDecisionGeneration ?? 0) ==
+           refreshSource.BridgeDecisionGeneration &&
+           publication.PublicationGeneration == refreshSource.RoutePublicationGeneration &&
+           publication.RouteCommitGeneration == refreshSource.RouteCommitGeneration &&
+           context.DataSessionGeneration == refreshSource.DataSessionGeneration;
+
+    private static string FormatInboundRegularV4FrontierRepairProjectionRefreshTupleLocked(
+        InboundTransferContext context,
+        IReadOnlyList<FileTransferRangeV4>? requiredRanges = null)
+    {
+        var refreshSource = context.V4RegularFrontierRepairProjectionRefreshSource;
+        var sourceProjection = refreshSource?.Projection;
+        var sourceAuthority = sourceProjection?.SourceContract.Authority;
+        var currentRequiredRanges = requiredRanges ??
+            (sourceProjection is null
+                ? []
+                : BuildInboundRegularV4DurableProjectionRangesLocked(context, sourceProjection));
+        var requiredRangeFingerprint = CreateInboundRegularV4FrontierRepairProjectionRangeFingerprint(
+            currentRequiredRanges,
+            context.ChunkCount,
+            context.PullHighestReceivedChunkIndex);
+        return $"bridge_decision_generation={context.CurrentBridgeRecoveryDecision?.BridgeDecisionGeneration ?? 0}; data_session_generation={context.DataSessionGeneration}; refresh_source_authority_id={FormatProtocolLogValue(sourceAuthority?.AuthorityId.ToString() ?? "(none)")}; refresh_source_repair_request_key={FormatProtocolLogValue(sourceProjection?.ProjectedRepairKey ?? sourceAuthority?.RepairKey ?? "(none)")}; refresh_source_bridge_decision_generation={sourceAuthority?.BridgeDecisionGeneration ?? 0}; refresh_source_data_session_generation={sourceProjection?.DataSessionGeneration ?? 0}; refresh_target_bridge_decision_generation={refreshSource?.BridgeDecisionGeneration ?? 0}; refresh_target_data_session_generation={refreshSource?.DataSessionGeneration ?? 0}; required_ranges={FormatProtocolLogValue(FormatInboundRegularV4FrontierRepairProjectionRanges(currentRequiredRanges))}; required_range_fingerprint={FormatProtocolLogValue(requiredRangeFingerprint)}";
+    }
+
     private static void LogInboundRegularV4FrontierRepairProjectionEvent(
         string eventName,
         InboundRegularV4FrontierRepairProjection projection,
-        string reason)
+        string reason,
+        InboundRegularV4FrontierRepairProjectionRefreshSource? refreshSource = null)
         => LocalOperationalLog.Info(
             "FileTransferService",
-            $"event={eventName}; {FormatInboundRegularV4FrontierRepairProjectionTuple(projection)}; decision_reason={FormatProtocolLogValue(reason)}");
+            $"event={eventName}; {FormatInboundRegularV4FrontierRepairProjectionTuple(projection)}; refresh_source_authority_id={FormatProtocolLogValue(refreshSource?.Projection.SourceContract.Authority.AuthorityId.ToString() ?? "(none)")}; refresh_source_repair_request_key={FormatProtocolLogValue(refreshSource?.Projection.ProjectedRepairKey ?? "(none)")}; refresh_source_bridge_decision_generation={refreshSource?.Projection.SourceContract.Authority.BridgeDecisionGeneration ?? 0}; refresh_source_data_session_generation={refreshSource?.Projection.DataSessionGeneration ?? 0}; refresh_target_bridge_decision_generation={refreshSource?.BridgeDecisionGeneration ?? 0}; refresh_target_data_session_generation={refreshSource?.DataSessionGeneration ?? 0}; decision_reason={FormatProtocolLogValue(reason)}");
 
     private static void ClearInboundRegularV4FrontierRepairProjectionLocked(
         InboundTransferContext context,
         string reason,
         bool requireFreshProjection)
     {
-        if (context.V4RegularFrontierRepairProjection is { } projection)
+        var projection = context.V4RegularFrontierRepairProjection;
+        if (projection is not null)
         {
             LogInboundRegularV4FrontierRepairProjectionEvent(
                 "filetransfer_regular_v4_frontier_repair_projection_cleared",
@@ -20124,10 +20245,21 @@ public sealed partial class SessionFileTransferService
                 reason);
         }
 
-        context.V4RegularFrontierRepairProjection = null;
-        context.V4RegularFrontierRepairProjectionRefreshRequired =
+        var refreshRequired =
             requireFreshProjection &&
             HasInboundRegularV4DurableFrontierGapLocked(context);
+        if (refreshRequired && projection is not null)
+        {
+            context.V4RegularFrontierRepairProjectionRefreshSource =
+                CreateInboundRegularV4FrontierRepairProjectionRefreshSourceLocked(context, projection);
+        }
+        else if (!refreshRequired)
+        {
+            context.V4RegularFrontierRepairProjectionRefreshSource = null;
+        }
+
+        context.V4RegularFrontierRepairProjection = null;
+        context.V4RegularFrontierRepairProjectionRefreshRequired = refreshRequired;
     }
 
     private static void RejectInboundRegularV4FrontierRepairProjectionLocked(
@@ -20191,6 +20323,8 @@ public sealed partial class SessionFileTransferService
                 // Retain only the exact coordinator lineage while the new frontier
                 // obtains a successor authority. The old range is not returned or
                 // published after this boundary.
+                context.V4RegularFrontierRepairProjectionRefreshSource =
+                    CreateInboundRegularV4FrontierRepairProjectionRefreshSourceLocked(context, projection);
                 context.V4RegularFrontierRepairProjectionRefreshRequired = true;
             }
             projection = null;
@@ -20303,12 +20437,15 @@ public sealed partial class SessionFileTransferService
             context.DataSessionGeneration,
             contract,
             kind);
+        var refreshSource = context.V4RegularFrontierRepairProjectionRefreshSource;
         context.V4RegularFrontierRepairProjection = projection;
         context.V4RegularFrontierRepairProjectionRefreshRequired = false;
+        context.V4RegularFrontierRepairProjectionRefreshSource = null;
         LogInboundRegularV4FrontierRepairProjectionEvent(
             "filetransfer_regular_v4_frontier_repair_projection_retained",
             projection,
-            reason);
+            reason,
+            refreshSource);
         return projection;
     }
 
@@ -20355,17 +20492,37 @@ public sealed partial class SessionFileTransferService
         InboundTransferContext context,
         string reason)
     {
-        if (context.V4RegularFrontierRepairProjection is not { } projection ||
-            IsInboundRegularV4FrontierRepairProjectionScopeCurrentLocked(context, projection, out _))
+        if (context.V4RegularFrontierRepairProjection is { } projection)
+        {
+            if (IsInboundRegularV4FrontierRepairProjectionScopeCurrentLocked(context, projection, out _))
+            {
+                return;
+            }
+
+            RejectInboundRegularV4FrontierRepairProjectionLocked(
+                context,
+                projection,
+                reason,
+                requireFreshProjection: true);
+            return;
+        }
+
+        if (context.V4RegularFrontierRepairProjectionRefreshSource is not { } refreshSource ||
+            IsInboundRegularV4FrontierRepairProjectionRefreshSourceCurrentLocked(context, refreshSource))
         {
             return;
         }
 
-        RejectInboundRegularV4FrontierRepairProjectionLocked(
-            context,
-            projection,
-            reason,
-            requireFreshProjection: true);
+        LogInboundRegularV4FrontierRepairProjectionEvent(
+            "filetransfer_regular_v4_frontier_repair_projection_cleared",
+            refreshSource.Projection,
+            $"{reason}_refresh_source_scope_replaced",
+            refreshSource);
+        context.V4RegularFrontierRepairProjectionRefreshSource = null;
+        context.V4RegularFrontierRepairProjectionRefreshRequired =
+            !context.IsTerminal &&
+            IsCurrentRegularV4FrontierRepairRuntime(context) &&
+            HasInboundRegularV4DurableFrontierGapLocked(context);
     }
 
     private IReadOnlyList<FileTransferRangeV4> BuildInboundV4MissingRangesLocked(
@@ -20379,7 +20536,9 @@ public sealed partial class SessionFileTransferService
             context.V4FrontierStallStartedUtc = null;
             context.V4FrontierStallChunkIndex = -1;
             context.V4FrontierStallLastSuppressedLogUtc = null;
-            if (context.V4RegularFrontierRepairProjection is not null)
+            if (context.V4RegularFrontierRepairProjection is not null ||
+                context.V4RegularFrontierRepairProjectionRefreshSource is not null ||
+                context.V4RegularFrontierRepairProjectionRefreshRequired)
             {
                 ClearInboundRegularV4FrontierRepairProjectionLocked(
                     context,
@@ -20391,9 +20550,20 @@ public sealed partial class SessionFileTransferService
 
         var now = DateTimeOffset.UtcNow;
         ClearFilledInboundV4RepairRequestsLocked(context, now);
+        ReconcileInboundRegularV4FrontierRepairProjectionLocked(
+            context,
+            "state_projection_refresh_scope_revalidation");
         var hasRetainedProjection = TryRefreshInboundRegularV4FrontierRepairProjectionLocked(
             context,
             out var retainedProjection);
+        if (context.V4RegularFrontierRepairProjectionRefreshRequired &&
+            !HasInboundRegularV4DurableFrontierGapLocked(context))
+        {
+            ClearInboundRegularV4FrontierRepairProjectionLocked(
+                context,
+                "refresh_gap_resolved",
+                requireFreshProjection: false);
+        }
         if (context.UserPaused || context.PeerPaused)
         {
             return hasRetainedProjection
@@ -20668,7 +20838,8 @@ public sealed partial class SessionFileTransferService
                 repairRequestKey = durableProjectionRepairRequestKey;
             }
         }
-        if (IsInboundRegularV4FrontierRepairSettledStalledLocked(context, repairRequestKey))
+        if (!context.V4RegularFrontierRepairProjectionRefreshRequired &&
+            IsInboundRegularV4FrontierRepairSettledStalledLocked(context, repairRequestKey))
         {
             return hasRetainedProjection
                 ? retainedProjection!.ProjectedRanges
@@ -20707,6 +20878,10 @@ public sealed partial class SessionFileTransferService
         RegularV4FrontierRepairContract? refreshPredecessorContract = null;
         if (repairState.FrontierRepair &&
             context.V4RegularFrontierRepairProjectionRefreshRequired &&
+            context.V4RegularFrontierRepairProjectionRefreshSource is { } invalidatedRefreshSource &&
+            ReferenceEquals(
+                repairState.RegularV4RepairContract,
+                invalidatedRefreshSource.Projection.SourceContract) &&
             repairState.RegularV4RepairContract is { } invalidatedProjectionContract)
         {
             if (!invalidatedProjectionContract.Lifecycle.IsSettled &&
@@ -20887,6 +21062,7 @@ public sealed partial class SessionFileTransferService
             predecessorProjectionContract = pendingInstallPredecessor;
         }
 
+        var recoveryProjectionPressureObserved = false;
         if (repairState.FrontierRepair &&
             repairState.RegularV4RepairContract is { Lifecycle.IsSettled: false } repairContract)
         {
@@ -20913,6 +21089,35 @@ public sealed partial class SessionFileTransferService
                 return [];
             }
 
+            var projectionRefreshSource = context.V4RegularFrontierRepairProjectionRefreshSource;
+            var coordinatorRecoveryProjectionReauthorization =
+                predecessorProjectionContract is null &&
+                context.V4RegularFrontierRepairProjectionRefreshRequired &&
+                projectionRefreshSource is { } refreshSource &&
+                IsInboundRegularV4FrontierRepairProjectionRefreshSourceCurrentLocked(context, refreshSource) &&
+                refreshSource.Projection.SourceContract.Lifecycle.IsSettled &&
+                refreshSource.Projection.SourceContract.Authority.BridgeDecisionGeneration !=
+                refreshSource.BridgeDecisionGeneration;
+            if (coordinatorRecoveryProjectionReauthorization)
+            {
+                recoveryProjectionPressureObserved =
+                    TryObserveRegularV4ReceiverFrontierRepairProjectionPressure(
+                        context,
+                        repairContract.Authority.RepairKey,
+                        Math.Max(
+                            0,
+                            Math.Max(
+                                context.PullHighestReceivedChunkIndex + 1,
+                                context.V4CreditUntilChunkIndexExclusive) - context.NextChunkIndex),
+                        durableProjectionAuthorizationRanges.Sum(static range => range.ChunkCount));
+                if (!recoveryProjectionPressureObserved)
+                {
+                    LocalOperationalLog.Info(
+                        "FileTransferService",
+                        $"event=filetransfer_regular_v4_frontier_repair_projection_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(repairContract.Authority.AuthorityId.ToString())}; predecessor_authority_id=(none); direction=inbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}; runtime_generation={context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; terminal_generation={context.CurrentRuntimeOwner?.TerminalGeneration ?? 0}; leg_generation={context.CurrentTransferLeg?.Generation ?? 0}; transport_epoch={context.CurrentTransferLeg?.TransportEpochId ?? 0}; bridge_recovery_generation={context.CurrentTransferLeg?.BridgeRecoveryGeneration ?? 0}; {FormatInboundRegularV4FrontierRepairProjectionRefreshTupleLocked(context, durableProjectionAuthorizationRanges)}; route_publication_generation={context.CurrentRoutePublicationToken?.PublicationGeneration ?? 0}; route_commit_generation={context.CurrentRoutePublicationToken?.RouteCommitGeneration ?? 0}; source_repair_request_key={FormatProtocolLogValue(repairRequestKey)}; projected_repair_request_key={FormatProtocolLogValue(repairContract.Authority.RepairKey)}; source_ranges={FormatProtocolLogValue(FormatInboundRegularV4FrontierRepairProjectionRanges(durableProjectionAuthorizationRanges))}; projected_ranges={FormatProtocolLogValue(FormatInboundRegularV4FrontierRepairProjectionRanges(durableProjectionAuthorizationRanges))}; projection_generation={context.LastV4RegularFrontierRepairProjectionGeneration}; projection_kind=unknown; source_authority_lifecycle=retired; source_authority_settlement={FormatProtocolLogValue(projectionRefreshSource!.Projection.SourceContract.Lifecycle.SettlementOutcome?.ToString() ?? "(none)")}; frontier_chunk_index={context.NextChunkIndex}; durable_received_highest_chunk_index={context.PullHighestReceivedChunkIndex}; decision_reason=coordinator_recovery_projection_pressure_missing");
+                    return [];
+                }
+            }
             var projectionKind = predecessorProjectionContract is null
                 ? InboundRegularV4FrontierRepairProjectionKind.InitialDue
                 : InboundRegularV4FrontierRepairProjectionKind.Narrowed;
@@ -20925,7 +21130,9 @@ public sealed partial class SessionFileTransferService
                     repairState,
                     hasRetainedProjection ? ranges : durableProjectionAuthorizationRanges,
                     projectionKind,
-                    predecessorProjectionContract is null
+                    coordinatorRecoveryProjectionReauthorization
+                        ? "coordinator_recovery_projection_reauthorized"
+                        : predecessorProjectionContract is null
                         ? "coordinator_authority_projection_staged"
                         : "coordinator_successor_projection_staged");
             if (installedProjection is not null)
@@ -20979,7 +21186,7 @@ public sealed partial class SessionFileTransferService
                 HasInboundRegularV4DurableFrontierGapLocked(context);
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_regular_v4_frontier_repair_projection_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id=(none); predecessor_authority_id={FormatProtocolLogValue(predecessorProjectionContract?.Authority.AuthorityId.ToString() ?? "(none)")}; direction=inbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}; runtime_generation={context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; terminal_generation={context.CurrentRuntimeOwner?.TerminalGeneration ?? 0}; leg_generation={context.CurrentTransferLeg?.Generation ?? 0}; transport_epoch={context.CurrentTransferLeg?.TransportEpochId ?? 0}; bridge_recovery_generation={context.CurrentTransferLeg?.BridgeRecoveryGeneration ?? 0}; data_session_generation={context.DataSessionGeneration}; route_publication_generation={context.CurrentRoutePublicationToken?.PublicationGeneration ?? 0}; route_commit_generation={context.CurrentRoutePublicationToken?.RouteCommitGeneration ?? 0}; source_repair_request_key={FormatProtocolLogValue(repairRequestKey)}; projected_repair_request_key={FormatProtocolLogValue(repairRequestKey)}; source_ranges={FormatProtocolLogValue(FormatInboundRegularV4FrontierRepairProjectionRanges(ranges))}; projected_ranges={FormatProtocolLogValue(FormatInboundRegularV4FrontierRepairProjectionRanges(ranges))}; projection_generation={context.LastV4RegularFrontierRepairProjectionGeneration}; projection_kind=unknown; source_authority_lifecycle=missing; source_authority_settlement=(none); frontier_chunk_index={context.NextChunkIndex}; durable_received_highest_chunk_index={context.PullHighestReceivedChunkIndex}; decision_reason=coordinator_projection_authority_missing");
+                $"event=filetransfer_regular_v4_frontier_repair_projection_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id=(none); predecessor_authority_id={FormatProtocolLogValue(predecessorProjectionContract?.Authority.AuthorityId.ToString() ?? "(none)")}; direction=inbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}; runtime_generation={context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; terminal_generation={context.CurrentRuntimeOwner?.TerminalGeneration ?? 0}; leg_generation={context.CurrentTransferLeg?.Generation ?? 0}; transport_epoch={context.CurrentTransferLeg?.TransportEpochId ?? 0}; bridge_recovery_generation={context.CurrentTransferLeg?.BridgeRecoveryGeneration ?? 0}; {FormatInboundRegularV4FrontierRepairProjectionRefreshTupleLocked(context, durableProjectionAuthorizationRanges)}; route_publication_generation={context.CurrentRoutePublicationToken?.PublicationGeneration ?? 0}; route_commit_generation={context.CurrentRoutePublicationToken?.RouteCommitGeneration ?? 0}; source_repair_request_key={FormatProtocolLogValue(repairRequestKey)}; projected_repair_request_key={FormatProtocolLogValue(repairRequestKey)}; source_ranges={FormatProtocolLogValue(FormatInboundRegularV4FrontierRepairProjectionRanges(ranges))}; projected_ranges={FormatProtocolLogValue(FormatInboundRegularV4FrontierRepairProjectionRanges(ranges))}; projection_generation={context.LastV4RegularFrontierRepairProjectionGeneration}; projection_kind=unknown; source_authority_lifecycle=missing; source_authority_settlement=(none); frontier_chunk_index={context.NextChunkIndex}; durable_received_highest_chunk_index={context.PullHighestReceivedChunkIndex}; decision_reason=coordinator_projection_authority_missing");
             return [];
         }
 
@@ -21076,7 +21283,8 @@ public sealed partial class SessionFileTransferService
             ShouldLogInboundV4RebindFrontierLoopLocked(context, now, repairRepeatIntervalMs);
         if (repairState.FrontierRepair)
         {
-            if (!IsInboundRegularV4FrontierRepairSettledStalledLocked(context, repairRequestKey))
+            if (!recoveryProjectionPressureObserved &&
+                !IsInboundRegularV4FrontierRepairSettledStalledLocked(context, repairRequestKey))
             {
                 MaybeObserveRegularV4ReceiverFrontierRepairPressure(
                     context,

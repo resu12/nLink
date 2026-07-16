@@ -982,6 +982,11 @@ function New-RouteAcceptanceRunResult {
         regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount = 0
         regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount = 0
         regularV4FrontierRepairSettlementDispositionVerdict = 'none'
+        regularV4FrontierRepairProjectionReauthorizationMissingRawCount = 0
+        regularV4FrontierRepairProjectionReauthorizationMissingDistinctCount = 0
+        regularV4FrontierRepairProjectionReauthorizationMissingRecoveredCount = 0
+        regularV4FrontierRepairProjectionReauthorizationMissingUnresolvedCount = 0
+        regularV4FrontierRepairProjectionReauthorizationVerdict = 'none'
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount = 0
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount = 0
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = 0
@@ -2439,6 +2444,11 @@ function Assert-Phase4OperatorVerdict {
     $Result.regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_settlement_disposition_unverifiable_recovered_count' -DefaultValue '0')
     $Result.regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_settlement_disposition_unverifiable_unresolved_count' -DefaultValue '0')
     $Result.regularV4FrontierRepairSettlementDispositionVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_settlement_disposition_verdict' -DefaultValue 'none'
+    $Result.regularV4FrontierRepairProjectionReauthorizationMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_projection_reauthorization_missing_raw_count' -DefaultValue '0')
+    $Result.regularV4FrontierRepairProjectionReauthorizationMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_projection_reauthorization_missing_distinct_count' -DefaultValue '0')
+    $Result.regularV4FrontierRepairProjectionReauthorizationMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_projection_reauthorization_missing_recovered_count' -DefaultValue '0')
+    $Result.regularV4FrontierRepairProjectionReauthorizationMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_projection_reauthorization_missing_unresolved_count' -DefaultValue '0')
+    $Result.regularV4FrontierRepairProjectionReauthorizationVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_projection_reauthorization_verdict' -DefaultValue 'none'
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count' -DefaultValue '0')
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_distinct_count' -DefaultValue '0')
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count' -DefaultValue '0')
@@ -3940,6 +3950,38 @@ function Write-RouteAcceptanceFakePhase4Run {
             $reportPath = Join-Path $ArtifactDir $reportName
             $reportText = Get-Content -LiteralPath $reportPath -Raw
             foreach ($fixtureLine in $projectionFixtureLines) {
+                $separatorIndex = $fixtureLine.IndexOf('=')
+                $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
+                $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
+                if ([regex]::IsMatch($reportText, $fixturePattern)) {
+                    $reportText = [regex]::Replace($reportText, $fixturePattern, $fixtureLine)
+                }
+                else {
+                    $reportText = $reportText.TrimEnd("`r", "`n") + [Environment]::NewLine + $fixtureLine + [Environment]::NewLine
+                }
+            }
+            Set-Content -LiteralPath $reportPath -Value $reportText -Encoding UTF8
+        }
+    }
+
+    if (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'REGULAR_V4_PROJECTION_REAUTHORIZATION_SUMMARY_FIXTURE') {
+        $projectionReauthorizationFixtureLines = @(
+            'regular_v4_frontier_repair_projection_reauthorization_missing_raw_count=1438',
+            'regular_v4_frontier_repair_projection_reauthorization_missing_distinct_count=1',
+            'regular_v4_frontier_repair_projection_reauthorization_missing_recovered_count=0',
+            'regular_v4_frontier_repair_projection_reauthorization_missing_unresolved_count=1',
+            'regular_v4_frontier_repair_projection_reauthorization_verdict=fail',
+            'first_proof_chain_failure_class=regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery',
+            'first_proof_chain_failure_event=filetransfer_regular_v4_frontier_repair_projection_rejected',
+            'first_proof_chain_failure_reason=fresh_projection_required_before_unrestricted_state',
+            'first_proof_chain_failure_sequence=4675',
+            'first_proof_chain_failure_source_path=filetransfer-retained-log-slice.log',
+            'first_proof_chain_failure_line_number=4675'
+        )
+        foreach ($reportName in @('filetransfer-route-consistency-summary.txt', 'filetransfer-operator-verdict.txt')) {
+            $reportPath = Join-Path $ArtifactDir $reportName
+            $reportText = Get-Content -LiteralPath $reportPath -Raw
+            foreach ($fixtureLine in $projectionReauthorizationFixtureLines) {
                 $separatorIndex = $fixtureLine.IndexOf('=')
                 $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
                 $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
@@ -7020,7 +7062,8 @@ function Get-RouteAcceptanceResultFailureClass {
         if ([string]$Result.runtimeFailureCandidate -in @(
                 'regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved',
                 'regular_v4_frontier_repair_successor_pressure_install_missing',
-                'regular_v4_frontier_repair_settlement_disposition_unverifiable')) {
+                'regular_v4_frontier_repair_settlement_disposition_unverifiable',
+                'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery')) {
             return 'incomplete_proof'
         }
         if ([string]$Result.runtimeFailureCandidate -in @('active_file_tuna_v6_evidence', 'diagnostic_regular_nkn_v6_evidence')) {
@@ -7580,6 +7623,11 @@ function New-RouteAcceptanceSummaryRunDto {
         regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount = [int]$Result.regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount
         regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount = [int]$Result.regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount
         regularV4FrontierRepairSettlementDispositionVerdict = [string]$Result.regularV4FrontierRepairSettlementDispositionVerdict
+        regularV4FrontierRepairProjectionReauthorizationMissingRawCount = [int]$Result.regularV4FrontierRepairProjectionReauthorizationMissingRawCount
+        regularV4FrontierRepairProjectionReauthorizationMissingDistinctCount = [int]$Result.regularV4FrontierRepairProjectionReauthorizationMissingDistinctCount
+        regularV4FrontierRepairProjectionReauthorizationMissingRecoveredCount = [int]$Result.regularV4FrontierRepairProjectionReauthorizationMissingRecoveredCount
+        regularV4FrontierRepairProjectionReauthorizationMissingUnresolvedCount = [int]$Result.regularV4FrontierRepairProjectionReauthorizationMissingUnresolvedCount
+        regularV4FrontierRepairProjectionReauthorizationVerdict = [string]$Result.regularV4FrontierRepairProjectionReauthorizationVerdict
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount
@@ -7758,6 +7806,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $regularV4FrontierRepairSettlementDispositionUnverifiableDistinctCount = 0
     $regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount = 0
     $regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount = 0
+    $regularV4FrontierRepairProjectionReauthorizationMissingRawCount = 0
+    $regularV4FrontierRepairProjectionReauthorizationMissingDistinctCount = 0
+    $regularV4FrontierRepairProjectionReauthorizationMissingRecoveredCount = 0
+    $regularV4FrontierRepairProjectionReauthorizationMissingUnresolvedCount = 0
     $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount = 0
     $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount = 0
     $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = 0
@@ -7802,6 +7854,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $regularV4FrontierRepairSettlementDispositionUnverifiableDistinctCount += [int]$runDto.regularV4FrontierRepairSettlementDispositionUnverifiableDistinctCount
         $regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount += [int]$runDto.regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount
         $regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount += [int]$runDto.regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount
+        $regularV4FrontierRepairProjectionReauthorizationMissingRawCount += [int]$runDto.regularV4FrontierRepairProjectionReauthorizationMissingRawCount
+        $regularV4FrontierRepairProjectionReauthorizationMissingDistinctCount += [int]$runDto.regularV4FrontierRepairProjectionReauthorizationMissingDistinctCount
+        $regularV4FrontierRepairProjectionReauthorizationMissingRecoveredCount += [int]$runDto.regularV4FrontierRepairProjectionReauthorizationMissingRecoveredCount
+        $regularV4FrontierRepairProjectionReauthorizationMissingUnresolvedCount += [int]$runDto.regularV4FrontierRepairProjectionReauthorizationMissingUnresolvedCount
         $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount
         $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount
         $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount
@@ -7869,6 +7925,18 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     }
     elseif ($regularV4FrontierRepairSettlementDispositionUnverifiableDistinctCount -gt 0 -or
         @($runDtos | Where-Object { [string]$_.regularV4FrontierRepairSettlementDispositionVerdict -eq 'pass' }).Count -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
+    }
+    $regularV4FrontierRepairProjectionReauthorizationVerdict = if (
+        $regularV4FrontierRepairProjectionReauthorizationMissingUnresolvedCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.regularV4FrontierRepairProjectionReauthorizationVerdict -eq 'fail' }).Count -gt 0) {
+        'fail'
+    }
+    elseif ($regularV4FrontierRepairProjectionReauthorizationMissingDistinctCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.regularV4FrontierRepairProjectionReauthorizationVerdict -eq 'pass' }).Count -gt 0) {
         'pass'
     }
     else {
@@ -8045,6 +8113,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("regular_v4_frontier_repair_settlement_disposition_unverifiable_recovered_count={0}" -f $regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount),
         ("regular_v4_frontier_repair_settlement_disposition_unverifiable_unresolved_count={0}" -f $regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount),
         ("regular_v4_frontier_repair_settlement_disposition_verdict={0}" -f $regularV4FrontierRepairSettlementDispositionVerdict),
+        ("regular_v4_frontier_repair_projection_reauthorization_missing_raw_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationMissingRawCount),
+        ("regular_v4_frontier_repair_projection_reauthorization_missing_distinct_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationMissingDistinctCount),
+        ("regular_v4_frontier_repair_projection_reauthorization_missing_recovered_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationMissingRecoveredCount),
+        ("regular_v4_frontier_repair_projection_reauthorization_missing_unresolved_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationMissingUnresolvedCount),
+        ("regular_v4_frontier_repair_projection_reauthorization_verdict={0}" -f $regularV4FrontierRepairProjectionReauthorizationVerdict),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount),
@@ -8158,6 +8231,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.regular_v4_frontier_repair_settlement_disposition_unverifiable_recovered_count={1}" -f $prefix, $result.regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount)
         $textLines += ("{0}.regular_v4_frontier_repair_settlement_disposition_unverifiable_unresolved_count={1}" -f $prefix, $result.regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount)
         $textLines += ("{0}.regular_v4_frontier_repair_settlement_disposition_verdict={1}" -f $prefix, $result.regularV4FrontierRepairSettlementDispositionVerdict)
+        $textLines += ("{0}.regular_v4_frontier_repair_projection_reauthorization_missing_raw_count={1}" -f $prefix, $result.regularV4FrontierRepairProjectionReauthorizationMissingRawCount)
+        $textLines += ("{0}.regular_v4_frontier_repair_projection_reauthorization_missing_distinct_count={1}" -f $prefix, $result.regularV4FrontierRepairProjectionReauthorizationMissingDistinctCount)
+        $textLines += ("{0}.regular_v4_frontier_repair_projection_reauthorization_missing_recovered_count={1}" -f $prefix, $result.regularV4FrontierRepairProjectionReauthorizationMissingRecoveredCount)
+        $textLines += ("{0}.regular_v4_frontier_repair_projection_reauthorization_missing_unresolved_count={1}" -f $prefix, $result.regularV4FrontierRepairProjectionReauthorizationMissingUnresolvedCount)
+        $textLines += ("{0}.regular_v4_frontier_repair_projection_reauthorization_verdict={1}" -f $prefix, $result.regularV4FrontierRepairProjectionReauthorizationVerdict)
         $textLines += ("{0}.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount)
         $textLines += ("{0}.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_distinct_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount)
         $textLines += ("{0}.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount)
@@ -8351,6 +8429,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount = $regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount
         regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount = $regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount
         regularV4FrontierRepairSettlementDispositionVerdict = $regularV4FrontierRepairSettlementDispositionVerdict
+        regularV4FrontierRepairProjectionReauthorizationMissingRawCount = $regularV4FrontierRepairProjectionReauthorizationMissingRawCount
+        regularV4FrontierRepairProjectionReauthorizationMissingDistinctCount = $regularV4FrontierRepairProjectionReauthorizationMissingDistinctCount
+        regularV4FrontierRepairProjectionReauthorizationMissingRecoveredCount = $regularV4FrontierRepairProjectionReauthorizationMissingRecoveredCount
+        regularV4FrontierRepairProjectionReauthorizationMissingUnresolvedCount = $regularV4FrontierRepairProjectionReauthorizationMissingUnresolvedCount
+        regularV4FrontierRepairProjectionReauthorizationVerdict = $regularV4FrontierRepairProjectionReauthorizationVerdict
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount = $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount = $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount

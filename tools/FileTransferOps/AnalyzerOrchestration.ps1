@@ -1087,6 +1087,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_frontier_repair_precontract_settlement_consumed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_frontier_repair_settlement_held_for_lease_closure_window') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_settlement_reported') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_bridge_recovery_authority_granted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_lifecycle_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_lease_closure_retained') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_data_session_availability_observed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_transport_resumed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_blocked_by_regular_v4_receive_recovery') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_held_by_regular_v4_receive_recovery') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_regular_v4_recovery_settlement_missing') +
@@ -1106,6 +1111,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     )
     $regularV4FrontierRepairMissingRangePreservationProof =
         Get-FileTransferRegularV4MissingRangePreservationProof `
+            -Events $regularV4FrontierRepairProjectionEvents
+    $regularV4FrontierRepairProjectionReauthorizationProof =
+        Get-FileTransferRegularV4RepairProjectionReauthorizationProof `
             -Events $regularV4FrontierRepairProjectionEvents
     $regularV4PeerSilenceReplayMissingDispatchRangeProof =
         Get-FileTransferRegularV4PeerSilenceReplayMissingDispatchRangeProof `
@@ -1431,6 +1439,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Reason = 'unresolved_frontier_repair_missing_range_omitted'
         }) | Out-Null
     }
+    foreach ($candidateEvent in @($regularV4FrontierRepairProjectionReauthorizationProof.UnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery'
+            Event = $candidateEvent
+            Reason = 'fresh_projection_required_before_unrestricted_state'
+        }) | Out-Null
+    }
     foreach ($candidateEvent in @($regularV4PeerSilenceReplayMissingDispatchRangeProof.UnresolvedCandidateEvents)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved'
@@ -1614,6 +1629,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.RecoveredCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.UnresolvedCount),
         ("regular_v4_frontier_repair_missing_range_preservation_verdict={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.Verdict),
+        ("regular_v4_frontier_repair_projection_reauthorization_missing_raw_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.RawCount),
+        ("regular_v4_frontier_repair_projection_reauthorization_missing_distinct_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.DistinctCount),
+        ("regular_v4_frontier_repair_projection_reauthorization_missing_recovered_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.RecoveredCount),
+        ("regular_v4_frontier_repair_projection_reauthorization_missing_unresolved_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.UnresolvedCount),
+        ("regular_v4_frontier_repair_projection_reauthorization_verdict={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.Verdict),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_raw_count={0}" -f $regularV4PeerSilenceReplayMissingDispatchRangeProof.RawCount),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_distinct_count={0}" -f $regularV4PeerSilenceReplayMissingDispatchRangeProof.DistinctCount),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count={0}" -f $regularV4PeerSilenceReplayMissingDispatchRangeProof.RecoveredCount),
@@ -1726,6 +1746,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.RecoveredCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.UnresolvedCount),
         ("regular_v4_frontier_repair_missing_range_preservation_verdict={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.Verdict),
+        ("regular_v4_frontier_repair_projection_reauthorization_missing_raw_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.RawCount),
+        ("regular_v4_frontier_repair_projection_reauthorization_missing_distinct_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.DistinctCount),
+        ("regular_v4_frontier_repair_projection_reauthorization_missing_recovered_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.RecoveredCount),
+        ("regular_v4_frontier_repair_projection_reauthorization_missing_unresolved_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.UnresolvedCount),
+        ("regular_v4_frontier_repair_projection_reauthorization_verdict={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.Verdict),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_raw_count={0}" -f $regularV4PeerSilenceReplayMissingDispatchRangeProof.RawCount),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_distinct_count={0}" -f $regularV4PeerSilenceReplayMissingDispatchRangeProof.DistinctCount),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count={0}" -f $regularV4PeerSilenceReplayMissingDispatchRangeProof.RecoveredCount),
@@ -1830,6 +1855,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.RecoveredCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.UnresolvedCount),
         ("regular_v4_frontier_repair_missing_range_preservation_verdict={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.Verdict),
+        ("regular_v4_frontier_repair_projection_reauthorization_missing_raw_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.RawCount),
+        ("regular_v4_frontier_repair_projection_reauthorization_missing_distinct_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.DistinctCount),
+        ("regular_v4_frontier_repair_projection_reauthorization_missing_recovered_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.RecoveredCount),
+        ("regular_v4_frontier_repair_projection_reauthorization_missing_unresolved_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.UnresolvedCount),
+        ("regular_v4_frontier_repair_projection_reauthorization_verdict={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.Verdict),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_raw_count={0}" -f $regularV4PeerSilenceReplayMissingDispatchRangeProof.RawCount),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_distinct_count={0}" -f $regularV4PeerSilenceReplayMissingDispatchRangeProof.DistinctCount),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count={0}" -f $regularV4PeerSilenceReplayMissingDispatchRangeProof.RecoveredCount),
@@ -2011,6 +2041,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         regular_v4_frontier_repair_missing_range_not_preserved_recovered_count = $regularV4FrontierRepairMissingRangePreservationProof.RecoveredCount
         regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count = $regularV4FrontierRepairMissingRangePreservationProof.UnresolvedCount
         regular_v4_frontier_repair_missing_range_preservation_verdict = $regularV4FrontierRepairMissingRangePreservationProof.Verdict
+        regular_v4_frontier_repair_projection_reauthorization_missing_raw_count = $regularV4FrontierRepairProjectionReauthorizationProof.RawCount
+        regular_v4_frontier_repair_projection_reauthorization_missing_distinct_count = $regularV4FrontierRepairProjectionReauthorizationProof.DistinctCount
+        regular_v4_frontier_repair_projection_reauthorization_missing_recovered_count = $regularV4FrontierRepairProjectionReauthorizationProof.RecoveredCount
+        regular_v4_frontier_repair_projection_reauthorization_missing_unresolved_count = $regularV4FrontierRepairProjectionReauthorizationProof.UnresolvedCount
+        regular_v4_frontier_repair_projection_reauthorization_verdict = $regularV4FrontierRepairProjectionReauthorizationProof.Verdict
         regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_raw_count = $regularV4PeerSilenceReplayMissingDispatchRangeProof.RawCount
         regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_distinct_count = $regularV4PeerSilenceReplayMissingDispatchRangeProof.DistinctCount
         regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count = $regularV4PeerSilenceReplayMissingDispatchRangeProof.RecoveredCount
