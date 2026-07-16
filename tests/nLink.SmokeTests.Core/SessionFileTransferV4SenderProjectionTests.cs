@@ -183,13 +183,19 @@ public sealed partial class SessionFileTransferV4SenderTests
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
-    public void RegularV4Projection_DueRetryDoesNotTreatPendingWriteAsDurableNarrowing()
+    public void RegularV4Projection_ImmediateStalledSuccessorInstallsPressureBeforePredecessorRetirement()
     {
         const string transferId = "transfer_regular_v4_projection_pending_due";
+        var logStart = GetOperationalLogLength();
         using var service = new SessionFileTransferService();
         using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        using var dataSession = new RecordingDataSession($"session_{transferId}", transferId);
         service.AttachTransport(transport);
         var context = CreateProjectionInboundContext(transferId);
+        SetPrivateProperty(context, "DataSession", dataSession);
+        typeof(SessionFileTransferService)
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
         SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "projection_pending_due");
         _ = CreateInboundState(service, context, "frontier_stall_repair_due", forceMissingRange: true);
         MarkProjectionTailDurable(context);
@@ -225,11 +231,15 @@ public sealed partial class SessionFileTransferV4SenderTests
             context,
             "V4FrontierStallStartedUtc",
             DateTimeOffset.UtcNow - TimeSpan.FromSeconds(11));
-        var afterSuccessorRetention = CreateInboundState(service, context, "chunk_batch_committed");
-
+        var afterSuccessorRetention = CreateInboundState(
+            service,
+            context,
+            "frontier_stall_repair_due",
+            forceMissingRange: true);
         var retainedAfterSuccessorSettlement = Assert.Single(afterSuccessorRetention.MissingRanges);
         Assert.Equal(9, retainedAfterSuccessorSettlement.StartChunkIndex);
         Assert.Equal(3, retainedAfterSuccessorSettlement.ChunkCount);
+
         var successorLifecycle = GetPrivatePropertyValue(successorAttemptContract!, "Lifecycle");
         Assert.True(GetPrivateProperty<bool>(successorLifecycle!, "IsSettled"));
         Assert.Equal(
@@ -239,6 +249,33 @@ public sealed partial class SessionFileTransferV4SenderTests
         var retainedProjection = GetPrivatePropertyValue(context, "V4RegularFrontierRepairProjection");
         Assert.NotNull(retainedProjection);
         Assert.Same(sourceContractBefore, GetPrivatePropertyValue(retainedProjection, "SourceContract"));
+
+        var predecessorAuthority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(
+            GetPrivatePropertyValue(sourceContractBefore!, "Authority"));
+        var successorAuthority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(
+            GetPrivatePropertyValue(successorAttemptContract!, "Authority"));
+        var receipt = Assert.Single(transport.RegularV4PressureInstallReceipts);
+        Assert.Equal(successorAuthority, receipt.Authority);
+        var settlements = transport.RegularV4FrontierRepairSettlements.ToArray();
+        Assert.Equal(2, settlements.Length);
+        Assert.Equal(predecessorAuthority.AuthorityId, settlements[0].AuthorityId);
+        Assert.Equal(FileTransferRegularV4FrontierRepairSettlementOutcome.Superseded, settlements[0].Outcome);
+        Assert.Equal(successorAuthority.AuthorityId, settlements[1].AuthorityId);
+        Assert.Equal(FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled, settlements[1].Outcome);
+
+        var log = ReadOperationalLogTail(logStart);
+        var installIndex = log.IndexOf(
+            $"event=filetransfer_regular_v4_frontier_repair_successor_pressure_install_decided; authority_schema=2; authority_id={successorAuthority.AuthorityId}",
+            StringComparison.Ordinal);
+        var predecessorSettlementIndex = log.IndexOf(
+            $"event=filetransfer_regular_v4_frontier_repair_contract_settled; authority_schema=2; authority_id={predecessorAuthority.AuthorityId}",
+            StringComparison.Ordinal);
+        var successorSettlementIndex = log.IndexOf(
+            $"event=filetransfer_regular_v4_frontier_repair_contract_settled; authority_schema=2; authority_id={successorAuthority.AuthorityId}",
+            StringComparison.Ordinal);
+        Assert.True(installIndex >= 0, log);
+        Assert.True(predecessorSettlementIndex > installIndex, log);
+        Assert.True(successorSettlementIndex > predecessorSettlementIndex, log);
     }
 
     [Fact]
@@ -402,6 +439,8 @@ public sealed partial class SessionFileTransferV4SenderTests
     {
         const string transferId = "transfer_regular_v4_projection_frontier_successor";
         using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
         var context = CreateProjectionInboundContext(transferId);
         SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "projection_frontier_successor");
         _ = CreateInboundState(service, context, "frontier_stall_repair_due", forceMissingRange: true);
@@ -447,7 +486,12 @@ public sealed partial class SessionFileTransferV4SenderTests
     {
         const string transferId = "transfer_regular_v4_projection_data_session";
         using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
         var context = CreateProjectionInboundContext(transferId);
+        typeof(SessionFileTransferService)
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
         SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "projection_data_session");
         _ = CreateInboundState(service, context, "frontier_stall_repair_due", forceMissingRange: true);
         var originalProjection = GetPrivatePropertyValue(context, "V4RegularFrontierRepairProjection");

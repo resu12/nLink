@@ -18683,6 +18683,8 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public RegularV4FrontierRepairContract? CurrentRegularV4FrontierRepairContract { get; set; }
 
+        public PullV4QueuedRepairSend? PendingRegularV4FrontierRepairPressureInstallRetry { get; set; }
+
         public FallbackFrontierRepairContract? CurrentFallbackFrontierRepairContract { get; set; }
 
         public int LastRepairReplayGeneration { get; set; }
@@ -19278,6 +19280,14 @@ public sealed partial class SessionFileTransferService : IDisposable
         public required FileTransferAuthorityLifecycle<FileTransferRegularV4FrontierRepairSettlementOutcome> Lifecycle { get; init; }
 
         public DateTimeOffset? DispatchedUtc { get; set; }
+
+        public RegularV4FrontierRepairContract? PendingPressureInstallPredecessorContract { get; set; }
+
+        public string? PendingPressureInstallReason { get; set; }
+
+        public long? PressureInstallDataSessionGeneration { get; set; }
+
+        public FileTransferRegularV4FrontierRepairPressureInstallReceipt? PressureInstallReceipt { get; set; }
     }
 
     private enum InboundRegularV4FrontierRepairProjectionKind

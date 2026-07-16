@@ -2868,6 +2868,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
     }
 
     [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "RegularV4FrontierRepairPressure")]
     [Fact]
     public void Bridge_RegularV4ControlFeedbackPressure_AcceptsInitialLiveRouteEpochZeroAuthority()
     {
@@ -2962,6 +2963,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
     }
 
     [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "RegularV4FrontierRepairPressure")]
     [Fact]
     public void Bridge_RegularV4FrontierRepairSettlement_ClearsCurrentPressure()
     {
@@ -3100,6 +3102,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
     }
 
     [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "RegularV4FrontierRepairPressure")]
     [Fact]
     public void Bridge_RegularV4FrontierRepairSettlement_PredecessorCannotClearAuthorizedSuccessor()
     {
@@ -3130,6 +3133,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             {
                 AuthorityId = new FileTransferAuthorityId($"fta2-test-{transferId}-4-successor"),
                 PredecessorAuthorityId = predecessor.AuthorityId,
+                BridgeDecisionGeneration = 3,
                 RepairKey = "regular_v4_peer_silence_safety_replay:0:0:64:2",
                 DecisionGeneration = 4,
                 DecisionReason = "requeue_after_send_timeout",
@@ -3143,30 +3147,228 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 frontierLagChunks: 64,
                 pendingRepairCount: 64,
                 repairAuthority: predecessor);
-            adapter.ReportRegularV4ControlFeedbackPressure(
-                transferId,
-                "regular_v4_frontier_repair_successor_authorized",
-                creditExhaustedTimeMs: 0,
-                frontierLagChunks: 64,
-                pendingRepairCount: 64,
-                repairAuthority: successor);
 
-            var predecessorAccepted = adapter.ReportRegularV4FrontierRepairSettlement(CreateSettlement(
+            var supersededSettlement = CreateSettlement(
                 predecessor,
-                FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch,
-                "repair_dispatch_not_observed"));
+                FileTransferRegularV4FrontierRepairSettlementOutcome.Superseded,
+                "regular_v4_frontier_repair_successor_authorized") with
+            {
+                SuccessorAuthorityId = successor.AuthorityId,
+            };
 
-            Assert.False(predecessorAccepted);
+            Assert.False(adapter.ReportRegularV4FrontierRepairSettlement(supersededSettlement));
             Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out var blockerReason, out _));
             Assert.Equal("regular_v4_control_feedback_pressure", blockerReason);
 
-            var successorAccepted = adapter.ReportRegularV4FrontierRepairSettlement(CreateSettlement(
+            var mismatchedSuccessor = successor with
+            {
+                AuthorityId = new FileTransferAuthorityId($"fta2-test-{transferId}-4-mismatched-successor"),
+                PredecessorAuthorityId = new FileTransferAuthorityId($"fta2-test-{transferId}-unknown-predecessor"),
+            };
+            var rejectedInstall = adapter.InstallRegularV4FrontierRepairPressure(new FileTransferRegularV4ControlFeedbackPressure(
+                mismatchedSuccessor.SessionId,
+                mismatchedSuccessor.TransferId,
+                0,
+                64,
+                64,
+                "regular_v4_frontier_repair_successor_authorized",
+                mismatchedSuccessor));
+
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected, rejectedInstall.Status);
+            Assert.Equal("regular_v4_frontier_repair_successor_predecessor_mismatch", rejectedInstall.Reason);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out _));
+
+            var scopeMismatchedSuccessor = successor with
+            {
+                AuthorityId = new FileTransferAuthorityId($"fta2-test-{transferId}-4-scope-mismatched-successor"),
+                RoutePublicationGeneration = successor.RoutePublicationGeneration + 1,
+            };
+            var scopeRejectedInstall = adapter.InstallRegularV4FrontierRepairPressure(new FileTransferRegularV4ControlFeedbackPressure(
+                scopeMismatchedSuccessor.SessionId,
+                scopeMismatchedSuccessor.TransferId,
+                0,
+                64,
+                64,
+                "regular_v4_frontier_repair_successor_authorized",
+                scopeMismatchedSuccessor));
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected, scopeRejectedInstall.Status);
+            Assert.Equal("regular_v4_frontier_repair_successor_scope_mismatch", scopeRejectedInstall.Reason);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out _));
+
+            var successorPressure = new FileTransferRegularV4ControlFeedbackPressure(
+                successor.SessionId,
+                successor.TransferId,
+                0,
+                64,
+                64,
+                "regular_v4_frontier_repair_successor_authorized",
+                successor);
+            var installReceipt = adapter.InstallRegularV4FrontierRepairPressure(successorPressure);
+
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed, installReceipt.Status);
+            Assert.Equal(successor, installReceipt.Authority);
+            Assert.True(installReceipt.InstallGeneration > 0);
+            Assert.Equal(successorPressure.Reason, installReceipt.PressureReason);
+            Thread.Sleep(25);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out var remainingBeforeDuplicateMs));
+
+            var duplicateInstallReceipt = adapter.InstallRegularV4FrontierRepairPressure(successorPressure);
+
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent, duplicateInstallReceipt.Status);
+            Assert.Equal(installReceipt.InstallGeneration, duplicateInstallReceipt.InstallGeneration);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out var remainingAfterDuplicateMs));
+            Assert.True(remainingAfterDuplicateMs <= remainingBeforeDuplicateMs, $"duplicate install refreshed TTL from {remainingBeforeDuplicateMs}ms to {remainingAfterDuplicateMs}ms");
+
+            var sameIdMutation = successor with
+            {
+                RepairKey = "regular_v4_peer_silence_safety_replay:0:64:64:2",
+            };
+            var sameIdMutationReceipt = adapter.InstallRegularV4FrontierRepairPressure(successorPressure with
+            {
+                RepairAuthority = sameIdMutation,
+            });
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected, sameIdMutationReceipt.Status);
+            Assert.Equal("regular_v4_frontier_repair_authority_id_reuse", sameIdMutationReceipt.Reason);
+
+            var nestedSuccessor = successor with
+            {
+                AuthorityId = new FileTransferAuthorityId($"fta2-test-{transferId}-4-nested-successor"),
+                PredecessorAuthorityId = successor.AuthorityId,
+                DecisionGeneration = successor.DecisionGeneration + 1,
+            };
+            var nestedSuccessorReceipt = adapter.InstallRegularV4FrontierRepairPressure(successorPressure with
+            {
+                RepairAuthority = nestedSuccessor,
+            });
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected, nestedSuccessorReceipt.Status);
+            Assert.Equal("regular_v4_frontier_repair_predecessor_pressure_pending", nestedSuccessorReceipt.Reason);
+
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                transferId,
+                "regular_v4_frontier_repair_send_deferred",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 64,
+                pendingRepairCount: 64,
+                repairAuthority: predecessor);
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                transferId,
+                "regular_v4_frontier_repair_send_deferred",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 64,
+                pendingRepairCount: 64,
+                repairAuthority: null);
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                transferId,
+                "regular_v4_frontier_repair_send_deferred",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 64,
+                pendingRepairCount: 64,
+                repairAuthority: predecessor with { AuthorityId = default });
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out _));
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent,
+                adapter.InstallRegularV4FrontierRepairPressure(successorPressure).Status);
+
+            var successorFinalSettlement = CreateSettlement(
                 successor,
                 FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled,
-                "regular_v4_frontier_repair_missing_dispatch_settled"));
+                "regular_v4_frontier_repair_missing_dispatch_settled");
+            Assert.False(adapter.ReportRegularV4FrontierRepairSettlement(successorFinalSettlement));
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out _));
+
+            var predecessorAccepted = adapter.ReportRegularV4FrontierRepairSettlement(supersededSettlement);
+
+            Assert.True(predecessorAccepted);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out _));
+            Assert.Equal("regular_v4_control_feedback_pressure", blockerReason);
+            var postRetirementDuplicateInstall = adapter.InstallRegularV4FrontierRepairPressure(successorPressure);
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent, postRetirementDuplicateInstall.Status);
+            Assert.Equal(installReceipt.InstallGeneration, postRetirementDuplicateInstall.InstallGeneration);
+            Assert.True(adapter.ReportRegularV4FrontierRepairSettlement(supersededSettlement));
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out _));
+
+            var successorAccepted = adapter.ReportRegularV4FrontierRepairSettlement(successorFinalSettlement);
 
             Assert.True(successorAccepted);
             Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
+            Assert.True(adapter.ReportRegularV4FrontierRepairSettlement(successorFinalSettlement));
+            Assert.True(adapter.ReportRegularV4FrontierRepairSettlement(supersededSettlement));
+            Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
+
+            var terminalTransferId = $"{transferId}-terminal";
+            var terminalPredecessor = CreateRegularV4FrontierRepairAuthority(
+                terminalTransferId,
+                repairKey: "regular_v4_peer_silence_safety_replay:0:0:64:1",
+                frontierChunkIndex: 0,
+                durableReceivedHighestChunkIndex: -1,
+                pendingRepairCount: 64,
+                decisionGeneration: 5,
+                liveRouteEpoch: 0,
+                bridgeDecisionGeneration: 3);
+            var terminalSuccessor = terminalPredecessor with
+            {
+                AuthorityId = new FileTransferAuthorityId($"fta2-test-{terminalTransferId}-6-successor"),
+                PredecessorAuthorityId = terminalPredecessor.AuthorityId,
+                RepairKey = "regular_v4_peer_silence_safety_replay:0:0:64:2",
+                DecisionGeneration = 6,
+                DecisionReason = "requeue_after_send_timeout",
+            };
+            adapter.RegisterActiveFileTransferDataSession(terminalTransferId);
+            adapter.RegisterActiveFileTransferRuntime(terminalTransferId);
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                terminalTransferId,
+                "regular_v4_frontier_repair_send_deferred",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 64,
+                pendingRepairCount: 64,
+                repairAuthority: terminalPredecessor);
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
+                adapter.InstallRegularV4FrontierRepairPressure(new FileTransferRegularV4ControlFeedbackPressure(
+                    terminalSuccessor.SessionId,
+                    terminalSuccessor.TransferId,
+                    0,
+                    64,
+                    64,
+                    "regular_v4_frontier_repair_successor_authorized",
+                    terminalSuccessor)).Status);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
+
+            adapter.UnregisterActiveFileTransferRuntime(terminalTransferId);
+
+            Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
+            Assert.False(adapter.ReportRegularV4FrontierRepairSettlement(CreateSettlement(
+                terminalPredecessor,
+                FileTransferRegularV4FrontierRepairSettlementOutcome.Superseded,
+                "terminal_late_predecessor") with
+            {
+                SuccessorAuthorityId = terminalSuccessor.AuthorityId,
+            }));
+            Assert.False(adapter.ReportRegularV4FrontierRepairSettlement(CreateSettlement(
+                terminalSuccessor,
+                FileTransferRegularV4FrontierRepairSettlementOutcome.TransferTerminal,
+                "terminal_late_successor")));
+            adapter.UnregisterActiveFileTransferDataSession(terminalTransferId);
+
+            var logText = LocalOperationalLog.GetRecentLogText();
+            Assert.True(
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_successor_pressure_install_accepted", "install_status=installed", "install_generation=1", "ttl_refreshed=1"),
+                logText);
+            Assert.True(
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_successor_pressure_install_idempotent", "install_status=idempotent", "install_generation=1", "ttl_refreshed=0"),
+                logText);
+            Assert.True(
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_predecessor_pressure_retired", "successor_install_generation=1", "cleared_predecessor=1", "cleared_pressure=0"),
+                logText);
+            Assert.True(
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_settlement_accepted", "outcome=Superseded", "settlement_disposition=idempotent", "cleared_pressure=0", "ttl_refreshed=0"),
+                logText);
+            Assert.True(
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_settlement_rejected", "outcome=settled_stalled", "settlement_disposition=rejected", "cleared_predecessor=0", "cleared_pressure=0"),
+                logText);
+            Assert.True(
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_authority_rejected", "route=regular_nkn_v4_fast", "protocol_version=4", "decision_generation=3"),
+                logText);
         }
         finally
         {
@@ -3212,6 +3414,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
     }
 
     [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "RegularV4FrontierRepairPressure")]
     [Fact]
     public void Bridge_RegularV4FrontierRepairSettlement_AcceptsRecentAuthorityAfterDiagnosticPressureClear()
     {
@@ -3318,7 +3521,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             };
 
             Assert.True(adapter.ReportRegularV4FrontierRepairSettlement(currentSettlement));
-            Assert.False(adapter.ReportRegularV4FrontierRepairSettlement(currentSettlement));
+            Assert.True(adapter.ReportRegularV4FrontierRepairSettlement(currentSettlement));
 
             var logText = LocalOperationalLog.GetRecentLogText();
             Assert.True(
@@ -3328,10 +3531,10 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_settlement_rejected", "route=regular_nkn_v4_fast", "bridge_decision_generation=2", "cleared_pressure=0"),
                 logText);
             Assert.True(
-                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_settlement_accepted", "route=regular_nkn_v4_fast", "bridge_decision_generation=2", "outcome=settled_stalled", "cleared_pressure=1"),
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_settlement_accepted", "route=regular_nkn_v4_fast", "bridge_decision_generation=2", "outcome=settled_stalled", "settlement_disposition=accepted", "cleared_pressure=0"),
                 logText);
             Assert.True(
-                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_settlement_rejected", "route=regular_nkn_v4_fast", "bridge_decision_generation=2", "pressure_pending_repair_count=0", "pressure_reason=none"),
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_settlement_accepted", "route=regular_nkn_v4_fast", "bridge_decision_generation=2", "settlement_disposition=idempotent", "cleared_pressure=0"),
                 logText);
         }
         finally

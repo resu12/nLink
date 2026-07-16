@@ -933,6 +933,11 @@ function New-RouteAcceptanceRunResult {
         regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRecoveredCount = 0
         regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedUnresolvedCount = 0
         regularV4PeerSilenceReplayMissingDispatchRangePreservationVerdict = 'none'
+        regularV4FrontierRepairSuccessorPressureInstallMissingRawCount = 0
+        regularV4FrontierRepairSuccessorPressureInstallMissingDistinctCount = 0
+        regularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount = 0
+        regularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount = 0
+        regularV4FrontierRepairSuccessorPressureInstallVerdict = 'none'
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount = 0
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount = 0
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = 0
@@ -2380,6 +2385,11 @@ function Assert-Phase4OperatorVerdict {
     $Result.regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count' -DefaultValue '0')
     $Result.regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_unresolved_count' -DefaultValue '0')
     $Result.regularV4PeerSilenceReplayMissingDispatchRangePreservationVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_peer_silence_replay_missing_dispatch_range_preservation_verdict' -DefaultValue 'none'
+    $Result.regularV4FrontierRepairSuccessorPressureInstallMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_successor_pressure_install_missing_raw_count' -DefaultValue '0')
+    $Result.regularV4FrontierRepairSuccessorPressureInstallMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_successor_pressure_install_missing_distinct_count' -DefaultValue '0')
+    $Result.regularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count' -DefaultValue '0')
+    $Result.regularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count' -DefaultValue '0')
+    $Result.regularV4FrontierRepairSuccessorPressureInstallVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_successor_pressure_install_verdict' -DefaultValue 'none'
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count' -DefaultValue '0')
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_distinct_count' -DefaultValue '0')
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count' -DefaultValue '0')
@@ -3913,6 +3923,38 @@ function Write-RouteAcceptanceFakePhase4Run {
             $reportPath = Join-Path $ArtifactDir $reportName
             $reportText = Get-Content -LiteralPath $reportPath -Raw
             foreach ($fixtureLine in $peerSilenceReplayFixtureLines) {
+                $separatorIndex = $fixtureLine.IndexOf('=')
+                $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
+                $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
+                if ([regex]::IsMatch($reportText, $fixturePattern)) {
+                    $reportText = [regex]::Replace($reportText, $fixturePattern, $fixtureLine)
+                }
+                else {
+                    $reportText = $reportText.TrimEnd("`r", "`n") + [Environment]::NewLine + $fixtureLine + [Environment]::NewLine
+                }
+            }
+            Set-Content -LiteralPath $reportPath -Value $reportText -Encoding UTF8
+        }
+    }
+
+    if (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'REGULAR_V4_SUCCESSOR_PRESSURE_INSTALL_SUMMARY_FIXTURE') {
+        $successorPressureInstallFixtureLines = @(
+            'regular_v4_frontier_repair_successor_pressure_install_missing_raw_count=1',
+            'regular_v4_frontier_repair_successor_pressure_install_missing_distinct_count=1',
+            'regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count=0',
+            'regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count=1',
+            'regular_v4_frontier_repair_successor_pressure_install_verdict=fail',
+            'first_proof_chain_failure_class=regular_v4_frontier_repair_successor_pressure_install_missing',
+            'first_proof_chain_failure_event=filetransfer_regular_v4_frontier_repair_settlement_rejected',
+            'first_proof_chain_failure_reason=regular_v4_frontier_repair_pressure_missing',
+            'first_proof_chain_failure_sequence=2792',
+            'first_proof_chain_failure_source_path=filetransfer-retained-log-slice.log',
+            'first_proof_chain_failure_line_number=2792'
+        )
+        foreach ($reportName in @('filetransfer-route-consistency-summary.txt', 'filetransfer-operator-verdict.txt')) {
+            $reportPath = Join-Path $ArtifactDir $reportName
+            $reportText = Get-Content -LiteralPath $reportPath -Raw
+            foreach ($fixtureLine in $successorPressureInstallFixtureLines) {
                 $separatorIndex = $fixtureLine.IndexOf('=')
                 $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
                 $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
@@ -6884,10 +6926,9 @@ function Get-RouteAcceptanceResultFailureClass {
         -not [string]::IsNullOrWhiteSpace([string]$Result.runtimeFailureCandidate) -and
         -not [string]::Equals([string]$Result.runtimeFailureCandidate, '(none)', [System.StringComparison]::OrdinalIgnoreCase) -and
         -not [string]::Equals([string]$Result.runtimeFailureCandidate, 'none', [System.StringComparison]::OrdinalIgnoreCase)) {
-        if ([string]::Equals(
-                [string]$Result.runtimeFailureCandidate,
+        if ([string]$Result.runtimeFailureCandidate -in @(
                 'regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved',
-                [System.StringComparison]::OrdinalIgnoreCase)) {
+                'regular_v4_frontier_repair_successor_pressure_install_missing')) {
             return 'incomplete_proof'
         }
         if ([string]$Result.runtimeFailureCandidate -in @('active_file_tuna_v6_evidence', 'diagnostic_regular_nkn_v6_evidence')) {
@@ -7432,6 +7473,11 @@ function New-RouteAcceptanceSummaryRunDto {
         regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRecoveredCount = [int]$Result.regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRecoveredCount
         regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedUnresolvedCount = [int]$Result.regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedUnresolvedCount
         regularV4PeerSilenceReplayMissingDispatchRangePreservationVerdict = [string]$Result.regularV4PeerSilenceReplayMissingDispatchRangePreservationVerdict
+        regularV4FrontierRepairSuccessorPressureInstallMissingRawCount = [int]$Result.regularV4FrontierRepairSuccessorPressureInstallMissingRawCount
+        regularV4FrontierRepairSuccessorPressureInstallMissingDistinctCount = [int]$Result.regularV4FrontierRepairSuccessorPressureInstallMissingDistinctCount
+        regularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount = [int]$Result.regularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount
+        regularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount = [int]$Result.regularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount
+        regularV4FrontierRepairSuccessorPressureInstallVerdict = [string]$Result.regularV4FrontierRepairSuccessorPressureInstallVerdict
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount
@@ -7589,6 +7635,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedDistinctCount = 0
     $regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRecoveredCount = 0
     $regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedUnresolvedCount = 0
+    $regularV4FrontierRepairSuccessorPressureInstallMissingRawCount = 0
+    $regularV4FrontierRepairSuccessorPressureInstallMissingDistinctCount = 0
+    $regularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount = 0
+    $regularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount = 0
     $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount = 0
     $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount = 0
     $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = 0
@@ -7625,6 +7675,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedDistinctCount += [int]$runDto.regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedDistinctCount
         $regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRecoveredCount += [int]$runDto.regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRecoveredCount
         $regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedUnresolvedCount += [int]$runDto.regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedUnresolvedCount
+        $regularV4FrontierRepairSuccessorPressureInstallMissingRawCount += [int]$runDto.regularV4FrontierRepairSuccessorPressureInstallMissingRawCount
+        $regularV4FrontierRepairSuccessorPressureInstallMissingDistinctCount += [int]$runDto.regularV4FrontierRepairSuccessorPressureInstallMissingDistinctCount
+        $regularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount += [int]$runDto.regularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount
+        $regularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount += [int]$runDto.regularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount
         $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount
         $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount
         $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount
@@ -7668,6 +7722,18 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     }
     elseif ($regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedDistinctCount -gt 0 -or
         @($runDtos | Where-Object { [string]$_.regularV4PeerSilenceReplayMissingDispatchRangePreservationVerdict -eq 'pass' }).Count -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
+    }
+    $regularV4FrontierRepairSuccessorPressureInstallVerdict = if (
+        $regularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.regularV4FrontierRepairSuccessorPressureInstallVerdict -eq 'fail' }).Count -gt 0) {
+        'fail'
+    }
+    elseif ($regularV4FrontierRepairSuccessorPressureInstallMissingDistinctCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.regularV4FrontierRepairSuccessorPressureInstallVerdict -eq 'pass' }).Count -gt 0) {
         'pass'
     }
     else {
@@ -7829,6 +7895,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count={0}" -f $regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRecoveredCount),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_unresolved_count={0}" -f $regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedUnresolvedCount),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_preservation_verdict={0}" -f $regularV4PeerSilenceReplayMissingDispatchRangePreservationVerdict),
+        ("regular_v4_frontier_repair_successor_pressure_install_missing_raw_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallMissingRawCount),
+        ("regular_v4_frontier_repair_successor_pressure_install_missing_distinct_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallMissingDistinctCount),
+        ("regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount),
+        ("regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount),
+        ("regular_v4_frontier_repair_successor_pressure_install_verdict={0}" -f $regularV4FrontierRepairSuccessorPressureInstallVerdict),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount),
@@ -7927,6 +7998,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count={1}" -f $prefix, $result.regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRecoveredCount)
         $textLines += ("{0}.regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_unresolved_count={1}" -f $prefix, $result.regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedUnresolvedCount)
         $textLines += ("{0}.regular_v4_peer_silence_replay_missing_dispatch_range_preservation_verdict={1}" -f $prefix, $result.regularV4PeerSilenceReplayMissingDispatchRangePreservationVerdict)
+        $textLines += ("{0}.regular_v4_frontier_repair_successor_pressure_install_missing_raw_count={1}" -f $prefix, $result.regularV4FrontierRepairSuccessorPressureInstallMissingRawCount)
+        $textLines += ("{0}.regular_v4_frontier_repair_successor_pressure_install_missing_distinct_count={1}" -f $prefix, $result.regularV4FrontierRepairSuccessorPressureInstallMissingDistinctCount)
+        $textLines += ("{0}.regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count={1}" -f $prefix, $result.regularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount)
+        $textLines += ("{0}.regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count={1}" -f $prefix, $result.regularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount)
+        $textLines += ("{0}.regular_v4_frontier_repair_successor_pressure_install_verdict={1}" -f $prefix, $result.regularV4FrontierRepairSuccessorPressureInstallVerdict)
         $textLines += ("{0}.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount)
         $textLines += ("{0}.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_distinct_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount)
         $textLines += ("{0}.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount)
@@ -8105,6 +8181,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRecoveredCount = $regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRecoveredCount
         regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedUnresolvedCount = $regularV4PeerSilenceReplayMissingDispatchRangeNotPreservedUnresolvedCount
         regularV4PeerSilenceReplayMissingDispatchRangePreservationVerdict = $regularV4PeerSilenceReplayMissingDispatchRangePreservationVerdict
+        regularV4FrontierRepairSuccessorPressureInstallMissingRawCount = $regularV4FrontierRepairSuccessorPressureInstallMissingRawCount
+        regularV4FrontierRepairSuccessorPressureInstallMissingDistinctCount = $regularV4FrontierRepairSuccessorPressureInstallMissingDistinctCount
+        regularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount = $regularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount
+        regularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount = $regularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount
+        regularV4FrontierRepairSuccessorPressureInstallVerdict = $regularV4FrontierRepairSuccessorPressureInstallVerdict
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount = $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount = $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount

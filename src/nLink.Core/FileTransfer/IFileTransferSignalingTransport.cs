@@ -300,6 +300,26 @@ public interface IFileTransferRegularV4ControlFeedbackPressureObserver
     void ObserveRegularV4ControlFeedbackPressure(FileTransferRegularV4ControlFeedbackPressure pressure);
 }
 
+internal enum FileTransferRegularV4FrontierRepairPressureInstallStatus
+{
+    Installed,
+    Idempotent,
+    Rejected,
+}
+
+internal sealed record FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+    FileTransferRegularV4FrontierRepairAuthority Authority,
+    FileTransferRegularV4FrontierRepairPressureInstallStatus Status,
+    string Reason,
+    long InstallGeneration,
+    string PressureReason);
+
+internal interface IFileTransferRegularV4FrontierRepairPressureInstallBridge
+{
+    FileTransferRegularV4FrontierRepairPressureInstallReceipt InstallRegularV4FrontierRepairPressure(
+        FileTransferRegularV4ControlFeedbackPressure pressure);
+}
+
 public interface IFileTransferRegularV4FrontierRepairSettlementObserver
 {
     void ObserveRegularV4FrontierRepairSettlement(FileTransferRegularV4FrontierRepairSettlement settlement);

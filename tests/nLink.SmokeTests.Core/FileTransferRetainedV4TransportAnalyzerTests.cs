@@ -3092,6 +3092,185 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
         Assert.Equal(fullVerdict["regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count"], compactVerdict["regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count"]);
     }
 
+    [Fact]
+    [Trait("RetainedV4Suite", "SuccessorPressureInstall")]
+    public async Task AnalyzeRetained_RegularV4SuccessorPressureInstallMissing_FullAndCompactAgree()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_regular_v4_successor_pressure_missing";
+        var lines = BuildRegularV4SuccessorPressureInstallFixture(transferId, installBeforeRejection: false);
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_successor_pressure_install_decided; session_id=sess_a; transfer_id={transferId}; direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=3; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn; repair_request_key=372:12:372:12; frontier_chunk_index=372; decision_generation=3; authority_id=repair-successor; receipt_authority_id=repair-successor; predecessor_authority_id=repair-predecessor; retained_predecessor_authority_id=repair-predecessor; install_generation=1; install_status=Installed; decision_reason=successor_pressure_installed_late"));
+
+        var full = await RunAnalyzeFixtureAsync(lines);
+        var compact = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: new Dictionary<string, string>
+            {
+                ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+            });
+
+        Assert.Equal(0, full.Script.ExitCode);
+        Assert.Equal(0, compact.Script.ExitCode);
+        var fullVerdict = ReadArtifactReport(full.ArtifactDir, "filetransfer-operator-verdict.txt");
+        var compactVerdict = ReadArtifactReport(compact.ArtifactDir, "filetransfer-operator-verdict.txt");
+        foreach (var field in new[]
+                 {
+                     "recovery_failure_class",
+                     "first_proof_chain_failure_class",
+                     "first_proof_chain_failure_event",
+                     "first_proof_chain_failure_reason",
+                     "first_proof_chain_failure_sequence",
+                     "acceptance_failure_class",
+                     "regular_v4_frontier_repair_successor_pressure_install_missing_raw_count",
+                     "regular_v4_frontier_repair_successor_pressure_install_missing_distinct_count",
+                     "regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count",
+                     "regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count",
+                     "regular_v4_frontier_repair_successor_pressure_install_verdict"
+                 })
+        {
+            Assert.Equal(fullVerdict[field], compactVerdict[field]);
+        }
+
+        Assert.Equal("incomplete_proof", fullVerdict["acceptance_failure_class"]);
+        Assert.Equal("regular_v4_frontier_repair_successor_pressure_install_missing", fullVerdict["recovery_failure_class"]);
+        Assert.Equal("regular_v4_frontier_repair_successor_pressure_install_missing", fullVerdict["first_proof_chain_failure_class"]);
+        Assert.Equal("filetransfer_regular_v4_frontier_repair_settlement_rejected", fullVerdict["first_proof_chain_failure_event"]);
+        Assert.Equal("regular_v4_frontier_repair_pressure_missing", fullVerdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("2792", fullVerdict["first_proof_chain_failure_sequence"]);
+        Assert.Equal("1", fullVerdict["regular_v4_frontier_repair_successor_pressure_install_missing_raw_count"]);
+        Assert.Equal("1", fullVerdict["regular_v4_frontier_repair_successor_pressure_install_missing_distinct_count"]);
+        Assert.Equal("0", fullVerdict["regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count"]);
+        Assert.Equal("1", fullVerdict["regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count"]);
+        Assert.Equal("fail", fullVerdict["regular_v4_frontier_repair_successor_pressure_install_verdict"]);
+        Assert.NotEqual("regular_v4_frontier_repair_liveness_settlement_missing", fullVerdict["first_proof_chain_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("RetainedV4Suite", "SuccessorPressureInstall")]
+    public async Task AnalyzeRetained_RegularV4SuccessorPressureInstalledBeforeSettlement_DoesNotClassifyMissingInstall()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRegularV4SuccessorPressureInstallFixture(
+            "transfer_regular_v4_successor_pressure_installed",
+            installBeforeRejection: true);
+
+        var full = await RunAnalyzeFixtureAsync(lines);
+        var compact = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: new Dictionary<string, string>
+            {
+                ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+            });
+
+        Assert.Equal(0, full.Script.ExitCode);
+        Assert.Equal(0, compact.Script.ExitCode);
+        var fullVerdict = ReadArtifactReport(full.ArtifactDir, "filetransfer-operator-verdict.txt");
+        var compactVerdict = ReadArtifactReport(compact.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal(fullVerdict["regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count"], compactVerdict["regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count"]);
+        Assert.Equal(fullVerdict["regular_v4_frontier_repair_successor_pressure_install_verdict"], compactVerdict["regular_v4_frontier_repair_successor_pressure_install_verdict"]);
+        Assert.Equal(fullVerdict["first_proof_chain_failure_class"], compactVerdict["first_proof_chain_failure_class"]);
+        Assert.Equal("0", fullVerdict["regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count"]);
+        Assert.Equal("none", fullVerdict["regular_v4_frontier_repair_successor_pressure_install_verdict"]);
+        Assert.NotEqual("regular_v4_frontier_repair_successor_pressure_install_missing", fullVerdict["first_proof_chain_failure_class"]);
+        Assert.NotEqual("regular_v4_frontier_repair_liveness_settlement_missing", fullVerdict["first_proof_chain_failure_class"]);
+    }
+
+    [Theory]
+    [InlineData("wrong_scope")]
+    [InlineData("wrong_predecessor")]
+    [Trait("RetainedV4Suite", "SuccessorPressureInstall")]
+    public async Task AnalyzeRetained_RegularV4SuccessorPressureInstallRequiresExactScopeAndPredecessor(string mutation)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRegularV4SuccessorPressureInstallFixture(
+            $"transfer_regular_v4_successor_pressure_{mutation}",
+            installBeforeRejection: true,
+            installMutation: mutation);
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_successor_pressure_install_missing_distinct_count"]);
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count"]);
+        Assert.Equal("regular_v4_frontier_repair_successor_pressure_install_missing", verdict["first_proof_chain_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("RetainedV4Suite", "SuccessorPressureInstall")]
+    public async Task AnalyzeRetained_RegularV4SuccessorPressureDuplicateRejectionsDeduplicateLogicalTuple()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRegularV4SuccessorPressureInstallFixture(
+            "transfer_regular_v4_successor_pressure_duplicate",
+            installBeforeRejection: false);
+        lines.Add(lines[^1]);
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("2", verdict["regular_v4_frontier_repair_successor_pressure_install_missing_raw_count"]);
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_successor_pressure_install_missing_distinct_count"]);
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count"]);
+    }
+
+    private static List<string> BuildRegularV4SuccessorPressureInstallFixture(
+        string transferId,
+        bool installBeforeRejection,
+        string? installMutation = null)
+    {
+        const string repairKey = "372:12:372:12";
+        const string predecessorAuthorityId = "repair-predecessor";
+        const string successorAuthorityId = "repair-successor";
+        var lines = new List<string>
+        {
+            LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=3; route_publication_generation=1; route_commit_generation=0")
+        };
+        while (lines.Count < 2786)
+        {
+            lines.Add(LogLine($"event=successor_pressure_fixture_noise; transfer_id={transferId}; session_id=sess_a; ordinal={lines.Count + 1}"));
+        }
+
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_projection_retained; authority_schema=2; authority_id={successorAuthorityId}; predecessor_authority_id={predecessorAuthorityId}; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=3; data_session_generation=1; route_publication_generation=1; route_commit_generation=0; repair_generation=3; source_repair_request_key={repairKey}; projected_repair_request_key={repairKey}; source_ranges=372:12; projected_ranges=372:12; projection_generation=2; projection_kind=narrowed; source_authority_lifecycle=active; frontier_chunk_index=372; durable_received_highest_chunk_index=725; source_range_count=1; projected_range_count=1; projected_chunk_count=12; target_transport=regular_nkn; decision_reason=coordinator_successor_projection_staged"));
+        if (installBeforeRejection)
+        {
+            var installTransferId = installMutation == "wrong_scope" ? $"{transferId}_other" : transferId;
+            var installPredecessor = installMutation == "wrong_predecessor" ? "repair-unrelated" : predecessorAuthorityId;
+            lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_successor_pressure_install_decided; session_id=sess_a; transfer_id={installTransferId}; direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=3; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn; repair_request_key={repairKey}; frontier_chunk_index=372; decision_generation=3; authority_id={successorAuthorityId}; receipt_authority_id={successorAuthorityId}; predecessor_authority_id={installPredecessor}; retained_predecessor_authority_id={installPredecessor}; install_generation=1; install_status=Installed; decision_reason=successor_pressure_installed"));
+        }
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_contract_settled; authority_schema=2; authority_id={predecessorAuthorityId}; successor_authority_id={successorAuthorityId}; repair_request_key={repairKey}; settlement_outcome=Superseded; dispatch_observed=0; decision_reason=coordinator_successor_authorized"));
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_settlement_accepted; source=nkn_bridge_pressure; stage=settlement; session_id=sess_a; transfer_id={transferId}; direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=0; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn; repair_request_key={repairKey}; frontier_chunk_index=372; durable_received_highest_chunk_index=371; requested_chunk_count=12; decision_generation=2; authority_id={predecessorAuthorityId}; successor_authority_id={successorAuthorityId}; current_successor_authority_id={successorAuthorityId}; outcome=Superseded; pressure_pending_repair_count=12; cleared_predecessor=1; cleared_pressure=0; decision_reason=coordinator_successor_authorized"));
+        if (!installBeforeRejection)
+        {
+            lines.Add(LogLine($"event=successor_pressure_fixture_noise; transfer_id={transferId}; session_id=sess_a; ordinal=2790"));
+        }
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_contract_settled; authority_schema=2; authority_id={successorAuthorityId}; successor_authority_id=(none); repair_request_key={repairKey}; settlement_outcome=SettledStalled; dispatch_observed=0; decision_reason=repeated_frontier_repair_without_progress_settled"));
+        if (installBeforeRejection)
+        {
+            lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_settlement_accepted; source=nkn_bridge_pressure; stage=settlement; session_id=sess_a; transfer_id={transferId}; direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=3; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn; repair_request_key={repairKey}; frontier_chunk_index=372; durable_received_highest_chunk_index=725; requested_chunk_count=12; decision_generation=3; authority_id={successorAuthorityId}; outcome=settled_stalled; pressure_pending_repair_count=12; pressure_reason=regular_v4_frontier_repair_successor_authorized; cleared_pressure=1; decision_reason=repeated_frontier_repair_without_progress_settled"));
+            lines.Add(LogLine($"event=runtime_unlock_regular_v4_frontier_repair_settlement_handoff_adopted; authority_id={successorAuthorityId}; successor_authority_id=(none); session_id=sess_a; transfer_id={transferId}; direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; settlement_bridge_decision_generation=3; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn; repair_request_key={repairKey}; frontier_chunk_index=372; durable_received_highest_chunk_index=725; requested_chunk_count=12; settlement_decision_generation=3; settlement_outcome=settled_stalled; handoff_disposition=Adopted; decision_reason=adopted_by_receive_recovery"));
+        }
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_settlement_rejected; source=nkn_bridge_pressure; stage=settlement; session_id=sess_a; transfer_id={transferId}; direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=3; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn; repair_request_key={repairKey}; frontier_chunk_index=372; durable_received_highest_chunk_index=725; requested_chunk_count=12; decision_generation=3; authority_id={successorAuthorityId}; predecessor_authority_id={predecessorAuthorityId}; retained_predecessor_authority_id={predecessorAuthorityId}; outcome=settled_stalled; pressure_pending_repair_count=0; pressure_reason=none; cleared_pressure=0; rejection_reason=regular_v4_frontier_repair_pressure_missing; decision_reason=regular_v4_frontier_repair_pressure_missing"));
+        return lines;
+    }
+
     private static List<string> BuildRegularV4PeerSilenceReplaySettledMissingDispatchFixture(string transferId)
     {
         const string firstKey = "regular_v4_peer_silence_safety_replay:0:0:64:1";

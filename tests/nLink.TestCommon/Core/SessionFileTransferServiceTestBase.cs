@@ -153,7 +153,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         return builder.ToString();
     }
 
-    protected class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRegularV4FrontierRepairSettlementObserver, IFileTransferRouteCompletionObserver, IFileTransferRouteHintObserver, ITransportAccelerationStatus, IFileTransferSessionContextProvider, IFileTransferInitialTunaReadinessProvider, IRuntimeUnlockRouteCommitProofProvider
+    protected class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRegularV4FrontierRepairPressureInstallBridge, IFileTransferRegularV4FrontierRepairSettlementObserver, IFileTransferRouteCompletionObserver, IFileTransferRouteHintObserver, ITransportAccelerationStatus, IFileTransferSessionContextProvider, IFileTransferInitialTunaReadinessProvider, IRuntimeUnlockRouteCommitProofProvider
     {
         private readonly string sessionId;
         private readonly ConcurrentDictionary<string, LoopbackDataSession> dataSessions = new(StringComparer.Ordinal);
@@ -161,6 +161,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         private int activeDataSessionSends;
         private int maxConcurrentDataSessionSends;
         private int dataSessionSendCount;
+        private long regularV4PressureInstallGeneration;
         private bool shouldUseFileTransferV6ForAcceleration;
         private bool isFileTunaActiveForRouteSelection;
         public LoopbackFileTransferTransport(string sessionId)
@@ -227,6 +228,8 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public ConcurrentQueue<FileTransferReceiveRecoveryRequest> ReceiveRecoveryRequests { get; } = [];
         public ConcurrentQueue<FileTransferRegularV4ControlFeedbackPressure> RegularV4ControlFeedbackPressures { get; } = [];
         public ConcurrentQueue<FileTransferRegularV4FrontierRepairSettlement> RegularV4FrontierRepairSettlements { get; } = [];
+        internal ConcurrentQueue<FileTransferRegularV4FrontierRepairPressureInstallReceipt> RegularV4PressureInstallReceipts { get; } = [];
+        internal Func<FileTransferRegularV4ControlFeedbackPressure, FileTransferRegularV4FrontierRepairPressureInstallReceipt>? RegularV4PressureInstallOverride { get; set; }
         public ConcurrentQueue<FileTransferRouteCompletedNotification> RouteCompletionNotifications { get; } = [];
         public ConcurrentQueue<FileTransferRouteHintNotification> ObservedRouteHints { get; } = [];
         public ConcurrentQueue<string> RuntimeUnlockProbeEvents { get; } = [];
@@ -351,6 +354,61 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
 
         public void ObserveRegularV4ControlFeedbackPressure(FileTransferRegularV4ControlFeedbackPressure pressure)
             => RegularV4ControlFeedbackPressures.Enqueue(pressure);
+
+        FileTransferRegularV4FrontierRepairPressureInstallReceipt IFileTransferRegularV4FrontierRepairPressureInstallBridge.InstallRegularV4FrontierRepairPressure(
+            FileTransferRegularV4ControlFeedbackPressure pressure)
+        {
+            RegularV4ControlFeedbackPressures.Enqueue(pressure);
+            var installGeneration = Interlocked.Increment(ref regularV4PressureInstallGeneration);
+            var authority = pressure.RepairAuthority;
+            FileTransferRegularV4FrontierRepairPressureInstallReceipt receipt;
+            if (RegularV4PressureInstallOverride is { } installOverride)
+            {
+                receipt = installOverride(pressure);
+            }
+            else if (authority is null ||
+                     authority.PredecessorAuthorityId is not { IsDefault: false })
+            {
+                receipt = new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                    authority ?? new FileTransferRegularV4FrontierRepairAuthority(
+                        pressure.SessionId,
+                        pressure.TransferId,
+                        FileTransferDirection.Outbound,
+                        FileTransferRouteResolver.RegularNknV4FastToken,
+                        FileTransferProtocol.ProtocolVersionV4,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        null,
+                        "(none)",
+                        0,
+                        -1,
+                        Math.Max(0, pressure.PendingRepairCount),
+                        0,
+                        pressure.Reason),
+                    FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected,
+                    "regular_v4_frontier_repair_pressure_install_predecessor_missing",
+                    installGeneration,
+                    pressure.Reason);
+            }
+            else
+            {
+                receipt = new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                    authority,
+                    FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
+                    "regular_v4_frontier_repair_pressure_installed",
+                    installGeneration,
+                    pressure.Reason);
+            }
+
+            RegularV4PressureInstallReceipts.Enqueue(receipt);
+            return receipt;
+        }
 
         public void ObserveRegularV4FrontierRepairSettlement(FileTransferRegularV4FrontierRepairSettlement settlement)
             => RegularV4FrontierRepairSettlements.Enqueue(settlement);
