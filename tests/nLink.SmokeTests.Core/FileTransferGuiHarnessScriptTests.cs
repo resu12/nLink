@@ -493,6 +493,116 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeLogLedger_TracksOnlyCurrentRunWritersAcrossInterleavingAndDetectsWriterCorruption()
+    {
+        var helperPath = Path.Combine(FindRepoRoot(), "tools", "GuiSmokeLogLedger.ps1")
+            .Replace("'", "''", StringComparison.Ordinal);
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            . '{{helperPath}}'
+
+            $env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID = 'acceptance-current'
+            $env:NLINK_FILETRANSFER_SCENARIO_RUN_ID = 'acceptance-current:scenario:1'
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-ledger-writers-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $utf8 = [Text.UTF8Encoding]::new($false)
+                $nl = [Environment]::NewLine
+                $active = Join-Path $tempRoot 'nlink.log'
+                $historical = '[old] event=operational_log_writer_started; acceptance_run_id=acceptance-old; scenario_run_id=acceptance-old:scenario:1; log_writer_id=old; log_writer_sequence=7'
+                $a1 = '[a] event=operational_log_writer_started; acceptance_run_id=acceptance-current; scenario_run_id=acceptance-current:scenario:1; log_writer_id=writer-a; log_writer_sequence=1'
+                $a2 = '[a] event=a2; log_writer_id=writer-a; log_writer_sequence=2'
+                [IO.File]::WriteAllText($active, (@($historical, $a1, $a2) -join $nl) + $nl, $utf8)
+
+                $state = New-GuiSmokeLogLedgerState -MaxLines 30 -MaxGenerations 5
+                Sync-GuiSmokeLogLedger -State $state -Paths @($active)
+                $initial = Get-GuiSmokeLogLedgerSnapshot -State $state
+                Set-GuiSmokeLogLedgerWriterEvidenceBookmark -State $state -Bookmark $initial.lineCount
+                if (@($initial.writers).Count -ne 1 -or $initial.writers[0].writerId -ne 'writer-a' -or $initial.writers[0].lastSequence -ne 2) {
+                    throw 'current-run initial writer snapshot mismatch'
+                }
+
+                $b1 = '[b] event=operational_log_writer_started; acceptance_run_id=acceptance-current; scenario_run_id=acceptance-current:scenario:1; log_writer_id=writer-b; log_writer_sequence=1'
+                $a3 = '[a] event=a3; log_writer_id=writer-a; log_writer_sequence=3'
+                $b2 = '[b] event=b2; log_writer_id=writer-b; log_writer_sequence=2'
+                [IO.File]::AppendAllText($active, (@($b1, $a3, $b2) -join $nl) + $nl, $utf8)
+                Sync-GuiSmokeLogLedger -State $state -Paths @($active)
+                $final = Get-GuiSmokeLogLedgerSnapshot -State $state
+                $diagnostics = Get-GuiSmokeLogLedgerDiagnostics -State $state
+                if (@($final.writers).Count -ne 2 -or
+                    $diagnostics.WriterGapCount -ne 0 -or
+                    $diagnostics.WriterDuplicateCount -ne 0 -or
+                    $diagnostics.WriterIdentityMismatchCount -ne 0) {
+                    throw 'valid interleaved writers failed integrity'
+                }
+                if (-not (Test-GuiSmokeLogLedgerWriterSnapshotMonotonicSubset -InitialWriters $initial.writers -FinalWriters $final.writers)) {
+                    throw 'writer snapshots were not monotonic'
+                }
+
+                $gapPath = Join-Path $tempRoot 'gap.log'
+                [IO.File]::WriteAllText($gapPath, (@($a1, '[a] event=a3; log_writer_id=writer-a; log_writer_sequence=3') -join $nl) + $nl, $utf8)
+                $gapState = New-GuiSmokeLogLedgerState
+                Sync-GuiSmokeLogLedger -State $gapState -Paths @($gapPath)
+                if ((Get-GuiSmokeLogLedgerDiagnostics -State $gapState).WriterGapCount -ne 1) { throw 'writer gap was not detected' }
+
+                $duplicatePath = Join-Path $tempRoot 'duplicate.log'
+                [IO.File]::WriteAllText($duplicatePath, (@($a1, $a2, $a2) -join $nl) + $nl, $utf8)
+                $duplicateState = New-GuiSmokeLogLedgerState
+                Sync-GuiSmokeLogLedger -State $duplicateState -Paths @($duplicatePath)
+                if ((Get-GuiSmokeLogLedgerDiagnostics -State $duplicateState).WriterDuplicateCount -ne 1) { throw 'writer duplicate was not detected' }
+
+                $invalidStartPath = Join-Path $tempRoot 'invalid-start.log'
+                $invalidStart = '[a] event=operational_log_writer_started; acceptance_run_id=acceptance-current; scenario_run_id=acceptance-current:scenario:1; log_writer_id=writer-a; log_writer_sequence=2'
+                [IO.File]::WriteAllText($invalidStartPath, $invalidStart + $nl, $utf8)
+                $invalidStartState = New-GuiSmokeLogLedgerState
+                Sync-GuiSmokeLogLedger -State $invalidStartState -Paths @($invalidStartPath)
+                $invalidDiagnostics = Get-GuiSmokeLogLedgerDiagnostics -State $invalidStartState
+                if ($invalidDiagnostics.WriterGapCount -ne 1 -or $invalidDiagnostics.WriterIdentityMismatchCount -ne 1) { throw 'invalid writer start was not rejected' }
+
+                $orphanPath = Join-Path $tempRoot 'orphan.log'
+                [IO.File]::WriteAllText($orphanPath, $historical + $nl, $utf8)
+                $orphanState = New-GuiSmokeLogLedgerState
+                Sync-GuiSmokeLogLedger -State $orphanState -Paths @($orphanPath)
+                if ((Get-GuiSmokeLogLedgerDiagnostics -State $orphanState).WriterIdentityMismatchCount -ne 0) { throw 'historical pre-bookmark orphan was rejected' }
+                Set-GuiSmokeLogLedgerWriterEvidenceBookmark -State $orphanState -Bookmark (Get-GuiSmokeLogLedgerBookmark -State $orphanState)
+                [IO.File]::AppendAllText($orphanPath, '[lost-start] event=after; log_writer_id=writer-lost; log_writer_sequence=2' + $nl, $utf8)
+                Sync-GuiSmokeLogLedger -State $orphanState -Paths @($orphanPath)
+                if ((Get-GuiSmokeLogLedgerDiagnostics -State $orphanState).WriterIdentityMismatchCount -ne 1) { throw 'post-bookmark writer without a start event was accepted' }
+
+                $wrongIdentityPath = Join-Path $tempRoot 'wrong-identity.log'
+                [IO.File]::WriteAllText($wrongIdentityPath, '', $utf8)
+                $wrongIdentityState = New-GuiSmokeLogLedgerState
+                Sync-GuiSmokeLogLedger -State $wrongIdentityState -Paths @($wrongIdentityPath)
+                Set-GuiSmokeLogLedgerWriterEvidenceBookmark -State $wrongIdentityState -Bookmark (Get-GuiSmokeLogLedgerBookmark -State $wrongIdentityState)
+                [IO.File]::AppendAllText($wrongIdentityPath, '[wrong] event=operational_log_writer_started; acceptance_run_id=acceptance-other; scenario_run_id=acceptance-other:scenario:1; log_writer_id=writer-wrong; log_writer_sequence=1' + $nl, $utf8)
+                Sync-GuiSmokeLogLedger -State $wrongIdentityState -Paths @($wrongIdentityPath)
+                if ((Get-GuiSmokeLogLedgerDiagnostics -State $wrongIdentityState).WriterIdentityMismatchCount -ne 1) { throw 'post-bookmark writer with the wrong run identity was accepted' }
+
+                $untaggedPath = Join-Path $tempRoot 'mixed-untagged.log'
+                [IO.File]::WriteAllText($untaggedPath, $a1 + $nl, $utf8)
+                $untaggedState = New-GuiSmokeLogLedgerState
+                Sync-GuiSmokeLogLedger -State $untaggedState -Paths @($untaggedPath)
+                Set-GuiSmokeLogLedgerWriterEvidenceBookmark -State $untaggedState -Bookmark (Get-GuiSmokeLogLedgerBookmark -State $untaggedState)
+                [IO.File]::AppendAllText($untaggedPath, '[legacy] event=untagged_after_bookmark' + $nl, $utf8)
+                Sync-GuiSmokeLogLedger -State $untaggedState -Paths @($untaggedPath)
+                if ((Get-GuiSmokeLogLedgerDiagnostics -State $untaggedState).WriterIdentityMismatchCount -ne 1) { throw 'post-bookmark untagged line was accepted alongside a valid writer' }
+
+                Write-Output 'gui-log-ledger-writers-ok'
+            }
+            finally {
+                Remove-Item Env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID -ErrorAction SilentlyContinue
+                Remove-Item Env:NLINK_FILETRANSFER_SCENARIO_RUN_ID -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Writer ledger test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-log-ledger-writers-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void GuiSmokeTunaScenario_WritesDurableLogLedgerEvidenceOnce()
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
@@ -512,6 +622,12 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID", guiText, StringComparison.Ordinal);
         Assert.Contains("NLINK_FILETRANSFER_SCENARIO_RUN_ID", guiText, StringComparison.Ordinal);
         Assert.Contains("duplicateIndexCount", guiText, StringComparison.Ordinal);
+        Assert.Contains("writerEvidenceVersion", guiText, StringComparison.Ordinal);
+        Assert.Contains("writerGapCount", guiText, StringComparison.Ordinal);
+        Assert.Contains("writerFailureMarkerFiles", guiText, StringComparison.Ordinal);
+        Assert.Contains("operational_log_write_failed", guiText, StringComparison.Ordinal);
+        Assert.Contains("Wait-GuiSmokeProcessOutputCaptureDrain", guiText, StringComparison.Ordinal);
+        Assert.Contains("-ProcessOutputDrainAction", scenarioBody, StringComparison.Ordinal);
         Assert.Contains("consumedIndexSha256", guiText, StringComparison.Ordinal);
         Assert.Contains("cursorIntegrityVerdict", guiText, StringComparison.Ordinal);
         Assert.Contains("[string]$FileName = 'filetransfer-retained-log-slice.log'", wrapperText, StringComparison.Ordinal);
@@ -520,14 +636,211 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var helpeeStartIndex = scenarioBody.IndexOf("Start-HelpeeFlow -Context $Context", StringComparison.Ordinal);
         var bookmarkIndex = scenarioBody.IndexOf("$runBookmark = Get-AppLogBookmark", StringComparison.Ordinal);
         var initialSnapshotIndex = scenarioBody.IndexOf("$initialLogLedgerSnapshot = Get-GuiSmokeLogLedgerSnapshot", StringComparison.Ordinal);
+        var writerBookmarkIndex = scenarioBody.IndexOf("Set-GuiSmokeLogLedgerWriterEvidenceBookmark", StringComparison.Ordinal);
         var helperStartIndex = scenarioBody.IndexOf("Start-HelperFlow -Context $Context", StringComparison.Ordinal);
         Assert.True(
             helpeeStartIndex >= 0 &&
             bookmarkIndex > helpeeStartIndex &&
             initialSnapshotIndex > bookmarkIndex &&
-            helperStartIndex > initialSnapshotIndex,
+            writerBookmarkIndex > initialSnapshotIndex &&
+            helperStartIndex > writerBookmarkIndex,
             "The Tuna ledger bookmark and initial generation snapshot must be captured after the first app establishes nlink.log and before the helper contributes scenario events.");
         Assert.Contains("gui_smoke_log_cursor_initial_generation_missing", scenarioBody, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeLogLedger_WriterFailureMarkersAreBoundAndScopedToCurrentArtifact()
+    {
+        var repoRoot = FindRepoRoot();
+        var helperPath = Path.Combine(repoRoot, "tools", "GuiSmokeLogLedger.ps1")
+            .Replace("'", "''", StringComparison.Ordinal);
+        var guiText = File.ReadAllText(Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1"));
+        var writerBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Write-FileTransferGuiLogLedgerEvidence",
+            "Write-TunaGuiMilestoneEvidence");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            . '{{helperPath}}'
+            function Write-FileTransferGuiLogLedgerEvidence { {{writerBody}} }
+            function Get-FileSha256Hex {
+                param([string]$Path)
+                $sha = [Security.Cryptography.SHA256]::Create()
+                try { return ([BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($Path))) -replace '-', '').ToLowerInvariant() }
+                finally { $sha.Dispose() }
+            }
+            function Read-AppLogLinesSafe { param([string]$Path) return @(Get-Content -LiteralPath $Path -ErrorAction Stop) }
+            function Sync-GuiSmokeAppLogLedger { Sync-GuiSmokeLogLedger -State $script:GuiSmokeAppLogLedger -Paths @($script:testLogPath) }
+            function Wait-GuiSmokeProcessOutputCaptureDrain { param([object[]]$Processes) Start-Sleep -Milliseconds 50 }
+            function Copy-FileTransferLiveLogSlice {
+                param(
+                    [string]$ArtifactDir,
+                    [int]$Bookmark,
+                    [string]$FileName = 'filetransfer-retained-log-slice.log',
+                    $CapturedLines,
+                    [switch]$WriteOnce,
+                    [switch]$PassThru)
+                $path = Join-Path $ArtifactDir $FileName
+                $lines = @($CapturedLines)
+                $text = if ($lines.Count -gt 0) { ($lines -join [Environment]::NewLine) + [Environment]::NewLine } else { '' }
+                [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($false))
+                if ($PassThru) {
+                    return [pscustomobject]@{ Path = [IO.Path]::GetFullPath($path); Sha256 = Get-FileSha256Hex -Path $path; LineCount = $lines.Count }
+                }
+            }
+
+            $env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID = 'run-current'
+            $env:NLINK_FILETRANSFER_SCENARIO_RUN_ID = 'run-current:scenario:1'
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-ledger-marker-' + [guid]::NewGuid().ToString('N'))
+            $artifactDir = Join-Path $tempRoot 'current'
+            $currentOutput = Join-Path $artifactDir 'process-output'
+            $oldOutput = Join-Path $tempRoot 'old\process-output'
+            [void][IO.Directory]::CreateDirectory($currentOutput)
+            [void][IO.Directory]::CreateDirectory($oldOutput)
+            try {
+                $nl = [Environment]::NewLine
+                $utf8 = [Text.UTF8Encoding]::new($false)
+                $script:testLogPath = Join-Path $tempRoot 'nlink.log'
+                $start = '[app] event=operational_log_writer_started; acceptance_run_id=run-current; scenario_run_id=run-current:scenario:1; log_writer_id=writer-current; log_writer_sequence=1'
+                [IO.File]::WriteAllText($script:testLogPath, $start + $nl, $utf8)
+                $script:GuiSmokeAppLogLedger = New-GuiSmokeLogLedgerState
+                Sync-GuiSmokeAppLogLedger
+                $bookmark = Get-GuiSmokeLogLedgerBookmark -State $script:GuiSmokeAppLogLedger
+                $initial = Get-GuiSmokeLogLedgerSnapshot -State $script:GuiSmokeAppLogLedger -Bookmark $bookmark
+                Set-GuiSmokeLogLedgerWriterEvidenceBookmark -State $script:GuiSmokeAppLogLedger -Bookmark $bookmark
+                [IO.File]::AppendAllText($script:testLogPath, '[app] event=after; log_writer_id=writer-current; log_writer_sequence=2' + $nl, $utf8)
+
+                $currentError = Join-Path $currentOutput 'helper.stderr.log'
+                $oldError = Join-Path $oldOutput 'helper.stderr.log'
+                [IO.File]::WriteAllText($currentError, '', $utf8)
+                [IO.File]::WriteAllText($oldError, 'event=operational_log_write_failed; log_writer_id=writer-old; log_writer_sequence=9; failure_code=io_error' + $nl, $utf8)
+                $script:GuiSmokeProcessOutputFiles = [Collections.Generic.List[string]]::new()
+                $script:GuiSmokeProcessOutputFiles.Add($oldError)
+                $script:GuiSmokeProcessOutputFiles.Add($currentError)
+
+                Write-FileTransferGuiLogLedgerEvidence `
+                    -ArtifactDir $artifactDir `
+                    -Bookmark $bookmark `
+                    -InitialSnapshot $initial `
+                    -ProcessOutputDrainAction {
+                        Start-Sleep -Milliseconds 100
+                        [IO.File]::AppendAllText($script:testLogPath, '[app] event=after_drain_boundary; log_writer_id=writer-current; log_writer_sequence=3' + $nl, $utf8)
+                        [IO.File]::AppendAllText($currentError, 'event=operational_log_write_failed; log_writer_id=writer-current; log_writer_sequence=4; failure_code=mutex_timeout' + $nl, $utf8)
+                    }
+                $ledger = Get-Content -LiteralPath (Join-Path $artifactDir 'filetransfer-gui-log-ledger.json') -Raw | ConvertFrom-Json
+                if ($ledger.writerEvidenceVersion -ne 1 -or
+                    $ledger.writerWriteFailureCount -ne 1 -or
+                    $ledger.writerIntegrityVerdict -ne 'fail' -or
+                    $ledger.cursorIntegrityVerdict -ne 'fail') {
+                    throw 'writer failure did not fail cursor evidence'
+                }
+                if ($ledger.final.writers[0].lastSequence -ne 3 -or
+                    (Get-Content -LiteralPath $ledger.retainedSlice.path -Raw) -notlike '*event=after_drain_boundary*') {
+                    throw 'authoritative final sync did not include a write produced during process drain'
+                }
+                $markers = @(Get-Content -LiteralPath $ledger.writerFailureMarkerFiles[0].path)
+                if ($markers.Count -ne 1 -or $markers[0] -notlike '*writer-current*' -or $markers[0] -like '*writer-old*') {
+                    throw 'writer failure markers were not scoped to the current artifact'
+                }
+
+                $missingArtifactDir = Join-Path $tempRoot 'current-missing-output'
+                $missingOutputRoot = Join-Path $missingArtifactDir 'process-output'
+                [void][IO.Directory]::CreateDirectory($missingOutputRoot)
+                $script:testLogPath = Join-Path $tempRoot 'missing-output-nlink.log'
+                [IO.File]::WriteAllText($script:testLogPath, $start + $nl, $utf8)
+                $script:GuiSmokeAppLogLedger = New-GuiSmokeLogLedgerState
+                Sync-GuiSmokeAppLogLedger
+                $missingBookmark = Get-GuiSmokeLogLedgerBookmark -State $script:GuiSmokeAppLogLedger
+                $missingInitial = Get-GuiSmokeLogLedgerSnapshot -State $script:GuiSmokeAppLogLedger -Bookmark $missingBookmark
+                Set-GuiSmokeLogLedgerWriterEvidenceBookmark -State $script:GuiSmokeAppLogLedger -Bookmark $missingBookmark
+                [IO.File]::AppendAllText($script:testLogPath, '[app] event=after; log_writer_id=writer-current; log_writer_sequence=2' + $nl, $utf8)
+                $presentOutput = Join-Path $missingOutputRoot 'helper.stdout.log'
+                $missingOutput = Join-Path $missingOutputRoot 'helper.stderr.log'
+                [IO.File]::WriteAllText($presentOutput, '', $utf8)
+                $script:GuiSmokeProcessOutputFiles = [Collections.Generic.List[string]]::new()
+                $script:GuiSmokeProcessOutputFiles.Add($presentOutput)
+                $script:GuiSmokeProcessOutputFiles.Add($missingOutput)
+                Write-FileTransferGuiLogLedgerEvidence `
+                    -ArtifactDir $missingArtifactDir `
+                    -Bookmark $missingBookmark `
+                    -InitialSnapshot $missingInitial
+                $missingLedger = Get-Content -LiteralPath (Join-Path $missingArtifactDir 'filetransfer-gui-log-ledger.json') -Raw | ConvertFrom-Json
+                if ($missingLedger.writerFailureMarkerFiles.Count -ne 1 -or
+                    $missingLedger.writerWriteFailureCount -ne 0 -or
+                    $missingLedger.writerIntegrityVerdict -ne 'fail' -or
+                    $missingLedger.cursorIntegrityVerdict -ne 'fail' -or
+                    @($missingLedger.writerIntegrityReasons | Where-Object { $_ -like 'writer_output_registered_file_missing:*' }).Count -ne 1) {
+                    throw 'one missing registered output file did not fail otherwise-valid writer evidence'
+                }
+                Write-Output 'gui-log-ledger-marker-ok'
+            }
+            finally {
+                Remove-Item Env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID -ErrorAction SilentlyContinue
+                Remove-Item Env:NLINK_FILETRANSFER_SCENARIO_RUN_ID -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Writer marker test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-log-ledger-marker-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeLogLedger_ProcessOutputDrainWaitsForDelayedStderrCallback()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var drainBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Wait-GuiSmokeProcessOutputCaptureDrain",
+            "Copy-AppLogsIfPresent");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Wait-GuiSmokeProcessOutputCaptureDrain { {{drainBody}} }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-ledger-drain-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $stderrPath = Join-Path $tempRoot 'delayed.stderr.log'
+                $childScriptPath = Join-Path $tempRoot 'emit-delayed-stderr.ps1'
+                [IO.File]::WriteAllText($stderrPath, '', [Text.UTF8Encoding]::new($false))
+                [IO.File]::WriteAllText($childScriptPath, "Start-Sleep -Milliseconds 150; [Console]::Error.WriteLine('event=operational_log_write_failed; log_writer_id=writer-delayed; log_writer_sequence=9; failure_code=io_error')", [Text.UTF8Encoding]::new($false))
+                $script:GuiSmokeProcessOutputFiles = [Collections.Generic.List[string]]::new()
+                $script:GuiSmokeProcessOutputFiles.Add($stderrPath)
+
+                $startInfo = [Diagnostics.ProcessStartInfo]::new()
+                $startInfo.FileName = (Get-Process -Id $PID).Path
+                $startInfo.UseShellExecute = $false
+                $startInfo.RedirectStandardError = $true
+                $startInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $childScriptPath + '"'
+                $process = [Diagnostics.Process]::Start($startInfo)
+                Register-ObjectEvent -InputObject $process -EventName ErrorDataReceived -MessageData $stderrPath -Action {
+                    if ($null -ne $EventArgs.Data) {
+                        [IO.File]::AppendAllText([string]$Event.MessageData, $EventArgs.Data + [Environment]::NewLine, [Text.Encoding]::UTF8)
+                    }
+                } | Out-Null
+                $process.BeginErrorReadLine()
+
+                Wait-GuiSmokeProcessOutputCaptureDrain -Processes @($process) -TimeoutMs 5000 -QuietPeriodMs 250
+                if ([IO.File]::ReadAllText($stderrPath) -notlike '*writer-delayed*') {
+                    throw 'delayed stderr callback was not drained before snapshot boundary'
+                }
+                Write-Output 'gui-log-ledger-drain-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Writer drain test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-log-ledger-drain-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]

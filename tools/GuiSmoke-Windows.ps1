@@ -1189,6 +1189,62 @@ function Read-GuiSmokeProcessOutputLinesSnapshot {
     return $lines.ToArray()
 }
 
+function Wait-GuiSmokeProcessOutputCaptureDrain {
+    param(
+        [AllowEmptyCollection()][object[]]$Processes = @(),
+        [int]$TimeoutMs = 5000,
+        [int]$QuietPeriodMs = 500
+    )
+
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    foreach ($process in @($Processes)) {
+        if ($null -eq $process) {
+            continue
+        }
+
+        $remainingMs = [Math]::Max(1, $TimeoutMs - [int]$stopwatch.ElapsedMilliseconds)
+        if (-not $process.HasExited -and -not $process.WaitForExit($remainingMs)) {
+            throw "process_output_eof_timeout:process_id=$($process.Id)"
+        }
+
+        # The parameterless overload waits for redirected asynchronous output
+        # handlers to receive EOF after the process has exited.
+        $process.WaitForExit()
+    }
+
+    $lastFingerprint = ''
+    $stableSinceMs = -1L
+    while ($stopwatch.ElapsedMilliseconds -lt $TimeoutMs) {
+        $fingerprintParts = New-Object System.Collections.Generic.List[string]
+        foreach ($path in @($script:GuiSmokeProcessOutputFiles | Sort-Object -Unique)) {
+            if ([string]::IsNullOrWhiteSpace([string]$path) -or -not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                continue
+            }
+
+            $item = Get-Item -LiteralPath $path -Force
+            $fingerprintParts.Add(('{0}|{1}|{2}' -f $item.FullName, $item.Length, $item.LastWriteTimeUtc.Ticks)) | Out-Null
+        }
+
+        $fingerprint = [string]::Join(';', $fingerprintParts)
+        if ([string]::Equals($fingerprint, $lastFingerprint, [System.StringComparison]::Ordinal)) {
+            if ($stableSinceMs -lt 0) {
+                $stableSinceMs = $stopwatch.ElapsedMilliseconds
+            }
+            elseif (($stopwatch.ElapsedMilliseconds - $stableSinceMs) -ge $QuietPeriodMs) {
+                return
+            }
+        }
+        else {
+            $lastFingerprint = $fingerprint
+            $stableSinceMs = $stopwatch.ElapsedMilliseconds
+        }
+
+        Start-Sleep -Milliseconds 50
+    }
+
+    throw 'process_output_capture_drain_timeout'
+}
+
 function Copy-AppLogsIfPresent {
     param([Parameter(Mandatory = $true)][string]$ArtifactDir)
     $logsDir = Join-Path $env:LOCALAPPDATA 'nLink\logs'
@@ -2669,7 +2725,8 @@ function Write-FileTransferGuiLogLedgerEvidence {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
         [Parameter(Mandatory = $true)][int]$Bookmark,
-        [Parameter(Mandatory = $true)]$InitialSnapshot
+        [Parameter(Mandatory = $true)]$InitialSnapshot,
+        [AllowNull()][scriptblock]$ProcessOutputDrainAction = $null
     )
 
     $finalizationErrors = New-Object System.Collections.Generic.List[string]
@@ -2677,6 +2734,20 @@ function Write-FileTransferGuiLogLedgerEvidence {
     $analyzerInput = $null
     $finalSnapshot = $null
     $capturedLines = @()
+    $processOutputDrainFailure = ''
+    if ($null -ne $ProcessOutputDrainAction) {
+        try {
+            [object[]]$drainProcesses = @(& $ProcessOutputDrainAction)
+            Wait-GuiSmokeProcessOutputCaptureDrain -Processes $drainProcesses
+        }
+        catch {
+            $processOutputDrainFailure = "process_output_drain_failed:$($_.Exception.Message)"
+            $finalizationErrors.Add($processOutputDrainFailure) | Out-Null
+        }
+    }
+
+    # The authoritative log boundary must be captured only after all scenario
+    # writers have stopped and their redirected output has reached EOF.
     try {
         Sync-GuiSmokeAppLogLedger
         $finalSnapshot = Get-GuiSmokeLogLedgerSnapshot `
@@ -2720,14 +2791,147 @@ function Write-FileTransferGuiLogLedgerEvidence {
     }
     $diagnostics = Get-GuiSmokeLogLedgerDiagnostics -State $script:GuiSmokeAppLogLedger
     $integrityReasons = New-Object System.Collections.Generic.List[string]
+    $writerIntegrityReasons = New-Object System.Collections.Generic.List[string]
     foreach ($errorText in @($finalizationErrors.ToArray())) {
         $integrityReasons.Add([string]$errorText) | Out-Null
+    }
+    if (-not [string]::IsNullOrWhiteSpace($processOutputDrainFailure)) {
+        $writerIntegrityReasons.Add($processOutputDrainFailure) | Out-Null
     }
 
     foreach ($snapshotReason in @(Get-GuiSmokeLogLedgerSnapshotIntegrityReasons `
             -InitialSnapshot $InitialSnapshot `
             -FinalSnapshot $finalSnapshot)) {
         $integrityReasons.Add([string]$snapshotReason) | Out-Null
+    }
+
+    $expectedAcceptanceRunId = if ([string]::IsNullOrWhiteSpace([string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID)) { '(none)' } else { [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID }
+    $expectedScenarioRunId = if ([string]::IsNullOrWhiteSpace([string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID)) { '(none)' } else { [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID }
+    $writerIdentityMismatchCount = [long]$diagnostics.WriterIdentityMismatchCount
+    $initialWriters = @()
+    if ($null -ne $InitialSnapshot.PSObject.Properties['writers']) {
+        $initialWriters = @($InitialSnapshot.writers)
+    }
+    $finalWriters = @()
+    if ($null -ne $finalSnapshot.PSObject.Properties['writers']) {
+        $finalWriters = @($finalSnapshot.writers)
+    }
+    foreach ($writer in $finalWriters) {
+        if (-not [string]::Equals([string]$writer.acceptanceRunId, $expectedAcceptanceRunId, [System.StringComparison]::Ordinal) -or
+            -not [string]::Equals([string]$writer.scenarioRunId, $expectedScenarioRunId, [System.StringComparison]::Ordinal)) {
+            $writerIdentityMismatchCount++
+        }
+    }
+    if ($finalWriters.Count -eq 0) {
+        $writerIntegrityReasons.Add('final_writer_snapshot_missing') | Out-Null
+    }
+    if ([long]$diagnostics.WriterGapCount -ne 0) {
+        $writerIntegrityReasons.Add('writer_sequence_gap_observed') | Out-Null
+    }
+    if ([long]$diagnostics.WriterDuplicateCount -ne 0) {
+        $writerIntegrityReasons.Add('writer_sequence_duplicate_observed') | Out-Null
+    }
+    if ($writerIdentityMismatchCount -ne 0) {
+        $writerIntegrityReasons.Add('writer_identity_mismatch_observed') | Out-Null
+    }
+
+    $writerFailureMarkerFiles = New-Object System.Collections.Generic.List[object]
+    $writerWriteFailureCount = 0L
+    $currentProcessOutputRoot = [System.IO.Path]::GetFullPath((Join-Path $ArtifactDir 'process-output')).TrimEnd([char[]]@([char]'\', [char]'/')) + [System.IO.Path]::DirectorySeparatorChar
+    $writerOutputSnapshotRoot = Join-Path $ArtifactDir 'filetransfer-gui-log-writer-output-snapshots'
+    [void][System.IO.Directory]::CreateDirectory($writerOutputSnapshotRoot)
+    $writerOutputSnapshotIndex = 0
+    foreach ($outputPath in @($script:GuiSmokeProcessOutputFiles | Sort-Object -Unique)) {
+        if ([string]::IsNullOrWhiteSpace([string]$outputPath)) {
+            continue
+        }
+        $fullOutputPath = [System.IO.Path]::GetFullPath([string]$outputPath)
+        if (-not $fullOutputPath.StartsWith($currentProcessOutputRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        if (-not (Test-Path -LiteralPath $fullOutputPath -PathType Leaf)) {
+            $missingOutputReason = "writer_output_registered_file_missing:$fullOutputPath"
+            $finalizationErrors.Add($missingOutputReason) | Out-Null
+            $integrityReasons.Add($missingOutputReason) | Out-Null
+            $writerIntegrityReasons.Add($missingOutputReason) | Out-Null
+            continue
+        }
+        $sourceStream = $null
+        $snapshotStream = $null
+        try {
+            $shareMode = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+            $sourceStream = [System.IO.FileStream]::new(
+                $fullOutputPath,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                $shareMode)
+            $capturedLength = [long]$sourceStream.Length
+            if ($capturedLength -gt [int]::MaxValue) {
+                throw "writer_output_snapshot_too_large:bytes=$capturedLength"
+            }
+            $capturedBytes = New-Object byte[] ([int]$capturedLength)
+            $capturedByteCount = 0
+            while ($capturedByteCount -lt $capturedBytes.Length) {
+                $read = $sourceStream.Read($capturedBytes, $capturedByteCount, $capturedBytes.Length - $capturedByteCount)
+                if ($read -le 0) {
+                    break
+                }
+                $capturedByteCount += $read
+            }
+            if ($capturedByteCount -ne $capturedBytes.Length) {
+                throw "writer_output_snapshot_short_read:expected=$capturedLength;actual=$capturedByteCount"
+            }
+
+            $writerOutputSnapshotIndex++
+            $snapshotName = '{0:D3}-{1}' -f $writerOutputSnapshotIndex, ([System.IO.Path]::GetFileName($fullOutputPath))
+            $snapshotPath = Join-Path $writerOutputSnapshotRoot $snapshotName
+            $snapshotStream = [System.IO.FileStream]::new(
+                $snapshotPath,
+                [System.IO.FileMode]::CreateNew,
+                [System.IO.FileAccess]::Write,
+                [System.IO.FileShare]::None)
+            $snapshotStream.Write($capturedBytes, 0, $capturedBytes.Length)
+            $snapshotStream.Flush($true)
+            $snapshotStream.Dispose()
+            $snapshotStream = $null
+
+            $markerCount = 0L
+            $capturedText = [System.Text.Encoding]::UTF8.GetString($capturedBytes)
+            foreach ($outputLine in @($capturedText -split '\r?\n')) {
+                if ([string]$outputLine -match '(?i)(?:^|[;\s])event=operational_log_write_failed(?:;|$)') {
+                    $markerCount++
+                }
+            }
+            $writerWriteFailureCount += $markerCount
+            $writerFailureMarkerFiles.Add([ordered]@{
+                path = [System.IO.Path]::GetFullPath($snapshotPath)
+                sha256 = Get-FileSha256Hex -Path $snapshotPath
+                markerCount = $markerCount
+            }) | Out-Null
+        }
+        catch {
+            $markerScanFailure = "writer_failure_marker_scan_failed:${outputPath}:$($_.Exception.GetType().Name)"
+            $finalizationErrors.Add($markerScanFailure) | Out-Null
+            $integrityReasons.Add($markerScanFailure) | Out-Null
+            $writerIntegrityReasons.Add($markerScanFailure) | Out-Null
+        }
+        finally {
+            if ($snapshotStream) {
+                $snapshotStream.Dispose()
+            }
+            if ($sourceStream) {
+                $sourceStream.Dispose()
+            }
+        }
+    }
+    if ($writerFailureMarkerFiles.Count -eq 0) {
+        $writerIntegrityReasons.Add('writer_output_snapshot_missing') | Out-Null
+    }
+    if ($writerWriteFailureCount -ne 0) {
+        $writerIntegrityReasons.Add('operational_log_write_failure_observed') | Out-Null
+    }
+    foreach ($writerReason in @($writerIntegrityReasons.ToArray())) {
+        $integrityReasons.Add([string]$writerReason) | Out-Null
     }
     if ([int]$diagnostics.GapCount -ne 0) {
         $integrityReasons.Add('cursor_gap_observed') | Out-Null
@@ -2788,25 +2992,35 @@ function Write-FileTransferGuiLogLedgerEvidence {
         lineCount = [int]$InitialSnapshot.lineCount
         activeGenerationKey = [string]$InitialSnapshot.activeGenerationKey
         generations = @($InitialSnapshot.generations)
+        writers = @($initialWriters)
     }
     $finalEvidence = [ordered]@{
         bookmark = [int]$finalSnapshot.bookmark
         lineCount = [int]$finalSnapshot.lineCount
         activeGenerationKey = [string]$finalSnapshot.activeGenerationKey
         generations = @($finalSnapshot.generations)
+        writers = @($finalWriters)
     }
     $evidence = [ordered]@{
         schemaVersion = 1
         event = 'filetransfer_gui_log_ledger'
-        acceptanceRunId = $(if ([string]::IsNullOrWhiteSpace([string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID)) { '(none)' } else { [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID })
-        scenarioRunId = $(if ([string]::IsNullOrWhiteSpace([string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID)) { '(none)' } else { [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID })
+        acceptanceRunId = $expectedAcceptanceRunId
+        scenarioRunId = $expectedScenarioRunId
         ledgerId = [string]$finalSnapshot.ledgerId
+        writerEvidenceVersion = 1
         initial = $initialEvidence
         final = $finalEvidence
         rotationCount = [int]$diagnostics.RotationCount
         transientRescanCount = [int]$diagnostics.TransientRescanCount
         gapCount = [int]$diagnostics.GapCount
         duplicateIndexCount = [int]$diagnostics.DuplicateIndexCount
+        writerGapCount = [long]$diagnostics.WriterGapCount
+        writerDuplicateCount = [long]$diagnostics.WriterDuplicateCount
+        writerIdentityMismatchCount = $writerIdentityMismatchCount
+        writerWriteFailureCount = $writerWriteFailureCount
+        writerIntegrityVerdict = $(if ($writerIntegrityReasons.Count -eq 0) { 'pass' } else { 'fail' })
+        writerIntegrityReasons = @($writerIntegrityReasons.ToArray() | Select-Object -Unique)
+        writerFailureMarkerFiles = @($writerFailureMarkerFiles.ToArray())
         consumedIndexCount = [int]$diagnostics.ConsumedIndexCount
         consumedIndexSha256 = [string]$diagnostics.ConsumedIndexSha256
         consumedIndexRanges = @($diagnostics.ConsumedIndexRanges)
@@ -2816,7 +3030,7 @@ function Write-FileTransferGuiLogLedgerEvidence {
         retainedSlice = $retainedSliceEvidence
         analyzerInput = $analyzerInputEvidence
         cursorIntegrityVerdict = $(if ($integrityReasons.Count -eq 0) { 'pass' } else { 'fail' })
-        cursorIntegrityReasons = @($integrityReasons.ToArray())
+        cursorIntegrityReasons = @($integrityReasons.ToArray() | Select-Object -Unique)
     }
 
     $path = Join-Path $ArtifactDir 'filetransfer-gui-log-ledger.json'
@@ -9141,6 +9355,7 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
         activeGenerationKey = ''
         generations = @()
         initialGenerations = @()
+        writers = @()
     }
 
     Write-Host ("[GUI Smoke][filetransfer_tuna] artifact_dir={0}; state_root={1}; direction={2}; payer={3}; fault={4}; route_mode={5}; payload_bytes={6}; mixed_screenshare={7}" -f `
@@ -9161,6 +9376,9 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
         Start-HelpeeFlow -Context $Context
         $runBookmark = Get-AppLogBookmark
         $initialLogLedgerSnapshot = Get-GuiSmokeLogLedgerSnapshot `
+            -State $script:GuiSmokeAppLogLedger `
+            -Bookmark $runBookmark
+        Set-GuiSmokeLogLedgerWriterEvidenceBookmark `
             -State $script:GuiSmokeAppLogLedger `
             -Bookmark $runBookmark
         if ([string]::IsNullOrWhiteSpace([string]$initialLogLedgerSnapshot.activeGenerationKey) -or
@@ -9241,7 +9459,12 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
         Write-FileTransferGuiLogLedgerEvidence `
             -ArtifactDir $artifactDir `
             -Bookmark $runBookmark `
-            -InitialSnapshot $initialLogLedgerSnapshot
+            -InitialSnapshot $initialLogLedgerSnapshot `
+            -ProcessOutputDrainAction {
+                $processesToDrain = @($Context.Processes.ToArray())
+                Cleanup-Processes -Processes $processesToDrain -ExePath $Context.ExePath
+                return $processesToDrain
+            }
         if ($null -eq $previousInboundRoot) {
             Remove-Item Env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT -ErrorAction SilentlyContinue
         }

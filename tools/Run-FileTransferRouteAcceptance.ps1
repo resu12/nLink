@@ -236,6 +236,16 @@ function Write-RouteAcceptanceFakeCursorEvidence {
         @()
     }
     $consumedIndexSha256 = Get-RouteAcceptanceEvidenceTextSha256 -Value ($consumedIdentities -join [char]31)
+    $writerFailureMarkerPath = Join-Path $artifactDir 'filetransfer-gui-log-writer-failure-markers.log'
+    [System.IO.File]::WriteAllText($writerFailureMarkerPath, '', [System.Text.UTF8Encoding]::new($false))
+    $fakeWriter = [ordered]@{
+        writerId = 'fake-writer'
+        acceptanceRunId = $script:RouteAcceptanceRunId
+        scenarioRunId = [string]$Attempt.ScenarioRunId
+        firstSequence = 1
+        lastSequence = 1
+        observedCount = 1
+    }
     $ledger = [ordered]@{
         schemaVersion = 1
         event = 'filetransfer_gui_log_ledger'
@@ -248,6 +258,7 @@ function Write-RouteAcceptanceFakeCursorEvidence {
             lineCount = 0
             activeGenerationKey = $generationKey
             generations = @([ordered]@{ generationKey = $generationKey; lineCount = 0; consumedLineCount = 0; consumedByteOffset = 0 })
+            writers = @()
         }
         final = [ordered]@{
             ledgerId = $ledgerId
@@ -255,11 +266,24 @@ function Write-RouteAcceptanceFakeCursorEvidence {
             lineCount = $lineCount
             activeGenerationKey = $generationKey
             generations = @([ordered]@{ generationKey = $generationKey; lineCount = $lineCount; consumedLineCount = $lineCount; consumedByteOffset = $byteCount })
+            writers = @($fakeWriter)
         }
         rotationCount = 0
         transientRescanCount = 0
         gapCount = 0
         duplicateIndexCount = 0
+        writerEvidenceVersion = 1
+        writerGapCount = 0
+        writerDuplicateCount = 0
+        writerIdentityMismatchCount = 0
+        writerWriteFailureCount = 0
+        writerIntegrityVerdict = 'pass'
+        writerIntegrityReasons = @()
+        writerFailureMarkerFiles = @([ordered]@{
+            path = [System.IO.Path]::GetFullPath($writerFailureMarkerPath)
+            sha256 = Get-RouteAcceptanceEvidenceSha256 -Path $writerFailureMarkerPath
+            markerCount = 0
+        })
         consumedIndexCount = $lineCount
         consumedIndexSha256 = $consumedIndexSha256
         consumedIndexRanges = @([ordered]@{
@@ -322,10 +346,20 @@ function Set-RouteAcceptanceResultEvidence {
     } | Select-Object -First 1)
     if ($selectedAttempt.Count -gt 0) {
         $Result.cursorIntegrityVerdict = ([string]$selectedAttempt[0].logLedger.cursorIntegrityVerdict).ToLowerInvariant()
+        $Result.writerIntegrityVerdict = ([string]$selectedAttempt[0].logLedger.writerIntegrityVerdict).ToLowerInvariant()
+        $Result.writerGapCount = [long]$selectedAttempt[0].logLedger.writerGapCount
+        $Result.writerDuplicateCount = [long]$selectedAttempt[0].logLedger.writerDuplicateCount
+        $Result.writerIdentityMismatchCount = [long]$selectedAttempt[0].logLedger.writerIdentityMismatchCount
+        $Result.writerWriteFailureCount = [long]$selectedAttempt[0].logLedger.writerWriteFailureCount
         $cursorReasons = @($selectedAttempt[0].logLedger.cursorIntegrityReasons | ForEach-Object { [string]$_ })
     }
     else {
         $Result.cursorIntegrityVerdict = 'missing'
+        $Result.writerIntegrityVerdict = 'missing'
+        $Result.writerGapCount = 0L
+        $Result.writerDuplicateCount = 0L
+        $Result.writerIdentityMismatchCount = 0L
+        $Result.writerWriteFailureCount = 0L
         $cursorReasons = @('cursor_evidence_missing')
     }
 
@@ -918,6 +952,11 @@ function New-RouteAcceptanceRunResult {
         provenanceVerdict = 'missing'
         provenanceFailureReasons = @()
         cursorIntegrityVerdict = 'missing'
+        writerIntegrityVerdict = 'missing'
+        writerGapCount = 0L
+        writerDuplicateCount = 0L
+        writerIdentityMismatchCount = 0L
+        writerWriteFailureCount = 0L
         currentRuntimeProof = $false
         currentRuntimeProofReasons = @('manifest_missing')
         transferEvidenceStatus = 'not_started'
@@ -938,6 +977,11 @@ function New-RouteAcceptanceRunResult {
         regularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount = 0
         regularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount = 0
         regularV4FrontierRepairSuccessorPressureInstallVerdict = 'none'
+        regularV4FrontierRepairSettlementDispositionUnverifiableRawCount = 0
+        regularV4FrontierRepairSettlementDispositionUnverifiableDistinctCount = 0
+        regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount = 0
+        regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount = 0
+        regularV4FrontierRepairSettlementDispositionVerdict = 'none'
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount = 0
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount = 0
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = 0
@@ -2390,6 +2434,11 @@ function Assert-Phase4OperatorVerdict {
     $Result.regularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count' -DefaultValue '0')
     $Result.regularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count' -DefaultValue '0')
     $Result.regularV4FrontierRepairSuccessorPressureInstallVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_successor_pressure_install_verdict' -DefaultValue 'none'
+    $Result.regularV4FrontierRepairSettlementDispositionUnverifiableRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_settlement_disposition_unverifiable_raw_count' -DefaultValue '0')
+    $Result.regularV4FrontierRepairSettlementDispositionUnverifiableDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_settlement_disposition_unverifiable_distinct_count' -DefaultValue '0')
+    $Result.regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_settlement_disposition_unverifiable_recovered_count' -DefaultValue '0')
+    $Result.regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_settlement_disposition_unverifiable_unresolved_count' -DefaultValue '0')
+    $Result.regularV4FrontierRepairSettlementDispositionVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_settlement_disposition_verdict' -DefaultValue 'none'
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count' -DefaultValue '0')
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_distinct_count' -DefaultValue '0')
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count' -DefaultValue '0')
@@ -3955,6 +4004,38 @@ function Write-RouteAcceptanceFakePhase4Run {
             $reportPath = Join-Path $ArtifactDir $reportName
             $reportText = Get-Content -LiteralPath $reportPath -Raw
             foreach ($fixtureLine in $successorPressureInstallFixtureLines) {
+                $separatorIndex = $fixtureLine.IndexOf('=')
+                $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
+                $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
+                if ([regex]::IsMatch($reportText, $fixturePattern)) {
+                    $reportText = [regex]::Replace($reportText, $fixturePattern, $fixtureLine)
+                }
+                else {
+                    $reportText = $reportText.TrimEnd("`r", "`n") + [Environment]::NewLine + $fixtureLine + [Environment]::NewLine
+                }
+            }
+            Set-Content -LiteralPath $reportPath -Value $reportText -Encoding UTF8
+        }
+    }
+
+    if (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'REGULAR_V4_SETTLEMENT_DISPOSITION_SUMMARY_FIXTURE') {
+        $settlementDispositionFixtureLines = @(
+            'regular_v4_frontier_repair_settlement_disposition_unverifiable_raw_count=1',
+            'regular_v4_frontier_repair_settlement_disposition_unverifiable_distinct_count=1',
+            'regular_v4_frontier_repair_settlement_disposition_unverifiable_recovered_count=0',
+            'regular_v4_frontier_repair_settlement_disposition_unverifiable_unresolved_count=1',
+            'regular_v4_frontier_repair_settlement_disposition_verdict=fail',
+            'first_proof_chain_failure_class=regular_v4_frontier_repair_settlement_disposition_unverifiable',
+            'first_proof_chain_failure_event=filetransfer_regular_v4_frontier_repair_settlement_accepted',
+            'first_proof_chain_failure_reason=accepted_settlement_disposition_evidence_missing',
+            'first_proof_chain_failure_sequence=5298',
+            'first_proof_chain_failure_source_path=filetransfer-retained-log-slice.log',
+            'first_proof_chain_failure_line_number=5298'
+        )
+        foreach ($reportName in @('filetransfer-route-consistency-summary.txt', 'filetransfer-operator-verdict.txt')) {
+            $reportPath = Join-Path $ArtifactDir $reportName
+            $reportText = Get-Content -LiteralPath $reportPath -Raw
+            foreach ($fixtureLine in $settlementDispositionFixtureLines) {
                 $separatorIndex = $fixtureLine.IndexOf('=')
                 $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
                 $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
@@ -5857,6 +5938,11 @@ function Write-Phase5PreflightFailureSummaryFiles {
         ("provenance_verdict={0}" -f [string]$evidence.ProvenanceVerdict),
         ("provenance_failure_reasons={0}" -f (Join-RouteAcceptanceTokenList -Values $evidence.ProvenanceFailureReasons)),
         'cursor_integrity_verdict=missing',
+        'writer_integrity_verdict=missing',
+        'writer_gap_count=0',
+        'writer_duplicate_count=0',
+        'writer_identity_mismatch_count=0',
+        'writer_write_failure_count=0',
         'current_runtime_proof=0',
         ("current_runtime_proof_reasons={0}" -f (Join-RouteAcceptanceTokenList -Values $preflightProofReasons)),
         'transfer_evidence_status=not_started',
@@ -5921,6 +6007,11 @@ function Write-Phase5PreflightFailureSummaryFiles {
         provenanceVerdict = [string]$evidence.ProvenanceVerdict
         provenanceFailureReasons = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $evidence.ProvenanceFailureReasons -Limit 32)
         cursorIntegrityVerdict = 'missing'
+        writerIntegrityVerdict = 'missing'
+        writerGapCount = 0
+        writerDuplicateCount = 0
+        writerIdentityMismatchCount = 0
+        writerWriteFailureCount = 0
         currentRuntimeProof = $false
         currentRuntimeProofReasons = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $preflightProofReasons -Limit 32)
         transferEvidenceStatus = 'not_started'
@@ -6928,7 +7019,8 @@ function Get-RouteAcceptanceResultFailureClass {
         -not [string]::Equals([string]$Result.runtimeFailureCandidate, 'none', [System.StringComparison]::OrdinalIgnoreCase)) {
         if ([string]$Result.runtimeFailureCandidate -in @(
                 'regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved',
-                'regular_v4_frontier_repair_successor_pressure_install_missing')) {
+                'regular_v4_frontier_repair_successor_pressure_install_missing',
+                'regular_v4_frontier_repair_settlement_disposition_unverifiable')) {
             return 'incomplete_proof'
         }
         if ([string]$Result.runtimeFailureCandidate -in @('active_file_tuna_v6_evidence', 'diagnostic_regular_nkn_v6_evidence')) {
@@ -7458,6 +7550,11 @@ function New-RouteAcceptanceSummaryRunDto {
         provenanceVerdict = [string]$Result.provenanceVerdict
         provenanceFailureReasons = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $Result.provenanceFailureReasons -Limit 32)
         cursorIntegrityVerdict = [string]$Result.cursorIntegrityVerdict
+        writerIntegrityVerdict = [string]$Result.writerIntegrityVerdict
+        writerGapCount = [long]$Result.writerGapCount
+        writerDuplicateCount = [long]$Result.writerDuplicateCount
+        writerIdentityMismatchCount = [long]$Result.writerIdentityMismatchCount
+        writerWriteFailureCount = [long]$Result.writerWriteFailureCount
         currentRuntimeProof = [bool]$Result.currentRuntimeProof
         currentRuntimeProofReasons = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $Result.currentRuntimeProofReasons -Limit 32)
         transferEvidenceStatus = [string]$Result.transferEvidenceStatus
@@ -7478,6 +7575,11 @@ function New-RouteAcceptanceSummaryRunDto {
         regularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount = [int]$Result.regularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount
         regularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount = [int]$Result.regularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount
         regularV4FrontierRepairSuccessorPressureInstallVerdict = [string]$Result.regularV4FrontierRepairSuccessorPressureInstallVerdict
+        regularV4FrontierRepairSettlementDispositionUnverifiableRawCount = [int]$Result.regularV4FrontierRepairSettlementDispositionUnverifiableRawCount
+        regularV4FrontierRepairSettlementDispositionUnverifiableDistinctCount = [int]$Result.regularV4FrontierRepairSettlementDispositionUnverifiableDistinctCount
+        regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount = [int]$Result.regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount
+        regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount = [int]$Result.regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount
+        regularV4FrontierRepairSettlementDispositionVerdict = [string]$Result.regularV4FrontierRepairSettlementDispositionVerdict
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount
@@ -7608,6 +7710,19 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     else {
         'pass'
     }
+    $writerIntegrityVerdict = if ($runDtos.Count -eq 0) {
+        'missing'
+    }
+    elseif (@($runDtos | Where-Object { [string]$_.writerIntegrityVerdict -ne 'pass' }).Count -gt 0) {
+        'fail'
+    }
+    else {
+        'pass'
+    }
+    $writerGapCount = [long](($runDtos | Measure-Object -Property writerGapCount -Sum).Sum)
+    $writerDuplicateCount = [long](($runDtos | Measure-Object -Property writerDuplicateCount -Sum).Sum)
+    $writerIdentityMismatchCount = [long](($runDtos | Measure-Object -Property writerIdentityMismatchCount -Sum).Sum)
+    $writerWriteFailureCount = [long](($runDtos | Measure-Object -Property writerWriteFailureCount -Sum).Sum)
     $runtimeCandidateDtos = @($runDtos | Where-Object {
         -not [string]::IsNullOrWhiteSpace([string]$_.runtimeFailureCandidate) -and
         [string]$_.runtimeFailureCandidate -notin @('(none)', 'none')
@@ -7639,6 +7754,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $regularV4FrontierRepairSuccessorPressureInstallMissingDistinctCount = 0
     $regularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount = 0
     $regularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount = 0
+    $regularV4FrontierRepairSettlementDispositionUnverifiableRawCount = 0
+    $regularV4FrontierRepairSettlementDispositionUnverifiableDistinctCount = 0
+    $regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount = 0
+    $regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount = 0
     $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount = 0
     $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount = 0
     $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = 0
@@ -7679,6 +7798,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $regularV4FrontierRepairSuccessorPressureInstallMissingDistinctCount += [int]$runDto.regularV4FrontierRepairSuccessorPressureInstallMissingDistinctCount
         $regularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount += [int]$runDto.regularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount
         $regularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount += [int]$runDto.regularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount
+        $regularV4FrontierRepairSettlementDispositionUnverifiableRawCount += [int]$runDto.regularV4FrontierRepairSettlementDispositionUnverifiableRawCount
+        $regularV4FrontierRepairSettlementDispositionUnverifiableDistinctCount += [int]$runDto.regularV4FrontierRepairSettlementDispositionUnverifiableDistinctCount
+        $regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount += [int]$runDto.regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount
+        $regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount += [int]$runDto.regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount
         $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount
         $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount
         $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount
@@ -7734,6 +7857,18 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     }
     elseif ($regularV4FrontierRepairSuccessorPressureInstallMissingDistinctCount -gt 0 -or
         @($runDtos | Where-Object { [string]$_.regularV4FrontierRepairSuccessorPressureInstallVerdict -eq 'pass' }).Count -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
+    }
+    $regularV4FrontierRepairSettlementDispositionVerdict = if (
+        $regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.regularV4FrontierRepairSettlementDispositionVerdict -eq 'fail' }).Count -gt 0) {
+        'fail'
+    }
+    elseif ($regularV4FrontierRepairSettlementDispositionUnverifiableDistinctCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.regularV4FrontierRepairSettlementDispositionVerdict -eq 'pass' }).Count -gt 0) {
         'pass'
     }
     else {
@@ -7877,6 +8012,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("current_runtime_proof={0}" -f ($(if ([bool]$evidence.CurrentRuntimeProof) { 1 } else { 0 }))),
         ("current_runtime_proof_reasons={0}" -f (Join-RouteAcceptanceTokenList -Values $evidence.CurrentRuntimeProofReasons)),
         ("cursor_integrity_verdict={0}" -f $cursorIntegrityVerdict),
+        ("writer_integrity_verdict={0}" -f $writerIntegrityVerdict),
+        ("writer_gap_count={0}" -f $writerGapCount),
+        ("writer_duplicate_count={0}" -f $writerDuplicateCount),
+        ("writer_identity_mismatch_count={0}" -f $writerIdentityMismatchCount),
+        ("writer_write_failure_count={0}" -f $writerWriteFailureCount),
         ("transfer_evidence_status={0}" -f $transferEvidenceStatus),
         ("runtime_correctness_verdict={0}" -f $runtimeCorrectnessVerdict),
         ("runtime_failure_candidate={0}" -f $runtimeFailureCandidate),
@@ -7900,6 +8040,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount),
         ("regular_v4_frontier_repair_successor_pressure_install_verdict={0}" -f $regularV4FrontierRepairSuccessorPressureInstallVerdict),
+        ("regular_v4_frontier_repair_settlement_disposition_unverifiable_raw_count={0}" -f $regularV4FrontierRepairSettlementDispositionUnverifiableRawCount),
+        ("regular_v4_frontier_repair_settlement_disposition_unverifiable_distinct_count={0}" -f $regularV4FrontierRepairSettlementDispositionUnverifiableDistinctCount),
+        ("regular_v4_frontier_repair_settlement_disposition_unverifiable_recovered_count={0}" -f $regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount),
+        ("regular_v4_frontier_repair_settlement_disposition_unverifiable_unresolved_count={0}" -f $regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount),
+        ("regular_v4_frontier_repair_settlement_disposition_verdict={0}" -f $regularV4FrontierRepairSettlementDispositionVerdict),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount),
@@ -7983,6 +8128,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.provenance_verdict={1}" -f $prefix, $result.provenanceVerdict)
         $textLines += ("{0}.provenance_failure_reasons={1}" -f $prefix, (Join-RouteAcceptanceTokenList -Values $result.provenanceFailureReasons))
         $textLines += ("{0}.cursor_integrity_verdict={1}" -f $prefix, $result.cursorIntegrityVerdict)
+        $textLines += ("{0}.writer_integrity_verdict={1}" -f $prefix, $result.writerIntegrityVerdict)
+        $textLines += ("{0}.writer_gap_count={1}" -f $prefix, $result.writerGapCount)
+        $textLines += ("{0}.writer_duplicate_count={1}" -f $prefix, $result.writerDuplicateCount)
+        $textLines += ("{0}.writer_identity_mismatch_count={1}" -f $prefix, $result.writerIdentityMismatchCount)
+        $textLines += ("{0}.writer_write_failure_count={1}" -f $prefix, $result.writerWriteFailureCount)
         $textLines += ("{0}.current_runtime_proof={1}" -f $prefix, ($(if ($result.currentRuntimeProof) { 1 } else { 0 })))
         $textLines += ("{0}.current_runtime_proof_reasons={1}" -f $prefix, (Join-RouteAcceptanceTokenList -Values $result.currentRuntimeProofReasons))
         $textLines += ("{0}.transfer_evidence_status={1}" -f $prefix, $result.transferEvidenceStatus)
@@ -8003,6 +8153,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count={1}" -f $prefix, $result.regularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount)
         $textLines += ("{0}.regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count={1}" -f $prefix, $result.regularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount)
         $textLines += ("{0}.regular_v4_frontier_repair_successor_pressure_install_verdict={1}" -f $prefix, $result.regularV4FrontierRepairSuccessorPressureInstallVerdict)
+        $textLines += ("{0}.regular_v4_frontier_repair_settlement_disposition_unverifiable_raw_count={1}" -f $prefix, $result.regularV4FrontierRepairSettlementDispositionUnverifiableRawCount)
+        $textLines += ("{0}.regular_v4_frontier_repair_settlement_disposition_unverifiable_distinct_count={1}" -f $prefix, $result.regularV4FrontierRepairSettlementDispositionUnverifiableDistinctCount)
+        $textLines += ("{0}.regular_v4_frontier_repair_settlement_disposition_unverifiable_recovered_count={1}" -f $prefix, $result.regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount)
+        $textLines += ("{0}.regular_v4_frontier_repair_settlement_disposition_unverifiable_unresolved_count={1}" -f $prefix, $result.regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount)
+        $textLines += ("{0}.regular_v4_frontier_repair_settlement_disposition_verdict={1}" -f $prefix, $result.regularV4FrontierRepairSettlementDispositionVerdict)
         $textLines += ("{0}.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount)
         $textLines += ("{0}.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_distinct_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount)
         $textLines += ("{0}.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount)
@@ -8163,6 +8318,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         currentRuntimeProof = [bool]$evidence.CurrentRuntimeProof
         currentRuntimeProofReasons = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $evidence.CurrentRuntimeProofReasons -Limit 32)
         cursorIntegrityVerdict = $cursorIntegrityVerdict
+        writerIntegrityVerdict = $writerIntegrityVerdict
+        writerGapCount = $writerGapCount
+        writerDuplicateCount = $writerDuplicateCount
+        writerIdentityMismatchCount = $writerIdentityMismatchCount
+        writerWriteFailureCount = $writerWriteFailureCount
         transferEvidenceStatus = $transferEvidenceStatus
         runtimeCorrectnessVerdict = $runtimeCorrectnessVerdict
         runtimeFailureCandidate = $runtimeFailureCandidate
@@ -8186,6 +8346,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         regularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount = $regularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount
         regularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount = $regularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount
         regularV4FrontierRepairSuccessorPressureInstallVerdict = $regularV4FrontierRepairSuccessorPressureInstallVerdict
+        regularV4FrontierRepairSettlementDispositionUnverifiableRawCount = $regularV4FrontierRepairSettlementDispositionUnverifiableRawCount
+        regularV4FrontierRepairSettlementDispositionUnverifiableDistinctCount = $regularV4FrontierRepairSettlementDispositionUnverifiableDistinctCount
+        regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount = $regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount
+        regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount = $regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount
+        regularV4FrontierRepairSettlementDispositionVerdict = $regularV4FrontierRepairSettlementDispositionVerdict
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount = $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount = $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount

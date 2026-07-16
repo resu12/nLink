@@ -540,6 +540,84 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
     }
 
     [Fact]
+    public async Task RunFileTransferRouteAcceptance_SettlementDispositionFailureIsIncompleteProofInScenarioAndRootSummaries()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string scenario = "regular-v4-live-activation-off-on-off-256mb";
+        const string candidate = "regular_v4_frontier_repair_settlement_disposition_unverifiable";
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-settlement-disposition-summary-propagation");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-settlement-disposition-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_REGULAR_V4_SETTLEMENT_DISPOSITION_SUMMARY_FIXTURE"] = "1";
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ScenarioName", scenario,
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Expected fake settlement-disposition summary propagation run to pass.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal(candidate, summary["runtime_failure_candidate"]);
+            Assert.Equal("filetransfer_regular_v4_frontier_repair_settlement_accepted", summary["first_proof_chain_failure_event"]);
+            Assert.Equal("accepted_settlement_disposition_evidence_missing", summary["first_proof_chain_failure_reason"]);
+            Assert.Equal("5298", summary["first_proof_chain_failure_sequence"]);
+            Assert.Equal("1", summary["regular_v4_frontier_repair_settlement_disposition_unverifiable_raw_count"]);
+            Assert.Equal("1", summary["regular_v4_frontier_repair_settlement_disposition_unverifiable_distinct_count"]);
+            Assert.Equal("0", summary["regular_v4_frontier_repair_settlement_disposition_unverifiable_recovered_count"]);
+            Assert.Equal("1", summary["regular_v4_frontier_repair_settlement_disposition_unverifiable_unresolved_count"]);
+            Assert.Equal("fail", summary["regular_v4_frontier_repair_settlement_disposition_verdict"]);
+            Assert.Equal(candidate, summary[$"{scenario}.runtime_failure_candidate"]);
+            Assert.Equal("incomplete_proof", summary[$"{scenario}.acceptance_failure_class"]);
+            Assert.Equal("1", summary[$"{scenario}.regular_v4_frontier_repair_settlement_disposition_unverifiable_raw_count"]);
+            Assert.Equal("1", summary[$"{scenario}.regular_v4_frontier_repair_settlement_disposition_unverifiable_distinct_count"]);
+            Assert.Equal("0", summary[$"{scenario}.regular_v4_frontier_repair_settlement_disposition_unverifiable_recovered_count"]);
+            Assert.Equal("1", summary[$"{scenario}.regular_v4_frontier_repair_settlement_disposition_unverifiable_unresolved_count"]);
+            Assert.Equal("fail", summary[$"{scenario}.regular_v4_frontier_repair_settlement_disposition_verdict"]);
+
+            using var summaryJson = JsonDocument.Parse(
+                await File.ReadAllTextAsync(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.json")));
+            var root = summaryJson.RootElement;
+            Assert.Equal(candidate, root.GetProperty("runtimeFailureCandidate").GetString());
+            Assert.Equal(1, root.GetProperty("regularV4FrontierRepairSettlementDispositionUnverifiableRawCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("regularV4FrontierRepairSettlementDispositionUnverifiableDistinctCount").GetInt32());
+            Assert.Equal(0, root.GetProperty("regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount").GetInt32());
+            Assert.Equal("fail", root.GetProperty("regularV4FrontierRepairSettlementDispositionVerdict").GetString());
+
+            var run = Assert.Single(root.GetProperty("runs").EnumerateArray());
+            Assert.Equal(candidate, run.GetProperty("runtimeFailureCandidate").GetString());
+            Assert.Equal("incomplete_proof", run.GetProperty("acceptanceFailureClass").GetString());
+            Assert.Equal(1, run.GetProperty("regularV4FrontierRepairSettlementDispositionUnverifiableRawCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("regularV4FrontierRepairSettlementDispositionUnverifiableDistinctCount").GetInt32());
+            Assert.Equal(0, run.GetProperty("regularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("regularV4FrontierRepairSettlementDispositionUnverifiableUnresolvedCount").GetInt32());
+            Assert.Equal("fail", run.GetProperty("regularV4FrontierRepairSettlementDispositionVerdict").GetString());
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
     public async Task RunFileTransferRouteAcceptance_ClosureWindowLivenessCountsReachScenarioAndRootSummaries()
     {
         if (!OperatingSystem.IsWindows())
@@ -743,6 +821,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
         var sourceRunRoot = Path.Combine(sourceArtifactRoot, "phase5-evidence-source");
         var dryArtifactRoot = Path.Combine(testRoot, "dry");
         var dryRunRoot = Path.Combine(dryArtifactRoot, "phase5-evidence-dry-run");
+        var tamperedDryArtifactRoot = Path.Combine(testRoot, "dry-tampered-writer-marker");
+        var tamperedDryRunRoot = Path.Combine(tamperedDryArtifactRoot, "phase5-evidence-dry-run-tampered-writer-marker");
 
         try
         {
@@ -783,6 +863,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             var summary = ReadArtifactReport(dryRunRoot, "phase5-analyzer-gui-acceptance-summary.txt");
             Assert.Equal("1", summary["manifest_present"]);
             Assert.Equal("pass", summary["cursor_integrity_verdict"]);
+            Assert.Equal("pass", summary["writer_integrity_verdict"]);
+            Assert.Equal("0", summary["writer_gap_count"]);
+            Assert.Equal("0", summary["writer_duplicate_count"]);
+            Assert.Equal("0", summary["writer_identity_mismatch_count"]);
+            Assert.Equal("0", summary["writer_write_failure_count"]);
             Assert.Equal("0", summary["current_runtime_proof"]);
             Assert.Equal("incomplete_proof", summary["runtime_correctness_verdict"]);
 
@@ -794,11 +879,64 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.True(root.GetProperty("runtime").GetProperty("hashStable").GetBoolean());
             Assert.True(root.GetProperty("harness").GetProperty("hashStable").GetBoolean());
             Assert.True(root.GetProperty("bridge").GetProperty("hashStable").GetBoolean());
+            var ledgerEvidence = root.GetProperty("scenarioAttempts")[0].GetProperty("logLedger");
+            Assert.Equal(1, ledgerEvidence.GetProperty("writerEvidenceVersion").GetInt64());
+            Assert.Equal("PASS", ledgerEvidence.GetProperty("writerIntegrityVerdict").GetString());
+            Assert.Equal("pass", ledgerEvidence.GetProperty("producerWriterIntegrityVerdict").GetString());
 
             const string scenario = "regular-v4-live-activation-off-on-off-256mb";
             var sourceLedger = await File.ReadAllBytesAsync(Path.Combine(sourceRunRoot, scenario, "filetransfer-gui-log-ledger.json"));
             var importedLedger = await File.ReadAllBytesAsync(Path.Combine(dryRunRoot, scenario, "filetransfer-gui-log-ledger.json"));
             Assert.Equal(sourceLedger, importedLedger);
+
+            var sourceWriterMarkerPath = Path.Combine(
+                sourceRunRoot,
+                scenario,
+                "filetransfer-gui-log-writer-failure-markers.log");
+            await File.WriteAllTextAsync(
+                sourceWriterMarkerPath,
+                "event=operational_log_write_failed; log_writer_id=tampered; log_writer_sequence=2; failure_code=io_error" + Environment.NewLine);
+
+            var tamperedDryEnvironment = BuildFakeRouteAcceptanceEnvironment("phase5-evidence-dry-run-tampered-writer-marker");
+            var tamperedDry = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ScenarioName", scenario,
+                    "-ArtifactRoot", tamperedDryArtifactRoot,
+                    "-ExePath", Path.Combine(sourceRunRoot, "evidence-fixture", "nLink.fake.exe"),
+                    "-EvidenceDryRun",
+                    "-EvidenceDryRunFixtureRoot", sourceRunRoot,
+                    "-GoodputOnlyRerunLimit", "0",
+                    "-SetupOnlyRerunLimit", "0",
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                tamperedDryEnvironment);
+
+            Assert.NotEqual(0, tamperedDry.ExitCode);
+            var tamperedSummary = ReadArtifactReport(
+                tamperedDryRunRoot,
+                "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal("fail", tamperedSummary["writer_integrity_verdict"]);
+            Assert.Equal("fail", tamperedSummary["cursor_integrity_verdict"]);
+            Assert.Equal("0", tamperedSummary["current_runtime_proof"]);
+
+            using var tamperedManifest = JsonDocument.Parse(
+                await File.ReadAllTextAsync(Path.Combine(tamperedDryRunRoot, "route-acceptance-run-manifest.json")));
+            var tamperedManifestRoot = tamperedManifest.RootElement;
+            Assert.Equal(
+                "FAIL",
+                tamperedManifestRoot.GetProperty("validation").GetProperty("cursorIntegrityVerdict").GetString());
+            var tamperedLedgerEvidence = tamperedManifestRoot
+                .GetProperty("scenarioAttempts")[0]
+                .GetProperty("logLedger");
+            Assert.Equal("FAIL", tamperedLedgerEvidence.GetProperty("writerIntegrityVerdict").GetString());
+            Assert.Equal("pass", tamperedLedgerEvidence.GetProperty("producerWriterIntegrityVerdict").GetString());
+            Assert.Contains(
+                tamperedLedgerEvidence.GetProperty("writerIntegrityReasons").EnumerateArray(),
+                reason => reason.GetString() == "cursor_writer_failure_marker_sha256_mismatch");
         }
         finally
         {

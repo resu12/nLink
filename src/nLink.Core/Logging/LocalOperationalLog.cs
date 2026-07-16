@@ -9,6 +9,9 @@ public static class LocalOperationalLog
     private static readonly object Gate = new();
     private static readonly RollingFileLogger Logger = new(GetDefaultLogPath());
     private static readonly Queue<string> RecentEntries = new();
+    private static readonly string WriterId = CreateWriterId();
+    private static long writerSequence;
+    private static bool writerStartAttempted;
 
     public static string LogsDirectoryPath => Logger.LogsDirectoryPath;
 
@@ -36,10 +39,11 @@ public static class LocalOperationalLog
         {
             lock (Gate)
             {
+                EnsureWriterStartAttemptedLocked();
                 var safeSource = SensitiveDataRedactor.Redact(source);
                 var safeMessage = SensitiveDataRedactor.Redact(message);
                 var line = $"[{DateTimeOffset.UtcNow:yyyy-MM-dd HH:mm:ss'Z'}] [{level}] [{safeSource}] {safeMessage}";
-                Logger.WriteLine(line);
+                TryWritePersistedEntryLocked(line);
                 RecentEntries.Enqueue(line);
                 while (RecentEntries.Count > RecentEntryCapacity)
                 {
@@ -52,6 +56,73 @@ public static class LocalOperationalLog
             // Logging must never break application flow.
         }
     }
+
+    private static void EnsureWriterStartAttemptedLocked()
+    {
+        if (writerStartAttempted)
+        {
+            return;
+        }
+
+        writerStartAttempted = true;
+        var acceptanceRunId = GetEnvironmentEvidenceValue("NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID");
+        var scenarioRunId = GetEnvironmentEvidenceValue("NLINK_FILETRANSFER_SCENARIO_RUN_ID");
+        var message =
+            "event=operational_log_writer_started" +
+            $"; acceptance_run_id={acceptanceRunId}" +
+            $"; scenario_run_id={scenarioRunId}";
+        var line = $"[{DateTimeOffset.UtcNow:yyyy-MM-dd HH:mm:ss'Z'}] [INFO] [OperationalLog] {message}";
+        TryWritePersistedEntryLocked(line);
+    }
+
+    private static void TryWritePersistedEntryLocked(string line)
+    {
+        var physicalLines = line
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n')
+            .Split('\n');
+        var lastSequence = Interlocked.Add(ref writerSequence, physicalLines.Length);
+        var firstSequence = lastSequence - physicalLines.Length + 1;
+        var persistedLines = new string[physicalLines.Length];
+        for (var index = 0; index < physicalLines.Length; index++)
+        {
+            persistedLines[index] =
+                $"{physicalLines[index]}; log_writer_id={WriterId}; log_writer_sequence={firstSequence + index}";
+        }
+
+        var result = Logger.TryWriteLine(string.Join(Environment.NewLine, persistedLines));
+        if (result.Success)
+        {
+            return;
+        }
+
+        for (var sequence = firstSequence; sequence <= lastSequence; sequence++)
+        {
+            TryWriteFailureMarkerToStandardError(sequence, result.FailureCode);
+        }
+    }
+
+    private static void TryWriteFailureMarkerToStandardError(long sequence, string failureCode)
+    {
+        try
+        {
+            Console.Error.WriteLine(FormatWriteFailureMarker(WriterId, sequence, failureCode));
+        }
+        catch
+        {
+            // Producer-side evidence remains best effort and must never affect runtime behavior.
+        }
+    }
+
+    internal static string FormatWriteFailureMarker(string writerId, long sequence, string failureCode)
+        => "event=operational_log_write_failed" +
+           $"; log_writer_id={writerId}" +
+           $"; log_writer_sequence={sequence}" +
+           $"; failure_code={failureCode}";
+
+    internal static string WriterIdForTests => WriterId;
+
+    internal static long WriterSequenceForTests => Volatile.Read(ref writerSequence);
 
     public static string GetRecentLogText()
     {
@@ -82,6 +153,25 @@ public static class LocalOperationalLog
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         var logsDir = Path.Combine(localAppData, "nLink", "logs");
         return Path.Combine(logsDir, "nlink.log");
+    }
+
+    private static string CreateWriterId()
+    {
+        var nonce = Guid.NewGuid().ToString("N")[..16];
+        return $"p{Environment.ProcessId}r{nonce}";
+    }
+
+    private static string GetEnvironmentEvidenceValue(string name)
+    {
+        try
+        {
+            var value = Environment.GetEnvironmentVariable(name);
+            return string.IsNullOrWhiteSpace(value) ? "(none)" : value.Trim();
+        }
+        catch
+        {
+            return "(none)";
+        }
     }
 
     private static string ResolveInformationalVersion()

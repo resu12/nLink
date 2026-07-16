@@ -189,6 +189,7 @@ public sealed partial class SessionFileTransferV4SenderTests
                 transferId);
         static string[] UniqueLogLines(string log) => log
             .Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(static line => line.Split("; log_writer_id=", 2, StringSplitOptions.None)[0])
             .Distinct(StringComparer.Ordinal)
             .ToArray();
 

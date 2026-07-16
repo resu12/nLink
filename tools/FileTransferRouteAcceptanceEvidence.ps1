@@ -336,6 +336,18 @@ function Get-RouteAcceptanceEvidenceGenerationKey {
     return ''
 }
 
+function Get-RouteAcceptanceEvidenceWriterId {
+    param([Parameter(Mandatory = $true)][AllowNull()]$Writer)
+
+    foreach ($name in @('writerId', 'WriterId')) {
+        $value = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $Writer -Name $name -DefaultValue '')
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            return $value.Trim()
+        }
+    }
+    return ''
+}
+
 function Get-RouteAcceptanceEvidenceLineCount {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -344,6 +356,24 @@ function Get-RouteAcceptanceEvidenceLineCount {
     try {
         while ($null -ne $reader.ReadLine()) {
             $count++
+        }
+    }
+    finally {
+        $reader.Dispose()
+    }
+    return $count
+}
+
+function Get-RouteAcceptanceOperationalLogWriteFailureMarkerCount {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $reader = [System.IO.File]::OpenText([System.IO.Path]::GetFullPath($Path))
+    $count = 0L
+    try {
+        while ($null -ne ($line = $reader.ReadLine())) {
+            if ([string]$line -match '(?i)(?:^|[;\s])event=operational_log_write_failed(?:;|$)') {
+                $count++
+            }
         }
     }
     finally {
@@ -419,10 +449,98 @@ function Get-RouteAcceptanceCursorEvidence {
     foreach ($snapshotRequirement in @(
             [pscustomobject]@{ Snapshot = $initial; Prefix = 'initial' },
             [pscustomobject]@{ Snapshot = $final; Prefix = 'final' })) {
-        foreach ($fieldName in @('bookmark', 'lineCount', 'activeGenerationKey', 'generations')) {
+        foreach ($fieldName in @('bookmark', 'lineCount', 'activeGenerationKey', 'generations', 'writers')) {
             if (-not (Test-RouteAcceptanceEvidencePropertyPresent -Object $snapshotRequirement.Snapshot -Name $fieldName)) {
                 $reasons.Add(('cursor_{0}_{1}_missing' -f $snapshotRequirement.Prefix, $fieldName.ToLowerInvariant())) | Out-Null
             }
+        }
+    }
+
+
+    $writerEvidenceVersion = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerEvidenceVersion' -DefaultValue 0)
+    if ($writerEvidenceVersion -ne 1) {
+        $reasons.Add('cursor_writer_evidence_version_invalid') | Out-Null
+    }
+    $reportedWriterVerdict = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerIntegrityVerdict' -DefaultValue '')
+    $reportedWriterReasons = @(Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerIntegrityReasons' -DefaultValue @())
+    if ([string]::IsNullOrWhiteSpace($reportedWriterVerdict)) {
+        $reasons.Add('cursor_writer_integrity_verdict_missing') | Out-Null
+    }
+    elseif (-not [string]::Equals($reportedWriterVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) {
+        if ($reportedWriterReasons.Count -eq 0) {
+            $reasons.Add('cursor_writer_integrity_failed') | Out-Null
+        }
+        else {
+            foreach ($writerReason in $reportedWriterReasons) {
+                $reasons.Add(('cursor_writer_reported:{0}' -f [string]$writerReason)) | Out-Null
+            }
+        }
+    }
+
+    $initialWriters = @(Get-RouteAcceptanceEvidencePropertyValue -Object $initial -Name 'writers' -DefaultValue @())
+    $finalWriters = @(Get-RouteAcceptanceEvidencePropertyValue -Object $final -Name 'writers' -DefaultValue @())
+    if ($finalWriters.Count -eq 0) {
+        $reasons.Add('cursor_final_writer_snapshot_missing') | Out-Null
+    }
+    $initialWriterIds = @($initialWriters | ForEach-Object { Get-RouteAcceptanceEvidenceWriterId -Writer $_ })
+    $finalWriterIds = @($finalWriters | ForEach-Object { Get-RouteAcceptanceEvidenceWriterId -Writer $_ })
+    if (@($initialWriterIds | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0 -or
+        @($finalWriterIds | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0) {
+        $reasons.Add('cursor_writer_id_missing') | Out-Null
+    }
+    if (@($initialWriterIds | Select-Object -Unique).Count -ne $initialWriterIds.Count -or
+        @($finalWriterIds | Select-Object -Unique).Count -ne $finalWriterIds.Count) {
+        $reasons.Add('cursor_writer_id_duplicate') | Out-Null
+    }
+    if (($initialWriterIds -join "`n") -ne (@($initialWriterIds | Sort-Object) -join "`n") -or
+        ($finalWriterIds -join "`n") -ne (@($finalWriterIds | Sort-Object) -join "`n")) {
+        $reasons.Add('cursor_writer_order_invalid') | Out-Null
+    }
+
+    $finalWriterById = @{}
+    foreach ($writer in $finalWriters) {
+        $writerId = Get-RouteAcceptanceEvidenceWriterId -Writer $writer
+        if ([string]::IsNullOrWhiteSpace($writerId)) {
+            continue
+        }
+        $finalWriterById[$writerId] = $writer
+        $writerAcceptanceRunId = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $writer -Name 'acceptanceRunId' -DefaultValue '')
+        $writerScenarioRunId = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $writer -Name 'scenarioRunId' -DefaultValue '')
+        if (-not [string]::Equals($writerAcceptanceRunId, $AcceptanceRunId, [System.StringComparison]::Ordinal)) {
+            $reasons.Add('cursor_writer_acceptance_run_id_mismatch') | Out-Null
+        }
+        if (-not [string]::Equals($writerScenarioRunId, $ScenarioRunId, [System.StringComparison]::Ordinal)) {
+            $reasons.Add('cursor_writer_scenario_run_id_mismatch') | Out-Null
+        }
+        $firstSequence = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $writer -Name 'firstSequence' -DefaultValue 0)
+        $lastSequence = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $writer -Name 'lastSequence' -DefaultValue 0)
+        $observedCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $writer -Name 'observedCount' -DefaultValue 0)
+        if ($firstSequence -ne 1 -or $lastSequence -lt $firstSequence -or $observedCount -ne ($lastSequence - $firstSequence + 1)) {
+            $reasons.Add('cursor_writer_snapshot_invalid') | Out-Null
+        }
+    }
+    foreach ($initialWriter in $initialWriters) {
+        $writerId = Get-RouteAcceptanceEvidenceWriterId -Writer $initialWriter
+        if ([string]::IsNullOrWhiteSpace($writerId) -or -not $finalWriterById.ContainsKey($writerId)) {
+            $reasons.Add('cursor_writer_snapshot_not_monotonic') | Out-Null
+            continue
+        }
+        $finalWriter = $finalWriterById[$writerId]
+        if (-not [string]::Equals(
+                [string](Get-RouteAcceptanceEvidencePropertyValue -Object $initialWriter -Name 'acceptanceRunId' -DefaultValue ''),
+                [string](Get-RouteAcceptanceEvidencePropertyValue -Object $finalWriter -Name 'acceptanceRunId' -DefaultValue ''),
+                [System.StringComparison]::Ordinal) -or
+            -not [string]::Equals(
+                [string](Get-RouteAcceptanceEvidencePropertyValue -Object $initialWriter -Name 'scenarioRunId' -DefaultValue ''),
+                [string](Get-RouteAcceptanceEvidencePropertyValue -Object $finalWriter -Name 'scenarioRunId' -DefaultValue ''),
+                [System.StringComparison]::Ordinal) -or
+            (ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $initialWriter -Name 'firstSequence' -DefaultValue 0)) -ne
+                (ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $finalWriter -Name 'firstSequence' -DefaultValue 0)) -or
+            (ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $finalWriter -Name 'lastSequence' -DefaultValue 0)) -lt
+                (ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $initialWriter -Name 'lastSequence' -DefaultValue 0)) -or
+            (ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $finalWriter -Name 'observedCount' -DefaultValue 0)) -lt
+                (ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $initialWriter -Name 'observedCount' -DefaultValue 0))) {
+            $reasons.Add('cursor_writer_snapshot_not_monotonic') | Out-Null
         }
     }
 
@@ -517,7 +635,15 @@ function Get-RouteAcceptanceCursorEvidence {
             'consumedIndexRanges',
             'syncCount',
             'failureCode',
-            'failureDetail')) {
+            'failureDetail',
+            'writerEvidenceVersion',
+            'writerGapCount',
+            'writerDuplicateCount',
+            'writerIdentityMismatchCount',
+            'writerWriteFailureCount',
+            'writerIntegrityVerdict',
+            'writerIntegrityReasons',
+            'writerFailureMarkerFiles')) {
         if (-not (Test-RouteAcceptanceEvidencePropertyPresent -Object $ledger -Name $requiredLedgerField)) {
             $missingFieldReason = switch ($requiredLedgerField) {
                 'gapCount' { 'cursor_gap_count_missing'; break }
@@ -530,6 +656,14 @@ function Get-RouteAcceptanceCursorEvidence {
                 'syncCount' { 'cursor_sync_count_missing'; break }
                 'failureCode' { 'cursor_failure_code_missing'; break }
                 'failureDetail' { 'cursor_failure_detail_missing'; break }
+                'writerEvidenceVersion' { 'cursor_writer_evidence_version_missing'; break }
+                'writerGapCount' { 'cursor_writer_gap_count_missing'; break }
+                'writerDuplicateCount' { 'cursor_writer_duplicate_count_missing'; break }
+                'writerIdentityMismatchCount' { 'cursor_writer_identity_mismatch_count_missing'; break }
+                'writerWriteFailureCount' { 'cursor_writer_write_failure_count_missing'; break }
+                'writerIntegrityVerdict' { 'cursor_writer_integrity_verdict_missing'; break }
+                'writerIntegrityReasons' { 'cursor_writer_integrity_reasons_missing'; break }
+                'writerFailureMarkerFiles' { 'cursor_writer_failure_marker_files_missing'; break }
                 default { 'cursor_ledger_field_missing' }
             }
             $reasons.Add($missingFieldReason) | Out-Null
@@ -542,6 +676,54 @@ function Get-RouteAcceptanceCursorEvidence {
     }
     if ($duplicateIndexCount -ne 0) {
         $reasons.Add('cursor_duplicate_index') | Out-Null
+    }
+    $writerGapCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerGapCount' -DefaultValue -1) -DefaultValue -1
+    $writerDuplicateCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerDuplicateCount' -DefaultValue -1) -DefaultValue -1
+    $writerIdentityMismatchCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerIdentityMismatchCount' -DefaultValue -1) -DefaultValue -1
+    $writerWriteFailureCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerWriteFailureCount' -DefaultValue -1) -DefaultValue -1
+    if ($writerGapCount -ne 0) {
+        $reasons.Add('cursor_writer_gap') | Out-Null
+    }
+    if ($writerDuplicateCount -ne 0) {
+        $reasons.Add('cursor_writer_duplicate') | Out-Null
+    }
+    if ($writerIdentityMismatchCount -ne 0) {
+        $reasons.Add('cursor_writer_identity_mismatch') | Out-Null
+    }
+    if ($writerWriteFailureCount -ne 0) {
+        $reasons.Add('cursor_writer_write_failure') | Out-Null
+    }
+
+    $writerFailureMarkerFiles = @(Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerFailureMarkerFiles' -DefaultValue @())
+    if ($writerFailureMarkerFiles.Count -eq 0) {
+        $reasons.Add('cursor_writer_failure_marker_files_missing') | Out-Null
+    }
+    $markerCountTotal = 0L
+    foreach ($markerFile in $writerFailureMarkerFiles) {
+        $markerPath = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $markerFile -Name 'path' -DefaultValue '')
+        if (-not [string]::IsNullOrWhiteSpace($markerPath) -and -not [System.IO.Path]::IsPathRooted($markerPath) -and -not [string]::IsNullOrWhiteSpace($ledgerResult.Path)) {
+            $markerPath = Join-Path ([System.IO.Path]::GetDirectoryName($ledgerResult.Path)) $markerPath
+        }
+        $markerSha256 = ([string](Get-RouteAcceptanceEvidencePropertyValue -Object $markerFile -Name 'sha256' -DefaultValue '')).Trim().ToLowerInvariant()
+        $markerCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $markerFile -Name 'markerCount' -DefaultValue -1) -DefaultValue -1
+        if ([string]::IsNullOrWhiteSpace($markerPath) -or -not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
+            $reasons.Add('cursor_writer_failure_marker_file_missing') | Out-Null
+        }
+        else {
+            if (-not (Test-RouteAcceptanceEvidenceSha256Value -Value $markerSha256) -or
+                -not [string]::Equals((Get-RouteAcceptanceEvidenceSha256 -Path $markerPath), $markerSha256, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $reasons.Add('cursor_writer_failure_marker_sha256_mismatch') | Out-Null
+            }
+            if ($markerCount -lt 0 -or (Get-RouteAcceptanceOperationalLogWriteFailureMarkerCount -Path $markerPath) -ne $markerCount) {
+                $reasons.Add('cursor_writer_failure_marker_count_mismatch') | Out-Null
+            }
+        }
+        if ($markerCount -ge 0) {
+            $markerCountTotal += $markerCount
+        }
+    }
+    if ($writerWriteFailureCount -lt 0 -or $markerCountTotal -ne $writerWriteFailureCount) {
+        $reasons.Add('cursor_writer_write_failure_count_mismatch') | Out-Null
     }
     $consumedIndexCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'consumedIndexCount' -DefaultValue -1) -DefaultValue -1
     $finalLineCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $final -Name 'lineCount' -DefaultValue -1) -DefaultValue -1
@@ -654,6 +836,13 @@ function Get-RouteAcceptanceCursorEvidence {
     }
 
     $uniqueReasons = @($reasons | Select-Object -Unique)
+    $writerValidationReasons = @(
+        $uniqueReasons |
+            Where-Object {
+                [string]$_ -match '^cursor_(?:writer_|initial_writer|final_writer)'
+            }
+    )
+    $writerValidationVerdict = if ($writerValidationReasons.Count -eq 0) { 'PASS' } else { 'FAIL' }
     return [pscustomobject][ordered]@{
         verdict = if ($uniqueReasons.Count -eq 0) { 'PASS' } else { 'FAIL' }
         reasons = $uniqueReasons
@@ -668,6 +857,15 @@ function Get-RouteAcceptanceCursorEvidence {
         transientRescanCount = $transientRescanCount
         gapCount = $gapCount
         duplicateIndexCount = $duplicateIndexCount
+        writerEvidenceVersion = $writerEvidenceVersion
+        writerGapCount = $writerGapCount
+        writerDuplicateCount = $writerDuplicateCount
+        writerIdentityMismatchCount = $writerIdentityMismatchCount
+        writerWriteFailureCount = $writerWriteFailureCount
+        producerWriterIntegrityVerdict = $reportedWriterVerdict
+        producerWriterIntegrityReasons = @($reportedWriterReasons)
+        writerIntegrityVerdict = $writerValidationVerdict
+        writerIntegrityReasons = $writerValidationReasons
         consumedIndexCount = $consumedIndexCount
         indexedEventCount = $indexedEventCount
         eventCount = $eventCount
@@ -721,6 +919,15 @@ function Get-RouteAcceptanceScenarioEvidence {
             transientRescanCount = $cursor.transientRescanCount
             gapCount = $cursor.gapCount
             duplicateIndexCount = $cursor.duplicateIndexCount
+            writerEvidenceVersion = $cursor.writerEvidenceVersion
+            writerGapCount = $cursor.writerGapCount
+            writerDuplicateCount = $cursor.writerDuplicateCount
+            writerIdentityMismatchCount = $cursor.writerIdentityMismatchCount
+            writerWriteFailureCount = $cursor.writerWriteFailureCount
+            writerIntegrityVerdict = $cursor.writerIntegrityVerdict
+            writerIntegrityReasons = @($cursor.writerIntegrityReasons)
+            producerWriterIntegrityVerdict = $cursor.producerWriterIntegrityVerdict
+            producerWriterIntegrityReasons = @($cursor.producerWriterIntegrityReasons)
             consumedIndexCount = $cursor.consumedIndexCount
             finalLineCount = $cursor.finalLineCount
             indexedEventCount = $cursor.indexedEventCount
@@ -1115,13 +1322,28 @@ function Get-RouteAcceptanceEvidenceManifestValidation {
                 }
             }
         }
-        foreach ($requiredCursorField in @('gapCount', 'duplicateIndexCount', 'consumedIndexCount', 'finalLineCount')) {
+        foreach ($requiredCursorField in @(
+                'gapCount',
+                'duplicateIndexCount',
+                'writerEvidenceVersion',
+                'writerGapCount',
+                'writerDuplicateCount',
+                'writerIdentityMismatchCount',
+                'writerWriteFailureCount',
+                'writerIntegrityVerdict',
+                'consumedIndexCount',
+                'finalLineCount')) {
             if (-not (Test-RouteAcceptanceEvidencePropertyPresent -Object $logLedger -Name $requiredCursorField)) {
                 $cursorReasons.Add(('cursor_{0}_missing' -f $requiredCursorField.ToLowerInvariant())) | Out-Null
             }
         }
         $gapCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $logLedger -Name 'gapCount' -DefaultValue -1) -DefaultValue -1
         $duplicateIndexCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $logLedger -Name 'duplicateIndexCount' -DefaultValue -1) -DefaultValue -1
+        $writerEvidenceVersion = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $logLedger -Name 'writerEvidenceVersion' -DefaultValue 0)
+        $writerGapCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $logLedger -Name 'writerGapCount' -DefaultValue -1) -DefaultValue -1
+        $writerDuplicateCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $logLedger -Name 'writerDuplicateCount' -DefaultValue -1) -DefaultValue -1
+        $writerIdentityMismatchCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $logLedger -Name 'writerIdentityMismatchCount' -DefaultValue -1) -DefaultValue -1
+        $writerWriteFailureCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $logLedger -Name 'writerWriteFailureCount' -DefaultValue -1) -DefaultValue -1
         $consumedIndexCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $logLedger -Name 'consumedIndexCount' -DefaultValue -1) -DefaultValue -1
         $finalLineCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $logLedger -Name 'finalLineCount' -DefaultValue -1) -DefaultValue -1
         if ($gapCount -ne 0) {
@@ -1129,6 +1351,24 @@ function Get-RouteAcceptanceEvidenceManifestValidation {
         }
         if ($duplicateIndexCount -ne 0) {
             $cursorReasons.Add('cursor_duplicate_index') | Out-Null
+        }
+        if ($writerEvidenceVersion -ne 1) {
+            $cursorReasons.Add('cursor_writer_evidence_version_invalid') | Out-Null
+        }
+        if ($writerGapCount -ne 0) {
+            $cursorReasons.Add('cursor_writer_gap') | Out-Null
+        }
+        if ($writerDuplicateCount -ne 0) {
+            $cursorReasons.Add('cursor_writer_duplicate') | Out-Null
+        }
+        if ($writerIdentityMismatchCount -ne 0) {
+            $cursorReasons.Add('cursor_writer_identity_mismatch') | Out-Null
+        }
+        if ($writerWriteFailureCount -ne 0) {
+            $cursorReasons.Add('cursor_writer_write_failure') | Out-Null
+        }
+        if (-not [string]::Equals([string](Get-RouteAcceptanceEvidencePropertyValue -Object $logLedger -Name 'writerIntegrityVerdict' -DefaultValue ''), 'pass', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $cursorReasons.Add('cursor_writer_integrity_failed') | Out-Null
         }
         if ($consumedIndexCount -lt 0 -or $finalLineCount -lt 0 -or $consumedIndexCount -ne $finalLineCount) {
             $cursorReasons.Add('cursor_consumed_index_count_mismatch') | Out-Null

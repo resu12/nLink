@@ -341,6 +341,60 @@ $fixture = New-EvidenceFixture -Name 'cursor'
 $valid = Get-RouteAcceptanceCursorEvidence -LogLedger $fixture.LedgerPath -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
 Assert-Equal $valid.verdict 'PASS' 'valid rotated cursor verdict'
 Assert-Equal $valid.rotationCount 2 'rotation count'
+Assert-Equal $valid.writerEvidenceVersion 1 'writer evidence version'
+Assert-Equal $valid.writerIntegrityVerdict 'PASS' 'writer integrity verdict'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.PSObject.Properties.Remove('writerEvidenceVersion')
+$legacyWriterEvidence = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $legacyWriterEvidence.reasons 'cursor_writer_evidence_version_invalid' 'legacy writer evidence cannot prove current runtime'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.writerGapCount = 1
+$writerGap = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $writerGap.reasons 'cursor_writer_gap' 'writer sequence gap reason'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.writerDuplicateCount = 1
+$writerDuplicate = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $writerDuplicate.reasons 'cursor_writer_duplicate' 'writer duplicate reason'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.writerIdentityMismatchCount = 1
+$writerMismatch = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $writerMismatch.reasons 'cursor_writer_identity_mismatch' 'writer identity mismatch reason'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.final.writers[0].acceptanceRunId = 'wrong-run'
+$writerWrongRun = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $writerWrongRun.reasons 'cursor_writer_acceptance_run_id_mismatch' 'writer run identity reason'
+Assert-Equal $writerWrongRun.producerWriterIntegrityVerdict 'PASS' 'producer writer verdict remains separately visible'
+Assert-Equal $writerWrongRun.writerIntegrityVerdict 'FAIL' 'revalidated writer identity failure overrides producer verdict'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.final.writers[0].firstSequence = 2
+$writerInvalidSequence = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $writerInvalidSequence.reasons 'cursor_writer_snapshot_invalid' 'writer sequence snapshot reason'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.final.writers = @()
+$writerMissing = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $writerMissing.reasons 'cursor_final_writer_snapshot_missing' 'final writer snapshot reason'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.writerFailureMarkerFiles[0].markerCount = 1
+$markerCountMismatch = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $markerCountMismatch.reasons 'cursor_writer_failure_marker_count_mismatch' 'writer failure marker count reason'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$markerPath = [string]$ledger.writerFailureMarkerFiles[0].path
+[System.IO.File]::WriteAllText($markerPath, "event=operational_log_write_failed; log_writer_id=tampered; log_writer_sequence=3; failure_code=io_error`n", [System.Text.UTF8Encoding]::new($false))
+$tamperedMarkerSnapshot = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $tamperedMarkerSnapshot.reasons 'cursor_writer_failure_marker_sha256_mismatch' 'tampered writer output snapshot hash reason'
+Assert-Contains $tamperedMarkerSnapshot.reasons 'cursor_writer_failure_marker_count_mismatch' 'tampered writer output snapshot marker count reason'
+Assert-Equal $tamperedMarkerSnapshot.producerWriterIntegrityVerdict 'PASS' 'producer marker verdict remains separately visible'
+Assert-Equal $tamperedMarkerSnapshot.writerIntegrityVerdict 'FAIL' 'revalidated marker failure overrides producer verdict'
+[System.IO.File]::WriteAllText($markerPath, '', [System.Text.UTF8Encoding]::new($false))
 
 $ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
 $ledger.initial.activeGenerationKey = ''
@@ -544,6 +598,16 @@ function New-EvidenceFixture {
     $slicePath = Join-Path $artifactDir 'filetransfer-retained-ledger-slice.log'
     [System.IO.File]::WriteAllText($slicePath, "event=one`nevent=two`n", [System.Text.UTF8Encoding]::new($false))
     $sliceHash = Get-RouteAcceptanceEvidenceSha256 -Path $slicePath
+    $writerFailureMarkerPath = Join-Path $artifactDir 'filetransfer-gui-log-writer-failure-markers.log'
+    [System.IO.File]::WriteAllText($writerFailureMarkerPath, '', [System.Text.UTF8Encoding]::new($false))
+    $writer = [ordered]@{
+        writerId = 'writer-current'
+        acceptanceRunId = $runId
+        scenarioRunId = $scenarioRunId
+        firstSequence = 1
+        lastSequence = 2
+        observedCount = 2
+    }
     $ledgerPath = Join-Path $artifactDir 'filetransfer-gui-log-ledger.json'
     $ledger = [ordered]@{
         schemaVersion = 1
@@ -557,6 +621,7 @@ function New-EvidenceFixture {
             lineCount = 1
             activeGenerationKey = 'gen-1'
             generations = @([ordered]@{ generationKey = 'gen-1'; consumedByteOffset = 0; consumedLineCount = 1 })
+            writers = @()
         }
         final = [ordered]@{
             ledgerId = ''
@@ -567,11 +632,24 @@ function New-EvidenceFixture {
                 [ordered]@{ generationKey = 'gen-1'; consumedByteOffset = 10; consumedLineCount = 1 },
                 [ordered]@{ generationKey = 'gen-2'; consumedByteOffset = 10; consumedLineCount = 1 }
             )
+            writers = @($writer)
         }
         rotationCount = 2
         transientRescanCount = 0
         gapCount = 0
         duplicateIndexCount = 0
+        writerEvidenceVersion = 1
+        writerGapCount = 0
+        writerDuplicateCount = 0
+        writerIdentityMismatchCount = 0
+        writerWriteFailureCount = 0
+        writerIntegrityVerdict = 'PASS'
+        writerIntegrityReasons = @()
+        writerFailureMarkerFiles = @([ordered]@{
+            path = $writerFailureMarkerPath
+            sha256 = Get-RouteAcceptanceEvidenceSha256 -Path $writerFailureMarkerPath
+            markerCount = 0
+        })
         consumedIndexCount = 2
         consumedIndexSha256 = Get-RouteAcceptanceEvidenceTextSha256 -Value ((@("gen-1`n0", "gen-2`n0") | Sort-Object) -join [char]31)
         consumedIndexRanges = @(

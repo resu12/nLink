@@ -3086,7 +3086,15 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_settlement_rejected", "route=regular_nkn_v4_fast", "protocol_version=4", "live_route_epoch=0", "cleared_pressure=0"),
                 logText);
             Assert.True(
-                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_settlement_accepted", "route=regular_nkn_v4_fast", "protocol_version=4", "live_route_epoch=0", "outcome=settled_stalled", "cleared_pressure=1"),
+                ContainsLogLineWithTokens(
+                    logText,
+                    "filetransfer_regular_v4_frontier_repair_settlement_accepted",
+                    "route=regular_nkn_v4_fast",
+                    "protocol_version=4",
+                    "live_route_epoch=0",
+                    $"authority_id={authority.AuthorityId}",
+                    "outcome=settled_stalled",
+                    "cleared_pressure=1"),
                 logText);
         }
         finally

@@ -17,11 +17,17 @@ function New-GuiSmokeLogLedgerState {
         LedgerId = [guid]::NewGuid().ToString('N')
         Lines = New-Object System.Collections.Generic.List[string]
         Generations = @{}
+        Writers = @{}
+        UnknownWritersAfterBookmark = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::Ordinal)
         ConsumedLineIdentities = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::Ordinal)
         MaxLines = $MaxLines
         MaxGenerations = $MaxGenerations
         GapCount = 0
         DuplicateIndexCount = 0
+        WriterGapCount = 0L
+        WriterDuplicateCount = 0L
+        WriterIdentityMismatchCount = 0L
+        WriterEvidenceBookmark = -1
         RotationCount = 0
         TransientRescanCount = 0
         SyncCount = 0
@@ -39,9 +45,15 @@ function Reset-GuiSmokeLogLedgerState {
     $State.LedgerId = [guid]::NewGuid().ToString('N')
     $State.Lines.Clear()
     $State.Generations.Clear()
+    $State.Writers.Clear()
+    $State.UnknownWritersAfterBookmark.Clear()
     $State.ConsumedLineIdentities.Clear()
     $State.GapCount = 0
     $State.DuplicateIndexCount = 0
+    $State.WriterGapCount = 0L
+    $State.WriterDuplicateCount = 0L
+    $State.WriterIdentityMismatchCount = 0L
+    $State.WriterEvidenceBookmark = -1
     $State.RotationCount = 0
     $State.TransientRescanCount = 0
     $State.SyncCount = 0
@@ -50,6 +62,151 @@ function Reset-GuiSmokeLogLedgerState {
     $State.ActiveGenerationKey = ''
     $State.FailureCode = ''
     $State.FailureDetail = ''
+}
+
+function Set-GuiSmokeLogLedgerWriterEvidenceBookmark {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)][int]$Bookmark
+    )
+
+    if ($Bookmark -lt 0 -or $Bookmark -gt $State.Lines.Count) {
+        throw ("gui_smoke_log_writer_invalid_bookmark: bookmark={0}; line_count={1}" -f $Bookmark, $State.Lines.Count)
+    }
+    if ([int]$State.WriterEvidenceBookmark -ge 0 -and [int]$State.WriterEvidenceBookmark -ne $Bookmark) {
+        throw ("gui_smoke_log_writer_bookmark_changed: initial={0}; replacement={1}" -f $State.WriterEvidenceBookmark, $Bookmark)
+    }
+
+    $State.WriterEvidenceBookmark = $Bookmark
+}
+
+function Get-GuiSmokeLogLedgerStructuredField {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $match = [regex]::Match(
+        $Line,
+        ('(?:^|[;\s]){0}=(?<value>[^;\r\n]*)' -f [regex]::Escape($Name)),
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (-not $match.Success) {
+        return ''
+    }
+
+    return [string]$match.Groups['value'].Value.Trim()
+}
+
+function Add-GuiSmokeLogLedgerWriterEvidence {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line
+    )
+
+    $writerId = Get-GuiSmokeLogLedgerStructuredField -Line $Line -Name 'log_writer_id'
+    $writerSequenceText = Get-GuiSmokeLogLedgerStructuredField -Line $Line -Name 'log_writer_sequence'
+    if ([string]::IsNullOrWhiteSpace($writerId) -and [string]::IsNullOrWhiteSpace($writerSequenceText)) {
+        if ([int]$State.WriterEvidenceBookmark -ge 0 -and
+            $State.Lines.Count -ge [int]$State.WriterEvidenceBookmark) {
+            $State.WriterIdentityMismatchCount++
+        }
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($writerId) -or [string]::IsNullOrWhiteSpace($writerSequenceText)) {
+        $State.WriterIdentityMismatchCount++
+        return
+    }
+
+    $writerSequence = 0L
+    if (-not [long]::TryParse(
+            $writerSequenceText,
+            [System.Globalization.NumberStyles]::Integer,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [ref]$writerSequence) -or
+        $writerSequence -le 0) {
+        $State.WriterIdentityMismatchCount++
+        return
+    }
+
+    $eventName = Get-GuiSmokeLogLedgerStructuredField -Line $Line -Name 'event'
+    $isStart = [string]::Equals($eventName, 'operational_log_writer_started', [System.StringComparison]::OrdinalIgnoreCase)
+    $writer = $State.Writers[$writerId]
+    if ($null -eq $writer) {
+        if (-not $isStart) {
+            if ([int]$State.WriterEvidenceBookmark -ge 0 -and
+                $State.Lines.Count -ge [int]$State.WriterEvidenceBookmark -and
+                $State.UnknownWritersAfterBookmark.Add($writerId)) {
+                $State.WriterIdentityMismatchCount++
+            }
+            return
+        }
+
+        $acceptanceRunId = Get-GuiSmokeLogLedgerStructuredField -Line $Line -Name 'acceptance_run_id'
+        $scenarioRunId = Get-GuiSmokeLogLedgerStructuredField -Line $Line -Name 'scenario_run_id'
+        $expectedAcceptanceRunId = [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID
+        $expectedScenarioRunId = [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID
+        if ([string]::IsNullOrWhiteSpace($expectedAcceptanceRunId) -or
+            [string]::IsNullOrWhiteSpace($expectedScenarioRunId) -or
+            -not [string]::Equals($acceptanceRunId, $expectedAcceptanceRunId, [System.StringComparison]::Ordinal) -or
+            -not [string]::Equals($scenarioRunId, $expectedScenarioRunId, [System.StringComparison]::Ordinal)) {
+            if ([int]$State.WriterEvidenceBookmark -ge 0 -and
+                $State.Lines.Count -ge [int]$State.WriterEvidenceBookmark) {
+                $State.WriterIdentityMismatchCount++
+            }
+            return
+        }
+
+        $writer = [pscustomobject]@{
+            WriterId = $writerId
+            AcceptanceRunId = $acceptanceRunId
+            ScenarioRunId = $scenarioRunId
+            FirstSequence = $writerSequence
+            LastSequence = $writerSequence
+            ObservedCount = 1L
+            StartObserved = $true
+        }
+        $State.Writers[$writerId] = $writer
+        if ($writerSequence -gt 1) {
+            $State.WriterGapCount += $writerSequence - 1L
+        }
+        if ($writerSequence -ne 1L) {
+            $State.WriterIdentityMismatchCount++
+        }
+        return
+    }
+
+    if ($writerSequence -eq ([long]$writer.LastSequence + 1L)) {
+        $writer.LastSequence = $writerSequence
+        $writer.ObservedCount++
+    }
+    elseif ($writerSequence -gt ([long]$writer.LastSequence + 1L)) {
+        $State.WriterGapCount += $writerSequence - [long]$writer.LastSequence - 1L
+        $writer.LastSequence = $writerSequence
+        $writer.ObservedCount++
+    }
+    else {
+        $State.WriterDuplicateCount++
+    }
+
+    if (-not $isStart) {
+        return
+    }
+
+    $acceptanceRunId = Get-GuiSmokeLogLedgerStructuredField -Line $Line -Name 'acceptance_run_id'
+    $scenarioRunId = Get-GuiSmokeLogLedgerStructuredField -Line $Line -Name 'scenario_run_id'
+    if ($writerSequence -ne 1L -or
+        [string]::IsNullOrWhiteSpace($acceptanceRunId) -or
+        [string]::IsNullOrWhiteSpace($scenarioRunId) -or
+        [string]::Equals($acceptanceRunId, '(none)', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($scenarioRunId, '(none)', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $State.WriterIdentityMismatchCount++
+        return
+    }
+
+    if (-not [string]::Equals([string]$writer.AcceptanceRunId, $acceptanceRunId, [System.StringComparison]::Ordinal) -or
+        -not [string]::Equals([string]$writer.ScenarioRunId, $scenarioRunId, [System.StringComparison]::Ordinal)) {
+        $State.WriterIdentityMismatchCount++
+    }
 }
 
 function Get-GuiSmokeLogLedgerHash {
@@ -566,6 +723,7 @@ function Sync-GuiSmokeLogLedger {
             foreach ($line in @($pending.Delta.Lines)) {
                 $lineIdentity = "{0}`n{1}" -f [string]$pending.GenerationKey, ($firstLineOrdinal + $lineIndex)
                 [void]$State.ConsumedLineIdentities.Add($lineIdentity)
+                Add-GuiSmokeLogLedgerWriterEvidence -State $State -Line ([string]$line)
                 $State.Lines.Add([string]$line) | Out-Null
                 $lineIndex++
             }
@@ -678,10 +836,32 @@ function Get-GuiSmokeLogLedgerDiagnostics {
         TransientRescanCount = [int]$State.TransientRescanCount
         GapCount = [int]$State.GapCount
         DuplicateIndexCount = [int]$State.DuplicateIndexCount
+        WriterGapCount = [long]$State.WriterGapCount
+        WriterDuplicateCount = [long]$State.WriterDuplicateCount
+        WriterIdentityMismatchCount = [long]$State.WriterIdentityMismatchCount
         SyncCount = [int]$State.SyncCount
         FailureCode = if ([string]::IsNullOrWhiteSpace([string]$State.FailureCode)) { '(none)' } else { [string]$State.FailureCode }
         FailureDetail = if ([string]::IsNullOrWhiteSpace([string]$State.FailureDetail)) { '(none)' } else { [string]$State.FailureDetail }
     }
+}
+
+function Get-GuiSmokeLogLedgerWriterSnapshots {
+    param([Parameter(Mandatory = $true)]$State)
+
+    return @(
+        $State.Writers.Values |
+            Sort-Object WriterId |
+            ForEach-Object {
+                [pscustomobject]@{
+                    writerId = [string]$_.WriterId
+                    acceptanceRunId = [string]$_.AcceptanceRunId
+                    scenarioRunId = [string]$_.ScenarioRunId
+                    firstSequence = [long]$_.FirstSequence
+                    lastSequence = [long]$_.LastSequence
+                    observedCount = [long]$_.ObservedCount
+                }
+            }
+    )
 }
 
 function Get-GuiSmokeLogLedgerGenerationSnapshots {
@@ -719,7 +899,41 @@ function Get-GuiSmokeLogLedgerSnapshot {
         activeGenerationKey = [string]$State.ActiveGenerationKey
         generations = @(Get-GuiSmokeLogLedgerGenerationSnapshots -State $State)
         initialGenerations = @($State.InitialGenerationSnapshots)
+        writers = @(Get-GuiSmokeLogLedgerWriterSnapshots -State $State)
     }
+}
+
+function Test-GuiSmokeLogLedgerWriterSnapshotMonotonicSubset {
+    param(
+        [AllowEmptyCollection()]$InitialWriters = @(),
+        [AllowEmptyCollection()]$FinalWriters = @()
+    )
+
+    $finalById = @{}
+    foreach ($writer in @($FinalWriters)) {
+        $writerId = [string]$writer.writerId
+        if (-not [string]::IsNullOrWhiteSpace($writerId)) {
+            $finalById[$writerId] = $writer
+        }
+    }
+
+    foreach ($initial in @($InitialWriters)) {
+        $writerId = [string]$initial.writerId
+        if ([string]::IsNullOrWhiteSpace($writerId) -or -not $finalById.ContainsKey($writerId)) {
+            return $false
+        }
+
+        $final = $finalById[$writerId]
+        if (-not [string]::Equals([string]$initial.acceptanceRunId, [string]$final.acceptanceRunId, [System.StringComparison]::Ordinal) -or
+            -not [string]::Equals([string]$initial.scenarioRunId, [string]$final.scenarioRunId, [System.StringComparison]::Ordinal) -or
+            [long]$initial.firstSequence -ne [long]$final.firstSequence -or
+            [long]$final.lastSequence -lt [long]$initial.lastSequence -or
+            [long]$final.observedCount -lt [long]$initial.observedCount) {
+            return $false
+        }
+    }
+
+    return $true
 }
 
 function Test-GuiSmokeLogLedgerSnapshotMonotonicSubset {
@@ -815,6 +1029,41 @@ function Get-GuiSmokeLogLedgerSnapshotIntegrityReasons {
             -InitialGenerations $initialGenerations `
             -FinalGenerations $finalGenerations)) {
         $reasons.Add('generation_snapshot_not_monotonic') | Out-Null
+    }
+
+    $initialWriters = @()
+    if ($null -ne $InitialSnapshot.PSObject.Properties['writers']) {
+        $initialWriters = @($InitialSnapshot.writers)
+    }
+    $finalWriters = @()
+    if ($null -ne $FinalSnapshot.PSObject.Properties['writers']) {
+        $finalWriters = @($FinalSnapshot.writers)
+    }
+    if ($finalWriters.Count -eq 0) {
+        $reasons.Add('final_writer_snapshot_missing') | Out-Null
+    }
+    if ($initialWriters.Count -gt 0 -and
+        $finalWriters.Count -gt 0 -and
+        -not (Test-GuiSmokeLogLedgerWriterSnapshotMonotonicSubset `
+            -InitialWriters $initialWriters `
+            -FinalWriters $finalWriters)) {
+        $reasons.Add('writer_snapshot_not_monotonic') | Out-Null
+    }
+
+    $writerIds = @($finalWriters | ForEach-Object { [string]$_.writerId })
+    if (@($writerIds | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0 -or
+        @($writerIds | Select-Object -Unique).Count -ne $writerIds.Count) {
+        $reasons.Add('writer_identity_invalid') | Out-Null
+    }
+    foreach ($writer in $finalWriters) {
+        if ([long]$writer.firstSequence -ne 1L -or
+            [long]$writer.lastSequence -lt [long]$writer.firstSequence -or
+            [long]$writer.observedCount -ne ([long]$writer.lastSequence - [long]$writer.firstSequence + 1L) -or
+            [string]::IsNullOrWhiteSpace([string]$writer.acceptanceRunId) -or
+            [string]::IsNullOrWhiteSpace([string]$writer.scenarioRunId)) {
+            $reasons.Add('writer_snapshot_invalid') | Out-Null
+            break
+        }
     }
 
     return @($reasons.ToArray())

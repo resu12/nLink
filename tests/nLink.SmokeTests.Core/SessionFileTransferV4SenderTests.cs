@@ -7318,6 +7318,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var logTail = ReadV4SenderLogSnapshot(logStart);
         var proofLog = ReadOperationalLogTail(logAfterHandoffState);
         Assert.Contains("event=filetransfer_v6_epoch_tail_unblocked; direction=outbound;", logTail, StringComparison.Ordinal);
+        Assert.Contains("recovery_boundary_generation=", logTail, StringComparison.Ordinal);
+        Assert.Contains("observation_reason=", logTail, StringComparison.Ordinal);
         Assert.Contains("reason=frontier_caught_up_to_accepted_tail", logTail, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_v6_tail_blocked_until_frontier_proof; direction=outbound;", proofLog, StringComparison.Ordinal);
         Assert.DoesNotContain($"reason=not_yet_sent; chunk_index={acceptedTail}", proofLog, StringComparison.Ordinal);

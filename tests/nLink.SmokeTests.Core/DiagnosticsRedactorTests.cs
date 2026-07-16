@@ -32,9 +32,15 @@ public sealed class DiagnosticsRedactorTests
         const string predecessorId = "fta2-repair_replay-89abcdef0123456701234567";
         const string requestedPredecessorId = "fta2-runtime_unlock_retry_dispatch-0123456789abcdef01234567";
         const string releaseAuthorityId = "fta2-recovery_liveness_lease-89abcdef0123456701234567";
+        const string retainedPredecessorId =
+            "fta2-repair_replay-fedcba987654321001234567:retained:0123456789abcdef0123456789abcdef";
+        const string currentSuccessorId =
+            "fta2-repair_replay-765432100123456789abcdef:current:fedcba9876543210fedcba9876543210";
         var sample = $"authority_id={authorityId}; predecessor_authority_id={predecessorId}; " +
                      $"requested_predecessor_authority_id={requestedPredecessorId}; " +
-                     $"release_authority_id={releaseAuthorityId}; secret=do-not-keep";
+                     $"release_authority_id={releaseAuthorityId}; " +
+                     $"retained_predecessor_authority_id={retainedPredecessorId}; " +
+                     $"current_successor_authority_id={currentSuccessorId}; secret=do-not-keep";
 
         var redacted = SensitiveDataRedactor.Redact(sample);
 
@@ -46,6 +52,14 @@ public sealed class DiagnosticsRedactorTests
             StringComparison.Ordinal);
         Assert.Contains(
             $"release_authority_id={releaseAuthorityId}",
+            redacted,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"retained_predecessor_authority_id={retainedPredecessorId}",
+            redacted,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"current_successor_authority_id={currentSuccessorId}",
             redacted,
             StringComparison.Ordinal);
         Assert.Contains("[redacted]", redacted, StringComparison.Ordinal);

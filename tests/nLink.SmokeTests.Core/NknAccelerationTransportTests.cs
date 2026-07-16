@@ -11758,6 +11758,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         Assert.Contains("pendingRuntimeUnlockRegularV4FrontierRepairSettlement", source, StringComparison.Ordinal);
         Assert.Contains("runtime_unlock_regular_v4_frontier_repair_precontract_settlement_cached", source, StringComparison.Ordinal);
         Assert.Contains("runtime_unlock_regular_v4_frontier_repair_precontract_settlement_consumed", source, StringComparison.Ordinal);
+        Assert.Contains("settlement_outcome_not_handoff_eligible", source, StringComparison.Ordinal);
         Assert.Contains("allowPreRecoveryBridgeDecisionGeneration", source, StringComparison.Ordinal);
         Assert.Contains("TryAdoptPendingRegularV4FrontierRepairSettlement", source, StringComparison.Ordinal);
         Assert.Contains("runtime_unlock_regular_v4_frontier_repair_settlement_handoff_adopted", source, StringComparison.Ordinal);
@@ -11792,6 +11793,207 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             "NotifyTransportAccelerationStateChanged(\"regular_v4_frontier_repair_settlement\")",
             source,
             StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(FileTransferRegularV4FrontierRepairSettlementOutcome.StaleRejected, true)]
+    [InlineData(FileTransferRegularV4FrontierRepairSettlementOutcome.StaleRejected, false)]
+    [InlineData(FileTransferRegularV4FrontierRepairSettlementOutcome.TransferTerminal, true)]
+    [InlineData(FileTransferRegularV4FrontierRepairSettlementOutcome.TransferTerminal, false)]
+    public async Task RegularV4Recovery_AcceptedNonHandoffSettlementIsDiagnosticOnly(
+        FileTransferRegularV4FrontierRepairSettlementOutcome outcome,
+        bool regularRouteCurrent)
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var routeState = regularRouteCurrent ? "current" : "replaced";
+            var hostClient = new FakeNknClient($"host.regular-v4-non-handoff.{outcome}.{routeState}.address");
+            var helperClient = new FakeNknClient($"helper.regular-v4-non-handoff.{outcome}.{routeState}.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity($"host-regular-v4-non-handoff-{outcome}-{routeState}-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                new RetryableTunaAccelerationSession(canListen: true, failedDialAttemptsBeforeSuccess: 0));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity($"helper-regular-v4-non-handoff-{outcome}-{routeState}-id", helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            var transferId = $"transfer_regular_v4_non_handoff_{outcome}_{routeState}";
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId);
+            if (!regularRouteCurrent)
+            {
+                InvokePrivateMethod(
+                    host,
+                    "TrackAuthorizedFileTransferRouteHintForTests",
+                    transferId,
+                    FileTransferRouteResolver.PostTunaFallbackV6Token,
+                    FileTransferProtocol.ProtocolVersionV6,
+                    "test_replaced_route",
+                    false,
+                    "unknown",
+                    "unknown",
+                    false,
+                    0L,
+                    null,
+                    1);
+            }
+            var recoveryRequest = new FileTransferReceiveRecoveryRequest(
+                sessionId,
+                transferId,
+                FileTransferDirection.Outbound,
+                "regular_v4_non_handoff_test")
+            {
+                RouteToken = FileTransferRouteResolver.RegularNknV4FastToken,
+                ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                LiveRouteEpoch = 0,
+                TransferLegGeneration = 1,
+                BridgeRecoveryGeneration = 0,
+                TransportEpoch = 0,
+                AuthorityReason = "regular_v4_non_handoff_test",
+            };
+            InvokePrivateMethod(
+                host,
+                "MarkFileTransferRegularV4RecoveryLivenessStarted",
+                recoveryRequest,
+                sessionId,
+                transferId,
+                "regular_v4_non_handoff_test");
+
+            var retryStateType = typeof(NknSignalingTransport).GetNestedType(
+                "RuntimeUnlockRecoveryRetryState",
+                BindingFlags.NonPublic);
+            Assert.NotNull(retryStateType);
+            var retryState = Activator.CreateInstance(retryStateType!, nonPublic: true);
+            Assert.NotNull(retryState);
+            void SetRetryStateProperty(string propertyName, object? value)
+            {
+                var property = retryStateType!.GetProperty(
+                    propertyName,
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                Assert.NotNull(property);
+                property!.SetValue(retryState, value);
+            }
+
+            SetRetryStateProperty("ContractGeneration", 41L);
+            SetRetryStateProperty("RetiredOfferGeneration", 17L);
+            SetRetryStateProperty("CurrentOfferGeneration", 18L);
+            SetRetryStateProperty("SessionId", sessionId);
+            SetRetryStateProperty("TransferId", transferId);
+            SetRetryStateProperty("RetryReason", "regular_v4_non_handoff_retry");
+            SetRetryStateProperty("RecoveryReason", "regular_v4_non_handoff_recovery");
+            SetRetryStateProperty("CreatedUtcMs", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            SetRetryStateProperty("RetryDeadlineUtcMs", 101L);
+            SetRetryStateProperty("DispatchDeadlineUtcMs", 102L);
+            SetRetryStateProperty("ObservedSendDeadlineUtcMs", 103L);
+            SetRetryStateProperty("LivenessDeferralDeadlineUtcMs", 104L);
+            SetRetryStateProperty("BlockedByRegularV4FrontierRepair", true);
+            SetRetryStateProperty("RegularV4FrontierRepairBlockerReason", "repair_pressure_active");
+            SetRetryStateProperty("RegularV4FrontierRepairTrigger", "repair_pressure_trigger");
+            SetRetryStateProperty("RegularV4FrontierRepairPayerDecisionId", 77L);
+            SetRetryStateProperty("RegularV4RecoveryBlockedTransferId", transferId);
+            SetRetryStateProperty("RegularV4RecoveryDirection", FileTransferDirection.Outbound);
+            SetRetryStateProperty("RegularV4RecoveryLivenessGeneration", 1);
+            SetRetryStateProperty("RegularV4RecoveryRouteToken", FileTransferRouteResolver.RegularNknV4FastToken);
+            SetRetryStateProperty("RegularV4RecoveryProtocolVersion", FileTransferProtocol.ProtocolVersionV4);
+            SetRetryStateProperty("RegularV4RecoveryLiveRouteEpoch", 0);
+            SetRetryStateProperty("RegularV4RecoveryTransferLegGeneration", 1L);
+            SetRetryStateProperty("RegularV4RecoveryTransportEpoch", 0L);
+            SetRetryStateProperty("RegularV4RecoveryBridgeRecoveryGeneration", 0);
+            SetRetryStateProperty("RegularV4RecoveryBridgeDecisionGeneration", 0);
+            SetPrivateField(host, "runtimeUnlockRecoveryRetryState", retryState);
+
+            var invariantProperties = new[]
+            {
+                "ContractState",
+                "RetryDeadlineUtcMs",
+                "DispatchDeadlineUtcMs",
+                "ObservedSendDeadlineUtcMs",
+                "LivenessDeferralDeadlineUtcMs",
+                "RetryQueued",
+                "RetryDispatching",
+                "RetryDispatched",
+                "BlockedByRegularV4ReceiveRecovery",
+                "BlockedByRegularV4FrontierRepair",
+                "RegularV4FrontierRepairBlockerReason",
+                "RegularV4FrontierRepairTrigger",
+                "RegularV4FrontierRepairPayerDecisionId",
+            };
+            var retryStateBefore = invariantProperties.ToDictionary(
+                propertyName => propertyName,
+                propertyName => retryStateType!.GetProperty(propertyName)!.GetValue(retryState));
+            var routeBefore = GetFileTransferRouteHintTokenForTests(host, transferId);
+            var recoveryState = Assert.IsAssignableFrom<IFileTransferRecoveryLivenessState>(host);
+            Assert.True(recoveryState.TryGetActiveFileTransferRecoveryLivenessSnapshot(sessionId, out var recoveryBefore));
+
+            var settlement = new FileTransferRegularV4FrontierRepairSettlement(
+                sessionId,
+                transferId,
+                FileTransferDirection.Outbound,
+                FileTransferRouteResolver.RegularNknV4FastToken,
+                FileTransferProtocol.ProtocolVersionV4,
+                0,
+                1,
+                0,
+                1,
+                0,
+                0,
+                0,
+                1,
+                null,
+                "regular_v4_peer_silence_safety_replay:0:0:64:1",
+                0,
+                3,
+                64,
+                1,
+                "regular_v4_non_handoff_test",
+                outcome,
+                FileTransferTransportKind.RegularNkn);
+            var logStart = GetOperationalLogLength();
+            InvokePrivateMethod(host, "HandleAcceptedRegularV4FrontierRepairSettlement", settlement);
+
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=runtime_unlock_regular_v4_frontier_repair_settlement_handoff_rejected;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.Contains("decision_reason=settlement_outcome_not_handoff_eligible", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_regular_v4_frontier_repair_precontract_settlement_cached;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.Same(retryState, GetPrivateField(host, "runtimeUnlockRecoveryRetryState"));
+            foreach (var propertyName in invariantProperties)
+            {
+                Assert.Equal(
+                    retryStateBefore[propertyName],
+                    retryStateType!.GetProperty(propertyName)!.GetValue(retryState));
+            }
+
+            Assert.Equal(routeBefore, GetFileTransferRouteHintTokenForTests(host, transferId));
+            Assert.True(recoveryState.TryGetActiveFileTransferRecoveryLivenessSnapshot(sessionId, out var recoveryAfter));
+            Assert.Equal(recoveryBefore, recoveryAfter);
+            Assert.DoesNotContain("event=filetransfer_route_selected;", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_progress", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=session_recovery_contract_", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_recovery_authority_", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_retry_scheduled;", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=session_liveness_", tail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
     }
 
     [Theory]
