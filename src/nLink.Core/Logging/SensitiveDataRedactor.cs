@@ -91,7 +91,7 @@ public static partial class SensitiveDataRedactor
     [GeneratedRegex(@"\bevent=(?<value>[A-Za-z0-9._/-]+)", RegexOptions.CultureInvariant)]
     private static partial Regex EventKeyValueRegex();
 
-    [GeneratedRegex(@"\b(?<key>authority_id|predecessor_authority_id|successor_authority_id|requested_predecessor_authority_id|release_authority_id|retained_predecessor_authority_id|current_successor_authority_id)=(?<value>fta[0-9]+-[A-Za-z0-9._/:-]+)", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"\b(?<key>authority_id|predecessor_authority_id|successor_authority_id|requested_predecessor_authority_id|release_authority_id|retained_predecessor_authority_id|current_authority_id|current_successor_authority_id)=(?<value>fta[0-9]+-[A-Za-z0-9._/:-]+)", RegexOptions.CultureInvariant)]
     private static partial Regex AuthorityIdKeyValueRegex();
 
     [GeneratedRegex(@"(?<prefix>(?:^|[\s|,;]))(?<key>[A-Za-z_][A-Za-z0-9._/-]{1,127})(?<separator>\s*[:=])", RegexOptions.CultureInvariant)]

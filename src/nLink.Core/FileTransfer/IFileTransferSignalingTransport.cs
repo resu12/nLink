@@ -553,6 +553,29 @@ internal enum RuntimeUnlockRetryDispatchDecisionStatus
     Rejected = 2,
 }
 
+internal enum RuntimeUnlockRetryDispatchDecisionStageStatus
+{
+    Rejected = 0,
+    Staged = 1,
+    Idempotent = 2,
+}
+
+internal enum RuntimeUnlockRetryDispatchInstallStatus
+{
+    Rejected = 0,
+    Installed = 1,
+    Idempotent = 2,
+}
+
+internal enum RuntimeUnlockRetryDispatchStageDisposition
+{
+    Unknown = 0,
+    Retained = 1,
+    AlreadyInstalled = 2,
+    Rejected = 3,
+    Cleared = 4,
+}
+
 internal enum RuntimeUnlockRetryDispatchSettlementOutcome
 {
     DispatchObserved = 0,
@@ -685,6 +708,25 @@ internal readonly record struct RuntimeUnlockRetryDispatchSettlementReport(
     string Reason)
 {
     public bool IsDefault => Authority.IsDefault || string.IsNullOrWhiteSpace(Reason);
+}
+
+internal readonly record struct RuntimeUnlockRetryDispatchInstallReceipt(
+    RuntimeUnlockRetryDispatchAuthority Authority,
+    long InstallGeneration)
+{
+    public RuntimeUnlockRetryDispatchAuthorityRequest Request { get; init; }
+
+    public RuntimeUnlockRetryDispatchDecisionStageStatus StageStatus { get; init; }
+
+    public RuntimeUnlockRetryDispatchStageDisposition StageDisposition { get; init; }
+
+    public bool StageCleared { get; init; }
+
+    public long StagedUtcMs { get; init; }
+
+    public long StageExpiresUtcMs { get; init; }
+
+    public bool IsDefault => Authority.IsDefault || InstallGeneration <= 0;
 }
 
 internal readonly record struct RuntimeUnlockRegularV4RecoverySettlementReport(
@@ -1031,6 +1073,48 @@ internal readonly record struct RuntimeUnlockRetryDispatchDecision(
     public FileTransferCoordinatorState State { get; init; } = null!;
 }
 
+internal readonly record struct RuntimeUnlockRetryDispatchDecisionStageResult(
+    RuntimeUnlockRetryDispatchDecisionStageStatus Status,
+    string Reason,
+    RuntimeUnlockRetryDispatchDecision Decision)
+{
+    public RuntimeUnlockRetryDispatchStageDisposition StageDisposition { get; init; }
+
+    public bool StageCleared { get; init; }
+
+    public long StagedUtcMs { get; init; }
+
+    public long StageExpiresUtcMs { get; init; }
+
+    public bool Accepted =>
+        Decision.Granted &&
+        !StageCleared &&
+        Status is
+            RuntimeUnlockRetryDispatchDecisionStageStatus.Staged or
+            RuntimeUnlockRetryDispatchDecisionStageStatus.Idempotent &&
+        (
+            StageDisposition == RuntimeUnlockRetryDispatchStageDisposition.Retained &&
+            StagedUtcMs > 0 &&
+            StageExpiresUtcMs > StagedUtcMs ||
+            Status == RuntimeUnlockRetryDispatchDecisionStageStatus.Idempotent &&
+            StageDisposition == RuntimeUnlockRetryDispatchStageDisposition.AlreadyInstalled &&
+            StagedUtcMs == 0 &&
+            StageExpiresUtcMs == 0
+        );
+}
+
+internal readonly record struct RuntimeUnlockRetryDispatchInstallResult(
+    RuntimeUnlockRetryDispatchInstallStatus Status,
+    string Reason,
+    RuntimeUnlockRetryDispatchInstallReceipt Receipt)
+{
+    public bool Accepted =>
+        !Receipt.IsDefault &&
+        Status is
+            RuntimeUnlockRetryDispatchInstallStatus.Installed or
+            RuntimeUnlockRetryDispatchInstallStatus.Idempotent;
+}
+
 internal readonly record struct RuntimeUnlockRetryDispatchSettlementDecision(
     RuntimeUnlockRetryDispatchSettlementDecisionStatus Status,
     string Reason,
@@ -1105,7 +1189,14 @@ internal interface IRuntimeUnlockRetryDispatchAuthorityBridge
         FileTransferDirection direction,
         out RuntimeUnlockRetryDispatchAuthorityRequest request);
 
-    bool ObserveRuntimeUnlockRetryDispatchDecision(RuntimeUnlockRetryDispatchDecision decision);
+    bool ObserveRuntimeUnlockRetryDispatchNonGrantDecision(
+        RuntimeUnlockRetryDispatchDecision decision);
+
+    RuntimeUnlockRetryDispatchDecisionStageResult StageRuntimeUnlockRetryDispatchDecision(
+        RuntimeUnlockRetryDispatchDecision decision);
+
+    RuntimeUnlockRetryDispatchInstallResult CommitRuntimeUnlockRetryDispatchInstall(
+        RuntimeUnlockRetryDispatchInstallReceipt receipt);
 
     bool ObserveRuntimeUnlockRetryDispatchSettlementDecision(
         RuntimeUnlockRetryDispatchSettlementDecision decision);

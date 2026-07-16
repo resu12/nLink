@@ -532,6 +532,644 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_post_grant_hold_count"]);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryInstallStageWithoutCommit_IsNotInstalledGrant(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_install_incomplete";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_decision_staged",
+                    transferId,
+                    "; stage_status=Staged; decision_status=Granted",
+                    "retry_dispatch_decision_staged"),
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_install_receipt_issued",
+                    transferId,
+                    "; stage_status=Staged; decision_status=Granted",
+                    "retry_dispatch_install_receipt_issued")),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1",
+                }
+                : null);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_decision_staged_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_install_receipt_issued_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_install_committed_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_authority_granted_count"]);
+        Assert.Equal("incomplete", verdict["runtime_unlock_retry_dispatch_install_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false, "retry_dispatch_install_transfer_context_replaced")]
+    [InlineData(true, "retry_dispatch_install_transfer_context_replaced")]
+    [InlineData(false, "retry_dispatch_install_revalidation_failed")]
+    [InlineData(true, "retry_dispatch_install_revalidation_failed")]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryExactInstallRejection_ResolvesStagedGrant(
+        bool compact,
+        string rejectionReason)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_install_rejected";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_decision_staged",
+                    transferId,
+                    "; stage_status=Staged; decision_status=Granted",
+                    "retry_dispatch_decision_staged"),
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_install_rejected",
+                    transferId,
+                    "; install_status=Rejected; decision_status=Rejected; stage_cleared=1; stage_disposition=invalidated_before_receipt",
+                    rejectionReason,
+                    installGeneration: 0)),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1",
+                }
+                : null);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_decision_staged_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_install_receipt_issued_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_install_committed_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_install_rejected_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_authority_granted_count"]);
+        Assert.Equal("pass", verdict["runtime_unlock_retry_dispatch_install_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryDifferentGenerationRejection_DoesNotResolveStage(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_install_rejected_generation_99";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_decision_staged",
+                    transferId,
+                    "; stage_status=Staged; decision_status=Granted",
+                    "retry_dispatch_decision_staged"),
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_install_rejected",
+                    transferId,
+                    "; install_status=Rejected; decision_status=Rejected; stage_cleared=1; stage_disposition=receipt_rejected",
+                    "retry_dispatch_install_receipt_replaced",
+                    installGeneration: 99)),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1",
+                }
+                : null);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_decision_staged_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_install_rejected_count"]);
+        Assert.Equal("incomplete", verdict["runtime_unlock_retry_dispatch_install_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryInstallRejectionWithoutRequestTuple_DoesNotResolveStage(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_install_rejection_request_missing";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_decision_staged",
+                    transferId,
+                    "; stage_status=Staged; decision_status=Granted",
+                    "retry_dispatch_decision_staged"),
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_install_rejected",
+                    transferId,
+                    suffix: "; install_generation=1; install_status=Rejected; decision_status=Rejected",
+                    decisionReason: "retry_dispatch_install_revalidation_failed")),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1",
+                }
+                : null);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_decision_staged_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_install_rejected_count"]);
+        Assert.Equal("incomplete", verdict["runtime_unlock_retry_dispatch_install_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryCommitWithoutStageOrReceipt_IsOrphaned(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_install_commit_orphan";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_install_committed",
+                    transferId,
+                    "; install_status=Installed; decision_status=Granted",
+                    "retry_dispatch_install_committed")),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1",
+                }
+                : null);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_decision_staged_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_install_receipt_issued_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_install_committed_count"]);
+        Assert.Equal("incomplete", verdict["runtime_unlock_retry_dispatch_install_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryReceiptAndCommitWithoutStage_AreOrphaned(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_install_receipt_commit_orphan";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_install_receipt_issued",
+                    transferId,
+                    "; decision_status=Granted",
+                    "retry_dispatch_install_receipt_issued"),
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_install_committed",
+                    transferId,
+                    "; install_status=Installed; decision_status=Granted",
+                    "retry_dispatch_install_committed")),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1",
+                }
+                : null);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_decision_staged_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_install_receipt_issued_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_install_committed_count"]);
+        Assert.Equal("incomplete", verdict["runtime_unlock_retry_dispatch_install_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryExactInstallCommit_GrantsOnceWithFullCompactParity(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_install_committed";
+        var staged = RuntimeUnlockRetryInstallLine(
+            "runtime_unlock_retry_dispatch_decision_staged",
+            transferId,
+            "; stage_status=Staged; decision_status=Granted",
+            "retry_dispatch_decision_staged");
+        var receipt = RuntimeUnlockRetryInstallLine(
+            "runtime_unlock_retry_dispatch_install_receipt_issued",
+            transferId,
+            "; stage_status=Staged; decision_status=Granted",
+            "retry_dispatch_install_receipt_issued");
+        var committed = RuntimeUnlockRetryInstallLine(
+            "runtime_unlock_retry_dispatch_install_committed",
+            transferId,
+            "; install_status=Installed; decision_status=Granted",
+            "retry_dispatch_install_committed");
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                staged,
+                staged,
+                receipt,
+                receipt,
+                committed,
+                committed,
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_authority_granted",
+                    transferId,
+                    "; install_status=Installed; decision_status=Granted",
+                    "runtime_unlock_retry_dispatch_authority_granted"),
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_released_after_regular_v4_receive_recovery",
+                    transferId),
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_observed",
+                    transferId),
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_contract_settled",
+                    transferId,
+                    suffix: "; settlement_outcome=DispatchObserved; dispatch_observed=1")),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1",
+                }
+                : null);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_decision_staged_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_install_receipt_issued_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_install_committed_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_authority_granted_count"]);
+        Assert.Equal("pass", verdict["runtime_unlock_retry_dispatch_install_verdict"]);
+        Assert.Equal("pass", verdict["runtime_unlock_retry_dispatch_proof_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryPostCommitRejection_InvalidatesLaterGrant(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_install_postcommit_rejected";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_decision_staged",
+                    transferId,
+                    "; stage_status=Staged; decision_status=Granted",
+                    "retry_dispatch_decision_staged"),
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_install_receipt_issued",
+                    transferId,
+                    "; decision_status=Granted",
+                    "retry_dispatch_install_receipt_issued"),
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_install_committed",
+                    transferId,
+                    "; install_status=Installed; decision_status=Granted",
+                    "retry_dispatch_install_committed"),
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_install_rejected",
+                    transferId,
+                    "; install_status=Rejected; decision_status=Rejected; stage_cleared=0; stage_disposition=post_commit_activation_invalidated",
+                    "retry_dispatch_install_post_commit_activation_invalidated"),
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_authority_granted",
+                    transferId,
+                    "; install_status=Installed; decision_status=Granted",
+                    "runtime_unlock_retry_dispatch_authority_granted")),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1",
+                }
+                : null);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_install_committed_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_install_rejected_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_authority_granted_count"]);
+        Assert.Equal("incomplete", verdict["runtime_unlock_retry_dispatch_install_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryDuplicateGrantTelemetry_CountsOneLogicalGrant(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_install_duplicate_grant";
+        var grant = RuntimeUnlockRetryInstallLine(
+            "runtime_unlock_retry_dispatch_authority_granted",
+            transferId,
+            "; install_status=Installed; decision_status=Granted",
+            "runtime_unlock_retry_dispatch_authority_granted");
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_decision_staged",
+                    transferId,
+                    "; stage_status=Staged; decision_status=Granted",
+                    "retry_dispatch_decision_staged"),
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_install_receipt_issued",
+                    transferId,
+                    "; decision_status=Granted",
+                    "retry_dispatch_install_receipt_issued"),
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_install_committed",
+                    transferId,
+                    "; install_status=Installed; decision_status=Granted",
+                    "retry_dispatch_install_committed"),
+                grant,
+                grant,
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_released_after_regular_v4_receive_recovery",
+                    transferId),
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_observed",
+                    transferId),
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_contract_settled",
+                    transferId,
+                    suffix: "; settlement_outcome=DispatchObserved; dispatch_observed=1")),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1",
+                }
+                : null);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_authority_granted_count"]);
+        Assert.Equal("pass", verdict["runtime_unlock_retry_dispatch_install_verdict"]);
+        Assert.Equal("pass", verdict["runtime_unlock_retry_dispatch_proof_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryInstallTupleMismatch_CannotBorrowCommit(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_install_tuple_mismatch";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_decision_staged",
+                    transferId,
+                    "; stage_status=Staged; decision_status=Granted",
+                    "retry_dispatch_decision_staged"),
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_install_receipt_issued",
+                    transferId,
+                    "; decision_status=Granted",
+                    "retry_dispatch_install_receipt_issued"),
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_install_committed",
+                    transferId,
+                    "; install_status=Installed; decision_status=Granted",
+                    "retry_dispatch_install_committed",
+                    runtimeGeneration: 5),
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_authority_granted",
+                    transferId,
+                    "; install_status=Installed; decision_status=Granted",
+                    "runtime_unlock_retry_dispatch_authority_granted")),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1",
+                }
+                : null);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_install_committed_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_authority_granted_count"]);
+        Assert.Equal("incomplete", verdict["runtime_unlock_retry_dispatch_install_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_RuntimeUnlockRetrySuccessorInstall_CannotBorrowDifferentPredecessor(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_install_predecessor_mismatch";
+        const string successorAuthorityId = "fta2-runtime-unlock-successor-2";
+        const string installedPredecessor = "fta2-runtime-unlock-predecessor-1";
+        const string grantedPredecessor = "fta2-runtime-unlock-unrelated-1";
+        string InstallLine(
+            string eventName,
+            string suffix,
+            string reason,
+            string predecessorAuthorityId)
+            => RuntimeUnlockRetryInstallLine(
+                eventName,
+                transferId,
+                suffix,
+                reason,
+                authorityId: successorAuthorityId,
+                predecessorAuthorityId: predecessorAuthorityId,
+                dispatchAttemptGeneration: 2,
+                missingDispatchSuccessorGeneration: 1);
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                InstallLine(
+                    "runtime_unlock_retry_dispatch_decision_staged",
+                    "; stage_status=Staged; decision_status=Granted",
+                    "retry_dispatch_decision_staged",
+                    installedPredecessor),
+                InstallLine(
+                    "runtime_unlock_retry_dispatch_install_receipt_issued",
+                    "; decision_status=Granted",
+                    "retry_dispatch_install_receipt_issued",
+                    installedPredecessor),
+                InstallLine(
+                    "runtime_unlock_retry_dispatch_install_committed",
+                    "; install_status=Installed; decision_status=Granted",
+                    "retry_dispatch_install_committed",
+                    installedPredecessor),
+                InstallLine(
+                    "runtime_unlock_retry_dispatch_authority_granted",
+                    "; install_status=Installed; decision_status=Granted",
+                    "runtime_unlock_retry_dispatch_authority_granted",
+                    grantedPredecessor)),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1",
+                }
+                : null);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_install_committed_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_authority_granted_count"]);
+        Assert.Equal("incomplete", verdict["runtime_unlock_retry_dispatch_install_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryPositiveInstallGenerationWithoutChain_IsNotLegacy(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_install_generation_without_chain";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_authority_granted",
+                    transferId,
+                    "; install_status=Installed; decision_status=Granted",
+                    "runtime_unlock_retry_dispatch_authority_granted")),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1",
+                }
+                : null);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_decision_staged_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_install_receipt_issued_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_install_committed_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_authority_granted_count"]);
+        Assert.Equal("incomplete", verdict["runtime_unlock_retry_dispatch_install_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryCommittedAuthorityA_ObservedAuthorityBDoesNotProveDispatch(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_install_observed_authority_mismatch";
+        const string committedAuthorityId = "fta2-runtime-unlock-installed-a";
+        const string observedAuthorityId = "fta2-runtime-unlock-observed-b";
+        string InstallLine(string eventName, string suffix, string reason)
+            => RuntimeUnlockRetryInstallLine(
+                eventName,
+                transferId,
+                suffix,
+                reason,
+                authorityId: committedAuthorityId);
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                InstallLine(
+                    "runtime_unlock_retry_dispatch_decision_staged",
+                    "; stage_status=Staged; decision_status=Granted",
+                    "retry_dispatch_decision_staged"),
+                InstallLine(
+                    "runtime_unlock_retry_dispatch_install_receipt_issued",
+                    "; decision_status=Granted",
+                    "retry_dispatch_install_receipt_issued"),
+                InstallLine(
+                    "runtime_unlock_retry_dispatch_install_committed",
+                    "; install_status=Installed; decision_status=Granted",
+                    "retry_dispatch_install_committed"),
+                InstallLine(
+                    "runtime_unlock_retry_dispatch_authority_granted",
+                    "; install_status=Installed; decision_status=Granted",
+                    "runtime_unlock_retry_dispatch_authority_granted"),
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_observed",
+                    transferId,
+                    authorityId: observedAuthorityId)),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1",
+                }
+                : null);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_authority_granted_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_observed_count"]);
+        Assert.Equal("pass", verdict["runtime_unlock_retry_dispatch_install_verdict"]);
+        Assert.Equal("fail", verdict["runtime_unlock_retry_dispatch_proof_verdict"]);
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RuntimeUnlockRetryMissingDispatchWithoutSuccessor_ClassifiesFirstEdge()
@@ -947,6 +1585,60 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("none", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_verdict"]);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_StagedIssuedSuccessorGrantWithoutCommit_DoesNotRecoverZeroOfferRejection(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_zero_offer_uncommitted_successor";
+        var lines = BuildRuntimeUnlockZeroOfferSuccessorCurrentArtifactFixture(
+                transferId,
+                rejectSuccessor: true)
+            .Where(line => !line.Contains(
+                "event=runtime_unlock_recovery_diagnostic_sample",
+                StringComparison.Ordinal))
+            .ToList();
+        var rawGrant = RuntimeUnlockRetrySchema2Line(
+                "runtime_unlock_retry_dispatch_authority_granted",
+                transferId,
+                suffix: "; install_generation=2; request_regular_v4_liveness_generation=3; request_bridge_decision_generation=5",
+                authorityId: "fta2-runtime-unlock-successor-2",
+                predecessorAuthorityId: "fta2-runtime-unlock-test-1",
+                retiredGeneration: 0,
+                dispatchAttemptGeneration: 2,
+                missingDispatchSuccessorGeneration: 1)
+            .Replace("offer_generation=12", "offer_generation=0", StringComparison.Ordinal)
+            .Replace("offer_nonce=nonce-1", "offer_nonce=(none)", StringComparison.Ordinal);
+        var insertionIndex = lines.Count - 2;
+        foreach (var installLine in RuntimeUnlockRetryStagedIssuedGrantWithoutCommitLines(rawGrant))
+        {
+            lines.Insert(insertionIndex++, LogLine(installLine, secondsOffset: lines.Count));
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines.ToArray(),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("incomplete", verdict["runtime_unlock_retry_dispatch_install_verdict"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_rejected_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_rejected_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_rejected_unresolved_count"]);
+        Assert.Equal("fail", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_verdict"]);
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RuntimeUnlockRetryMissingDispatchIgnoresLegacyRejectionAndOppositeTerminal()
@@ -1068,7 +1760,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task AnalyzeRetained_RuntimeUnlockRetrySchema2DuplicateSuccessor_Fails()
+    public async Task AnalyzeRetained_RuntimeUnlockRetrySchema2DuplicateSuccessorEvidence_IsDeduplicated()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -1096,7 +1788,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("fail", verdict["runtime_unlock_retry_dispatch_proof_verdict"]);
-        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_orphaned_supersession_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_orphaned_supersession_count"]);
     }
 
     [Fact]
@@ -2727,6 +3419,54 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count"]);
         Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count"]);
         Assert.Equal("pass", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_StagedIssuedGrantWithoutCommit_DoesNotRecoverFallbackTailRecheck(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_tail_recheck_uncommitted_grant";
+        var rawGrant =
+            $"event=runtime_unlock_retry_dispatch_authority_granted; authority_schema=2; authority_id=fta2-fallback-recheck-1; " +
+            RuntimeUnlockFallbackTailUnblockRequestTuple(transferId) +
+            "; install_generation=1; decision_reason=accepted";
+        var lines = BuildRuntimeUnlockFallbackTailUnblockRecheckFixture(transferId).ToList();
+        var insertionIndex = lines.Count - 2;
+        lines.Insert(
+            insertionIndex++,
+            LogLine(RuntimeUnlockFallbackTailUnblockRecheckRequestedLine(transferId), secondsOffset: lines.Count));
+        lines.Insert(
+            insertionIndex++,
+            LogLine(RuntimeUnlockFallbackTailUnblockRecheckDecidedLine(transferId), secondsOffset: lines.Count));
+        foreach (var installLine in RuntimeUnlockRetryStagedIssuedGrantWithoutCommitLines(rawGrant))
+        {
+            lines.Insert(insertionIndex++, LogLine(installLine, secondsOffset: lines.Count));
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines.ToArray(),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_authority_granted_count"]);
+        Assert.Equal("incomplete", verdict["runtime_unlock_retry_dispatch_install_verdict"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count"]);
+        Assert.Equal("fail", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict"]);
     }
 
     [Theory]
@@ -4516,6 +5256,50 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task AnalyzeRetained_StagedIssuedGrantWithoutCommit_DoesNotRecoverClosureHandoff(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_offer_timeout_uncommitted_grant";
+        var middleMessages = new List<string>
+        {
+            RuntimeUnlockRegularV4RecoveryLeaseClosureRetainedLine(transferId),
+            RuntimeUnlockRegularV4RecoveryClosureOfferTimeoutJoinedLine(transferId),
+            RuntimeUnlockRegularV4RecoveryClosureOfferTimeoutLine(),
+            RuntimeUnlockRegularV4RecoveryClosureOfferTimeoutArmedLine(transferId),
+            RuntimeUnlockRegularV4RecoveryLeaseClosureAdoptedLine(transferId),
+            RuntimeUnlockRegularV4RecoveryLeaseClosureConsumedLine(transferId),
+        };
+        middleMessages.AddRange(
+            RuntimeUnlockRetryStagedIssuedGrantWithoutCommitLines(
+                RuntimeUnlockRetryLeaseClosureGrantedLine(transferId) + "; install_generation=1"));
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(transferId, middleMessages.ToArray()),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_authority_granted_count"]);
+        Assert.Equal("incomplete", verdict["runtime_unlock_retry_dispatch_install_verdict"]);
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_unresolved_count"]);
+        Assert.Equal("fail", verdict["runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task AnalyzeRetained_DifferentOfferJoinsSameClosure_DoesNotRecoverTimedOutOffer(
         bool compact)
     {
@@ -5553,6 +6337,68 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
            $"source_publication_runtime_owner_route_kind=RegularNknV4Fast; source_publication_runtime_owner_protocol_version=4; source_publication_runtime_owner_live_route_epoch=1; " +
            $"source_publication_runtime_owner_runtime_generation={runtimeGeneration}; source_publication_runtime_owner_terminal_generation=0; source_publication_runtime_owner_family={runtimeOwnerFamily}; " +
            $"source_publication_runtime_owner_created_reason={runtimeOwnerCreatedReason}; offer_generation=12; offer_nonce=nonce-1; decision_reason={decisionReason}{suffix}";
+
+    private static string RuntimeUnlockRetryInstallLine(
+        string eventName,
+        string transferId,
+        string suffix,
+        string decisionReason,
+        int runtimeGeneration = 4,
+        string authorityId = "fta2-runtime-unlock-test-1",
+        string predecessorAuthorityId = "(none)",
+        int dispatchAttemptGeneration = 1,
+        int missingDispatchSuccessorGeneration = 0,
+        long? installGeneration = null)
+    {
+        var effectiveInstallGeneration = installGeneration ??
+            (string.Equals(
+                eventName,
+                "runtime_unlock_retry_dispatch_decision_staged",
+                StringComparison.Ordinal)
+                ? 0
+                : 1);
+        return RuntimeUnlockRetrySchema2Line(
+            eventName,
+            transferId,
+            runtimeGeneration: runtimeGeneration,
+            suffix: $"; install_generation={effectiveInstallGeneration}" +
+                    "; request_regular_v4_liveness_generation=3; request_bridge_decision_generation=5" +
+                    "; request_active_predecessor_supersession=0" +
+                    suffix,
+            authorityId: authorityId,
+            predecessorAuthorityId: predecessorAuthorityId,
+            dispatchAttemptGeneration: dispatchAttemptGeneration,
+            missingDispatchSuccessorGeneration: missingDispatchSuccessorGeneration,
+            decisionReason: decisionReason);
+    }
+
+    private static string[] RuntimeUnlockRetryStagedIssuedGrantWithoutCommitLines(
+        string grantLine)
+    {
+        var normalizedGrantLine = grantLine.Contains(
+            "request_active_predecessor_supersession=",
+            StringComparison.Ordinal)
+            ? grantLine
+            : grantLine + "; request_active_predecessor_supersession=0";
+        var stagedLine = System.Text.RegularExpressions.Regex.Replace(
+            normalizedGrantLine.Replace(
+                "event=runtime_unlock_retry_dispatch_authority_granted",
+                "event=runtime_unlock_retry_dispatch_decision_staged",
+                StringComparison.Ordinal),
+                "install_generation=[^;]+",
+                "install_generation=0");
+        return
+        [
+            stagedLine + "; stage_status=Staged; decision_status=Granted",
+            normalizedGrantLine
+                .Replace(
+                    "event=runtime_unlock_retry_dispatch_authority_granted",
+                    "event=runtime_unlock_retry_dispatch_install_receipt_issued",
+                    StringComparison.Ordinal) +
+                "; decision_status=Granted",
+            normalizedGrantLine,
+        ];
+    }
 
     private static string RuntimeUnlockRetrySettlementReportedLine(
         string transferId,

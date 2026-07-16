@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Reflection;
 using NLink.Core.FileTransfer;
+using NLink.Core.Logging;
 
 namespace NLink.SmokeTests;
 
@@ -28,6 +29,472 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         Assert.Equal(0, bridge.SettlementReportSubscriberCount);
         Assert.Equal(0, bridge.RegularV4SettlementReportSubscriberCount);
         Assert.Equal(0, bridge.RegularV4LifecycleReportSubscriberCount);
+    }
+
+    [Fact]
+    public async Task GrantedDecision_IsStagedThenInstalledOnceUnderCoreGate()
+    {
+        using var fixture = await CreateFixtureAsync(
+            "session_retry_two_phase_install",
+            "transfer_retry_two_phase_install");
+        fixture.Bridge.CoreGateForInstallProbe = GetCoreGate(fixture.Service);
+        var logStart = GetOperationalLogLength();
+
+        fixture.Bridge.RaiseAuthorityRequest(fixture.InitialRequest);
+
+        var decision = fixture.Bridge.DequeueAuthorityDecision();
+        var stage = fixture.Bridge.DequeueStageResult();
+        var install = fixture.Bridge.DequeueInstallResult();
+        var contract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(decision.Contract);
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Granted, decision.Status);
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStageStatus.Staged, stage.Status);
+        Assert.Equal(decision, stage.Decision);
+        Assert.Equal(RuntimeUnlockRetryDispatchStageDisposition.Retained, stage.StageDisposition);
+        Assert.False(stage.StageCleared);
+        Assert.True(stage.StagedUtcMs > 0);
+        Assert.True(stage.StageExpiresUtcMs > stage.StagedUtcMs);
+        Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Installed, install.Status);
+        Assert.Equal(contract.Authority, install.Receipt.Authority);
+        Assert.Equal(1, install.Receipt.InstallGeneration);
+        Assert.Equal(fixture.InitialRequest, install.Receipt.Request);
+        Assert.Equal(stage.Status, install.Receipt.StageStatus);
+        Assert.Equal(stage.StageDisposition, install.Receipt.StageDisposition);
+        Assert.Equal(stage.StageCleared, install.Receipt.StageCleared);
+        Assert.Equal(stage.StagedUtcMs, install.Receipt.StagedUtcMs);
+        Assert.Equal(stage.StageExpiresUtcMs, install.Receipt.StageExpiresUtcMs);
+        Assert.True(fixture.Bridge.LastInstallObservedUnderCoreGate);
+        Assert.True(fixture.Bridge.LastReceiptIssuedEvidenceObservedBeforeCommit);
+        Assert.Equal(1, fixture.Bridge.InstallCount);
+        Assert.Same(contract, fixture.Bridge.InfraCurrentContract);
+        Assert.Same(contract, GetCurrentContract(fixture.Context));
+        Assert.Equal(install.Receipt, GetCurrentInstallReceipt(fixture.Context));
+
+        var duplicate = fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(install.Receipt);
+
+        Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Idempotent, duplicate.Status);
+        Assert.Equal(1, fixture.Bridge.InstallCount);
+        Assert.Same(contract, fixture.Bridge.InfraCurrentContract);
+        Assert.Equal(install.Receipt, GetCurrentInstallReceipt(fixture.Context));
+
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.Contains(
+            "event=runtime_unlock_retry_dispatch_install_receipt_issued;",
+            logTail,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"transfer_id={fixture.TransferId};",
+            logTail,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"install_generation={install.Receipt.InstallGeneration};",
+            logTail,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"request_regular_v4_liveness_generation={fixture.InitialRequest.RegularV4LivenessGeneration};",
+            logTail,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"request_bridge_decision_generation={fixture.InitialRequest.BridgeDecisionGeneration};",
+            logTail,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"request_active_predecessor_supersession={(fixture.InitialRequest.RequestActivePredecessorSupersession ? 1 : 0)};",
+            logTail,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"current_authority_id={install.Receipt.Authority.AuthorityId};",
+            logTail,
+            StringComparison.Ordinal);
+        Assert.Contains("stage_status=Staged;", logTail, StringComparison.Ordinal);
+        Assert.Contains("stage_disposition=Retained;", logTail, StringComparison.Ordinal);
+        Assert.Contains("stage_cleared=0;", logTail, StringComparison.Ordinal);
+        Assert.Contains(
+            $"stage_expires_utc_ms={install.Receipt.StageExpiresUtcMs};",
+            logTail,
+            StringComparison.Ordinal);
+        Assert.Contains("runtime_owner_session_id=", logTail, StringComparison.Ordinal);
+        Assert.Contains("source_publication_session_id=", logTail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExactDuplicateRequest_ReusesCommittedReceiptWithoutAdvancingGeneration()
+    {
+        using var fixture = await CreateFixtureAsync(
+            "session_retry_install_duplicate",
+            "transfer_retry_install_duplicate");
+        _ = Grant(fixture, fixture.InitialRequest);
+        var firstReceipt = Assert.IsType<RuntimeUnlockRetryDispatchInstallReceipt>(
+            fixture.Bridge.LastCommittedReceipt);
+
+        fixture.Bridge.RaiseAuthorityRequest(fixture.InitialRequest);
+
+        var duplicateDecision = fixture.Bridge.DequeueAuthorityDecision();
+        var duplicateStage = fixture.Bridge.DequeueStageResult();
+        var duplicateInstall = fixture.Bridge.DequeueInstallResult();
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Granted, duplicateDecision.Status);
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStageStatus.Idempotent, duplicateStage.Status);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchStageDisposition.AlreadyInstalled,
+            duplicateStage.StageDisposition);
+        Assert.False(duplicateStage.StageCleared);
+        Assert.Equal(0, duplicateStage.StageExpiresUtcMs);
+        Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Idempotent, duplicateInstall.Status);
+        Assert.Equal(firstReceipt, duplicateInstall.Receipt);
+        Assert.Equal(firstReceipt.InstallGeneration, GetLastInstallGeneration(fixture.Context));
+        Assert.Equal(1, fixture.Bridge.InstallCount);
+    }
+
+    [Fact]
+    public async Task TerminalizationBetweenStageAndRevalidation_PreventsInstall()
+    {
+        using var fixture = await CreateFixtureAsync(
+            "session_retry_stage_terminal",
+            "transfer_retry_stage_terminal");
+        using var allowStageReturn = new ManualResetEventSlim(initialState: false);
+        fixture.Bridge.StageReturnBarrier = allowStageReturn;
+
+        var request = Task.Run(() => fixture.Bridge.RaiseAuthorityRequest(fixture.InitialRequest));
+        Assert.True(fixture.Bridge.StageObserved.Wait(TimeSpan.FromSeconds(3)));
+        var stagedDecision = fixture.Bridge.DequeueAuthorityDecision();
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Granted, stagedDecision.Status);
+        Assert.Null(fixture.Bridge.InfraCurrentContract);
+        Assert.Null(GetCurrentInstallReceipt(fixture.Context));
+        Assert.Equal(0, fixture.Bridge.InstallCount);
+
+        var terminal = await fixture.Service.CancelTransferAsync(
+            fixture.TransferId,
+            "test_terminal_between_retry_stage_and_install",
+            CancellationToken.None);
+        Assert.NotNull(terminal);
+
+        allowStageReturn.Set();
+        await request.WaitAsync(TimeSpan.FromSeconds(3));
+        var stage = fixture.Bridge.DequeueStageResult();
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStageStatus.Staged, stage.Status);
+        Assert.Equal(0, fixture.Bridge.InstallCount);
+        Assert.Null(fixture.Bridge.InfraCurrentContract);
+        Assert.Null(GetCurrentContract(fixture.Context));
+        Assert.Null(GetCurrentInstallReceipt(fixture.Context));
+        Assert.False(fixture.Bridge.HasPendingStage);
+    }
+
+    [Fact]
+    public async Task DataSessionReplacementBetweenStageAndRevalidation_PreventsInstall()
+    {
+        using var fixture = await CreateFixtureAsync(
+            "session_retry_stage_data_session_replaced",
+            "transfer_retry_stage_data_session_replaced");
+        using var allowStageReturn = new ManualResetEventSlim(initialState: false);
+        fixture.Bridge.StageReturnBarrier = allowStageReturn;
+
+        var request = Task.Run(() => fixture.Bridge.RaiseAuthorityRequest(fixture.InitialRequest));
+        Assert.True(fixture.Bridge.StageObserved.Wait(TimeSpan.FromSeconds(3)));
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchDecisionStatus.Granted,
+            fixture.Bridge.DequeueAuthorityDecision().Status);
+
+        var coreGate = GetCoreGate(fixture.Service);
+        lock (coreGate)
+        {
+            var currentGeneration = GetRequiredProperty<long>(
+                fixture.Context,
+                "DataSessionGeneration");
+            SetProperty(
+                fixture.Context,
+                "DataSessionGeneration",
+                currentGeneration + 1);
+        }
+
+        allowStageReturn.Set();
+        await request.WaitAsync(TimeSpan.FromSeconds(3));
+
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchDecisionStageStatus.Staged,
+            fixture.Bridge.DequeueStageResult().Status);
+        Assert.Equal(0, fixture.Bridge.InstallCount);
+        Assert.Null(fixture.Bridge.InfraCurrentContract);
+        Assert.Null(GetCurrentContract(fixture.Context));
+        Assert.Null(GetCurrentInstallReceipt(fixture.Context));
+        Assert.False(fixture.Bridge.HasPendingStage);
+
+        var installRejection = fixture.Bridge.DequeueAuthorityDecision();
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
+            installRejection.Status);
+        Assert.Equal(
+            "retry_dispatch_install_data_session_replaced",
+            installRejection.Reason);
+
+        fixture.Bridge.RaiseAuthorityRequest(fixture.InitialRequest);
+
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchDecisionStatus.Granted,
+            fixture.Bridge.DequeueAuthorityDecision().Status);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchDecisionStageStatus.Staged,
+            fixture.Bridge.DequeueStageResult().Status);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchInstallStatus.Installed,
+            fixture.Bridge.DequeueInstallResult().Status);
+        Assert.Equal(1, fixture.Bridge.InstallCount);
+        Assert.NotNull(fixture.Bridge.InfraCurrentContract);
+        Assert.NotNull(GetCurrentContract(fixture.Context));
+        Assert.NotNull(GetCurrentInstallReceipt(fixture.Context));
+    }
+
+    [Theory]
+    [InlineData("route_publication")]
+    [InlineData("runtime_owner")]
+    [InlineData("terminal_generation")]
+    [InlineData("transfer_leg")]
+    [InlineData("bridge_decision")]
+    [InlineData("recovery_contract")]
+    public async Task CurrentnessReplacementBetweenStageAndRevalidation_PreventsInstall(
+        string replacementKind)
+    {
+        using var fixture = await CreateFixtureAsync(
+            $"session_retry_stage_{replacementKind}",
+            $"transfer_retry_stage_{replacementKind}");
+        using var allowStageReturn = new ManualResetEventSlim(initialState: false);
+        fixture.Bridge.StageReturnBarrier = allowStageReturn;
+
+        var request = Task.Run(() => fixture.Bridge.RaiseAuthorityRequest(fixture.InitialRequest));
+        Assert.True(fixture.Bridge.StageObserved.Wait(TimeSpan.FromSeconds(3)));
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchDecisionStatus.Granted,
+            fixture.Bridge.DequeueAuthorityDecision().Status);
+
+        lock (GetCoreGate(fixture.Service))
+        {
+            ReplaceRuntimeUnlockRetryDispatchInstallCurrentness(
+                fixture.Context,
+                replacementKind);
+        }
+
+        allowStageReturn.Set();
+        await request.WaitAsync(TimeSpan.FromSeconds(3));
+
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchDecisionStageStatus.Staged,
+            fixture.Bridge.DequeueStageResult().Status);
+        var rejection = fixture.Bridge.DequeueAuthorityDecision();
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, rejection.Status);
+        Assert.StartsWith("retry_dispatch_install_", rejection.Reason, StringComparison.Ordinal);
+        Assert.Equal(0, fixture.Bridge.InstallCount);
+        Assert.False(fixture.Bridge.HasPendingStage);
+        Assert.Null(fixture.Bridge.InfraCurrentContract);
+        Assert.Null(GetCurrentContract(fixture.Context));
+        Assert.Null(GetCurrentInstallReceipt(fixture.Context));
+    }
+
+    [Fact]
+    public async Task PredecessorLineageReplacementBetweenStageAndRevalidation_PreventsInstall()
+    {
+        using var fixture = await CreateFixtureAsync(
+            "session_retry_stage_predecessor_replaced",
+            "transfer_retry_stage_predecessor_replaced");
+        var predecessor = Grant(fixture, fixture.InitialRequest);
+        var successorRequest = fixture.InitialRequest with
+        {
+            DispatchAttemptGeneration = 2,
+            PredecessorAuthorityId = predecessor.Authority.AuthorityId,
+            RequestActivePredecessorSupersession = true,
+        };
+        using var allowStageReturn = new ManualResetEventSlim(initialState: false);
+        fixture.Bridge.StageReturnBarrier = allowStageReturn;
+        fixture.Bridge.StageObserved.Reset();
+
+        var request = Task.Run(() => fixture.Bridge.RaiseAuthorityRequest(successorRequest));
+        Assert.True(fixture.Bridge.StageObserved.Wait(TimeSpan.FromSeconds(3)));
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchDecisionStatus.Granted,
+            fixture.Bridge.DequeueAuthorityDecision().Status);
+        Assert.False(predecessor.Lifecycle.IsSettled);
+        Assert.Same(
+            predecessor,
+            GetPendingPredecessorContract(fixture.Context));
+
+        lock (GetCoreGate(fixture.Service))
+        {
+            SetProperty(
+                fixture.Context,
+                "PendingRuntimeUnlockRetryDispatchPredecessorContract",
+                null);
+        }
+
+        allowStageReturn.Set();
+        await request.WaitAsync(TimeSpan.FromSeconds(3));
+
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchDecisionStageStatus.Staged,
+            fixture.Bridge.DequeueStageResult().Status);
+        var rejection = fixture.Bridge.DequeueAuthorityDecision();
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, rejection.Status);
+        Assert.Equal("retry_dispatch_install_revalidation_failed", rejection.Reason);
+        Assert.Equal(1, fixture.Bridge.InstallCount);
+        Assert.False(fixture.Bridge.HasPendingStage);
+        Assert.Null(fixture.Bridge.InfraCurrentContract);
+        Assert.Null(GetCurrentContract(fixture.Context));
+        Assert.Null(GetCurrentInstallReceipt(fixture.Context));
+        Assert.Null(GetPendingPredecessorContract(fixture.Context));
+    }
+
+    [Fact]
+    public async Task CommitBarrier_HoldsCoreLockUntilInstallLinearizes()
+    {
+        using var fixture = await CreateFixtureAsync(
+            "session_retry_commit_barrier",
+            "transfer_retry_commit_barrier");
+        using var allowCommit = new ManualResetEventSlim(initialState: false);
+        fixture.Bridge.CoreGateForInstallProbe = GetCoreGate(fixture.Service);
+        fixture.Bridge.CommitReturnBarrier = allowCommit;
+
+        var request = Task.Run(() => fixture.Bridge.RaiseAuthorityRequest(fixture.InitialRequest));
+        Assert.True(fixture.Bridge.CommitObserved.Wait(TimeSpan.FromSeconds(3)));
+        Assert.True(fixture.Bridge.LastInstallObservedUnderCoreGate);
+
+        var terminal = Task.Run(async () => await fixture.Service.CancelTransferAsync(
+            fixture.TransferId,
+            "test_terminal_waits_for_retry_install_commit",
+            CancellationToken.None));
+        await Task.Delay(100);
+        Assert.False(terminal.IsCompleted);
+        Assert.Equal(0, fixture.Bridge.InstallCount);
+
+        allowCommit.Set();
+        await request.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.NotNull(await terminal.WaitAsync(TimeSpan.FromSeconds(3)));
+
+        Assert.Equal(1, fixture.Bridge.InstallCount);
+        Assert.Null(GetCurrentContract(fixture.Context));
+        Assert.Null(GetCurrentInstallReceipt(fixture.Context));
+    }
+
+    [Fact]
+    public async Task StageOrInstallRejection_FailsClosedWithoutInstallingInfraAuthority()
+    {
+        using (var stageFixture = await CreateFixtureAsync(
+                   "session_retry_stage_rejected",
+                   "transfer_retry_stage_rejected"))
+        {
+            stageFixture.Bridge.RejectNextStage = true;
+
+            stageFixture.Bridge.RaiseAuthorityRequest(stageFixture.InitialRequest);
+
+            Assert.Equal(
+                RuntimeUnlockRetryDispatchDecisionStatus.Granted,
+                stageFixture.Bridge.DequeueAuthorityDecision().Status);
+            var stageRejection = stageFixture.Bridge.DequeueStageResult();
+            Assert.Equal(
+                RuntimeUnlockRetryDispatchDecisionStageStatus.Rejected,
+                stageRejection.Status);
+            Assert.Equal(
+                RuntimeUnlockRetryDispatchStageDisposition.Rejected,
+                stageRejection.StageDisposition);
+            Assert.False(stageRejection.StageCleared);
+            Assert.Equal(0, stageRejection.StageExpiresUtcMs);
+            Assert.Equal(0, stageFixture.Bridge.InstallCount);
+            Assert.Null(stageFixture.Bridge.InfraCurrentContract);
+            Assert.Null(GetCurrentContract(stageFixture.Context));
+            Assert.Null(GetCurrentInstallReceipt(stageFixture.Context));
+        }
+
+        using var installFixture = await CreateFixtureAsync(
+            "session_retry_install_rejected",
+            "transfer_retry_install_rejected");
+        installFixture.Bridge.RejectNextInstall = true;
+
+        installFixture.Bridge.RaiseAuthorityRequest(installFixture.InitialRequest);
+
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchDecisionStatus.Granted,
+            installFixture.Bridge.DequeueAuthorityDecision().Status);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchDecisionStageStatus.Staged,
+            installFixture.Bridge.DequeueStageResult().Status);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchInstallStatus.Rejected,
+            installFixture.Bridge.DequeueInstallResult().Status);
+        Assert.Equal(0, installFixture.Bridge.InstallCount);
+        Assert.Null(installFixture.Bridge.InfraCurrentContract);
+        Assert.Null(GetCurrentContract(installFixture.Context));
+        Assert.Null(GetCurrentInstallReceipt(installFixture.Context));
+        Assert.Equal(1, GetLastInstallGeneration(installFixture.Context));
+    }
+
+    [Fact]
+    public async Task SuccessorInstall_UsesNextGenerationAndCannotBeClearedByOldReceipt()
+    {
+        using var fixture = await CreateFixtureAsync(
+            "session_retry_install_successor",
+            "transfer_retry_install_successor");
+        var predecessor = Grant(fixture, fixture.InitialRequest);
+        var predecessorReceipt = Assert.IsType<RuntimeUnlockRetryDispatchInstallReceipt>(
+            fixture.Bridge.LastCommittedReceipt);
+        var successorLogStart = GetOperationalLogLength();
+        var successorRequest = fixture.InitialRequest with
+        {
+            DispatchAttemptGeneration = 2,
+            PredecessorAuthorityId = predecessor.Authority.AuthorityId,
+            RequestActivePredecessorSupersession = true,
+        };
+
+        using var allowStageReturn = new ManualResetEventSlim(initialState: false);
+        fixture.Bridge.StageReturnBarrier = allowStageReturn;
+        fixture.Bridge.StageObserved.Reset();
+        var successorRequestTask = Task.Run(
+            () => fixture.Bridge.RaiseAuthorityRequest(successorRequest));
+        Assert.True(fixture.Bridge.StageObserved.Wait(TimeSpan.FromSeconds(3)));
+        var successorDecision = fixture.Bridge.DequeueAuthorityDecision();
+        var successor = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+            successorDecision.Contract);
+        Assert.False(predecessor.Lifecycle.IsSettled);
+        Assert.Same(predecessor, fixture.Bridge.InfraCurrentContract);
+        Assert.Same(predecessor, GetPendingPredecessorContract(fixture.Context));
+
+        allowStageReturn.Set();
+        await successorRequestTask.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchDecisionStageStatus.Staged,
+            fixture.Bridge.DequeueStageResult().Status);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchInstallStatus.Installed,
+            fixture.Bridge.DequeueInstallResult().Status);
+        var successorReceipt = Assert.IsType<RuntimeUnlockRetryDispatchInstallReceipt>(
+            fixture.Bridge.LastCommittedReceipt);
+
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchSettlementOutcome.Superseded,
+            predecessor.Lifecycle.SettlementOutcome);
+        Assert.Equal(
+            "coordinator_successor_installed",
+            predecessor.Lifecycle.SettlementReason);
+        Assert.Equal(
+            successor.Authority.AuthorityId,
+            predecessor.Lifecycle.SuccessorAuthorityId);
+        Assert.Null(GetPendingPredecessorContract(fixture.Context));
+        Assert.Equal(predecessorReceipt.InstallGeneration + 1, successorReceipt.InstallGeneration);
+        Assert.Equal(successor.Authority, successorReceipt.Authority);
+        var late = fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(predecessorReceipt);
+        Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Rejected, late.Status);
+        Assert.Equal(2, fixture.Bridge.InstallCount);
+        Assert.Same(successor, fixture.Bridge.InfraCurrentContract);
+        Assert.Same(successor, GetCurrentContract(fixture.Context));
+        Assert.Equal(successorReceipt, GetCurrentInstallReceipt(fixture.Context));
+
+        var successorLogTail = ReadOperationalLogTail(successorLogStart);
+        Assert.Contains(
+            $"predecessor_authority_id={predecessor.Authority.AuthorityId};",
+            successorLogTail,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "request_active_predecessor_supersession=1;",
+            successorLogTail,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"install_generation={successorReceipt.InstallGeneration};",
+            successorLogTail,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -547,8 +1014,19 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Granted, decision.Status);
         Assert.Equal(request, decision.Request);
         var contract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(decision.Contract);
+        var staged = fixture.Bridge.DequeueStageResult();
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStageStatus.Staged, staged.Status);
+        Assert.Equal(decision, staged.Decision);
+        var installed = fixture.Bridge.DequeueInstallResult();
+        Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Installed, installed.Status);
+        Assert.Equal(contract.Authority, installed.Receipt.Authority);
+        Assert.True(installed.Receipt.InstallGeneration > 0);
         Assert.Same(contract, GetCurrentContract(fixture.Context));
         Assert.Same(contract, fixture.Bridge.InfraCurrentContract);
+        Assert.Equal(installed.Receipt, GetCurrentInstallReceipt(fixture.Context));
+        Assert.Equal(
+            installed.Receipt.InstallGeneration,
+            GetLastInstallGeneration(fixture.Context));
         return contract;
     }
 
@@ -1068,11 +1546,93 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         property!.SetValue(context, value);
     }
 
+    private static void ReplaceRuntimeUnlockRetryDispatchInstallCurrentness(
+        object context,
+        string replacementKind)
+    {
+        switch (replacementKind)
+        {
+            case "route_publication":
+            {
+                var publication = GetRequiredProperty<RoutePublicationToken>(
+                    context,
+                    "CurrentRoutePublicationToken");
+                SetProperty(
+                    context,
+                    "CurrentRoutePublicationToken",
+                    publication with
+                    {
+                        PublicationGeneration = checked(publication.PublicationGeneration + 1),
+                    });
+                break;
+            }
+            case "runtime_owner":
+            {
+                var owner = GetRequiredProperty<RuntimeOwnerToken>(
+                    context,
+                    "CurrentRuntimeOwner");
+                SetProperty(
+                    context,
+                    "CurrentRuntimeOwner",
+                    owner with
+                    {
+                        RuntimeGeneration = checked(owner.RuntimeGeneration + 1),
+                    });
+                break;
+            }
+            case "terminal_generation":
+            {
+                var generation = GetRequiredProperty<int>(context, "TerminalGeneration");
+                SetProperty(context, "TerminalGeneration", checked(generation + 1));
+                break;
+            }
+            case "transfer_leg":
+            {
+                var leg = GetRequiredProperty<FileTransferLeg>(context, "CurrentTransferLeg");
+                SetProperty(leg, "Generation", checked(leg.Generation + 1));
+                break;
+            }
+            case "bridge_decision":
+            {
+                var bridgeDecision = GetOptionalStructProperty<BridgeRecoveryDecision>(
+                    context,
+                    "CurrentBridgeRecoveryDecision");
+                Assert.NotNull(bridgeDecision);
+                SetProperty(
+                    context,
+                    "CurrentBridgeRecoveryDecision",
+                    bridgeDecision.Value with
+                    {
+                        BridgeDecisionGeneration = checked(
+                            bridgeDecision.Value.BridgeDecisionGeneration + 1),
+                    });
+                break;
+            }
+            case "recovery_contract":
+                SetProperty(context, "CurrentRuntimeUnlockRetryDispatchContract", null);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(
+                    nameof(replacementKind),
+                    replacementKind,
+                    "Unknown install-currentness replacement.");
+        }
+    }
+
     private static RuntimeUnlockRetryDispatchContract? GetCurrentContract(object context)
         => context.GetType()
             .GetProperty(
                 "CurrentRuntimeUnlockRetryDispatchContract",
                 BindingFlags.Instance | BindingFlags.Public)!
+            .GetValue(context) as RuntimeUnlockRetryDispatchContract;
+
+    private static RuntimeUnlockRetryDispatchContract? GetPendingPredecessorContract(
+        object context)
+        => context
+            .GetType()
+            .GetProperty(
+                "PendingRuntimeUnlockRetryDispatchPredecessorContract",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!
             .GetValue(context) as RuntimeUnlockRetryDispatchContract;
 
     private static RuntimeUnlockRetryDispatchSettlementReport? GetLastSettlement(object context)
@@ -1084,6 +1644,17 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             .GetValue(context);
         return value is RuntimeUnlockRetryDispatchSettlementReport report ? report : null;
     }
+
+    private static RuntimeUnlockRetryDispatchInstallReceipt? GetCurrentInstallReceipt(
+        object context)
+        => GetOptionalStructProperty<RuntimeUnlockRetryDispatchInstallReceipt>(
+            context,
+            "CurrentRuntimeUnlockRetryDispatchInstallReceipt");
+
+    private static long GetLastInstallGeneration(object context)
+        => GetRequiredProperty<long>(
+            context,
+            "LastRuntimeUnlockRetryDispatchInstallGeneration");
 
     private static RuntimeUnlockRegularV4RecoverySettlementReport? GetLastRegularV4Settlement(
         object context)
@@ -1127,6 +1698,8 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         IRuntimeUnlockRetryDispatchAuthorityBridge
     {
         private readonly ConcurrentQueue<RuntimeUnlockRetryDispatchDecision> authorityDecisions = [];
+        private readonly ConcurrentQueue<RuntimeUnlockRetryDispatchDecisionStageResult> stageResults = [];
+        private readonly ConcurrentQueue<RuntimeUnlockRetryDispatchInstallResult> installResults = [];
         private readonly ConcurrentQueue<RuntimeUnlockRetryDispatchSettlementDecision> settlementDecisions = [];
         private readonly ConcurrentQueue<RuntimeUnlockRegularV4RecoverySettlementDecision> regularV4SettlementDecisions = [];
         private readonly ConcurrentQueue<RuntimeUnlockRegularV4RecoveryLifecycleDecision> regularV4LifecycleDecisions = [];
@@ -1135,7 +1708,12 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         private EventHandler<RuntimeUnlockRegularV4RecoverySettlementReportedEventArgs>? regularV4SettlementReported;
         private EventHandler<RuntimeUnlockRegularV4RecoveryLifecycleReportedEventArgs>? regularV4LifecycleReported;
         private RuntimeUnlockRetryDispatchAuthorityRequest? pendingRequest;
+        private RuntimeUnlockRetryDispatchDecision? pendingStage;
+        private long pendingStageStagedUtcMs;
+        private long pendingStageExpiresUtcMs;
+        private RuntimeUnlockRetryDispatchInstallReceipt? lastCommittedReceipt;
         private int settlementDecisionObservationCount;
+        private int installObservationCount;
 
         public event EventHandler<RuntimeUnlockRetryDispatchAuthorityRequestedEventArgs>?
             RuntimeUnlockRetryDispatchAuthorityRequested
@@ -1179,6 +1757,31 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
 
         public RuntimeUnlockRetryDispatchContract? InfraCurrentContract { get; private set; }
 
+        public ManualResetEventSlim? StageReturnBarrier { get; set; }
+
+        public ManualResetEventSlim StageObserved { get; } = new(initialState: false);
+
+        public ManualResetEventSlim? CommitReturnBarrier { get; set; }
+
+        public ManualResetEventSlim CommitObserved { get; } = new(initialState: false);
+
+        public object? CoreGateForInstallProbe { get; set; }
+
+        public bool LastInstallObservedUnderCoreGate { get; private set; }
+
+        public bool LastReceiptIssuedEvidenceObservedBeforeCommit { get; private set; }
+
+        public bool RejectNextStage { get; set; }
+
+        public bool RejectNextInstall { get; set; }
+
+        public int InstallCount => Volatile.Read(ref installObservationCount);
+
+        public RuntimeUnlockRetryDispatchInstallReceipt? LastCommittedReceipt =>
+            lastCommittedReceipt;
+
+        public bool HasPendingStage => pendingStage.HasValue;
+
         public object? CoreGateForSettlementDecisionProbe { get; set; }
 
         public bool LastSettlementDecisionObservedWithCoreGateAvailable { get; private set; }
@@ -1221,6 +1824,18 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             return decision;
         }
 
+        public RuntimeUnlockRetryDispatchDecisionStageResult DequeueStageResult()
+        {
+            Assert.True(stageResults.TryDequeue(out var result));
+            return result;
+        }
+
+        public RuntimeUnlockRetryDispatchInstallResult DequeueInstallResult()
+        {
+            Assert.True(installResults.TryDequeue(out var result));
+            return result;
+        }
+
         public RuntimeUnlockRetryDispatchSettlementDecision DequeueSettlementDecision()
         {
             Assert.True(settlementDecisions.TryDequeue(out var decision));
@@ -1258,16 +1873,29 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             return false;
         }
 
-        public bool ObserveRuntimeUnlockRetryDispatchDecision(
+        public bool ObserveRuntimeUnlockRetryDispatchNonGrantDecision(
             RuntimeUnlockRetryDispatchDecision decision)
         {
+            if (decision.Status == RuntimeUnlockRetryDispatchDecisionStatus.Granted)
+            {
+                return false;
+            }
+
+            if (decision.Status == RuntimeUnlockRetryDispatchDecisionStatus.Rejected &&
+                pendingStage is { } staged &&
+                decision.Request == staged.Request &&
+                ReferenceEquals(decision.Contract, staged.Contract))
+            {
+                pendingStage = null;
+                pendingStageStagedUtcMs = 0;
+                pendingStageExpiresUtcMs = 0;
+                InfraCurrentContract = null;
+                lastCommittedReceipt = null;
+            }
+
             authorityDecisions.Enqueue(decision);
             pendingRequest = null;
-            if (decision.Granted)
-            {
-                InfraCurrentContract = decision.Contract;
-            }
-            else if (decision.Status == RuntimeUnlockRetryDispatchDecisionStatus.Rejected &&
+            if (decision.Status == RuntimeUnlockRetryDispatchDecisionStatus.Rejected &&
                      string.Equals(
                          decision.Reason,
                          "retry_dispatch_missing_successor_limit_exhausted",
@@ -1277,6 +1905,196 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             }
 
             return true;
+        }
+
+        public RuntimeUnlockRetryDispatchDecisionStageResult StageRuntimeUnlockRetryDispatchDecision(
+            RuntimeUnlockRetryDispatchDecision decision)
+        {
+            authorityDecisions.Enqueue(decision);
+            RuntimeUnlockRetryDispatchDecisionStageResult result;
+            if (RejectNextStage)
+            {
+                RejectNextStage = false;
+                result = new RuntimeUnlockRetryDispatchDecisionStageResult(
+                    RuntimeUnlockRetryDispatchDecisionStageStatus.Rejected,
+                    "test_retry_dispatch_stage_rejected",
+                    decision)
+                {
+                    StageDisposition = pendingStage.HasValue
+                        ? RuntimeUnlockRetryDispatchStageDisposition.Retained
+                        : RuntimeUnlockRetryDispatchStageDisposition.Rejected,
+                    StageCleared = false,
+                    StagedUtcMs = pendingStageStagedUtcMs,
+                    StageExpiresUtcMs = pendingStageExpiresUtcMs,
+                };
+            }
+            else if (!decision.Granted)
+            {
+                result = new RuntimeUnlockRetryDispatchDecisionStageResult(
+                    RuntimeUnlockRetryDispatchDecisionStageStatus.Rejected,
+                    "test_retry_dispatch_stage_non_grant",
+                    decision)
+                {
+                    StageDisposition = pendingStage.HasValue
+                        ? RuntimeUnlockRetryDispatchStageDisposition.Retained
+                        : RuntimeUnlockRetryDispatchStageDisposition.Rejected,
+                    StageCleared = false,
+                    StagedUtcMs = pendingStageStagedUtcMs,
+                    StageExpiresUtcMs = pendingStageExpiresUtcMs,
+                };
+            }
+            else if (lastCommittedReceipt is { } committed &&
+                     decision.Contract is { } committedContract &&
+                     committed.Authority.Equals(committedContract.Authority) &&
+                     ReferenceEquals(InfraCurrentContract, committedContract))
+            {
+                result = new RuntimeUnlockRetryDispatchDecisionStageResult(
+                    RuntimeUnlockRetryDispatchDecisionStageStatus.Idempotent,
+                    "retry_dispatch_decision_stage_duplicate",
+                    decision)
+                {
+                    StageDisposition = RuntimeUnlockRetryDispatchStageDisposition.AlreadyInstalled,
+                    StageCleared = false,
+                    StagedUtcMs = 0,
+                    StageExpiresUtcMs = 0,
+                };
+            }
+            else if (pendingStage is { } staged && staged.Equals(decision))
+            {
+                result = new RuntimeUnlockRetryDispatchDecisionStageResult(
+                    RuntimeUnlockRetryDispatchDecisionStageStatus.Idempotent,
+                    "retry_dispatch_decision_stage_duplicate",
+                    decision)
+                {
+                    StageDisposition = RuntimeUnlockRetryDispatchStageDisposition.Retained,
+                    StageCleared = false,
+                    StagedUtcMs = pendingStageStagedUtcMs,
+                    StageExpiresUtcMs = pendingStageExpiresUtcMs,
+                };
+            }
+            else if (pendingStage.HasValue)
+            {
+                result = new RuntimeUnlockRetryDispatchDecisionStageResult(
+                    RuntimeUnlockRetryDispatchDecisionStageStatus.Rejected,
+                    "test_retry_dispatch_stage_mismatch",
+                    decision)
+                {
+                    StageDisposition = RuntimeUnlockRetryDispatchStageDisposition.Retained,
+                    StageCleared = false,
+                    StagedUtcMs = pendingStageStagedUtcMs,
+                    StageExpiresUtcMs = pendingStageExpiresUtcMs,
+                };
+            }
+            else
+            {
+                pendingStage = decision;
+                pendingStageStagedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                pendingStageExpiresUtcMs = pendingStageStagedUtcMs + 15_000;
+                result = new RuntimeUnlockRetryDispatchDecisionStageResult(
+                    RuntimeUnlockRetryDispatchDecisionStageStatus.Staged,
+                    "retry_dispatch_decision_staged",
+                    decision)
+                {
+                    StageDisposition = RuntimeUnlockRetryDispatchStageDisposition.Retained,
+                    StageCleared = false,
+                    StagedUtcMs = pendingStageStagedUtcMs,
+                    StageExpiresUtcMs = pendingStageExpiresUtcMs,
+                };
+            }
+
+            stageResults.Enqueue(result);
+            StageObserved.Set();
+            StageReturnBarrier?.Wait(TimeSpan.FromSeconds(5));
+            return result;
+        }
+
+        public RuntimeUnlockRetryDispatchInstallResult CommitRuntimeUnlockRetryDispatchInstall(
+            RuntimeUnlockRetryDispatchInstallReceipt receipt)
+        {
+            var recentLog = LocalOperationalLog.GetRecentLogText();
+            LastReceiptIssuedEvidenceObservedBeforeCommit =
+                recentLog.Contains(
+                    "event=runtime_unlock_retry_dispatch_install_receipt_issued;",
+                    StringComparison.Ordinal) &&
+                recentLog.Contains(
+                    $"transfer_id={receipt.Authority.TransferId};",
+                    StringComparison.Ordinal) &&
+                recentLog.Contains(
+                    $"install_generation={receipt.InstallGeneration};",
+                    StringComparison.Ordinal);
+
+            if (CoreGateForInstallProbe is { } coreGate)
+            {
+                LastInstallObservedUnderCoreGate = Monitor.IsEntered(coreGate);
+            }
+
+            CommitObserved.Set();
+            CommitReturnBarrier?.Wait(TimeSpan.FromSeconds(5));
+
+            RuntimeUnlockRetryDispatchInstallResult result;
+            if (RejectNextInstall)
+            {
+                RejectNextInstall = false;
+                result = new RuntimeUnlockRetryDispatchInstallResult(
+                    RuntimeUnlockRetryDispatchInstallStatus.Rejected,
+                    "test_retry_dispatch_install_rejected",
+                    receipt);
+            }
+            else if (lastCommittedReceipt is { } committed && committed.Equals(receipt))
+            {
+                result = new RuntimeUnlockRetryDispatchInstallResult(
+                    RuntimeUnlockRetryDispatchInstallStatus.Idempotent,
+                    "retry_dispatch_install_duplicate",
+                    receipt);
+            }
+            else if (pendingStage is not { } staged ||
+                     !staged.Granted ||
+                     !staged.Contract!.Authority.Equals(receipt.Authority) ||
+                     staged.Request != receipt.Request ||
+                     receipt.StageStatus is not (
+                         RuntimeUnlockRetryDispatchDecisionStageStatus.Staged or
+                         RuntimeUnlockRetryDispatchDecisionStageStatus.Idempotent) ||
+                     receipt.StageDisposition !=
+                         RuntimeUnlockRetryDispatchStageDisposition.Retained ||
+                     receipt.StageCleared ||
+                     receipt.StagedUtcMs != pendingStageStagedUtcMs ||
+                     receipt.StageExpiresUtcMs != pendingStageExpiresUtcMs)
+            {
+                result = new RuntimeUnlockRetryDispatchInstallResult(
+                    RuntimeUnlockRetryDispatchInstallStatus.Rejected,
+                    "test_retry_dispatch_install_mismatch",
+                    receipt);
+            }
+            else if (staged.Contract.RequestActivePredecessorSupersession &&
+                     (InfraCurrentContract is not { } predecessor ||
+                      predecessor.Authority.AuthorityId !=
+                          staged.Contract.Authority.PredecessorAuthorityId ||
+                      !predecessor.TrySupersedeBeforeSend(
+                          "coordinator_successor_installed",
+                          staged.Contract.Authority.AuthorityId)))
+            {
+                result = new RuntimeUnlockRetryDispatchInstallResult(
+                    RuntimeUnlockRetryDispatchInstallStatus.Rejected,
+                    "test_retry_dispatch_install_predecessor_mismatch",
+                    receipt);
+            }
+            else
+            {
+                InfraCurrentContract = staged.Contract;
+                lastCommittedReceipt = receipt;
+                pendingStage = null;
+                pendingStageStagedUtcMs = 0;
+                pendingStageExpiresUtcMs = 0;
+                pendingRequest = null;
+                Interlocked.Increment(ref installObservationCount);
+                result = new RuntimeUnlockRetryDispatchInstallResult(
+                    RuntimeUnlockRetryDispatchInstallStatus.Installed,
+                    "retry_dispatch_install_committed",
+                    receipt);
+            }
+
+            installResults.Enqueue(result);
+            return result;
         }
 
         public bool ObserveRuntimeUnlockRetryDispatchSettlementDecision(

@@ -5019,6 +5019,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         }
 
         RuntimeUnlockRetryDispatchDecision decision;
+        long decisionDataSessionGeneration = -1;
         lock (gate)
         {
             var request = args.Request;
@@ -5033,6 +5034,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 string.Equals(request.TransferId, outbound.TransferId, StringComparison.Ordinal))
             {
                 decision = AuthorizeRuntimeUnlockRetryDispatchLocked(outbound, request);
+                decisionDataSessionGeneration = outbound.DataSessionGeneration;
             }
             else if (bridgeIsCurrentTransport &&
                      inboundTransfer is { } inbound &&
@@ -5042,6 +5044,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                      string.Equals(request.TransferId, inbound.TransferId, StringComparison.Ordinal))
             {
                 decision = AuthorizeRuntimeUnlockRetryDispatchLocked(inbound, request);
+                decisionDataSessionGeneration = inbound.DataSessionGeneration;
             }
             else
             {
@@ -5055,7 +5058,405 @@ public sealed partial class SessionFileTransferService : IDisposable
             }
         }
 
-        bridge.ObserveRuntimeUnlockRetryDispatchDecision(decision);
+        if (!decision.Granted)
+        {
+            bridge.ObserveRuntimeUnlockRetryDispatchNonGrantDecision(decision);
+            return;
+        }
+
+        var stageResult = bridge.StageRuntimeUnlockRetryDispatchDecision(decision);
+        if (!stageResult.Accepted || stageResult.Decision != decision)
+        {
+            RuntimeUnlockRetryDispatchDecision rejection;
+            lock (gate)
+            {
+                rejection = RejectRuntimeUnlockRetryDispatchInstallLocked(
+                    decision,
+                    "retry_dispatch_install_stage_rejected");
+            }
+            bridge.ObserveRuntimeUnlockRetryDispatchNonGrantDecision(rejection);
+            return;
+        }
+
+        // Commit is intentionally synchronous while gate remains held. The bridge
+        // implementation is a bounded, callback-free state transition, so this
+        // closes the final currentness-to-install window without reversing the
+        // ordinary Infra-to-Core callback lock order.
+        RuntimeUnlockRetryDispatchDecision? installRejection;
+        lock (gate)
+        {
+            installRejection = CommitRuntimeUnlockRetryDispatchInstallLocked(
+                bridge,
+                decision,
+                stageResult,
+                decisionDataSessionGeneration);
+        }
+        if (installRejection is { } rejectionDecision)
+        {
+            bridge.ObserveRuntimeUnlockRetryDispatchNonGrantDecision(rejectionDecision);
+        }
+    }
+
+    private RuntimeUnlockRetryDispatchDecision? CommitRuntimeUnlockRetryDispatchInstallLocked(
+        IRuntimeUnlockRetryDispatchAuthorityBridge bridge,
+        RuntimeUnlockRetryDispatchDecision decision,
+        RuntimeUnlockRetryDispatchDecisionStageResult stageResult,
+        long decisionDataSessionGeneration)
+    {
+        var bridgeIsCurrentTransport =
+            transport is IRuntimeUnlockRetryDispatchAuthorityBridge currentBridge &&
+            ReferenceEquals(currentBridge, bridge);
+        if (!bridgeIsCurrentTransport)
+        {
+            return RejectRuntimeUnlockRetryDispatchInstallLocked(
+                decision,
+                "retry_dispatch_install_bridge_replaced");
+        }
+
+        var request = decision.Request;
+        if (request.Direction == FileTransferDirection.Outbound &&
+            outboundTransfer is { } outbound &&
+            !outbound.IsTerminal &&
+            string.Equals(request.SessionId, outbound.SessionId, StringComparison.Ordinal) &&
+            string.Equals(request.TransferId, outbound.TransferId, StringComparison.Ordinal))
+        {
+            return CommitRuntimeUnlockRetryDispatchInstallLocked(
+                outbound,
+                bridge,
+                decision,
+                stageResult,
+                decisionDataSessionGeneration);
+        }
+
+        if (request.Direction == FileTransferDirection.Inbound &&
+            inboundTransfer is { } inbound &&
+            !inbound.IsTerminal &&
+            string.Equals(request.SessionId, inbound.SessionId, StringComparison.Ordinal) &&
+            string.Equals(request.TransferId, inbound.TransferId, StringComparison.Ordinal))
+        {
+            return CommitRuntimeUnlockRetryDispatchInstallLocked(
+                inbound,
+                bridge,
+                decision,
+                stageResult,
+                decisionDataSessionGeneration);
+        }
+
+        return RejectRuntimeUnlockRetryDispatchInstallLocked(
+            decision,
+            "retry_dispatch_install_transfer_context_replaced");
+    }
+
+    private static RuntimeUnlockRetryDispatchDecision? CommitRuntimeUnlockRetryDispatchInstallLocked(
+        OutboundTransferContext context,
+        IRuntimeUnlockRetryDispatchAuthorityBridge bridge,
+        RuntimeUnlockRetryDispatchDecision decision,
+        RuntimeUnlockRetryDispatchDecisionStageResult stageResult,
+        long decisionDataSessionGeneration)
+    {
+        if (decisionDataSessionGeneration < 0 ||
+            context.DataSessionGeneration != decisionDataSessionGeneration)
+        {
+            RejectRuntimeUnlockRetryDispatchInstallLocked(
+                context,
+                decision,
+                "retry_dispatch_install_data_session_replaced");
+            return CreateRuntimeUnlockRetryDispatchInstallRejection(
+                decision,
+                "retry_dispatch_install_data_session_replaced",
+                CreateCoordinatorStateLocked(context));
+        }
+
+        if (!FileTransferCoordinator.TryIssueRuntimeUnlockRetryDispatchInstallReceipt(
+                CreateCoordinatorStateLocked(context),
+                decision,
+                decision.Request,
+                context.CurrentRuntimeUnlockRetryDispatchContract,
+                context.PendingRuntimeUnlockRetryDispatchPredecessorContract,
+                context.LastRuntimeUnlockRetryDispatchSettlement,
+                context.CurrentRuntimeUnlockRetryDispatchInstallReceipt,
+                context.LastRuntimeUnlockRetryDispatchInstallGeneration,
+                out var receipt,
+                out _))
+        {
+            RejectRuntimeUnlockRetryDispatchInstallLocked(
+                context,
+                decision,
+                "retry_dispatch_install_revalidation_failed");
+            return CreateRuntimeUnlockRetryDispatchInstallRejection(
+                decision,
+                "retry_dispatch_install_revalidation_failed",
+                CreateCoordinatorStateLocked(context));
+        }
+
+        receipt = BindRuntimeUnlockRetryDispatchInstallReceiptToStage(
+            receipt,
+            stageResult);
+
+        context.LastRuntimeUnlockRetryDispatchInstallGeneration = Math.Max(
+            context.LastRuntimeUnlockRetryDispatchInstallGeneration,
+            receipt.InstallGeneration);
+        LogRuntimeUnlockRetryDispatchInstallReceiptIssued(
+            receipt);
+        var result = bridge.CommitRuntimeUnlockRetryDispatchInstall(receipt);
+        if (!result.Accepted || result.Receipt != receipt)
+        {
+            RejectRuntimeUnlockRetryDispatchInstallLocked(
+                context,
+                decision,
+                "retry_dispatch_install_commit_rejected");
+            return CreateRuntimeUnlockRetryDispatchInstallRejection(
+                decision,
+                "retry_dispatch_install_commit_rejected",
+                CreateCoordinatorStateLocked(context));
+        }
+
+        if (result.Status == RuntimeUnlockRetryDispatchInstallStatus.Installed &&
+            !TryApplyCommittedRuntimeUnlockRetryDispatchPredecessorLocked(
+                context,
+                decision,
+                out var predecessorRejectionReason))
+        {
+            RejectRuntimeUnlockRetryDispatchInstallLocked(
+                context,
+                decision,
+                predecessorRejectionReason);
+            return CreateRuntimeUnlockRetryDispatchInstallRejection(
+                decision,
+                predecessorRejectionReason,
+                CreateCoordinatorStateLocked(context));
+        }
+
+        context.CurrentRuntimeUnlockRetryDispatchInstallReceipt = receipt;
+        ApplyRuntimeUnlockRetryDispatchReleaseConsumptionLocked(context, decision);
+        return null;
+    }
+
+    private static RuntimeUnlockRetryDispatchDecision? CommitRuntimeUnlockRetryDispatchInstallLocked(
+        InboundTransferContext context,
+        IRuntimeUnlockRetryDispatchAuthorityBridge bridge,
+        RuntimeUnlockRetryDispatchDecision decision,
+        RuntimeUnlockRetryDispatchDecisionStageResult stageResult,
+        long decisionDataSessionGeneration)
+    {
+        if (decisionDataSessionGeneration < 0 ||
+            context.DataSessionGeneration != decisionDataSessionGeneration)
+        {
+            RejectRuntimeUnlockRetryDispatchInstallLocked(
+                context,
+                decision,
+                "retry_dispatch_install_data_session_replaced");
+            return CreateRuntimeUnlockRetryDispatchInstallRejection(
+                decision,
+                "retry_dispatch_install_data_session_replaced",
+                CreateCoordinatorStateLocked(context));
+        }
+
+        if (!FileTransferCoordinator.TryIssueRuntimeUnlockRetryDispatchInstallReceipt(
+                CreateCoordinatorStateLocked(context),
+                decision,
+                decision.Request,
+                context.CurrentRuntimeUnlockRetryDispatchContract,
+                context.PendingRuntimeUnlockRetryDispatchPredecessorContract,
+                context.LastRuntimeUnlockRetryDispatchSettlement,
+                context.CurrentRuntimeUnlockRetryDispatchInstallReceipt,
+                context.LastRuntimeUnlockRetryDispatchInstallGeneration,
+                out var receipt,
+                out _))
+        {
+            RejectRuntimeUnlockRetryDispatchInstallLocked(
+                context,
+                decision,
+                "retry_dispatch_install_revalidation_failed");
+            return CreateRuntimeUnlockRetryDispatchInstallRejection(
+                decision,
+                "retry_dispatch_install_revalidation_failed",
+                CreateCoordinatorStateLocked(context));
+        }
+
+        receipt = BindRuntimeUnlockRetryDispatchInstallReceiptToStage(
+            receipt,
+            stageResult);
+
+        context.LastRuntimeUnlockRetryDispatchInstallGeneration = Math.Max(
+            context.LastRuntimeUnlockRetryDispatchInstallGeneration,
+            receipt.InstallGeneration);
+        LogRuntimeUnlockRetryDispatchInstallReceiptIssued(
+            receipt);
+        var result = bridge.CommitRuntimeUnlockRetryDispatchInstall(receipt);
+        if (!result.Accepted || result.Receipt != receipt)
+        {
+            RejectRuntimeUnlockRetryDispatchInstallLocked(
+                context,
+                decision,
+                "retry_dispatch_install_commit_rejected");
+            return CreateRuntimeUnlockRetryDispatchInstallRejection(
+                decision,
+                "retry_dispatch_install_commit_rejected",
+                CreateCoordinatorStateLocked(context));
+        }
+
+        if (result.Status == RuntimeUnlockRetryDispatchInstallStatus.Installed &&
+            !TryApplyCommittedRuntimeUnlockRetryDispatchPredecessorLocked(
+                context,
+                decision,
+                out var predecessorRejectionReason))
+        {
+            RejectRuntimeUnlockRetryDispatchInstallLocked(
+                context,
+                decision,
+                predecessorRejectionReason);
+            return CreateRuntimeUnlockRetryDispatchInstallRejection(
+                decision,
+                predecessorRejectionReason,
+                CreateCoordinatorStateLocked(context));
+        }
+
+        context.CurrentRuntimeUnlockRetryDispatchInstallReceipt = receipt;
+        ApplyRuntimeUnlockRetryDispatchReleaseConsumptionLocked(context, decision);
+        return null;
+    }
+
+    private RuntimeUnlockRetryDispatchDecision RejectRuntimeUnlockRetryDispatchInstallLocked(
+        RuntimeUnlockRetryDispatchDecision decision,
+        string reason)
+    {
+        var request = decision.Request;
+        var state = decision.State;
+        if (request.Direction == FileTransferDirection.Outbound &&
+            outboundTransfer is { } outbound &&
+            string.Equals(request.SessionId, outbound.SessionId, StringComparison.Ordinal) &&
+            string.Equals(request.TransferId, outbound.TransferId, StringComparison.Ordinal))
+        {
+            RejectRuntimeUnlockRetryDispatchInstallLocked(outbound, decision, reason);
+            state = CreateCoordinatorStateLocked(outbound);
+        }
+        else if (request.Direction == FileTransferDirection.Inbound &&
+                 inboundTransfer is { } inbound &&
+                 string.Equals(request.SessionId, inbound.SessionId, StringComparison.Ordinal) &&
+                 string.Equals(request.TransferId, inbound.TransferId, StringComparison.Ordinal))
+        {
+            RejectRuntimeUnlockRetryDispatchInstallLocked(inbound, decision, reason);
+            state = CreateCoordinatorStateLocked(inbound);
+        }
+
+        return CreateRuntimeUnlockRetryDispatchInstallRejection(
+            decision,
+            reason,
+            state);
+    }
+
+    private static RuntimeUnlockRetryDispatchDecision
+        CreateRuntimeUnlockRetryDispatchInstallRejection(
+            RuntimeUnlockRetryDispatchDecision decision,
+            string reason,
+            FileTransferCoordinatorState state)
+        => new(
+            RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
+            reason,
+            decision.Contract)
+        {
+            Request = decision.Request,
+            State = state,
+        };
+
+    private static RuntimeUnlockRetryDispatchInstallReceipt
+        BindRuntimeUnlockRetryDispatchInstallReceiptToStage(
+            RuntimeUnlockRetryDispatchInstallReceipt receipt,
+            RuntimeUnlockRetryDispatchDecisionStageResult stageResult)
+        => receipt.StageDisposition != RuntimeUnlockRetryDispatchStageDisposition.Unknown
+            ? receipt
+            : receipt with
+            {
+                Request = stageResult.Decision.Request,
+                StageStatus = stageResult.Status,
+                StageDisposition = stageResult.StageDisposition,
+                StageCleared = stageResult.StageCleared,
+                StagedUtcMs = stageResult.StagedUtcMs,
+                StageExpiresUtcMs = stageResult.StageExpiresUtcMs,
+            };
+
+    private static void LogRuntimeUnlockRetryDispatchInstallReceiptIssued(
+        RuntimeUnlockRetryDispatchInstallReceipt receipt)
+    {
+        var request = receipt.Request;
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_retry_dispatch_install_receipt_issued; {RuntimeUnlockRetryDispatchTelemetry.FormatAuthorityTuple(receipt.Authority)}; request_regular_v4_liveness_generation={request.RegularV4LivenessGeneration}; request_bridge_decision_generation={request.BridgeDecisionGeneration}; request_active_predecessor_supersession={(request.RequestActivePredecessorSupersession ? 1 : 0)}; current_authority_id={RuntimeUnlockRetryDispatchTelemetry.SanitizeToken(receipt.Authority.AuthorityId.ToString())}; install_generation={receipt.InstallGeneration}; stage_status={RuntimeUnlockRetryDispatchTelemetry.SanitizeToken(receipt.StageStatus.ToString())}; stage_disposition={RuntimeUnlockRetryDispatchTelemetry.SanitizeToken(receipt.StageDisposition.ToString())}; stage_cleared={(receipt.StageCleared ? 1 : 0)}; staged_utc_ms={receipt.StagedUtcMs}; stage_expires_utc_ms={receipt.StageExpiresUtcMs}; decision_reason=coordinator_install_receipt_issued");
+    }
+
+    private static void RejectRuntimeUnlockRetryDispatchInstallLocked(
+        OutboundTransferContext context,
+        RuntimeUnlockRetryDispatchDecision decision,
+        string reason)
+    {
+        if (decision.Contract is not { } contract ||
+            !ReferenceEquals(context.CurrentRuntimeUnlockRetryDispatchContract, contract))
+        {
+            return;
+        }
+
+        if (contract.TrySettle(
+                RuntimeUnlockRetryDispatchSettlementOutcome.AuthorityRejected,
+                reason) &&
+            contract.TryCreateSettlementReport(out var report))
+        {
+            var settlementDecision = FileTransferCoordinator.ObserveRuntimeUnlockRetryDispatchSettlement(
+                CreateCoordinatorStateLocked(context),
+                contract,
+                context.LastRuntimeUnlockRetryDispatchSettlement,
+                report);
+            ApplyRuntimeUnlockRetryDispatchSettlementDecisionLocked(context, settlementDecision);
+        }
+        context.CurrentRuntimeUnlockRetryDispatchInstallReceipt = null;
+        context.PendingRuntimeUnlockRetryDispatchPredecessorContract = null;
+    }
+
+    private static void RejectRuntimeUnlockRetryDispatchInstallLocked(
+        InboundTransferContext context,
+        RuntimeUnlockRetryDispatchDecision decision,
+        string reason)
+    {
+        if (decision.Contract is not { } contract ||
+            !ReferenceEquals(context.CurrentRuntimeUnlockRetryDispatchContract, contract))
+        {
+            return;
+        }
+
+        if (contract.TrySettle(
+                RuntimeUnlockRetryDispatchSettlementOutcome.AuthorityRejected,
+                reason) &&
+            contract.TryCreateSettlementReport(out var report))
+        {
+            var settlementDecision = FileTransferCoordinator.ObserveRuntimeUnlockRetryDispatchSettlement(
+                CreateCoordinatorStateLocked(context),
+                contract,
+                context.LastRuntimeUnlockRetryDispatchSettlement,
+                report);
+            ApplyRuntimeUnlockRetryDispatchSettlementDecisionLocked(context, settlementDecision);
+        }
+        context.CurrentRuntimeUnlockRetryDispatchInstallReceipt = null;
+        context.PendingRuntimeUnlockRetryDispatchPredecessorContract = null;
+    }
+
+    private static void ApplyRuntimeUnlockRetryDispatchReleaseConsumptionLocked(
+        OutboundTransferContext context,
+        RuntimeUnlockRetryDispatchDecision decision)
+    {
+        context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
+            decision.State.RuntimeUnlockRegularV4RecoverySettlementAvailable;
+        context.RuntimeUnlockRecoveryLeaseClosureAvailable =
+            decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable;
+    }
+
+    private static void ApplyRuntimeUnlockRetryDispatchReleaseConsumptionLocked(
+        InboundTransferContext context,
+        RuntimeUnlockRetryDispatchDecision decision)
+    {
+        context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
+            decision.State.RuntimeUnlockRegularV4RecoverySettlementAvailable;
+        context.RuntimeUnlockRecoveryLeaseClosureAvailable =
+            decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable;
     }
 
     private static RuntimeUnlockRetryDispatchDecision AuthorizeRuntimeUnlockRetryDispatchLocked(
@@ -5266,6 +5667,14 @@ public sealed partial class SessionFileTransferService : IDisposable
                 context.LastRuntimeUnlockRetryDispatchSettlement,
                 "coordinator_decision_invalidated_retry_dispatch",
                 out var reconciliationSettlement);
+        context.PendingRuntimeUnlockRetryDispatchPredecessorContract =
+            ReconcileRuntimeUnlockRetryDispatchActivePredecessor(
+                context.PendingRuntimeUnlockRetryDispatchPredecessorContract,
+                context.CurrentRuntimeUnlockRetryDispatchContract);
+        context.CurrentRuntimeUnlockRetryDispatchInstallReceipt =
+            ReconcileRuntimeUnlockRetryDispatchInstallReceipt(
+                context.CurrentRuntimeUnlockRetryDispatchInstallReceipt,
+                context.CurrentRuntimeUnlockRetryDispatchContract);
         context.LastRuntimeUnlockRetryDispatchSettlement =
             reconciliationSettlement ??
             decision.State.LastRuntimeUnlockRetryDispatchSettlement ??
@@ -5341,6 +5750,14 @@ public sealed partial class SessionFileTransferService : IDisposable
                 context.LastRuntimeUnlockRetryDispatchSettlement,
                 "coordinator_decision_invalidated_retry_dispatch",
                 out var reconciliationSettlement);
+        context.PendingRuntimeUnlockRetryDispatchPredecessorContract =
+            ReconcileRuntimeUnlockRetryDispatchActivePredecessor(
+                context.PendingRuntimeUnlockRetryDispatchPredecessorContract,
+                context.CurrentRuntimeUnlockRetryDispatchContract);
+        context.CurrentRuntimeUnlockRetryDispatchInstallReceipt =
+            ReconcileRuntimeUnlockRetryDispatchInstallReceipt(
+                context.CurrentRuntimeUnlockRetryDispatchInstallReceipt,
+                context.CurrentRuntimeUnlockRetryDispatchContract);
         context.LastRuntimeUnlockRetryDispatchSettlement =
             reconciliationSettlement ??
             decision.State.LastRuntimeUnlockRetryDispatchSettlement ??
@@ -5469,6 +5886,14 @@ public sealed partial class SessionFileTransferService : IDisposable
                 context.LastRuntimeUnlockRetryDispatchSettlement,
                 "coordinator_action_invalidated_retry_dispatch",
                 out var reconciliationSettlement);
+        context.PendingRuntimeUnlockRetryDispatchPredecessorContract =
+            ReconcileRuntimeUnlockRetryDispatchActivePredecessor(
+                context.PendingRuntimeUnlockRetryDispatchPredecessorContract,
+                context.CurrentRuntimeUnlockRetryDispatchContract);
+        context.CurrentRuntimeUnlockRetryDispatchInstallReceipt =
+            ReconcileRuntimeUnlockRetryDispatchInstallReceipt(
+                context.CurrentRuntimeUnlockRetryDispatchInstallReceipt,
+                context.CurrentRuntimeUnlockRetryDispatchContract);
         context.LastRuntimeUnlockRetryDispatchSettlement =
             reconciliationSettlement ??
             decision.State.LastRuntimeUnlockRetryDispatchSettlement ??
@@ -5520,6 +5945,14 @@ public sealed partial class SessionFileTransferService : IDisposable
                 context.LastRuntimeUnlockRetryDispatchSettlement,
                 "coordinator_action_invalidated_retry_dispatch",
                 out var reconciliationSettlement);
+        context.PendingRuntimeUnlockRetryDispatchPredecessorContract =
+            ReconcileRuntimeUnlockRetryDispatchActivePredecessor(
+                context.PendingRuntimeUnlockRetryDispatchPredecessorContract,
+                context.CurrentRuntimeUnlockRetryDispatchContract);
+        context.CurrentRuntimeUnlockRetryDispatchInstallReceipt =
+            ReconcileRuntimeUnlockRetryDispatchInstallReceipt(
+                context.CurrentRuntimeUnlockRetryDispatchInstallReceipt,
+                context.CurrentRuntimeUnlockRetryDispatchContract);
         context.LastRuntimeUnlockRetryDispatchSettlement =
             reconciliationSettlement ??
             decision.State.LastRuntimeUnlockRetryDispatchSettlement ??
@@ -5608,6 +6041,17 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         return null;
     }
+
+    private static RuntimeUnlockRetryDispatchInstallReceipt?
+        ReconcileRuntimeUnlockRetryDispatchInstallReceipt(
+            RuntimeUnlockRetryDispatchInstallReceipt? receipt,
+            RuntimeUnlockRetryDispatchContract? contract)
+        => receipt is { } currentReceipt &&
+           contract is { } currentContract &&
+           !currentContract.Lifecycle.IsSettled &&
+           currentReceipt.Authority == currentContract.Authority
+            ? currentReceipt
+            : null;
 
     private static FileTransferCoordinatorState CreateCoordinatorStateLocked(InboundTransferContext context)
         => new(
@@ -18427,7 +18871,15 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public RuntimeUnlockRetryDispatchContract? CurrentRuntimeUnlockRetryDispatchContract { get; set; }
 
+        public RuntimeUnlockRetryDispatchContract?
+            PendingRuntimeUnlockRetryDispatchPredecessorContract { get; set; }
+
         public int LastRuntimeUnlockRetryDispatchAuthorityGeneration { get; set; }
+
+        public long LastRuntimeUnlockRetryDispatchInstallGeneration { get; set; }
+
+        public RuntimeUnlockRetryDispatchInstallReceipt?
+            CurrentRuntimeUnlockRetryDispatchInstallReceipt { get; set; }
 
         public RuntimeUnlockRetryDispatchSettlementReport? LastRuntimeUnlockRetryDispatchSettlement { get; set; }
 
@@ -19487,7 +19939,15 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public RuntimeUnlockRetryDispatchContract? CurrentRuntimeUnlockRetryDispatchContract { get; set; }
 
+        public RuntimeUnlockRetryDispatchContract?
+            PendingRuntimeUnlockRetryDispatchPredecessorContract { get; set; }
+
         public int LastRuntimeUnlockRetryDispatchAuthorityGeneration { get; set; }
+
+        public long LastRuntimeUnlockRetryDispatchInstallGeneration { get; set; }
+
+        public RuntimeUnlockRetryDispatchInstallReceipt?
+            CurrentRuntimeUnlockRetryDispatchInstallReceipt { get; set; }
 
         public RuntimeUnlockRetryDispatchSettlementReport? LastRuntimeUnlockRetryDispatchSettlement { get; set; }
 

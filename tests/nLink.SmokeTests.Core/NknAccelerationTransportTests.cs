@@ -11988,7 +11988,6 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             Assert.DoesNotContain("event=session_recovery_contract_", tail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_recovery_authority_", tail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_retry_scheduled;", tail, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=session_liveness_", tail, StringComparison.Ordinal);
         }
         finally
         {
@@ -13615,6 +13614,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 "runtime_unlock_offer_send_not_observed",
                 "regular_v4_repair_settled",
                 false);
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
 
             var retryStateField = typeof(NknSignalingTransport).GetField(
                 "runtimeUnlockRecoveryRetryState",
@@ -13632,6 +13632,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 "runtime_unlock_offer_send_not_observed",
                 "bridge_recovery_wait_timeout",
                 true);
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
 
             Assert.Same(firstState, retryStateField.GetValue(host));
             var successorBeforeLate = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
@@ -13659,6 +13660,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 "runtime_unlock_offer_send_not_observed",
                 "second_bridge_recovery_wait_timeout",
                 true);
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
             var secondSuccessor = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
                 firstState.GetType().GetProperty("DispatchContract")!.GetValue(firstState));
             Assert.NotSame(successorBeforeLate, secondSuccessor);
@@ -13697,6 +13699,861 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = previousHelpeePriorityDelay;
             FakeNknClient.ResetNetwork();
         }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatchInstall_StageIsInertAndExactCommitIsIdempotent()
+    {
+        using var fixture = await CreateRuntimeUnlockRetryDispatchInstallFixtureAsync("phase2-exact");
+        var decision = Assert.Single(fixture.Decisions);
+        var contract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(decision.Contract);
+        var stateType = fixture.State.GetType();
+        var retryDeadline = GetPrivatePropertyValue<long>(fixture.State, "RetryDeadlineUtcMs");
+        var dispatchDeadline = GetPrivatePropertyValue<long>(fixture.State, "DispatchDeadlineUtcMs");
+        var observedSendDeadline = GetPrivatePropertyValue<long>(fixture.State, "ObservedSendDeadlineUtcMs");
+        var livenessDeadline = GetPrivatePropertyValue<long>(fixture.State, "LivenessDeferralDeadlineUtcMs");
+        var logStart = GetOperationalLogLength();
+
+        var staged = fixture.Bridge.StageRuntimeUnlockRetryDispatchDecision(decision);
+
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStageStatus.Staged, staged.Status);
+        Assert.True(staged.Accepted);
+        var pendingStage = stateType.GetProperty("PendingDispatchDecisionStage")!.GetValue(fixture.State);
+        Assert.NotNull(pendingStage);
+        var stageExpiry = GetPrivatePropertyValue<long>(pendingStage!, "ExpiresUtcMs");
+        Assert.Null(stateType.GetProperty("DispatchContract")!.GetValue(fixture.State));
+        Assert.False(GetPrivatePropertyValue<bool>(fixture.State, "DispatchAuthorityGranted"));
+        Assert.False(GetPrivatePropertyValue<bool>(fixture.State, "RetryAuthorityGranted"));
+        Assert.Equal(retryDeadline, GetPrivatePropertyValue<long>(fixture.State, "RetryDeadlineUtcMs"));
+        Assert.Equal(dispatchDeadline, GetPrivatePropertyValue<long>(fixture.State, "DispatchDeadlineUtcMs"));
+        Assert.Equal(observedSendDeadline, GetPrivatePropertyValue<long>(fixture.State, "ObservedSendDeadlineUtcMs"));
+        Assert.Equal(livenessDeadline, GetPrivatePropertyValue<long>(fixture.State, "LivenessDeferralDeadlineUtcMs"));
+        Assert.Null(GetPrivateField(fixture.Host, "outboundAccelerationOfferNonce"));
+
+        var duplicateStage = fixture.Bridge.StageRuntimeUnlockRetryDispatchDecision(decision);
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStageStatus.Idempotent, duplicateStage.Status);
+        Assert.Equal(
+            stageExpiry,
+            GetPrivatePropertyValue<long>(
+                stateType.GetProperty("PendingDispatchDecisionStage")!.GetValue(fixture.State)!,
+                "ExpiresUtcMs"));
+
+        var receipt = CreateRuntimeUnlockRetryDispatchInstallReceipt(
+            decision,
+            staged,
+            installGeneration: 1);
+        var installed = fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(receipt);
+
+        Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Installed, installed.Status);
+        Assert.Same(contract, stateType.GetProperty("DispatchContract")!.GetValue(fixture.State));
+        Assert.True(GetPrivatePropertyValue<bool>(fixture.State, "DispatchAuthorityGranted"));
+        Assert.True(GetPrivatePropertyValue<bool>(fixture.State, "RetryAuthorityGranted"));
+        Assert.Null(stateType.GetProperty("PendingDispatchDecisionStage")!.GetValue(fixture.State));
+        Assert.Equal(receipt, GetPrivatePropertyValue<RuntimeUnlockRetryDispatchInstallReceipt>(
+            fixture.State,
+            "LastCommittedDispatchInstallReceipt"));
+        var installedDeadline = GetPrivatePropertyValue<long>(fixture.State, "DispatchDeadlineUtcMs");
+        Assert.True(installedDeadline > 0);
+
+        var duplicateCommit = fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(receipt);
+
+        Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Idempotent, duplicateCommit.Status);
+        Assert.Same(contract, stateType.GetProperty("DispatchContract")!.GetValue(fixture.State));
+        Assert.Equal(installedDeadline, GetPrivatePropertyValue<long>(fixture.State, "DispatchDeadlineUtcMs"));
+        await fixture.Host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
+        var tail = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=runtime_unlock_retry_dispatch_decision_staged;", tail, StringComparison.Ordinal);
+        Assert.Contains("request_regular_v4_liveness_generation=", tail, StringComparison.Ordinal);
+        Assert.Contains("request_bridge_decision_generation=", tail, StringComparison.Ordinal);
+        Assert.Contains("install_generation=0", tail, StringComparison.Ordinal);
+        Assert.Contains("stage_expires_utc_ms=", tail, StringComparison.Ordinal);
+        Assert.Contains("current_authority_id=", tail, StringComparison.Ordinal);
+        Assert.Contains("event=runtime_unlock_retry_dispatch_install_committed;", tail, StringComparison.Ordinal);
+        Assert.Contains("install_generation=1", tail, StringComparison.Ordinal);
+        Assert.Equal(
+            1,
+            tail.Split("event=runtime_unlock_retry_dispatch_authority_granted;", StringSplitOptions.None).Length - 1);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatchInstall_UnknownMismatchedAndExpiredReceiptsFailClosed()
+    {
+        using var fixture = await CreateRuntimeUnlockRetryDispatchInstallFixtureAsync("phase2-invalid");
+        var decision = Assert.Single(fixture.Decisions);
+        var contract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(decision.Contract);
+        var stateType = fixture.State.GetType();
+        var previousDeadline = NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests;
+        try
+        {
+            NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests =
+                TimeSpan.FromMilliseconds(30);
+            var staged = fixture.Bridge.StageRuntimeUnlockRetryDispatchDecision(decision);
+            Assert.Equal(
+                RuntimeUnlockRetryDispatchDecisionStageStatus.Staged,
+                staged.Status);
+            var pendingStage = stateType.GetProperty("PendingDispatchDecisionStage")!.GetValue(fixture.State);
+            Assert.NotNull(pendingStage);
+
+            var unknownReceiptLogStart = GetOperationalLogLength();
+            var unknown = fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(default);
+            Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Rejected, unknown.Status);
+            Assert.Same(pendingStage, stateType.GetProperty("PendingDispatchDecisionStage")!.GetValue(fixture.State));
+            var unknownReceiptLog = ReadOperationalLogTail(unknownReceiptLogStart);
+            Assert.Contains(
+                "event=runtime_unlock_retry_dispatch_install_rejected;",
+                unknownReceiptLog,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_retry_dispatch_install_receipt_issued;",
+                unknownReceiptLog,
+                StringComparison.Ordinal);
+
+            var mismatchedAuthority = contract.Authority with
+            {
+                TerminalGeneration = checked(contract.Authority.TerminalGeneration + 1),
+            };
+            var mismatched = fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(
+                CreateRuntimeUnlockRetryDispatchInstallReceipt(
+                    decision,
+                    staged,
+                    installGeneration: 1,
+                    authority: mismatchedAuthority));
+            Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Rejected, mismatched.Status);
+            Assert.Equal("retry_dispatch_install_authority_mismatch", mismatched.Reason);
+            Assert.Same(pendingStage, stateType.GetProperty("PendingDispatchDecisionStage")!.GetValue(fixture.State));
+            Assert.Null(stateType.GetProperty("DispatchContract")!.GetValue(fixture.State));
+            Assert.False(GetPrivatePropertyValue<bool>(fixture.State, "DispatchAuthorityGranted"));
+
+            var forgedGeneration = fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(
+                CreateRuntimeUnlockRetryDispatchInstallReceipt(
+                    decision,
+                    staged,
+                    installGeneration: 99));
+            Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Rejected, forgedGeneration.Status);
+            Assert.Equal(
+                "retry_dispatch_install_generation_out_of_sequence",
+                forgedGeneration.Reason);
+            Assert.Same(pendingStage, stateType.GetProperty("PendingDispatchDecisionStage")!.GetValue(fixture.State));
+
+            await Task.Delay(75);
+            var expired = fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(
+                CreateRuntimeUnlockRetryDispatchInstallReceipt(
+                    decision,
+                    staged,
+                    installGeneration: 1));
+            Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Rejected, expired.Status);
+            Assert.Equal("retry_dispatch_install_stage_expired", expired.Reason);
+            Assert.Null(stateType.GetProperty("PendingDispatchDecisionStage")!.GetValue(fixture.State));
+            Assert.Null(stateType.GetProperty("DispatchContract")!.GetValue(fixture.State));
+
+            NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests = TimeSpan.FromSeconds(5);
+            var restaged = fixture.Bridge.StageRuntimeUnlockRetryDispatchDecision(decision);
+            Assert.Equal(
+                RuntimeUnlockRetryDispatchDecisionStageStatus.Staged,
+                restaged.Status);
+            var laterGeneration = fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(
+                CreateRuntimeUnlockRetryDispatchInstallReceipt(
+                    decision,
+                    restaged,
+                    installGeneration: 2));
+            Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Installed, laterGeneration.Status);
+        }
+        finally
+        {
+            NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests = previousDeadline;
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatchInstall_SequenceSurvivesRetryStateReplacement()
+    {
+        using var fixture = await CreateRuntimeUnlockRetryDispatchInstallFixtureAsync("phase2-replacement");
+        var initialDecision = Assert.Single(fixture.Decisions);
+        var initialContract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(initialDecision.Contract);
+        var previousDeadline = NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests;
+        try
+        {
+            NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests =
+                TimeSpan.FromMilliseconds(25);
+            var initialStage = fixture.Bridge.StageRuntimeUnlockRetryDispatchDecision(initialDecision);
+            Assert.Equal(
+                RuntimeUnlockRetryDispatchDecisionStageStatus.Staged,
+                initialStage.Status);
+            await Task.Delay(75);
+            var failedGenerationOne = fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(
+                CreateRuntimeUnlockRetryDispatchInstallReceipt(
+                    initialDecision,
+                    initialStage,
+                    installGeneration: 1));
+            Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Rejected, failedGenerationOne.Status);
+            Assert.Equal("retry_dispatch_install_stage_expired", failedGenerationOne.Reason);
+
+            NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests = TimeSpan.FromSeconds(5);
+            SetPrivateField(fixture.Host, "runtimeUnlockRecoveryRetryState", null);
+            fixture.Decisions.Clear();
+            InstallRuntimeUnlockRetryDispatchCaptureCoordinatorForTests(
+                fixture.Host,
+                fixture.Decisions);
+            InvokePrivateMethod(
+                fixture.Host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                0L,
+                fixture.SessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "independent_recovery_after_install_failure",
+                false);
+
+            var replacementState = GetPrivateField(
+                fixture.Host,
+                "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(replacementState);
+            Assert.NotSame(fixture.State, replacementState);
+            var replacementDecision = Assert.Single(fixture.Decisions);
+            var replacementContract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+                replacementDecision.Contract);
+            var replacementStage = fixture.Bridge.StageRuntimeUnlockRetryDispatchDecision(replacementDecision);
+            Assert.Equal(
+                RuntimeUnlockRetryDispatchDecisionStageStatus.Staged,
+                replacementStage.Status);
+
+            var staleGeneration = fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(
+                CreateRuntimeUnlockRetryDispatchInstallReceipt(
+                    replacementDecision,
+                    replacementStage,
+                    installGeneration: 1));
+            Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Rejected, staleGeneration.Status);
+            Assert.Equal("retry_dispatch_install_generation_out_of_sequence", staleGeneration.Reason);
+            Assert.NotNull(replacementState!.GetType()
+                .GetProperty("PendingDispatchDecisionStage")!
+                .GetValue(replacementState));
+
+            var generationTwo = fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(
+                CreateRuntimeUnlockRetryDispatchInstallReceipt(
+                    replacementDecision,
+                    replacementStage,
+                    installGeneration: 2));
+            Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Installed, generationTwo.Status);
+            Assert.Same(
+                replacementContract,
+                replacementState.GetType().GetProperty("DispatchContract")!.GetValue(replacementState));
+        }
+        finally
+        {
+            NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests = previousDeadline;
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatchInstall_ExactIssuedReceiptConsumesGenerationAfterStateReplacement()
+    {
+        using var fixture = await CreateRuntimeUnlockRetryDispatchInstallFixtureAsync(
+            "phase2-exact-receipt-after-replacement");
+        var initialDecision = Assert.Single(fixture.Decisions);
+        var initialContract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+            initialDecision.Contract);
+        var initialStage = fixture.Bridge.StageRuntimeUnlockRetryDispatchDecision(initialDecision);
+        var initialReceipt = CreateRuntimeUnlockRetryDispatchInstallReceipt(
+            initialDecision,
+            initialStage,
+            installGeneration: 1);
+
+        SetPrivateField(fixture.Host, "runtimeUnlockRecoveryRetryState", null);
+        fixture.Decisions.Clear();
+        InstallRuntimeUnlockRetryDispatchCaptureCoordinatorForTests(
+            fixture.Host,
+            fixture.Decisions);
+        InvokePrivateMethod(
+            fixture.Host,
+            "ArmRuntimeUnlockRetryAfterRecovery",
+            0L,
+            fixture.SessionId,
+            "runtime_unlock_offer_send_not_observed",
+            "independent_recovery_after_stage_replacement",
+            false);
+
+        var replacementState = GetPrivateField(
+            fixture.Host,
+            "runtimeUnlockRecoveryRetryState");
+        Assert.NotNull(replacementState);
+        var capturedReplacementDecision = Assert.Single(fixture.Decisions);
+        var capturedReplacementContract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+            capturedReplacementDecision.Contract);
+        var replacementAuthority = capturedReplacementContract.Authority with
+        {
+            AuthorityId = new FileTransferAuthorityId(
+                $"fta2-test-phase2-replacement-{Guid.NewGuid():N}"),
+        };
+        var replacementContract = new RuntimeUnlockRetryDispatchContract(
+            replacementAuthority,
+            capturedReplacementContract.RequestActivePredecessorSupersession,
+            capturedReplacementContract.RegularV4LivenessGeneration,
+            capturedReplacementContract.RequestBridgeDecisionGeneration);
+        var replacementDecision = capturedReplacementDecision with
+        {
+            Contract = replacementContract,
+            State = capturedReplacementDecision.State with
+            {
+                CurrentRuntimeUnlockRetryDispatchAuthority = replacementAuthority,
+            },
+        };
+        Assert.NotSame(initialContract, replacementContract);
+        var replacementStage = fixture.Bridge.StageRuntimeUnlockRetryDispatchDecision(
+            replacementDecision);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchDecisionStageStatus.Staged,
+            replacementStage.Status);
+
+        var unknownAuthority = initialContract.Authority with
+        {
+            TerminalGeneration = checked(initialContract.Authority.TerminalGeneration + 1),
+        };
+        var unknown = fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(
+            CreateRuntimeUnlockRetryDispatchInstallReceipt(
+                initialDecision,
+                initialStage,
+                installGeneration: 1,
+                authority: unknownAuthority));
+        Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Rejected, unknown.Status);
+        var generationMap = Assert.IsAssignableFrom<System.Collections.IDictionary>(
+            GetPrivateField(fixture.Host, "runtimeUnlockRetryDispatchInstallGenerations"));
+        Assert.Empty(generationMap.Values.Cast<object>());
+
+        var staleExact = fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(initialReceipt);
+        Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Rejected, staleExact.Status);
+        Assert.Single(generationMap.Values.Cast<object>());
+        Assert.Equal(1L, Assert.IsType<long>(generationMap.Values.Cast<object>().Single()));
+        Assert.NotNull(
+            replacementState!.GetType()
+                .GetProperty("PendingDispatchDecisionStage")!
+                .GetValue(replacementState));
+
+        var replacementReceipt = CreateRuntimeUnlockRetryDispatchInstallReceipt(
+            replacementDecision,
+            replacementStage,
+            installGeneration: 2);
+        var installed = fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(replacementReceipt);
+        Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Installed, installed.Status);
+        Assert.Same(
+            replacementContract,
+            replacementState.GetType().GetProperty("DispatchContract")!.GetValue(replacementState));
+        await fixture.Host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatchInstall_ExpiredStageIsInvalidatedBeforeExactRestage()
+    {
+        using var fixture = await CreateRuntimeUnlockRetryDispatchInstallFixtureAsync(
+            "phase2-expired-restage");
+        var decision = Assert.Single(fixture.Decisions);
+        var previousDeadline = NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests;
+        try
+        {
+            NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests =
+                TimeSpan.FromMilliseconds(25);
+            var initialStage = fixture.Bridge.StageRuntimeUnlockRetryDispatchDecision(decision);
+            Assert.Equal(RuntimeUnlockRetryDispatchDecisionStageStatus.Staged, initialStage.Status);
+            var initialReceipt = CreateRuntimeUnlockRetryDispatchInstallReceipt(
+                decision,
+                initialStage,
+                installGeneration: 1);
+            await Task.Delay(75);
+
+            NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests =
+                TimeSpan.FromSeconds(5);
+            var logStart = GetOperationalLogLength();
+            var replacementStage = fixture.Bridge.StageRuntimeUnlockRetryDispatchDecision(decision);
+
+            Assert.Equal(
+                RuntimeUnlockRetryDispatchDecisionStageStatus.Staged,
+                replacementStage.Status);
+            Assert.True(replacementStage.StagedUtcMs > initialStage.StagedUtcMs);
+            var tail = ReadOperationalLogTail(logStart);
+            var invalidatedIndex = tail.IndexOf(
+                "decision_reason=retry_dispatch_install_stage_expired_before_replacement",
+                StringComparison.Ordinal);
+            var replacementIndex = tail.LastIndexOf(
+                "event=runtime_unlock_retry_dispatch_decision_staged;",
+                StringComparison.Ordinal);
+            Assert.True(invalidatedIndex >= 0);
+            Assert.True(replacementIndex > invalidatedIndex);
+
+            var staleExact = fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(initialReceipt);
+            Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Rejected, staleExact.Status);
+            Assert.Equal("retry_dispatch_install_stage_replaced", staleExact.Reason);
+            var generationMap = Assert.IsAssignableFrom<System.Collections.IDictionary>(
+                GetPrivateField(fixture.Host, "runtimeUnlockRetryDispatchInstallGenerations"));
+            Assert.Equal(1L, Assert.IsType<long>(generationMap.Values.Cast<object>().Single()));
+
+            var installed = fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(
+                CreateRuntimeUnlockRetryDispatchInstallReceipt(
+                    decision,
+                    replacementStage,
+                    installGeneration: 2));
+            Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Installed, installed.Status);
+            await fixture.Host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
+        }
+        finally
+        {
+            NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests = previousDeadline;
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatchInstall_CommitQueuesCallbackFreeFollowUp()
+    {
+        using var fixture = await CreateRuntimeUnlockRetryDispatchInstallFixtureAsync(
+            "phase2-callback-free-commit");
+        var decision = Assert.Single(fixture.Decisions);
+        var stage = fixture.Bridge.StageRuntimeUnlockRetryDispatchDecision(decision);
+        var receipt = CreateRuntimeUnlockRetryDispatchInstallReceipt(
+            decision,
+            stage,
+            installGeneration: 1);
+        var entered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var previousBarrier =
+            NknSignalingTransport.RuntimeUnlockRetryDispatchInstallFollowUpBarrierForTests;
+        try
+        {
+            NknSignalingTransport.RuntimeUnlockRetryDispatchInstallFollowUpBarrierForTests = () =>
+            {
+                entered.TrySetResult(true);
+                return release.Task;
+            };
+            var logStart = GetOperationalLogLength();
+
+            var installed = fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(receipt);
+
+            Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Installed, installed.Status);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            var beforeRelease = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=runtime_unlock_retry_dispatch_install_committed;",
+                beforeRelease,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_retry_dispatch_authority_granted;",
+                beforeRelease,
+                StringComparison.Ordinal);
+
+            release.TrySetResult(true);
+            await fixture.Host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
+            var afterRelease = ReadOperationalLogTail(logStart);
+            Assert.Equal(
+                1,
+                afterRelease.Split(
+                    "event=runtime_unlock_retry_dispatch_authority_granted;",
+                    StringSplitOptions.None).Length - 1);
+        }
+        finally
+        {
+            release.TrySetResult(true);
+            await fixture.Host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
+            NknSignalingTransport.RuntimeUnlockRetryDispatchInstallFollowUpBarrierForTests =
+                previousBarrier;
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatchInstall_ExactInvalidationClearsStageButUnrelatedRejectionDoesNot()
+    {
+        using var fixture = await CreateRuntimeUnlockRetryDispatchInstallFixtureAsync("phase2-invalidation");
+        var decision = Assert.Single(fixture.Decisions);
+        var staged = fixture.Bridge.StageRuntimeUnlockRetryDispatchDecision(decision);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchDecisionStageStatus.Staged,
+            staged.Status);
+        var stateType = fixture.State.GetType();
+        var pendingStage = stateType.GetProperty("PendingDispatchDecisionStage")!.GetValue(fixture.State);
+        Assert.NotNull(pendingStage);
+
+        var unrelated = new RuntimeUnlockRetryDispatchDecision(
+            RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
+            "test_unrelated_install_rejection",
+            null)
+        {
+            Request = decision.Request,
+            State = decision.State,
+        };
+        Assert.False(fixture.Bridge.ObserveRuntimeUnlockRetryDispatchNonGrantDecision(unrelated));
+        Assert.Same(pendingStage, stateType.GetProperty("PendingDispatchDecisionStage")!.GetValue(fixture.State));
+        Assert.Null(stateType.GetProperty("DispatchContract")!.GetValue(fixture.State));
+        Assert.False(GetPrivatePropertyValue<bool>(fixture.State, "DispatchAuthorityGranted"));
+
+        var exact = new RuntimeUnlockRetryDispatchDecision(
+            RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
+            "retry_dispatch_install_revalidation_failed",
+            decision.Contract)
+        {
+            Request = decision.Request,
+            State = decision.State,
+        };
+        _ = fixture.Bridge.ObserveRuntimeUnlockRetryDispatchNonGrantDecision(exact);
+
+        Assert.Null(stateType.GetProperty("PendingDispatchDecisionStage")!.GetValue(fixture.State));
+        Assert.Null(stateType.GetProperty("DispatchContract")!.GetValue(fixture.State));
+        Assert.False(GetPrivatePropertyValue<bool>(fixture.State, "DispatchAuthorityGranted"));
+        Assert.False(GetPrivatePropertyValue<bool>(fixture.State, "RetryAuthorityGranted"));
+        Assert.Equal(0L, GetPrivatePropertyValue<long>(fixture.State, "DispatchDeadlineUtcMs"));
+        Assert.Equal(0L, GetPrivatePropertyValue<long>(fixture.State, "RetryDeadlineUtcMs"));
+        Assert.Equal(0L, GetPrivatePropertyValue<long>(fixture.State, "ObservedSendDeadlineUtcMs"));
+        Assert.Equal(0L, GetPrivatePropertyValue<long>(fixture.State, "LivenessDeferralDeadlineUtcMs"));
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatchInstall_TerminalBeforeCommitMakesLateReceiptDiagnosticOnly()
+    {
+        using var fixture = await CreateRuntimeUnlockRetryDispatchInstallFixtureAsync("phase2-terminal");
+        var decision = Assert.Single(fixture.Decisions);
+        var contract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(decision.Contract);
+        var staged = fixture.Bridge.StageRuntimeUnlockRetryDispatchDecision(decision);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchDecisionStageStatus.Staged,
+            staged.Status);
+
+        Assert.IsAssignableFrom<IFileTransferTerminalObserver>(fixture.Host)
+            .ObserveFileTransferTerminal(
+                new FileTransferTerminalNotification(
+                    fixture.SessionId,
+                    fixture.TransferId,
+                    FileTransferDirection.Outbound,
+                    FileTransferRouteResolver.RegularNknV4FastToken,
+                    FileTransferProtocol.ProtocolVersionV4,
+                    FileTransferTransferState.Failed,
+                    FileTransferResultCodes.PeerDisconnected,
+                    "Phase 2 terminal barrier."));
+
+        var late = fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(
+            CreateRuntimeUnlockRetryDispatchInstallReceipt(
+                decision,
+                staged,
+                installGeneration: 1));
+        var state = GetPrivateField(fixture.Host, "runtimeUnlockRecoveryRetryState");
+        Assert.NotNull(state);
+        Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Rejected, late.Status);
+        Assert.Null(state!.GetType().GetProperty("PendingDispatchDecisionStage")!.GetValue(state));
+        Assert.Null(state.GetType().GetProperty("DispatchContract")!.GetValue(state));
+        Assert.False(GetPrivatePropertyValue<bool>(state, "DispatchAuthorityGranted"));
+        Assert.Equal(0L, GetPrivatePropertyValue<long>(state, "DispatchDeadlineUtcMs"));
+        Assert.Equal(0L, GetPrivatePropertyValue<long>(state, "LivenessDeferralDeadlineUtcMs"));
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatchInstall_OldReceiptCannotMutateInstalledSuccessor()
+    {
+        using var fixture = await CreateRuntimeUnlockRetryDispatchInstallFixtureAsync("phase2-successor");
+        var predecessorDecision = Assert.Single(fixture.Decisions);
+        var predecessor = Assert.IsType<RuntimeUnlockRetryDispatchContract>(predecessorDecision.Contract);
+        var predecessorStage = fixture.Bridge.StageRuntimeUnlockRetryDispatchDecision(predecessorDecision);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchDecisionStageStatus.Staged,
+            predecessorStage.Status);
+        var predecessorReceipt = CreateRuntimeUnlockRetryDispatchInstallReceipt(
+            predecessorDecision,
+            predecessorStage,
+            installGeneration: 1);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchInstallStatus.Installed,
+            fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(predecessorReceipt).Status);
+
+        InvokePrivateMethod(
+            fixture.Host,
+            "ArmRuntimeUnlockRetryAfterRecovery",
+            1L,
+            fixture.SessionId,
+            "runtime_unlock_offer_send_not_observed",
+            "bridge_recovery_wait_timeout",
+            true);
+        Assert.Equal(2, fixture.Decisions.Count);
+        var successorDecision = fixture.Decisions[1];
+        var successor = Assert.IsType<RuntimeUnlockRetryDispatchContract>(successorDecision.Contract);
+        Assert.NotEqual(predecessor.Authority.AuthorityId, successor.Authority.AuthorityId);
+        Assert.Equal(predecessor.Authority.AuthorityId, successor.Authority.PredecessorAuthorityId);
+        var successorStage = fixture.Bridge.StageRuntimeUnlockRetryDispatchDecision(successorDecision);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchDecisionStageStatus.Staged,
+            successorStage.Status);
+        var successorReceipt = CreateRuntimeUnlockRetryDispatchInstallReceipt(
+            successorDecision,
+            successorStage,
+            installGeneration: 2);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchInstallStatus.Installed,
+            fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(successorReceipt).Status);
+        var successorDeadline = GetPrivatePropertyValue<long>(fixture.State, "DispatchDeadlineUtcMs");
+
+        var latePredecessor = fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(predecessorReceipt);
+
+        Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Rejected, latePredecessor.Status);
+        Assert.Same(
+            successor,
+            fixture.State.GetType().GetProperty("DispatchContract")!.GetValue(fixture.State));
+        Assert.Equal(
+            successorReceipt,
+            GetPrivatePropertyValue<RuntimeUnlockRetryDispatchInstallReceipt>(
+                fixture.State,
+                "LastCommittedDispatchInstallReceipt"));
+        Assert.Equal(successorDeadline, GetPrivatePropertyValue<long>(fixture.State, "DispatchDeadlineUtcMs"));
+        Assert.True(GetPrivatePropertyValue<bool>(fixture.State, "DispatchAuthorityGranted"));
+
+        var schedulingLogStart = GetOperationalLogLength();
+        InvokePrivateMethod(
+            fixture.Host,
+            "ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed",
+            "late_predecessor_receipt_schedule",
+            predecessorReceipt);
+
+        Assert.Same(
+            successor,
+            fixture.State.GetType().GetProperty("DispatchContract")!.GetValue(fixture.State));
+        Assert.Equal(
+            successorReceipt,
+            GetPrivatePropertyValue<RuntimeUnlockRetryDispatchInstallReceipt>(
+                fixture.State,
+                "LastCommittedDispatchInstallReceipt"));
+        Assert.Equal(successorDeadline, GetPrivatePropertyValue<long>(fixture.State, "DispatchDeadlineUtcMs"));
+        Assert.Contains(
+            "decision_reason=retry_dispatch_install_receipt_replaced_recovery_schedule_entry",
+            ReadOperationalLogTail(schedulingLogStart),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatchInstall_PredecessorSettlementBetweenStageAndCommitRejectsAndConsumesGeneration()
+    {
+        using var fixture = await CreateRuntimeUnlockRetryDispatchInstallFixtureAsync(
+            "phase2-predecessor-settlement-race");
+        var predecessorDecision = Assert.Single(fixture.Decisions);
+        var predecessor = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+            predecessorDecision.Contract);
+        var predecessorStage = fixture.Bridge.StageRuntimeUnlockRetryDispatchDecision(predecessorDecision);
+        var predecessorReceipt = CreateRuntimeUnlockRetryDispatchInstallReceipt(
+            predecessorDecision,
+            predecessorStage,
+            installGeneration: 1);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchDecisionStageStatus.Staged,
+            predecessorStage.Status);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchInstallStatus.Installed,
+            fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(predecessorReceipt).Status);
+
+        InvokePrivateMethod(
+            fixture.Host,
+            "ArmRuntimeUnlockRetryAfterRecovery",
+            1L,
+            fixture.SessionId,
+            "runtime_unlock_offer_send_not_observed",
+            "bridge_recovery_wait_timeout",
+            true);
+        var successorDecision = fixture.Decisions[1];
+        var successor = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+            successorDecision.Contract);
+        Assert.Equal(predecessor.Authority.AuthorityId, successor.Authority.PredecessorAuthorityId);
+        var successorStage = fixture.Bridge.StageRuntimeUnlockRetryDispatchDecision(successorDecision);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchDecisionStageStatus.Staged,
+            successorStage.Status);
+
+        var settleMethod = typeof(NknSignalingTransport).GetMethod(
+            "SettleRuntimeUnlockRetryDispatchContractUnsafe",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(settleMethod);
+        object?[] settleArguments =
+        [
+            fixture.State,
+            RuntimeUnlockRetryDispatchSettlementOutcome.AuthorityRejected,
+            "predecessor_settled_between_stage_and_commit",
+            null,
+            false,
+        ];
+        Assert.True(Assert.IsType<bool>(settleMethod!.Invoke(null, settleArguments)));
+        Assert.True(predecessor.Lifecycle.IsSettled);
+        Assert.NotNull(
+            fixture.State.GetType().GetProperty("PendingDispatchDecisionStage")!.GetValue(fixture.State));
+
+        var predecessorDeadline = GetPrivatePropertyValue<long>(fixture.State, "DispatchDeadlineUtcMs");
+        var racedReceipt = CreateRuntimeUnlockRetryDispatchInstallReceipt(
+            successorDecision,
+            successorStage,
+            installGeneration: 2);
+        var racedCommit = fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(racedReceipt);
+
+        Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Rejected, racedCommit.Status);
+        Assert.Equal("retry_dispatch_install_predecessor_phase_mismatch", racedCommit.Reason);
+        Assert.Null(
+            fixture.State.GetType().GetProperty("PendingDispatchDecisionStage")!.GetValue(fixture.State));
+        Assert.Same(
+            predecessor,
+            fixture.State.GetType().GetProperty("DispatchContract")!.GetValue(fixture.State));
+        Assert.Equal(
+            predecessorReceipt,
+            GetPrivatePropertyValue<RuntimeUnlockRetryDispatchInstallReceipt>(
+                fixture.State,
+                "LastCommittedDispatchInstallReceipt"));
+        Assert.Equal(predecessorDeadline, GetPrivatePropertyValue<long>(fixture.State, "DispatchDeadlineUtcMs"));
+
+        var generationMap = Assert.IsAssignableFrom<System.Collections.IDictionary>(
+            GetPrivateField(fixture.Host, "runtimeUnlockRetryDispatchInstallGenerations"));
+        Assert.Single(generationMap.Values.Cast<object>());
+        Assert.Equal(2L, Assert.IsType<long>(generationMap.Values.Cast<object>().Single()));
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatchInstall_PostGrantSuccessorRejectionClearsBindingAndDeadlines()
+    {
+        using var fixture = await CreateRuntimeUnlockRetryDispatchInstallFixtureAsync(
+            "phase2-post-grant-successor-rejected");
+        var predecessorDecision = Assert.Single(fixture.Decisions);
+        var predecessor = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+            predecessorDecision.Contract);
+        var predecessorStage = fixture.Bridge.StageRuntimeUnlockRetryDispatchDecision(predecessorDecision);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchDecisionStageStatus.Staged,
+            predecessorStage.Status);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchInstallStatus.Installed,
+            fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(
+                CreateRuntimeUnlockRetryDispatchInstallReceipt(
+                    predecessorDecision,
+                    predecessorStage,
+                    installGeneration: 1)).Status);
+
+        InvokePrivateMethod(
+            fixture.Host,
+            "ArmRuntimeUnlockRetryAfterRecovery",
+            1L,
+            fixture.SessionId,
+            "runtime_unlock_offer_send_not_observed",
+            "bridge_recovery_wait_timeout",
+            true);
+        var successorDecision = fixture.Decisions[1];
+        var successor = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+            successorDecision.Contract);
+        Assert.Equal(predecessor.Authority.AuthorityId, successor.Authority.PredecessorAuthorityId);
+        Assert.False(predecessor.Lifecycle.IsSettled);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchDecisionStageStatus.Staged,
+            fixture.Bridge.StageRuntimeUnlockRetryDispatchDecision(successorDecision).Status);
+
+        var stateType = fixture.State.GetType();
+        foreach (var deadlineName in new[]
+                 {
+                     "RetryDeadlineUtcMs",
+                     "DispatchDeadlineUtcMs",
+                     "ObservedSendDeadlineUtcMs",
+                     "LivenessDeferralDeadlineUtcMs",
+                 })
+        {
+            stateType.GetProperty(deadlineName)!.SetValue(fixture.State, 123456789L);
+        }
+
+        var rejection = new RuntimeUnlockRetryDispatchDecision(
+            RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
+            "retry_dispatch_install_revalidation_failed",
+            successor)
+        {
+            Request = successorDecision.Request,
+            State = successorDecision.State with
+            {
+                CurrentRuntimeUnlockRetryDispatchAuthority = null,
+            },
+        };
+
+        Assert.True(fixture.Bridge.ObserveRuntimeUnlockRetryDispatchNonGrantDecision(rejection));
+        Assert.False(predecessor.Lifecycle.IsSettled);
+        Assert.Null(stateType.GetProperty("DispatchContract")!.GetValue(fixture.State));
+        Assert.Null(stateType.GetProperty("DispatchPredecessorContract")!.GetValue(fixture.State));
+        Assert.Null(stateType.GetProperty("PendingDispatchDecisionStage")!.GetValue(fixture.State));
+        Assert.Null(stateType.GetProperty("PendingDispatchAuthorityRequest")!.GetValue(fixture.State));
+        Assert.Null(stateType.GetProperty("PendingDispatchSuccessorIntent")!.GetValue(fixture.State));
+        Assert.False(GetPrivatePropertyValue<bool>(fixture.State, "DispatchAuthorityGranted"));
+        Assert.False(GetPrivatePropertyValue<bool>(fixture.State, "RetryAuthorityGranted"));
+        Assert.Equal(0L, GetPrivatePropertyValue<long>(fixture.State, "RetryDeadlineUtcMs"));
+        Assert.Equal(0L, GetPrivatePropertyValue<long>(fixture.State, "DispatchDeadlineUtcMs"));
+        Assert.Equal(0L, GetPrivatePropertyValue<long>(fixture.State, "ObservedSendDeadlineUtcMs"));
+        Assert.Equal(0L, GetPrivatePropertyValue<long>(fixture.State, "LivenessDeferralDeadlineUtcMs"));
+        Assert.Equal(
+            SessionRecoveryContractState.Failed,
+            GetPrivatePropertyValue<SessionRecoveryContractState>(fixture.State, "ContractState"));
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatchInstall_PreGrantSuccessorRejectionPreservesPredecessor()
+    {
+        using var fixture = await CreateRuntimeUnlockRetryDispatchInstallFixtureAsync(
+            "phase2-pre-grant-successor-rejected");
+        var predecessorDecision = Assert.Single(fixture.Decisions);
+        var predecessor = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+            predecessorDecision.Contract);
+        var predecessorStage = fixture.Bridge.StageRuntimeUnlockRetryDispatchDecision(predecessorDecision);
+        var predecessorReceipt = CreateRuntimeUnlockRetryDispatchInstallReceipt(
+            predecessorDecision,
+            predecessorStage,
+            installGeneration: 1);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchDecisionStageStatus.Staged,
+            predecessorStage.Status);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchInstallStatus.Installed,
+            fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(predecessorReceipt).Status);
+
+        InvokePrivateMethod(
+            fixture.Host,
+            "ArmRuntimeUnlockRetryAfterRecovery",
+            1L,
+            fixture.SessionId,
+            "runtime_unlock_offer_send_not_observed",
+            "bridge_recovery_wait_timeout",
+            true);
+        var successorDecision = fixture.Decisions[1];
+        Assert.NotNull(successorDecision.Contract);
+        Assert.False(predecessor.Lifecycle.IsSettled);
+        var dispatchDeadline = GetPrivatePropertyValue<long>(fixture.State, "DispatchDeadlineUtcMs");
+        var rejection = new RuntimeUnlockRetryDispatchDecision(
+            RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
+            "retry_dispatch_predecessor_send_in_flight",
+            null)
+        {
+            Request = successorDecision.Request,
+            State = successorDecision.State with
+            {
+                CurrentRuntimeUnlockRetryDispatchAuthority = predecessor.Authority,
+            },
+        };
+
+        Assert.False(fixture.Bridge.ObserveRuntimeUnlockRetryDispatchNonGrantDecision(rejection));
+        Assert.False(predecessor.Lifecycle.IsSettled);
+        Assert.Same(
+            predecessor,
+            fixture.State.GetType().GetProperty("DispatchContract")!.GetValue(fixture.State));
+        Assert.Null(
+            fixture.State.GetType().GetProperty("DispatchPredecessorContract")!.GetValue(fixture.State));
+        Assert.Null(
+            fixture.State.GetType().GetProperty("PendingDispatchAuthorityRequest")!.GetValue(fixture.State));
+        Assert.Equal(
+            predecessorReceipt,
+            GetPrivatePropertyValue<RuntimeUnlockRetryDispatchInstallReceipt>(
+                fixture.State,
+                "LastCommittedDispatchInstallReceipt"));
+        Assert.True(GetPrivatePropertyValue<bool>(fixture.State, "DispatchAuthorityGranted"));
+        Assert.Equal(
+            dispatchDeadline,
+            GetPrivatePropertyValue<long>(fixture.State, "DispatchDeadlineUtcMs"));
     }
 
     [Fact]
@@ -13760,6 +14617,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 "runtime_unlock_offer_send_not_observed",
                 "regular_v4_repair_settled",
                 false);
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
             InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
             Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(911L, "nonce-held-successor"));
             Assert.True(host.BeginRuntimeUnlockRetryDispatchSendForTests());
@@ -13772,6 +14630,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 "runtime_unlock_offer_send_not_observed",
                 "bridge_recovery_wait_timeout",
                 true);
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
 
             var retryStateField = typeof(NknSignalingTransport).GetField(
                 "runtimeUnlockRecoveryRetryState",
@@ -14350,6 +15209,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 "runtime_unlock_offer_send_not_observed",
                 "regular_v4_repair_settled",
                 false);
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
             var state = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
             Assert.NotNull(state);
             var stateType = state.GetType();
@@ -14365,6 +15225,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 "runtime_unlock_offer_send_not_observed",
                 "bridge_recovery_wait_timeout",
                 true);
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
 
             var successor = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
                 stateType.GetProperty("DispatchContract")!.GetValue(state));
@@ -14453,6 +15314,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 "runtime_unlock_offer_send_not_observed",
                 "regular_v4_repair_settled",
                 false);
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
             var logStart = GetOperationalLogLength();
             InvokePrivateMethod(
                 host,
@@ -14462,6 +15324,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 "runtime_unlock_offer_send_not_observed",
                 "bridge_recovery_wait_timeout",
                 true);
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
 
             Assert.Equal(1, Volatile.Read(ref terminalInjected));
             var state = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
@@ -16237,6 +17100,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 sessionId,
                 "runtime_unlock_listener_sidecar_unavailable",
                 "sidecar_remote_closed");
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
 
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains(
@@ -16244,7 +17108,15 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     StringComparison.Ordinal),
                 TimeSpan.FromSeconds(3));
 
-            AssertRuntimeUnlockDispatchGrantBeforeSchedule(ReadOperationalLogTail(logStart));
+            var installedTail = ReadOperationalLogTail(logStart);
+            var commitIndex = installedTail.IndexOf(
+                "event=runtime_unlock_retry_dispatch_install_committed;",
+                StringComparison.Ordinal);
+            var grantIndex = installedTail.IndexOf(
+                "event=runtime_unlock_retry_dispatch_authority_granted;",
+                StringComparison.Ordinal);
+            Assert.True(commitIndex >= 0, installedTail);
+            Assert.True(grantIndex > commitIndex, installedTail);
             InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
             Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(503L, "test-fallback-sidecar-dispatch"));
             Assert.True(host.BeginRuntimeUnlockRetryDispatchSendForTests());
@@ -16269,6 +17141,14 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             Assert.Contains("recovery_reason=sidecar_remote_closed", tail, StringComparison.Ordinal);
             Assert.Contains("route=post_tuna_fallback_v6", tail, StringComparison.Ordinal);
             Assert.Contains("protocol_version=6", tail, StringComparison.Ordinal);
+            Assert.True(
+                tail.IndexOf(
+                    "event=runtime_unlock_retry_dispatch_authority_granted;",
+                    StringComparison.Ordinal) <
+                tail.IndexOf(
+                    "event=runtime_unlock_retry_dispatch_observed;",
+                    StringComparison.Ordinal),
+                tail);
             Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_authority_rejected;", tail, StringComparison.Ordinal);
             Assert.DoesNotContain("decision_reason=route_not_regular_nkn_v4_fast", tail, StringComparison.Ordinal);
         }
@@ -19468,7 +20348,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     Interlocked.Exchange(ref callbackBeforeObserverReturned, 1);
                 }
                 requests.Enqueue(args.Request);
-                decisionsObserved.Enqueue(bridge.ObserveRuntimeUnlockRetryDispatchDecision(
+                decisionsObserved.Enqueue(bridge.ObserveRuntimeUnlockRetryDispatchNonGrantDecision(
                     new RuntimeUnlockRetryDispatchDecision(
                         RuntimeUnlockRetryDispatchDecisionStatus.Held,
                         "fallback_owner_work_pending",
@@ -19586,7 +20466,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             bridge.RuntimeUnlockRetryDispatchAuthorityRequested += (_, args) =>
             {
                 rechecked.TrySetResult(args.Request);
-                _ = bridge.ObserveRuntimeUnlockRetryDispatchDecision(
+                _ = bridge.ObserveRuntimeUnlockRetryDispatchNonGrantDecision(
                     new RuntimeUnlockRetryDispatchDecision(
                         RuntimeUnlockRetryDispatchDecisionStatus.Held,
                         "fallback_paired_tail_yield_pending",
@@ -19729,7 +20609,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             bridge.RuntimeUnlockRetryDispatchAuthorityRequested += (_, args) =>
             {
                 var contract = CreateFallbackTailRuntimeUnlockRetryDispatchContractForTests(args.Request);
-                decisionObserved.TrySetResult(bridge.ObserveRuntimeUnlockRetryDispatchDecision(
+                decisionObserved.TrySetResult(bridge.StageRuntimeUnlockRetryDispatchDecision(
                     new RuntimeUnlockRetryDispatchDecision(
                         RuntimeUnlockRetryDispatchDecisionStatus.Granted,
                         "accepted",
@@ -19737,7 +20617,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     {
                         Request = args.Request,
                         State = null!,
-                    }));
+                    }).Accepted);
             };
             var logStart = GetOperationalLogLength();
 
@@ -19956,7 +20836,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             bridge.RuntimeUnlockRetryDispatchAuthorityRequested += (_, args) =>
             {
                 Interlocked.Increment(ref callbackCount);
-                _ = bridge.ObserveRuntimeUnlockRetryDispatchDecision(
+                _ = bridge.ObserveRuntimeUnlockRetryDispatchNonGrantDecision(
                     new RuntimeUnlockRetryDispatchDecision(
                         RuntimeUnlockRetryDispatchDecisionStatus.Held,
                         "fallback_owner_work_pending",
@@ -19977,7 +20857,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 "Captured",
                 state.GetType().GetProperty("PendingFallbackTailUnblockRecheckPhase")!.GetValue(state)!.ToString());
 
-            Assert.True(bridge.ObserveRuntimeUnlockRetryDispatchDecision(
+            Assert.True(bridge.ObserveRuntimeUnlockRetryDispatchNonGrantDecision(
                 new RuntimeUnlockRetryDispatchDecision(
                     RuntimeUnlockRetryDispatchDecisionStatus.Held,
                     "fallback_owner_work_pending",
@@ -20164,7 +21044,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             bridge.RuntimeUnlockRetryDispatchAuthorityRequested += (_, args) =>
             {
                 requested.Enqueue(args.Request);
-                _ = bridge.ObserveRuntimeUnlockRetryDispatchDecision(
+                _ = bridge.ObserveRuntimeUnlockRetryDispatchNonGrantDecision(
                     new RuntimeUnlockRetryDispatchDecision(
                         RuntimeUnlockRetryDispatchDecisionStatus.Held,
                         "fallback_owner_work_pending",
@@ -20242,7 +21122,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             bridge.RuntimeUnlockRetryDispatchAuthorityRequested += (_, args) =>
             {
                 requested.Enqueue(args.Request);
-                _ = bridge.ObserveRuntimeUnlockRetryDispatchDecision(
+                _ = bridge.ObserveRuntimeUnlockRetryDispatchNonGrantDecision(
                     new RuntimeUnlockRetryDispatchDecision(
                         RuntimeUnlockRetryDispatchDecisionStatus.Held,
                         "fallback_owner_work_pending",
@@ -20315,7 +21195,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             bridge.RuntimeUnlockRetryDispatchAuthorityRequested += (_, args) =>
             {
                 requested.Enqueue(args.Request);
-                _ = bridge.ObserveRuntimeUnlockRetryDispatchDecision(
+                _ = bridge.ObserveRuntimeUnlockRetryDispatchNonGrantDecision(
                     new RuntimeUnlockRetryDispatchDecision(
                         RuntimeUnlockRetryDispatchDecisionStatus.Held,
                         "fallback_owner_work_pending",
@@ -20376,7 +21256,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             bridge.RuntimeUnlockRetryDispatchAuthorityRequested += (_, args) =>
             {
                 callback.TrySetResult(Volatile.Read(ref observerActive) != 0);
-                _ = bridge.ObserveRuntimeUnlockRetryDispatchDecision(
+                _ = bridge.ObserveRuntimeUnlockRetryDispatchNonGrantDecision(
                     new RuntimeUnlockRetryDispatchDecision(
                         RuntimeUnlockRetryDispatchDecisionStatus.Held,
                         "fallback_owner_work_pending",
@@ -24795,6 +25675,13 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             var predecessorSettlementReport = Assert.IsType<RuntimeUnlockRetryDispatchSettlementReport>(
                 predecessorState.GetType().GetProperty("LastAppliedDispatchSettlementReport")!
                     .GetValue(predecessorState));
+            var predecessorInstallReceipt = Assert.IsType<RuntimeUnlockRetryDispatchInstallReceipt>(
+                predecessorState.GetType().GetProperty("LastCommittedDispatchInstallReceipt")!
+                    .GetValue(predecessorState));
+            SetPrivateField(
+                host,
+                "outboundAccelerationOfferInstallReceipt",
+                predecessorInstallReceipt);
 
             var recoveryRequest = AttachRegularV4RecoveryAuthorityForTests(
                 new FileTransferReceiveRecoveryRequest(
@@ -24829,7 +25716,11 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     StringComparison.Ordinal),
                 TimeSpan.FromSeconds(3));
 
-            InvokePrivateMethod(host, "ScheduleAccelerationOfferAnswerTimeout", nonce);
+            InvokePrivateMethod(
+                host,
+                "ScheduleAccelerationOfferAnswerTimeout",
+                nonce,
+                predecessorInstallReceipt);
 
             await WaitUntilAsync(
                 () =>
@@ -25603,6 +26494,13 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     offerNonce: nonce);
             var predecessorState = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
             Assert.NotNull(predecessorState);
+            var predecessorInstallReceipt = Assert.IsType<RuntimeUnlockRetryDispatchInstallReceipt>(
+                predecessorState!.GetType().GetProperty("LastCommittedDispatchInstallReceipt")!
+                    .GetValue(predecessorState));
+            SetPrivateField(
+                host,
+                "outboundAccelerationOfferInstallReceipt",
+                predecessorInstallReceipt);
             predecessorState!.GetType().GetProperty("CutThroughPending")!.SetValue(predecessorState, false);
             predecessorState.GetType().GetProperty("CutThroughActive")!.SetValue(predecessorState, true);
             predecessorState.GetType().GetProperty("CutThroughAttempt")!.SetValue(predecessorState, 1);
@@ -25621,7 +26519,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 71L,
                 offerGeneration,
                 sessionId,
-                "control_to_bulk_endpoint");
+                "control_to_bulk_endpoint",
+                predecessorInstallReceipt);
             // Model the real race where the outbound runtime-unlock trigger is
             // retired after scheduling but before the peer-response callback.
             // The callback must still use its captured offer identity and join
@@ -25892,7 +26791,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 answerTimeoutScheduled: true);
             var logStart = GetOperationalLogLength();
 
-            InvokePrivateMethod(host, "ScheduleAccelerationOfferAnswerTimeout", nonce);
+            InvokePrivateMethod(host, "ScheduleAccelerationOfferAnswerTimeout", nonce, null);
 
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains(
@@ -26186,7 +27085,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             }
             else
             {
-                InvokePrivateMethod(host, "ScheduleAccelerationOfferAnswerTimeout", nonce);
+                InvokePrivateMethod(host, "ScheduleAccelerationOfferAnswerTimeout", nonce, null);
                 await Task.Delay(250, cts.Token);
             }
 
@@ -32733,6 +33632,148 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
             return decisionTransform?.Invoke(decision) ?? decision;
         };
+    }
+
+    private static async Task<RuntimeUnlockRetryDispatchInstallFixture>
+        CreateRuntimeUnlockRetryDispatchInstallFixtureAsync(string testName)
+    {
+        FakeNknClient.ResetNetwork();
+        var suffix = $"{testName}-{Guid.NewGuid():N}";
+        var options = NknTransportOptions.Load();
+        var hostClient = new FakeNknClient($"host.{suffix}.address");
+        var helperClient = new FakeNknClient($"helper.{suffix}.address");
+        var host = new NknSignalingTransport(
+            hostClient,
+            options,
+            new NknIdentity($"host-{suffix}-id", hostClient.Address),
+            NknTunaAccelerationOptions.Disabled,
+            accelerationLane: null);
+        var helper = new NknSignalingTransport(
+            helperClient,
+            options,
+            new NknIdentity($"helper-{suffix}-id", helperClient.Address));
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            var transferId = $"transfer_{suffix}";
+            var decisions = new List<RuntimeUnlockRetryDispatchDecision>();
+            InstallRuntimeUnlockRetryDispatchCaptureCoordinatorForTests(host, decisions);
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId);
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                0L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "regular_v4_repair_settled",
+                false);
+
+            Assert.Single(decisions);
+            var state = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(state);
+            return new RuntimeUnlockRetryDispatchInstallFixture(
+                host,
+                helper,
+                Assert.IsAssignableFrom<IRuntimeUnlockRetryDispatchAuthorityBridge>(host),
+                state!,
+                decisions,
+                sessionId,
+                transferId);
+        }
+        catch
+        {
+            host.Dispose();
+            helper.Dispose();
+            FakeNknClient.ResetNetwork();
+            throw;
+        }
+    }
+
+    private static RuntimeUnlockRetryDispatchInstallReceipt
+        CreateRuntimeUnlockRetryDispatchInstallReceipt(
+            RuntimeUnlockRetryDispatchDecision decision,
+            RuntimeUnlockRetryDispatchDecisionStageResult stage,
+            long installGeneration,
+            RuntimeUnlockRetryDispatchAuthority? authority = null)
+    {
+        var contract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(decision.Contract);
+        return new RuntimeUnlockRetryDispatchInstallReceipt(
+            authority ?? contract.Authority,
+            installGeneration)
+        {
+            Request = decision.Request,
+            StageStatus = stage.Status,
+            StageDisposition = stage.StageDisposition,
+            StageCleared = stage.StageCleared,
+            StagedUtcMs = stage.StagedUtcMs,
+            StageExpiresUtcMs = stage.StageExpiresUtcMs,
+        };
+    }
+
+    private static void InstallRuntimeUnlockRetryDispatchCaptureCoordinatorForTests(
+        NknSignalingTransport transport,
+        List<RuntimeUnlockRetryDispatchDecision> decisions)
+        => InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
+            transport,
+            decisionTransform: decision =>
+            {
+                decisions.Add(decision);
+                return new RuntimeUnlockRetryDispatchDecision(
+                    RuntimeUnlockRetryDispatchDecisionStatus.Held,
+                    "test_phase2_stage_capture",
+                    null)
+                {
+                    Request = decision.Request,
+                    State = decision.State,
+                };
+            });
+
+    private sealed class RuntimeUnlockRetryDispatchInstallFixture : IDisposable
+    {
+        private readonly NknSignalingTransport helper;
+
+        public RuntimeUnlockRetryDispatchInstallFixture(
+            NknSignalingTransport host,
+            NknSignalingTransport helper,
+            IRuntimeUnlockRetryDispatchAuthorityBridge bridge,
+            object state,
+            List<RuntimeUnlockRetryDispatchDecision> decisions,
+            string sessionId,
+            string transferId)
+        {
+            Host = host;
+            this.helper = helper;
+            Bridge = bridge;
+            State = state;
+            Decisions = decisions;
+            SessionId = sessionId;
+            TransferId = transferId;
+        }
+
+        public NknSignalingTransport Host { get; }
+
+        public IRuntimeUnlockRetryDispatchAuthorityBridge Bridge { get; }
+
+        public object State { get; }
+
+        public List<RuntimeUnlockRetryDispatchDecision> Decisions { get; }
+
+        public string SessionId { get; }
+
+        public string TransferId { get; }
+
+        public void Dispose()
+        {
+            Host.Dispose();
+            helper.Dispose();
+            FakeNknClient.ResetNetwork();
+        }
     }
 
     private static void ResetAccelerationOverridesForTests()

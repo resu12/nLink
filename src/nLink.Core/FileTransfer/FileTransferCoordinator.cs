@@ -3954,7 +3954,6 @@ internal static class FileTransferCoordinator
                 : Decision(RuntimeUnlockRetryDispatchDecisionStatus.Granted, "idempotent", existing);
         }
 
-        RuntimeUnlockRetryDispatchContract? activePredecessorToSupersede = null;
         var authorizedReleaseKind = releaseKind;
         var authorizedReleaseAuthorityId = releaseAuthorityId;
         var authorizedReleaseGeneration = releaseGeneration;
@@ -4017,7 +4016,6 @@ internal static class FileTransferCoordinator
                         "retry_dispatch_predecessor_send_in_flight");
                 }
 
-                activePredecessorToSupersede = predecessor;
             }
             else
             {
@@ -4168,35 +4166,13 @@ internal static class FileTransferCoordinator
             request.RequestActivePredecessorSupersession,
             request.RegularV4LivenessGeneration,
             request.BridgeDecisionGeneration);
-        RuntimeUnlockRetryDispatchSettlementReport? supersededPredecessorSettlement = null;
-        if (activePredecessorToSupersede is not null &&
-            !activePredecessorToSupersede.TrySupersedeBeforeSend(
-                "coordinator_successor_authorized",
-                authority.AuthorityId))
-        {
-            return Decision(
-                RuntimeUnlockRetryDispatchDecisionStatus.Held,
-                "retry_dispatch_predecessor_settlement_raced");
-        }
-        if (activePredecessorToSupersede is not null)
-        {
-            if (!activePredecessorToSupersede.TryCreateSettlementReport(
-                    out var supersededSettlement))
-            {
-                return Decision(
-                    RuntimeUnlockRetryDispatchDecisionStatus.Held,
-                    "retry_dispatch_predecessor_settlement_raced");
-            }
-
-            supersededPredecessorSettlement = supersededSettlement;
-        }
 
         var acceptedState = state with
         {
             CurrentRuntimeUnlockRetryDispatchAuthority = authority,
             LastRuntimeUnlockRetryDispatchAuthorityGeneration = authorityGeneration,
             LastRuntimeUnlockRetryDispatchSettlement =
-                supersededPredecessorSettlement ?? state.LastRuntimeUnlockRetryDispatchSettlement,
+                state.LastRuntimeUnlockRetryDispatchSettlement,
             RuntimeUnlockRegularV4RecoverySettlementAvailable =
                 currentContract is null &&
                 authorizedReleaseKind == RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement
@@ -4277,11 +4253,15 @@ internal static class FileTransferCoordinator
             state.CurrentRuntimeUnlockRetryDispatchAuthority is { } currentSuccessor &&
             successorContract.Authority == currentSuccessor &&
             currentSuccessor.PredecessorAuthorityId == authority.AuthorityId &&
-            string.Equals(report.Reason, "coordinator_successor_authorized", StringComparison.Ordinal))
+            IsRuntimeUnlockRetryDispatchSupersededReason(report.Reason))
         {
             return Decision(
                 RuntimeUnlockRetryDispatchSettlementDecisionStatus.Idempotent,
-                "retry_dispatch_settlement_superseded_predecessor");
+                "retry_dispatch_settlement_superseded_predecessor",
+                state with
+                {
+                    LastRuntimeUnlockRetryDispatchSettlement = report,
+                });
         }
 
         if (currentContract is null)
@@ -4904,6 +4884,189 @@ internal static class FileTransferCoordinator
 
         return true;
     }
+
+    internal static bool TryIssueRuntimeUnlockRetryDispatchInstallReceipt(
+        FileTransferCoordinatorState state,
+        RuntimeUnlockRetryDispatchDecision stagedDecision,
+        RuntimeUnlockRetryDispatchAuthorityRequest expectedRequest,
+        RuntimeUnlockRetryDispatchContract? currentContract,
+        RuntimeUnlockRetryDispatchContract? activePredecessorContract,
+        RuntimeUnlockRetryDispatchSettlementReport? lastSettlement,
+        RuntimeUnlockRetryDispatchInstallReceipt? currentReceipt,
+        long lastInstallGeneration,
+        out RuntimeUnlockRetryDispatchInstallReceipt receipt,
+        out string mismatchField)
+    {
+        receipt = default;
+        mismatchField = "none";
+        if (state.IsTerminal)
+        {
+            return RuntimeUnlockRetryDispatchMismatch("terminal_state", out mismatchField);
+        }
+
+        if (lastInstallGeneration < 0 || lastInstallGeneration == long.MaxValue)
+        {
+            return RuntimeUnlockRetryDispatchMismatch("install_generation", out mismatchField);
+        }
+
+        if (!stagedDecision.Granted ||
+            stagedDecision.Contract is not { } stagedContract ||
+            currentContract is null ||
+            !ReferenceEquals(stagedContract, currentContract) ||
+            stagedContract.Authority != currentContract.Authority)
+        {
+            return RuntimeUnlockRetryDispatchMismatch("current_contract", out mismatchField);
+        }
+
+        if (currentContract.Lifecycle.IsSettled ||
+            currentContract.AttemptPhase == RuntimeUnlockRetryDispatchAttemptPhase.Settled)
+        {
+            return RuntimeUnlockRetryDispatchMismatch("contract_lifecycle", out mismatchField);
+        }
+
+        var currentDecision = stagedDecision with
+        {
+            State = state,
+        };
+        if (!TryValidateRuntimeUnlockRetryDispatchGrantedDecision(
+                currentDecision,
+                expectedRequest,
+                out mismatchField))
+        {
+            return false;
+        }
+
+        var authority = stagedContract.Authority;
+        if (state.LastRuntimeUnlockRetryDispatchAuthorityGeneration != authority.AuthorityGeneration)
+        {
+            return RuntimeUnlockRetryDispatchMismatch(
+                "authority_generation",
+                out mismatchField);
+        }
+
+        if (stagedDecision.State is null ||
+            stagedDecision.State.CurrentRuntimeUnlockRetryDispatchAuthority != authority)
+        {
+            return RuntimeUnlockRetryDispatchMismatch(
+                "staged_coordinator_authority",
+                out mismatchField);
+        }
+
+        if (currentReceipt is { } installedReceipt)
+        {
+            if (installedReceipt.IsDefault ||
+                installedReceipt.Authority != authority ||
+                installedReceipt.InstallGeneration != lastInstallGeneration)
+            {
+                return RuntimeUnlockRetryDispatchMismatch(
+                    "current_install_receipt",
+                    out mismatchField);
+            }
+
+            receipt = installedReceipt;
+            return true;
+        }
+
+        if (authority.PredecessorAuthorityId is { IsDefault: false } predecessorAuthorityId)
+        {
+            if (stagedContract.RequestActivePredecessorSupersession)
+            {
+                if (activePredecessorContract is not { } predecessor ||
+                    predecessor.Authority.AuthorityId != predecessorAuthorityId ||
+                    predecessor.Authority.SessionId != authority.SessionId ||
+                    predecessor.Authority.TransferId != authority.TransferId ||
+                    predecessor.Authority.Direction != authority.Direction ||
+                    predecessor.Authority.RecoveryContractGeneration !=
+                        authority.RecoveryContractGeneration ||
+                    predecessor.Authority.DispatchAttemptGeneration + 1 !=
+                        authority.DispatchAttemptGeneration ||
+                    predecessor.Authority.MissingDispatchSuccessorGeneration !=
+                        authority.MissingDispatchSuccessorGeneration ||
+                    predecessor.Lifecycle.IsSettled ||
+                    predecessor.AttemptPhase is
+                        RuntimeUnlockRetryDispatchAttemptPhase.SendInFlight or
+                        RuntimeUnlockRetryDispatchAttemptPhase.Settled)
+                {
+                    return RuntimeUnlockRetryDispatchMismatch(
+                        "active_predecessor_lineage",
+                        out mismatchField);
+                }
+            }
+            else if (activePredecessorContract is not null)
+            {
+                return RuntimeUnlockRetryDispatchMismatch(
+                    "missing_dispatch_predecessor_lineage",
+                    out mismatchField);
+            }
+            else if (lastSettlement is not { } predecessorSettlement ||
+                     predecessorSettlement.Authority.AuthorityId != predecessorAuthorityId)
+            {
+                return RuntimeUnlockRetryDispatchMismatch(
+                    "predecessor_settlement",
+                    out mismatchField);
+            }
+            else if (predecessorSettlement.Outcome !=
+                     RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch)
+            {
+                return RuntimeUnlockRetryDispatchMismatch(
+                    "missing_dispatch_predecessor_lineage",
+                    out mismatchField);
+            }
+        }
+        else if (expectedRequest.PredecessorAuthorityId is not null ||
+                 stagedContract.RequestActivePredecessorSupersession)
+        {
+            return RuntimeUnlockRetryDispatchMismatch(
+                "initial_predecessor_lineage",
+                out mismatchField);
+        }
+
+        if (currentReceipt is null)
+        {
+            var releaseCurrent = authority.PredecessorAuthorityId is null
+                ? TryValidateRuntimeUnlockRetryRelease(
+                    state,
+                    expectedRequest,
+                    authority.ReleaseKind,
+                    authority.ReleaseAuthorityId,
+                    authority.ReleaseGeneration,
+                    authority.ReleaseOutcome,
+                    out _)
+                : TryValidateInheritedRuntimeUnlockRetryRelease(
+                    state,
+                    currentContract,
+                    authority.ReleaseKind,
+                    authority.ReleaseAuthorityId,
+                    authority.ReleaseGeneration,
+                    authority.ReleaseOutcome,
+                    out _);
+            if (!releaseCurrent)
+            {
+                return RuntimeUnlockRetryDispatchMismatch(
+                    "release_currentness",
+                    out mismatchField);
+            }
+        }
+
+        var installGeneration = Math.Max(1, lastInstallGeneration + 1);
+        receipt = new RuntimeUnlockRetryDispatchInstallReceipt(
+            authority,
+            installGeneration)
+        {
+            Request = expectedRequest,
+        };
+        return true;
+    }
+
+    private static bool IsRuntimeUnlockRetryDispatchSupersededReason(string reason)
+        => string.Equals(
+               reason,
+               "coordinator_successor_installed",
+               StringComparison.Ordinal) ||
+           string.Equals(
+               reason,
+               "coordinator_successor_authorized",
+               StringComparison.Ordinal);
 
     internal static bool TryValidateRuntimeUnlockRetryDispatchBinding(
         RuntimeUnlockRetryDispatchAuthority authority,

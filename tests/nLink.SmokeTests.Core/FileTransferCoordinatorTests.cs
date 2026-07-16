@@ -1215,6 +1215,164 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void RuntimeUnlockRetryDispatchInstallReceipt_IsFreshMonotonicAndIdempotent()
+    {
+        var (state, request, release) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
+        var granted = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            state,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+        var contract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(granted.Contract);
+        var preinstallState = granted.State with
+        {
+            RuntimeUnlockRegularV4RecoverySettlementAvailable =
+                state.RuntimeUnlockRegularV4RecoverySettlementAvailable,
+        };
+
+        Assert.True(FileTransferCoordinator.TryIssueRuntimeUnlockRetryDispatchInstallReceipt(
+            preinstallState,
+            granted,
+            request,
+            contract,
+            null,
+            preinstallState.LastRuntimeUnlockRetryDispatchSettlement,
+            currentReceipt: null,
+            lastInstallGeneration: 0,
+            out var firstReceipt,
+            out var mismatchField));
+        Assert.Equal("none", mismatchField);
+        Assert.Equal(contract.Authority, firstReceipt.Authority);
+        Assert.Equal(1, firstReceipt.InstallGeneration);
+        Assert.Equal(request, firstReceipt.Request);
+
+        Assert.True(FileTransferCoordinator.TryIssueRuntimeUnlockRetryDispatchInstallReceipt(
+            granted.State,
+            granted,
+            request,
+            contract,
+            null,
+            granted.State.LastRuntimeUnlockRetryDispatchSettlement,
+            firstReceipt,
+            firstReceipt.InstallGeneration,
+            out var duplicateReceipt,
+            out mismatchField));
+        Assert.Equal("none", mismatchField);
+        Assert.Equal(firstReceipt, duplicateReceipt);
+
+        Assert.False(FileTransferCoordinator.TryIssueRuntimeUnlockRetryDispatchInstallReceipt(
+            preinstallState with { IsTerminal = true },
+            granted,
+            request,
+            contract,
+            null,
+            preinstallState.LastRuntimeUnlockRetryDispatchSettlement,
+            currentReceipt: null,
+            lastInstallGeneration: firstReceipt.InstallGeneration,
+            out _,
+            out mismatchField));
+        Assert.Equal("terminal_state", mismatchField);
+
+        Assert.False(FileTransferCoordinator.TryIssueRuntimeUnlockRetryDispatchInstallReceipt(
+            preinstallState with { CurrentRuntimeUnlockRetryDispatchAuthority = null },
+            granted,
+            request,
+            contract,
+            null,
+            preinstallState.LastRuntimeUnlockRetryDispatchSettlement,
+            currentReceipt: null,
+            lastInstallGeneration: firstReceipt.InstallGeneration,
+            out _,
+            out mismatchField));
+        Assert.Equal("coordinator_current_authority", mismatchField);
+
+        Assert.False(FileTransferCoordinator.TryIssueRuntimeUnlockRetryDispatchInstallReceipt(
+            preinstallState with { RuntimeUnlockRegularV4RecoverySettlementAvailable = false },
+            granted,
+            request,
+            contract,
+            null,
+            preinstallState.LastRuntimeUnlockRetryDispatchSettlement,
+            currentReceipt: null,
+            lastInstallGeneration: firstReceipt.InstallGeneration,
+            out _,
+            out mismatchField));
+        Assert.Equal("release_currentness", mismatchField);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRetryDispatchInstallReceipt_RequiresExactPredecessorLineage()
+    {
+        var (state, request, release) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
+        var first = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            state,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+        var predecessor = Assert.IsType<RuntimeUnlockRetryDispatchContract>(first.Contract);
+        Assert.True(predecessor.TrySettle(
+            RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch,
+            "retry_dispatch_not_observed"));
+        Assert.True(predecessor.TryCreateSettlementReport(out var predecessorReport));
+        var settled = FileTransferCoordinator.ObserveRuntimeUnlockRetryDispatchSettlement(
+            first.State,
+            predecessor,
+            null,
+            predecessorReport);
+        Assert.Equal(RuntimeUnlockRetryDispatchSettlementDecisionStatus.Accepted, settled.Status);
+        var successorRequest = request with
+        {
+            DispatchAttemptGeneration = 2,
+            MissingDispatchSuccessorGeneration = 1,
+            PredecessorAuthorityId = predecessor.Authority.AuthorityId,
+        };
+        var successor = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            settled.State,
+            successorRequest,
+            predecessor,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+        var successorContract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(successor.Contract);
+
+        Assert.False(FileTransferCoordinator.TryIssueRuntimeUnlockRetryDispatchInstallReceipt(
+            successor.State,
+            successor,
+            successorRequest,
+            successorContract,
+            null,
+            lastSettlement: null,
+            currentReceipt: null,
+            lastInstallGeneration: 1,
+            out _,
+            out var mismatchField));
+        Assert.Equal("predecessor_settlement", mismatchField);
+
+        Assert.True(FileTransferCoordinator.TryIssueRuntimeUnlockRetryDispatchInstallReceipt(
+            successor.State,
+            successor,
+            successorRequest,
+            successorContract,
+            null,
+            predecessorReport,
+            currentReceipt: null,
+            lastInstallGeneration: 1,
+            out var receipt,
+            out mismatchField));
+        Assert.Equal("none", mismatchField);
+        Assert.Equal(2, receipt.InstallGeneration);
+        Assert.Equal(successorContract.Authority, receipt.Authority);
+        Assert.Equal(successorRequest, receipt.Request);
+    }
+
+    [Fact]
     public void RuntimeUnlockRetryDispatchAuthority_RequiresAcceptedRegularV4RecoverySettlementConsumption()
     {
         var (correlatedState, request, release) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
@@ -2496,7 +2654,7 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
-    public void RuntimeUnlockRetryDispatchAuthority_ExplicitHandoffAtomicallySupersedesPredecessor()
+    public void RuntimeUnlockRetryDispatchAuthority_ExplicitHandoffDefersPredecessorUntilInstall()
     {
         var (state, request, release) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
         var first = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
@@ -2549,14 +2707,43 @@ public sealed class FileTransferCoordinatorTests
         Assert.True(successor.Granted);
         Assert.Equal(first.Contract!.Authority.DispatchAttemptGeneration + 1, successor.Contract!.Authority.DispatchAttemptGeneration);
         Assert.Equal(0, successor.Contract!.Authority.MissingDispatchSuccessorGeneration);
-        Assert.Equal(
-            RuntimeUnlockRetryDispatchSettlementOutcome.Superseded,
-            first.Contract.Lifecycle.SettlementOutcome);
-        Assert.Equal(successor.Contract!.Authority.AuthorityId, first.Contract.Lifecycle.SuccessorAuthorityId);
+        Assert.False(first.Contract.Lifecycle.IsSettled);
+        Assert.Null(first.Contract.Lifecycle.SuccessorAuthorityId);
         Assert.Equal(first.Contract.Authority.AuthorityId, successor.Contract.Authority.PredecessorAuthorityId);
-        Assert.True(first.Contract.TryCreateSettlementReport(out var supersededReport));
-        Assert.Equal(supersededReport, successor.State.LastRuntimeUnlockRetryDispatchSettlement);
+        Assert.Equal(
+            first.State.LastRuntimeUnlockRetryDispatchSettlement,
+            successor.State.LastRuntimeUnlockRetryDispatchSettlement);
         Assert.True(successor.Contract.RequestActivePredecessorSupersession);
+
+        Assert.False(FileTransferCoordinator.TryIssueRuntimeUnlockRetryDispatchInstallReceipt(
+            successor.State,
+            successor,
+            successorRequest,
+            successor.Contract,
+            null,
+            successor.State.LastRuntimeUnlockRetryDispatchSettlement,
+            currentReceipt: null,
+            lastInstallGeneration: 1,
+            out _,
+            out var missingPredecessorField));
+        Assert.Equal("active_predecessor_lineage", missingPredecessorField);
+
+        Assert.True(FileTransferCoordinator.TryIssueRuntimeUnlockRetryDispatchInstallReceipt(
+            successor.State,
+            successor,
+            successorRequest,
+            successor.Contract,
+            first.Contract,
+            successor.State.LastRuntimeUnlockRetryDispatchSettlement,
+            currentReceipt: null,
+            lastInstallGeneration: 1,
+            out var receipt,
+            out var receiptMismatchField));
+        Assert.Equal("none", receiptMismatchField);
+        Assert.Equal(2, receipt.InstallGeneration);
+        Assert.Equal(successorRequest, receipt.Request);
+        Assert.True(receipt.Request.RequestActivePredecessorSupersession);
+        Assert.False(first.Contract.Lifecycle.IsSettled);
 
         var idempotentSuccessor = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
             successor.State,
@@ -2915,7 +3102,7 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
-    public async Task RuntimeUnlockRetryDispatchAuthority_SendStartAndSupersessionHaveOneWinner()
+    public async Task RuntimeUnlockRetryDispatchAuthority_SendStartAndInstallHaveOneWinner()
     {
         for (var iteration = 0; iteration < 50; iteration++)
         {
@@ -2938,6 +3125,7 @@ public sealed class FileTransferCoordinatorTests
             };
             using var start = new ManualResetEventSlim(false);
             var sendStarted = false;
+            var successorInstalled = false;
             RuntimeUnlockRetryDispatchDecision successor = default;
 
             var sendTask = Task.Run(() =>
@@ -2956,13 +3144,19 @@ public sealed class FileTransferCoordinatorTests
                     release.AuthorityId,
                     release.RepairGeneration,
                     FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+                if (successor.Granted && successor.Contract is { } successorContract)
+                {
+                    successorInstalled = predecessor.TrySupersedeBeforeSend(
+                        "coordinator_successor_installed",
+                        successorContract.Authority.AuthorityId);
+                }
             });
 
             start.Set();
             await Task.WhenAll(sendTask, successorTask);
 
-            Assert.NotEqual(sendStarted, successor.Granted);
-            Assert.True(sendStarted || successor.Granted);
+            Assert.NotEqual(sendStarted, successorInstalled);
+            Assert.True(sendStarted || successorInstalled);
         }
     }
 
@@ -3187,6 +3381,10 @@ public sealed class FileTransferCoordinatorTests
             release.RepairGeneration,
             FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
         Assert.True(successor.Granted);
+        Assert.False(predecessorContract.Lifecycle.IsSettled);
+        Assert.True(predecessorContract.TrySupersedeBeforeSend(
+            "coordinator_successor_installed",
+            successor.Contract!.Authority.AuthorityId));
         Assert.True(predecessorContract.TryCreateSettlementReport(out var predecessorReport));
 
         var superseded = FileTransferCoordinator.ObserveRuntimeUnlockRetryDispatchSettlement(
@@ -3196,6 +3394,7 @@ public sealed class FileTransferCoordinatorTests
             predecessorReport);
         Assert.Equal(RuntimeUnlockRetryDispatchSettlementDecisionStatus.Idempotent, superseded.Status);
         Assert.Equal(successor.Contract!.Authority, superseded.State.CurrentRuntimeUnlockRetryDispatchAuthority);
+        Assert.Equal(predecessorReport, superseded.State.LastRuntimeUnlockRetryDispatchSettlement);
 
         var duplicateWithoutSuccessorState = successor.State with
         {
@@ -3281,7 +3480,7 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(successor.Contract.Authority, incompleteSourcePublication.State.CurrentRuntimeUnlockRetryDispatchAuthority);
 
         var lateMismatch = FileTransferCoordinator.ObserveRuntimeUnlockRetryDispatchSettlement(
-            successor.State,
+            superseded.State,
             successor.Contract,
             predecessorReport,
             predecessorReport with
