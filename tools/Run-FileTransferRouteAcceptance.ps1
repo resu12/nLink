@@ -981,6 +981,16 @@ function New-RouteAcceptanceRunResult {
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount = 0
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount = 0
         runtimeUnlockRetryDispatchInstallGrantEvidenceVerdict = 'none'
+        runtimeUnlockRetryRegularV4RecoverySettlementMissingRawCount = 0
+        runtimeUnlockRetryRegularV4RecoverySettlementMissingDistinctCount = 0
+        runtimeUnlockRetryRegularV4RecoverySettlementMissingRecoveredCount = 0
+        runtimeUnlockRetryRegularV4RecoverySettlementMissingUnresolvedCount = 0
+        runtimeUnlockRetryRegularV4RecoverySettlementVerdict = 'none'
+        runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRawCount = 0
+        runtimeUnlockPostTunaFallbackTransportProofHandoffMissingDistinctCount = 0
+        runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRecoveredCount = 0
+        runtimeUnlockPostTunaFallbackTransportProofHandoffMissingUnresolvedCount = 0
+        runtimeUnlockPostTunaFallbackTransportProofHandoffVerdict = 'none'
         regularV4FrontierRepairMissingRangeNotPreservedRawCount = 0
         regularV4FrontierRepairMissingRangeNotPreservedDistinctCount = 0
         regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount = 0
@@ -2450,6 +2460,16 @@ function Assert-Phase4OperatorVerdict {
     $Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchInstallGrantEvidenceVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_install_grant_evidence_verdict' -DefaultValue 'none'
+    $Result.runtimeUnlockRetryRegularV4RecoverySettlementMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_regular_v4_recovery_settlement_missing_raw_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryRegularV4RecoverySettlementMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_regular_v4_recovery_settlement_missing_distinct_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryRegularV4RecoverySettlementMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_regular_v4_recovery_settlement_missing_recovered_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryRegularV4RecoverySettlementMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_regular_v4_recovery_settlement_missing_unresolved_count' -DefaultValue (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_regular_v4_recovery_settlement_missing_count' -DefaultValue '0'))
+    $Result.runtimeUnlockRetryRegularV4RecoverySettlementVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_regular_v4_recovery_settlement_verdict' -DefaultValue 'none'
+    $Result.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_raw_count' -DefaultValue '0')
+    $Result.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_distinct_count' -DefaultValue '0')
+    $Result.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_recovered_count' -DefaultValue '0')
+    $Result.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_unresolved_count' -DefaultValue '0')
+    $Result.runtimeUnlockPostTunaFallbackTransportProofHandoffVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_verdict' -DefaultValue 'none'
     $Result.regularV4FrontierRepairMissingRangeNotPreservedRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_missing_range_not_preserved_raw_count' -DefaultValue '0')
     $Result.regularV4FrontierRepairMissingRangeNotPreservedDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_missing_range_not_preserved_distinct_count' -DefaultValue '0')
     $Result.regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_missing_range_not_preserved_recovered_count' -DefaultValue '0')
@@ -4164,6 +4184,44 @@ function Write-RouteAcceptanceFakePhase4Run {
             $reportPath = Join-Path $ArtifactDir $reportName
             $reportText = Get-Content -LiteralPath $reportPath -Raw
             foreach ($fixtureLine in $grantEvidenceFixtureLines) {
+                $separatorIndex = $fixtureLine.IndexOf('=')
+                $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
+                $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
+                if ([regex]::IsMatch($reportText, $fixturePattern)) {
+                    $reportText = [regex]::Replace($reportText, $fixturePattern, $fixtureLine)
+                }
+                else {
+                    $reportText = $reportText.TrimEnd("`r", "`n") + [Environment]::NewLine + $fixtureLine + [Environment]::NewLine
+                }
+            }
+            Set-Content -LiteralPath $reportPath -Value $reportText -Encoding UTF8
+        }
+    }
+
+    if (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'POST_TUNA_FALLBACK_TRANSPORT_PROOF_HANDOFF_SUMMARY_FIXTURE') {
+        $postTunaFallbackHandoffFixtureLines = @(
+            'runtime_unlock_retry_regular_v4_recovery_settlement_missing_count=0',
+            'runtime_unlock_retry_regular_v4_recovery_settlement_missing_raw_count=1',
+            'runtime_unlock_retry_regular_v4_recovery_settlement_missing_distinct_count=1',
+            'runtime_unlock_retry_regular_v4_recovery_settlement_missing_recovered_count=1',
+            'runtime_unlock_retry_regular_v4_recovery_settlement_missing_unresolved_count=0',
+            'runtime_unlock_retry_regular_v4_recovery_settlement_verdict=pass',
+            'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_raw_count=1',
+            'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_distinct_count=1',
+            'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_recovered_count=0',
+            'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_unresolved_count=1',
+            'runtime_unlock_post_tuna_fallback_transport_proof_handoff_verdict=fail',
+            'first_proof_chain_failure_class=runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing',
+            'first_proof_chain_failure_event=tuna_acceleration_timeline',
+            'first_proof_chain_failure_reason=scheduled_runtime_unlock_handoff_not_started',
+            'first_proof_chain_failure_sequence=22360',
+            'first_proof_chain_failure_source_path=filetransfer-retained-log-slice.log',
+            'first_proof_chain_failure_line_number=22360'
+        )
+        foreach ($reportName in @('filetransfer-route-consistency-summary.txt', 'filetransfer-operator-verdict.txt')) {
+            $reportPath = Join-Path $ArtifactDir $reportName
+            $reportText = Get-Content -LiteralPath $reportPath -Raw
+            foreach ($fixtureLine in $postTunaFallbackHandoffFixtureLines) {
                 $separatorIndex = $fixtureLine.IndexOf('=')
                 $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
                 $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
@@ -7122,7 +7180,10 @@ function Get-RouteAcceptanceResultFailureClass {
         if (Test-RouteAcceptanceIncompleteProofRuntimeCandidate -Candidate ([string]$Result.runtimeFailureCandidate)) {
             return 'incomplete_proof'
         }
-        if ([string]$Result.runtimeFailureCandidate -in @('active_file_tuna_v6_evidence', 'diagnostic_regular_nkn_v6_evidence')) {
+        if ([string]$Result.runtimeFailureCandidate -in @(
+            'active_file_tuna_v6_evidence',
+            'diagnostic_regular_nkn_v6_evidence',
+            'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing')) {
             return 'route_runtime'
         }
         return [string]$Result.runtimeFailureCandidate
@@ -7666,6 +7727,16 @@ function New-RouteAcceptanceSummaryRunDto {
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount = [int]$Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount = [int]$Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount
         runtimeUnlockRetryDispatchInstallGrantEvidenceVerdict = [string]$Result.runtimeUnlockRetryDispatchInstallGrantEvidenceVerdict
+        runtimeUnlockRetryRegularV4RecoverySettlementMissingRawCount = [int]$Result.runtimeUnlockRetryRegularV4RecoverySettlementMissingRawCount
+        runtimeUnlockRetryRegularV4RecoverySettlementMissingDistinctCount = [int]$Result.runtimeUnlockRetryRegularV4RecoverySettlementMissingDistinctCount
+        runtimeUnlockRetryRegularV4RecoverySettlementMissingRecoveredCount = [int]$Result.runtimeUnlockRetryRegularV4RecoverySettlementMissingRecoveredCount
+        runtimeUnlockRetryRegularV4RecoverySettlementMissingUnresolvedCount = [int]$Result.runtimeUnlockRetryRegularV4RecoverySettlementMissingUnresolvedCount
+        runtimeUnlockRetryRegularV4RecoverySettlementVerdict = [string]$Result.runtimeUnlockRetryRegularV4RecoverySettlementVerdict
+        runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRawCount = [int]$Result.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRawCount
+        runtimeUnlockPostTunaFallbackTransportProofHandoffMissingDistinctCount = [int]$Result.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingDistinctCount
+        runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRecoveredCount = [int]$Result.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRecoveredCount
+        runtimeUnlockPostTunaFallbackTransportProofHandoffMissingUnresolvedCount = [int]$Result.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingUnresolvedCount
+        runtimeUnlockPostTunaFallbackTransportProofHandoffVerdict = [string]$Result.runtimeUnlockPostTunaFallbackTransportProofHandoffVerdict
         regularV4FrontierRepairMissingRangeNotPreservedRawCount = [int]$Result.regularV4FrontierRepairMissingRangeNotPreservedRawCount
         regularV4FrontierRepairMissingRangeNotPreservedDistinctCount = [int]$Result.regularV4FrontierRepairMissingRangeNotPreservedDistinctCount
         regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount = [int]$Result.regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount
@@ -7892,6 +7963,14 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount = 0
     $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount = 0
     $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount = 0
+    $runtimeUnlockRetryRegularV4RecoverySettlementMissingRawCount = 0
+    $runtimeUnlockRetryRegularV4RecoverySettlementMissingDistinctCount = 0
+    $runtimeUnlockRetryRegularV4RecoverySettlementMissingRecoveredCount = 0
+    $runtimeUnlockRetryRegularV4RecoverySettlementMissingUnresolvedCount = 0
+    $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRawCount = 0
+    $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingDistinctCount = 0
+    $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRecoveredCount = 0
+    $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingUnresolvedCount = 0
     $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount = 0
     $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount = 0
     $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRawCount = 0
@@ -7909,6 +7988,14 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount += [int]$runDto.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount
         $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount += [int]$runDto.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount
         $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount += [int]$runDto.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount
+        $runtimeUnlockRetryRegularV4RecoverySettlementMissingRawCount += [int]$runDto.runtimeUnlockRetryRegularV4RecoverySettlementMissingRawCount
+        $runtimeUnlockRetryRegularV4RecoverySettlementMissingDistinctCount += [int]$runDto.runtimeUnlockRetryRegularV4RecoverySettlementMissingDistinctCount
+        $runtimeUnlockRetryRegularV4RecoverySettlementMissingRecoveredCount += [int]$runDto.runtimeUnlockRetryRegularV4RecoverySettlementMissingRecoveredCount
+        $runtimeUnlockRetryRegularV4RecoverySettlementMissingUnresolvedCount += [int]$runDto.runtimeUnlockRetryRegularV4RecoverySettlementMissingUnresolvedCount
+        $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRawCount += [int]$runDto.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRawCount
+        $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingDistinctCount += [int]$runDto.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingDistinctCount
+        $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRecoveredCount += [int]$runDto.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRecoveredCount
+        $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingUnresolvedCount += [int]$runDto.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingUnresolvedCount
         $fallbackTailBridgeRecoveryGenerationMismatchRawCount += [int]$runDto.fallbackTailBridgeRecoveryGenerationMismatchRawCount
         $fallbackTailBridgeRecoveryGenerationMismatchDistinctCount += [int]$runDto.fallbackTailBridgeRecoveryGenerationMismatchDistinctCount
         $fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount += [int]$runDto.fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount
@@ -8065,6 +8152,34 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     else {
         'none'
     }
+    $runtimeUnlockRetryRegularV4RecoverySettlementVerdict = if (
+        $runtimeUnlockRetryRegularV4RecoverySettlementMissingUnresolvedCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.runtimeUnlockRetryRegularV4RecoverySettlementVerdict -eq 'fail' }).Count -gt 0) {
+        'fail'
+    }
+    elseif (@($runDtos | Where-Object { [string]$_.runtimeUnlockRetryRegularV4RecoverySettlementVerdict -eq 'pending' }).Count -gt 0) {
+        'pending'
+    }
+    elseif (@($runDtos | Where-Object { [string]$_.runtimeUnlockRetryRegularV4RecoverySettlementVerdict -eq 'pass' }).Count -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
+    }
+    $runtimeUnlockPostTunaFallbackTransportProofHandoffVerdict = if (
+        $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingUnresolvedCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.runtimeUnlockPostTunaFallbackTransportProofHandoffVerdict -eq 'fail' }).Count -gt 0) {
+        'fail'
+    }
+    elseif (@($runDtos | Where-Object { [string]$_.runtimeUnlockPostTunaFallbackTransportProofHandoffVerdict -eq 'pending' }).Count -gt 0) {
+        'pending'
+    }
+    elseif (@($runDtos | Where-Object { [string]$_.runtimeUnlockPostTunaFallbackTransportProofHandoffVerdict -eq 'pass' }).Count -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
+    }
     $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict = if (
         $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount -gt 0 -or
         @($runDtos | Where-Object { [string]$_.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict -eq 'fail' }).Count -gt 0) {
@@ -8184,6 +8299,17 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count={0}" -f $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count={0}" -f $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_verdict={0}" -f $runtimeUnlockRetryDispatchInstallGrantEvidenceVerdict),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_count={0}" -f $runtimeUnlockRetryRegularV4RecoverySettlementMissingUnresolvedCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_raw_count={0}" -f $runtimeUnlockRetryRegularV4RecoverySettlementMissingRawCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_distinct_count={0}" -f $runtimeUnlockRetryRegularV4RecoverySettlementMissingDistinctCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_recovered_count={0}" -f $runtimeUnlockRetryRegularV4RecoverySettlementMissingRecoveredCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_unresolved_count={0}" -f $runtimeUnlockRetryRegularV4RecoverySettlementMissingUnresolvedCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_verdict={0}" -f $runtimeUnlockRetryRegularV4RecoverySettlementVerdict),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_raw_count={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRawCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_distinct_count={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingDistinctCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_recovered_count={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRecoveredCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_unresolved_count={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingUnresolvedCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_verdict={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffVerdict),
         ("first_proof_chain_failure_class={0}" -f $firstProofChainFailureClass),
         ("first_proof_chain_failure_event={0}" -f $firstProofChainFailureEvent),
         ("first_proof_chain_failure_reason={0}" -f $firstProofChainFailureReason),
@@ -8314,6 +8440,17 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_install_grant_evidence_verdict={1}" -f $prefix, $result.runtimeUnlockRetryDispatchInstallGrantEvidenceVerdict)
+        $textLines += ("{0}.runtime_unlock_retry_regular_v4_recovery_settlement_missing_count={1}" -f $prefix, $result.runtimeUnlockRetryRegularV4RecoverySettlementMissingUnresolvedCount)
+        $textLines += ("{0}.runtime_unlock_retry_regular_v4_recovery_settlement_missing_raw_count={1}" -f $prefix, $result.runtimeUnlockRetryRegularV4RecoverySettlementMissingRawCount)
+        $textLines += ("{0}.runtime_unlock_retry_regular_v4_recovery_settlement_missing_distinct_count={1}" -f $prefix, $result.runtimeUnlockRetryRegularV4RecoverySettlementMissingDistinctCount)
+        $textLines += ("{0}.runtime_unlock_retry_regular_v4_recovery_settlement_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockRetryRegularV4RecoverySettlementMissingRecoveredCount)
+        $textLines += ("{0}.runtime_unlock_retry_regular_v4_recovery_settlement_missing_unresolved_count={1}" -f $prefix, $result.runtimeUnlockRetryRegularV4RecoverySettlementMissingUnresolvedCount)
+        $textLines += ("{0}.runtime_unlock_retry_regular_v4_recovery_settlement_verdict={1}" -f $prefix, $result.runtimeUnlockRetryRegularV4RecoverySettlementVerdict)
+        $textLines += ("{0}.runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_raw_count={1}" -f $prefix, $result.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRawCount)
+        $textLines += ("{0}.runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_distinct_count={1}" -f $prefix, $result.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingDistinctCount)
+        $textLines += ("{0}.runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRecoveredCount)
+        $textLines += ("{0}.runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_unresolved_count={1}" -f $prefix, $result.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingUnresolvedCount)
+        $textLines += ("{0}.runtime_unlock_post_tuna_fallback_transport_proof_handoff_verdict={1}" -f $prefix, $result.runtimeUnlockPostTunaFallbackTransportProofHandoffVerdict)
         $textLines += ("{0}.regular_v4_frontier_repair_missing_range_not_preserved_raw_count={1}" -f $prefix, $result.regularV4FrontierRepairMissingRangeNotPreservedRawCount)
         $textLines += ("{0}.regular_v4_frontier_repair_missing_range_not_preserved_distinct_count={1}" -f $prefix, $result.regularV4FrontierRepairMissingRangeNotPreservedDistinctCount)
         $textLines += ("{0}.regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={1}" -f $prefix, $result.regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount)
@@ -8514,6 +8651,16 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount = $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount = $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount
         runtimeUnlockRetryDispatchInstallGrantEvidenceVerdict = $runtimeUnlockRetryDispatchInstallGrantEvidenceVerdict
+        runtimeUnlockRetryRegularV4RecoverySettlementMissingRawCount = $runtimeUnlockRetryRegularV4RecoverySettlementMissingRawCount
+        runtimeUnlockRetryRegularV4RecoverySettlementMissingDistinctCount = $runtimeUnlockRetryRegularV4RecoverySettlementMissingDistinctCount
+        runtimeUnlockRetryRegularV4RecoverySettlementMissingRecoveredCount = $runtimeUnlockRetryRegularV4RecoverySettlementMissingRecoveredCount
+        runtimeUnlockRetryRegularV4RecoverySettlementMissingUnresolvedCount = $runtimeUnlockRetryRegularV4RecoverySettlementMissingUnresolvedCount
+        runtimeUnlockRetryRegularV4RecoverySettlementVerdict = $runtimeUnlockRetryRegularV4RecoverySettlementVerdict
+        runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRawCount = $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRawCount
+        runtimeUnlockPostTunaFallbackTransportProofHandoffMissingDistinctCount = $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingDistinctCount
+        runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRecoveredCount = $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRecoveredCount
+        runtimeUnlockPostTunaFallbackTransportProofHandoffMissingUnresolvedCount = $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingUnresolvedCount
+        runtimeUnlockPostTunaFallbackTransportProofHandoffVerdict = $runtimeUnlockPostTunaFallbackTransportProofHandoffVerdict
         firstProofChainFailureClass = $firstProofChainFailureClass
         firstProofChainFailureEvent = $firstProofChainFailureEvent
         firstProofChainFailureReason = $firstProofChainFailureReason

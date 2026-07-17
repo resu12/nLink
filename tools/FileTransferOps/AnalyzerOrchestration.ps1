@@ -1212,158 +1212,88 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         Get-FileTransferRuntimeUnlockRetryZeroOfferSuccessorCorrelation `
             -Events $runtimeUnlockRetryZeroOfferSuccessorEvents `
             -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents
-    [object[]]$runtimeUnlockRetryRegularV4RecoverySettlementMissingEvents = @(
-        Get-FileTransferCompactIndexEventsByName `
-            -Index $Index `
-            -Name 'runtime_unlock_retry_regular_v4_recovery_settlement_missing'
-    )
-    [object[]]$runtimeUnlockRegularV4RecoveryBlockedEvents = @(
+    [object[]]$runtimeUnlockRegularV4RecoverySettlementEvents = @(
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_regular_v4_recovery_settlement_missing') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_blocked_by_regular_v4_receive_recovery') +
-        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_held_by_regular_v4_receive_recovery')
-    )
-    [object[]]$runtimeUnlockRegularV4RecoverySettlementReportedEvents = @(
-        Get-FileTransferCompactIndexEventsByName `
-            -Index $Index `
-            -Name 'runtime_unlock_regular_v4_recovery_settlement_reported'
-    )
-    [object[]]$runtimeUnlockRegularV4RecoverySettlementDecidedEvents = @(
-        Get-FileTransferCompactIndexEventsByName `
-            -Index $Index `
-            -Name 'runtime_unlock_regular_v4_recovery_settlement_decided'
-    )
-    [object[]]$runtimeUnlockRegularV4RecoveryLifecycleReportedEvents = @(
-        Get-FileTransferCompactIndexEventsByName `
-            -Index $Index `
-            -Name 'runtime_unlock_regular_v4_recovery_lifecycle_reported'
-    )
-    [object[]]$runtimeUnlockRegularV4RecoveryLifecycleDecidedEvents = @(
-        Get-FileTransferCompactIndexEventsByName `
-            -Index $Index `
-            -Name 'runtime_unlock_regular_v4_recovery_lifecycle_decided'
-    )
-    [object[]]$runtimeUnlockRegularV4RecoveryResolutionEvents = @(
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_held_by_regular_v4_receive_recovery') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_released_after_regular_v4_receive_recovery') +
-        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_rejected_after_regular_v4_receive_recovery')
-    )
-    [object[]]$runtimeUnlockRegularV4RecoveryBoundaryEvents = @(
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_rejected_after_regular_v4_receive_recovery') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_settlement_reported') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_settlement_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_lifecycle_reported') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_lifecycle_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_lease_closure_retained') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_lease_closure_adopted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_lease_closure_consumed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_deferral_granted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_deferral_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_recovery_authority_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_pending_request_rechecked') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_authority_granted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'session_liveness_timeout_filetransfer_recovery_state_not_deferred') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'transfer_terminal') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_inbound_terminal') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_outbound_terminal') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_terminalized') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_manifest_replaced') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_session_replaced') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_data_session_recreated') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_selected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transitioned') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_owner_changed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_bridge_recovery_authority_granted')
+    )
+    $runtimeUnlockRegularV4RecoverySettlementProof =
+        Get-FileTransferRuntimeUnlockRegularV4RecoverySettlementCorrelation `
+            -Events $runtimeUnlockRegularV4RecoverySettlementEvents `
+            -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents
+    $runtimeUnlockRetryBlockedByRegularV4RecoveryCount =
+        Get-FileTransferCompactIndexEventCount -Index $Index -Name 'runtime_unlock_retry_blocked_by_regular_v4_receive_recovery'
+    $runtimeUnlockRetryHeldByRegularV4RecoveryCount =
+        Get-FileTransferCompactIndexEventCount -Index $Index -Name 'runtime_unlock_retry_dispatch_held_by_regular_v4_receive_recovery'
+    [object[]]$runtimeUnlockRetryRegularV4RecoverySettlementMissingUncoveredEvents = @(
+        $runtimeUnlockRegularV4RecoverySettlementProof.UnresolvedCandidateEvents
+    )
+    [object[]]$runtimeUnlockRetryRegularV4SettlementHandoffBypassedEvents = @(
+        $runtimeUnlockRegularV4RecoverySettlementProof.HandoffBypassCandidateEvents
+    )
+    $runtimeUnlockRetryRegularV4RecoverySettlementMissingCount =
+        $runtimeUnlockRegularV4RecoverySettlementProof.UnresolvedCount
+    [object[]]$runtimeUnlockPostTunaFallbackTransportProofHandoffEvents = @(
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_unlock_precommit_probe_pending_held') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_retry_fired') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_unlock_admission_denied') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_unlock_fallback_survival_resume_held') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_timeline') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_filetransfer_owner_accepted_before_path_lease') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_filetransfer_owner_rejected_before_path_lease') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_filetransfer_owner_missing_before_path_lease') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_filetransfer_owner_stale_before_offer_dispatch') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_path_lease_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_activation_offer_sent') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_activation_offer_queued') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_unlock_precommit_probe_waiting_for_transport_proof') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_unlock_precommit_probe_pending_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_sent') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_runtime_unlock_dispatch_deferred_for_regular_v4_receive_recovery') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_runtime_unlock_retry_suppressed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_negotiation_scheduling_held') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_negotiation_scheduling_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_negotiation_scheduling_invalidated') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_selected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_hint_authorized_publication_accepted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_outbound_terminal') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_inbound_terminal') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'transfer_terminal') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_terminalized')
     )
-
-    if ($runtimeUnlockRegularV4RecoverySettlementReportedEvents.Count -gt 0 -or
-        $runtimeUnlockRegularV4RecoverySettlementDecidedEvents.Count -gt 0) {
-        $blockedTupleKeys = @{}
-        foreach ($blockedEvent in @($runtimeUnlockRegularV4RecoveryBlockedEvents | Sort-Object Sequence)) {
-            $blockedTupleKey = (@(
-                    'session_id', 'transfer_id', 'direction', 'route', 'protocol_version',
-                    'live_route_epoch', 'regular_v4_liveness_generation', 'bridge_decision_generation') |
-                ForEach-Object {
-                    Get-FileTransferEventField -Event $blockedEvent -Name $_ -Default '(missing)'
-                }) -join '|'
-            if ($blockedTupleKeys.ContainsKey($blockedTupleKey)) {
-                continue
-            }
-            $blockedTupleKeys[$blockedTupleKey] = $true
-
-            $blockedSequence = [int64]$blockedEvent.Sequence
-            $matchingBoundary = @($runtimeUnlockRegularV4RecoveryBoundaryEvents | Where-Object {
-                [int64]$_.Sequence -gt $blockedSequence -and
-                    (Test-FileTransferRuntimeUnlockRegularV4RecoveryBoundaryMatch `
-                        -Blocked $blockedEvent `
-                        -Boundary $_)
-            } | Sort-Object Sequence | Select-Object -First 1)
-            if ($matchingBoundary.Count -eq 0) {
-                continue
-            }
-            $boundarySequence = [int64]$matchingBoundary[0].Sequence
-
-            $matchingResolution = @($runtimeUnlockRegularV4RecoveryResolutionEvents | Where-Object {
-                [int64]$_.Sequence -gt $blockedSequence -and
-                    [int64]$_.Sequence -lt $boundarySequence -and
-                    (Test-FileTransferRuntimeUnlockRegularV4RecoveryBoundaryMatch `
-                        -Blocked $blockedEvent `
-                        -Boundary $_)
-            })
-            $matchingAcceptedHandoff = @(
-                foreach ($decision in $runtimeUnlockRegularV4RecoverySettlementDecidedEvents) {
-                    $decisionSequence = [int64]$decision.Sequence
-                    if ($decisionSequence -le $blockedSequence -or
-                        $decisionSequence -ge $boundarySequence -or
-                        -not (Test-FileTransferRuntimeUnlockRegularV4RecoverySettlementMatch `
-                            -Blocked $blockedEvent `
-                            -Candidate $decision)) {
-                        continue
-                    }
-
-                    $matchingReport = @($runtimeUnlockRegularV4RecoverySettlementReportedEvents | Where-Object {
-                        [int64]$_.Sequence -gt $blockedSequence -and
-                            [int64]$_.Sequence -lt $decisionSequence -and
-                            (Test-FileTransferRuntimeUnlockRegularV4RecoveryReportDecisionMatch `
-                                -Report $_ `
-                                -Decision $decision)
-                    } | Select-Object -Last 1)
-                    if ($matchingReport.Count -eq 0) {
-                        continue
-                    }
-
-                    $reportSequence = [int64]$matchingReport[0].Sequence
-                    $matchingLifecycleDecision = @(
-                        foreach ($lifecycleDecision in $runtimeUnlockRegularV4RecoveryLifecycleDecidedEvents) {
-                            $lifecycleDecisionSequence = [int64]$lifecycleDecision.Sequence
-                            if ($lifecycleDecisionSequence -le $blockedSequence -or
-                                $lifecycleDecisionSequence -ge $reportSequence -or
-                                (Get-FileTransferEventField -Event $lifecycleDecision -Name 'decision_status' -Default '') -notin @('Accepted', 'Idempotent') -or
-                                -not (Test-FileTransferRuntimeUnlockRegularV4RecoveryLifecycleMatchesBlocked `
-                                    -Blocked $blockedEvent `
-                                    -Lifecycle $lifecycleDecision)) {
-                                continue
-                            }
-
-                            $matchingLifecycleReport = @($runtimeUnlockRegularV4RecoveryLifecycleReportedEvents | Where-Object {
-                                [int64]$_.Sequence -gt $blockedSequence -and
-                                    [int64]$_.Sequence -lt $lifecycleDecisionSequence -and
-                                    (Test-FileTransferRuntimeUnlockRegularV4RecoveryLifecycleReportDecisionMatch `
-                                        -Report $_ `
-                                        -Decision $lifecycleDecision)
-                            } | Select-Object -Last 1)
-                            if ($matchingLifecycleReport.Count -gt 0) {
-                                $lifecycleDecision
-                            }
-                        }
-                    )
-                    if ($matchingLifecycleDecision.Count -gt 0) {
-                        $decision
-                    }
-                }
-            )
-
-            if ($matchingResolution.Count -eq 0 -and $matchingAcceptedHandoff.Count -eq 0) {
-                $runtimeUnlockRetryRegularV4RecoverySettlementMissingEvents += $matchingBoundary[0]
-            }
-        }
-    }
-    [object[]]$runtimeUnlockRetryRegularV4RecoverySettlementMissingUncoveredEvents = @(
-        Get-FileTransferUncoveredRuntimeUnlockRegularV4RecoverySettlementMissingEvents `
-            -SettlementMissingEvents $runtimeUnlockRetryRegularV4RecoverySettlementMissingEvents `
-            -ClosureLivenessFailureEvents @($runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureLivenessUnresolvedCandidateEvents)
-    )
-    if ($regularV4FrontierRepairSettlementDispositionProof.UnresolvedCount -gt 0 -and
-        $runtimeUnlockRetryRegularV4RecoverySettlementMissingUncoveredEvents.Count -gt 0) {
-        [object[]]$acceptedRegularV4SettlementEvents = @($regularV4FrontierRepairProjectionEvents | Where-Object {
-            $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_settlement_accepted'
-        })
-        $runtimeUnlockRetryRegularV4RecoverySettlementMissingUncoveredEvents = @(
-            $runtimeUnlockRetryRegularV4RecoverySettlementMissingUncoveredEvents | Where-Object {
-                -not (Test-FileTransferRuntimeUnlockRegularV4RecoveryCandidateBlockedByUnverifiableSettlement `
-                    -Candidate $_ `
-                    -AcceptedSettlementEvents $acceptedRegularV4SettlementEvents `
-                    -UnresolvedSettlementEvents @($regularV4FrontierRepairSettlementDispositionProof.UnresolvedCandidateEvents))
-            })
-    }
-    $runtimeUnlockRetryRegularV4RecoverySettlementMissingCount =
-        $runtimeUnlockRetryRegularV4RecoverySettlementMissingUncoveredEvents.Count
+    $runtimeUnlockPostTunaFallbackTransportProofHandoffProof =
+        Get-FileTransferRuntimeUnlockPostTunaFallbackTransportProofHandoffCorrelation `
+            -Events $runtimeUnlockPostTunaFallbackTransportProofHandoffEvents
     [object[]]$fallbackTailPairingEvents = @(
         @($routeEvents) +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_recovered') +
@@ -1378,6 +1308,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_yield_proof_sent') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_yield_proof_received') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_paired_yield_granted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_yield_local_authority_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_yield_proof_stale_ignored') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_owner_generation_mismatch') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_terminal_proof_consumed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'transfer_terminal') +
@@ -1387,6 +1319,12 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $fallbackTailPairedYieldValidation =
         Get-FileTransferFallbackTailPairedYieldValidation -Events $fallbackTailPairingEvents
     $fallbackSchema2YieldCount = @($fallbackTailPairedYieldValidation.Schema2YieldEvents).Count
+    [object[]]$fallbackTailYieldAuthorityRejectedEvents = @(
+        Get-FileTransferFallbackTailYieldAuthorityRejectionEvents -Events $fallbackTailPairingEvents
+    )
+    $fallbackTailYieldAuthorityRejectedCount =
+        $fallbackTailYieldAuthorityRejectedEvents.Count +
+        @($fallbackTailPairedYieldValidation.InvalidPairedEvents).Count
     $fallbackOwnerGenerationMismatchRawCount =
         Get-FileTransferCompactIndexEventCount -Index $Index -Name 'filetransfer_fallback_tail_owner_generation_mismatch'
     $fallbackTailBridgeRecoveryPairingProof =
@@ -1411,7 +1349,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 -Default 'retry_dispatch_grant_install_chain_incomplete'
         }) | Out-Null
     }
-    foreach ($candidateEvent in $runtimeUnlockRetryRegularV4RecoverySettlementMissingUncoveredEvents) {
+    foreach ($candidateEvent in @(
+            $runtimeUnlockRetryRegularV4RecoverySettlementMissingUncoveredEvents |
+                Where-Object {
+                    Test-FileTransferRuntimeUnlockRecoverySettlementMissingFirstEdgeEligible `
+                        -MissingEvent $_ `
+                        -SettlementEvents $regularV4FrontierRepairProjectionEvents `
+                        -DispositionGapEvents $regularV4FrontierRepairSettlementDispositionProof.UnresolvedCandidateEvents
+                })) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'runtime_unlock_retry_regular_v4_recovery_settlement_missing'
             Event = $candidateEvent
@@ -1419,6 +1364,20 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 -Event $candidateEvent `
                 -Name 'decision_reason' `
                 -Default 'regular_v4_recovery_settlement_missing'
+        }) | Out-Null
+    }
+    foreach ($candidateEvent in $runtimeUnlockRetryRegularV4SettlementHandoffBypassedEvents) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'runtime_unlock_retry_regular_v4_settlement_handoff_bypassed'
+            Event = $candidateEvent
+            Reason = 'regular_v4_recovery_settlement_handoff_bypassed'
+        }) | Out-Null
+    }
+    foreach ($candidateEvent in @($runtimeUnlockPostTunaFallbackTransportProofHandoffProof.UnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing'
+            Event = $candidateEvent
+            Reason = 'scheduled_runtime_unlock_handoff_not_started'
         }) | Out-Null
     }
     if ($outboundReceiveWorkerHandoffProof.Count -gt 0 -and
@@ -1451,6 +1410,18 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Class = 'post_tuna_fallback_paired_yield_bridge_recovery_generation_mismatch'
             Event = $candidateEvent
             Reason = 'bridge_recovery_generation_mismatch'
+        }) | Out-Null
+    }
+    foreach ($candidateEvent in @(
+            $fallbackTailYieldAuthorityRejectedEvents +
+            @($fallbackTailPairedYieldValidation.InvalidPairedEvents))) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'fallback_tail_yield_authority_invalid'
+            Event = $candidateEvent
+            Reason = Get-FileTransferEventField `
+                -Event $candidateEvent `
+                -Name 'decision_reason' `
+                -Default 'fallback_tail_yield_authority_invalid'
         }) | Out-Null
     }
     foreach ($candidateEvent in @($runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.UnresolvedCandidateEvents)) {
@@ -1590,7 +1561,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedUnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureLivenessUnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.UnresolvedCount -gt 0 -or
-        $runtimeUnlockRetryFallbackTailUnblockRecheckProof.UnresolvedCount -gt 0) {
+        $runtimeUnlockRetryFallbackTailUnblockRecheckProof.UnresolvedCount -gt 0 -or
+        $runtimeUnlockRegularV4RecoverySettlementProof.HandoffBypassCount -gt 0 -or
+        $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.UnresolvedCount -gt 0) {
         $verdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
         $gateStatus = 'fail'
         $acceptanceFailureClass = 'route_runtime'
@@ -1599,6 +1572,38 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $verdict = 'INCONCLUSIVE'
         $gateStatus = 'fail'
         $acceptanceFailureClass = 'incomplete_proof'
+    }
+
+    # The compact result must be classified from the same chronological first
+    # proof edge used for its first-edge fields.  Aggregate later failures
+    # cannot promote an earlier incomplete-proof boundary to route_runtime (or
+    # vice versa).
+    if ($null -ne $firstCompactProofChainFailure) {
+        $firstCompactClass = [string]$firstCompactProofChainFailure.Class
+        if ($firstCompactClass -in @(
+                'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete',
+                'runtime_unlock_retry_regular_v4_recovery_settlement_missing',
+                'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved',
+                'regular_v4_frontier_repair_settlement_disposition_unverifiable',
+                'regular_v4_frontier_repair_successor_pressure_install_missing',
+                'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery')) {
+            $verdict = 'INCONCLUSIVE'
+            $gateStatus = 'fail'
+            $acceptanceFailureClass = 'incomplete_proof'
+        }
+        elseif ($firstCompactClass -in @(
+                'runtime_unlock_regular_v4_recovery_lease_not_issued',
+                'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted',
+                'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved',
+                'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing',
+                'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
+                'runtime_unlock_retry_dispatch_zero_offer_successor_rejected',
+                'regular_v4_frontier_repair_missing_range_not_preserved',
+                'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing')) {
+            $verdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
+            $gateStatus = 'fail'
+            $acceptanceFailureClass = 'route_runtime'
+        }
     }
 
     $recoveryFailureClass = if ($null -ne $firstCompactProofChainFailure) {
@@ -1762,7 +1767,23 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_retry_dispatch_zero_offer_successor_rejected_unresolved_count={0}" -f $runtimeUnlockRetryZeroOfferSuccessorProof.UnresolvedCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_verdict={0}" -f $runtimeUnlockRetryZeroOfferSuccessorProof.Verdict),
         ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_count={0}" -f $runtimeUnlockRetryRegularV4RecoverySettlementMissingCount),
+        ("runtime_unlock_retry_blocked_by_regular_v4_receive_recovery_count={0}" -f $runtimeUnlockRetryBlockedByRegularV4RecoveryCount),
+        ("runtime_unlock_retry_held_by_regular_v4_receive_recovery_count={0}" -f $runtimeUnlockRetryHeldByRegularV4RecoveryCount),
+        ("runtime_unlock_retry_blocked_by_regular_v4_recovery_count={0}" -f $runtimeUnlockRetryBlockedByRegularV4RecoveryCount),
+        ("runtime_unlock_retry_held_by_regular_v4_recovery_count={0}" -f $runtimeUnlockRetryHeldByRegularV4RecoveryCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_raw_count={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.RawCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_distinct_count={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.DistinctCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_recovered_count={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.RecoveredCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_unresolved_count={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.UnresolvedCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_verdict={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.Verdict),
+        ("runtime_unlock_retry_regular_v4_settlement_handoff_bypassed_count={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.HandoffBypassCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_raw_count={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.RawCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_distinct_count={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.DistinctCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_recovered_count={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.RecoveredCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_unresolved_count={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.UnresolvedCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_verdict={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.Verdict),
         ("post_tuna_fallback_outbound_receive_worker_handoff_missing_count={0}" -f $outboundReceiveWorkerHandoffProof.Count),
+        ("fallback_tail_yield_authority_rejected_count={0}" -f $fallbackTailYieldAuthorityRejectedCount),
         ("fallback_tail_owner_generation_mismatch_count={0}" -f $fallbackTailOwnerGenerationMismatchCount),
         ("fallback_tail_bridge_recovery_generation_pairing_verdict={0}" -f $fallbackTailBridgeRecoveryPairingProof.Verdict),
         ("fallback_tail_bridge_recovery_generation_mismatch_raw_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.RawCount),
@@ -1886,7 +1907,23 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_retry_dispatch_zero_offer_successor_rejected_unresolved_count={0}" -f $runtimeUnlockRetryZeroOfferSuccessorProof.UnresolvedCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_verdict={0}" -f $runtimeUnlockRetryZeroOfferSuccessorProof.Verdict),
         ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_count={0}" -f $runtimeUnlockRetryRegularV4RecoverySettlementMissingCount),
+        ("runtime_unlock_retry_blocked_by_regular_v4_receive_recovery_count={0}" -f $runtimeUnlockRetryBlockedByRegularV4RecoveryCount),
+        ("runtime_unlock_retry_held_by_regular_v4_receive_recovery_count={0}" -f $runtimeUnlockRetryHeldByRegularV4RecoveryCount),
+        ("runtime_unlock_retry_blocked_by_regular_v4_recovery_count={0}" -f $runtimeUnlockRetryBlockedByRegularV4RecoveryCount),
+        ("runtime_unlock_retry_held_by_regular_v4_recovery_count={0}" -f $runtimeUnlockRetryHeldByRegularV4RecoveryCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_raw_count={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.RawCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_distinct_count={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.DistinctCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_recovered_count={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.RecoveredCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_unresolved_count={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.UnresolvedCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_verdict={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.Verdict),
+        ("runtime_unlock_retry_regular_v4_settlement_handoff_bypassed_count={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.HandoffBypassCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_raw_count={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.RawCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_distinct_count={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.DistinctCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_recovered_count={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.RecoveredCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_unresolved_count={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.UnresolvedCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_verdict={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.Verdict),
         ("post_tuna_fallback_outbound_receive_worker_handoff_missing_count={0}" -f $outboundReceiveWorkerHandoffProof.Count),
+        ("fallback_tail_yield_authority_rejected_count={0}" -f $fallbackTailYieldAuthorityRejectedCount),
         ("fallback_tail_owner_generation_mismatch_count={0}" -f $fallbackTailOwnerGenerationMismatchCount),
         ("fallback_tail_bridge_recovery_generation_pairing_verdict={0}" -f $fallbackTailBridgeRecoveryPairingProof.Verdict),
         ("fallback_tail_bridge_recovery_generation_mismatch_raw_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.RawCount),
@@ -2002,7 +2039,23 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_retry_dispatch_zero_offer_successor_rejected_unresolved_count={0}" -f $runtimeUnlockRetryZeroOfferSuccessorProof.UnresolvedCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_verdict={0}" -f $runtimeUnlockRetryZeroOfferSuccessorProof.Verdict),
         ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_count={0}" -f $runtimeUnlockRetryRegularV4RecoverySettlementMissingCount),
+        ("runtime_unlock_retry_blocked_by_regular_v4_receive_recovery_count={0}" -f $runtimeUnlockRetryBlockedByRegularV4RecoveryCount),
+        ("runtime_unlock_retry_held_by_regular_v4_receive_recovery_count={0}" -f $runtimeUnlockRetryHeldByRegularV4RecoveryCount),
+        ("runtime_unlock_retry_blocked_by_regular_v4_recovery_count={0}" -f $runtimeUnlockRetryBlockedByRegularV4RecoveryCount),
+        ("runtime_unlock_retry_held_by_regular_v4_recovery_count={0}" -f $runtimeUnlockRetryHeldByRegularV4RecoveryCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_raw_count={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.RawCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_distinct_count={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.DistinctCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_recovered_count={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.RecoveredCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_unresolved_count={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.UnresolvedCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_verdict={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.Verdict),
+        ("runtime_unlock_retry_regular_v4_settlement_handoff_bypassed_count={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.HandoffBypassCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_raw_count={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.RawCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_distinct_count={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.DistinctCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_recovered_count={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.RecoveredCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_unresolved_count={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.UnresolvedCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_verdict={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.Verdict),
         ("post_tuna_fallback_outbound_receive_worker_handoff_missing_count={0}" -f $outboundReceiveWorkerHandoffProof.Count),
+        ("fallback_tail_yield_authority_rejected_count={0}" -f $fallbackTailYieldAuthorityRejectedCount),
         ("fallback_tail_owner_generation_mismatch_count={0}" -f $fallbackTailOwnerGenerationMismatchCount),
         ("fallback_tail_bridge_recovery_generation_pairing_verdict={0}" -f $fallbackTailBridgeRecoveryPairingProof.Verdict),
         ("fallback_tail_bridge_recovery_generation_mismatch_raw_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.RawCount),
@@ -2102,6 +2155,22 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_retry_dispatch_zero_offer_successor_rejected_unresolved_count={0}" -f $runtimeUnlockRetryZeroOfferSuccessorProof.UnresolvedCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_verdict={0}" -f $runtimeUnlockRetryZeroOfferSuccessorProof.Verdict),
         ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_count={0}" -f $runtimeUnlockRetryRegularV4RecoverySettlementMissingCount),
+        ("runtime_unlock_retry_blocked_by_regular_v4_receive_recovery_count={0}" -f $runtimeUnlockRetryBlockedByRegularV4RecoveryCount),
+        ("runtime_unlock_retry_held_by_regular_v4_receive_recovery_count={0}" -f $runtimeUnlockRetryHeldByRegularV4RecoveryCount),
+        ("runtime_unlock_retry_blocked_by_regular_v4_recovery_count={0}" -f $runtimeUnlockRetryBlockedByRegularV4RecoveryCount),
+        ("runtime_unlock_retry_held_by_regular_v4_recovery_count={0}" -f $runtimeUnlockRetryHeldByRegularV4RecoveryCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_raw_count={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.RawCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_distinct_count={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.DistinctCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_recovered_count={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.RecoveredCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_unresolved_count={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.UnresolvedCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_verdict={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.Verdict),
+        ("runtime_unlock_retry_regular_v4_settlement_handoff_bypassed_count={0}" -f $runtimeUnlockRegularV4RecoverySettlementProof.HandoffBypassCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_raw_count={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.RawCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_distinct_count={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.DistinctCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_recovered_count={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.RecoveredCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_unresolved_count={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.UnresolvedCount),
+        ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_verdict={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.Verdict),
+        ("fallback_tail_yield_authority_rejected_count={0}" -f $fallbackTailYieldAuthorityRejectedCount),
         ("fallback_tail_owner_generation_mismatch_count={0}" -f $fallbackTailOwnerGenerationMismatchCount),
         ("fallback_tail_bridge_recovery_generation_pairing_verdict={0}" -f $fallbackTailBridgeRecoveryPairingProof.Verdict),
         ("fallback_tail_bridge_recovery_generation_mismatch_raw_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.RawCount),
@@ -2216,7 +2285,23 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         runtime_unlock_retry_dispatch_zero_offer_successor_rejected_unresolved_count = $runtimeUnlockRetryZeroOfferSuccessorProof.UnresolvedCount
         runtime_unlock_retry_dispatch_zero_offer_successor_verdict = $runtimeUnlockRetryZeroOfferSuccessorProof.Verdict
         runtime_unlock_retry_regular_v4_recovery_settlement_missing_count = $runtimeUnlockRetryRegularV4RecoverySettlementMissingCount
+        runtime_unlock_retry_blocked_by_regular_v4_receive_recovery_count = $runtimeUnlockRetryBlockedByRegularV4RecoveryCount
+        runtime_unlock_retry_held_by_regular_v4_receive_recovery_count = $runtimeUnlockRetryHeldByRegularV4RecoveryCount
+        runtime_unlock_retry_blocked_by_regular_v4_recovery_count = $runtimeUnlockRetryBlockedByRegularV4RecoveryCount
+        runtime_unlock_retry_held_by_regular_v4_recovery_count = $runtimeUnlockRetryHeldByRegularV4RecoveryCount
+        runtime_unlock_retry_regular_v4_recovery_settlement_missing_raw_count = $runtimeUnlockRegularV4RecoverySettlementProof.RawCount
+        runtime_unlock_retry_regular_v4_recovery_settlement_missing_distinct_count = $runtimeUnlockRegularV4RecoverySettlementProof.DistinctCount
+        runtime_unlock_retry_regular_v4_recovery_settlement_missing_recovered_count = $runtimeUnlockRegularV4RecoverySettlementProof.RecoveredCount
+        runtime_unlock_retry_regular_v4_recovery_settlement_missing_unresolved_count = $runtimeUnlockRegularV4RecoverySettlementProof.UnresolvedCount
+        runtime_unlock_retry_regular_v4_recovery_settlement_verdict = $runtimeUnlockRegularV4RecoverySettlementProof.Verdict
+        runtime_unlock_retry_regular_v4_settlement_handoff_bypassed_count = $runtimeUnlockRegularV4RecoverySettlementProof.HandoffBypassCount
+        runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_raw_count = $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.RawCount
+        runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_distinct_count = $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.DistinctCount
+        runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_recovered_count = $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.RecoveredCount
+        runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_unresolved_count = $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.UnresolvedCount
+        runtime_unlock_post_tuna_fallback_transport_proof_handoff_verdict = $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.Verdict
         post_tuna_fallback_outbound_receive_worker_handoff_missing_count = $outboundReceiveWorkerHandoffProof.Count
+        fallback_tail_yield_authority_rejected_count = $fallbackTailYieldAuthorityRejectedCount
         fallback_tail_owner_generation_mismatch_count = $fallbackTailOwnerGenerationMismatchCount
         fallback_tail_bridge_recovery_generation_pairing_verdict = $fallbackTailBridgeRecoveryPairingProof.Verdict
         fallback_tail_bridge_recovery_generation_mismatch_raw_count = $fallbackTailBridgeRecoveryPairingProof.RawCount
