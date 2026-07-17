@@ -374,6 +374,122 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task AnalyzeRetained_PostTunaFallbackExactStartedAndTerminalDisposition_RecoversOneBoundary(
+        bool compact,
+        bool duplicateStarted)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildPostTunaFallbackExactActivationDispositionFixture(
+                duplicateStarted,
+                mutation: "none"),
+            ["-LiveRouteProofMode", "RegularActivationCycle"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_distinct_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_recovered_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_unresolved_count"]);
+        Assert.Equal("pass", verdict["runtime_unlock_post_tuna_fallback_transport_proof_handoff_verdict"]);
+        Assert.NotEqual(
+            "runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing",
+            verdict["recovery_failure_class"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_PostTunaFallbackExactStartedWithoutTerminalDisposition_RemainsUnresolved(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildPostTunaFallbackExactActivationDispositionFixture(
+                duplicateStarted: true,
+                mutation: "started_only"),
+            ["-LiveRouteProofMode", "RegularActivationCycle"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal(
+            "runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing",
+            verdict["recovery_failure_class"]);
+        Assert.Equal("tuna_acceleration_timeline", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("1", verdict["runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_unresolved_count"]);
+        Assert.Equal("fail", verdict["runtime_unlock_post_tuna_fallback_transport_proof_handoff_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false, "intent_generation")]
+    [InlineData(true, "intent_generation")]
+    [InlineData(false, "operation_without_started")]
+    [InlineData(true, "operation_without_started")]
+    [InlineData(false, "retry_authority")]
+    [InlineData(true, "retry_authority")]
+    public async Task AnalyzeRetained_PostTunaFallbackExactDispositionMismatch_DoesNotRecoverBoundary(
+        bool compact,
+        string mutation)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildPostTunaFallbackExactActivationDispositionFixture(
+                duplicateStarted: false,
+                mutation),
+            ["-LiveRouteProofMode", "RegularActivationCycle"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal(
+            "runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing",
+            verdict["recovery_failure_class"]);
+        Assert.Equal("tuna_acceleration_timeline", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("scheduled_runtime_unlock_handoff_not_started", verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("1", verdict["runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_unresolved_count"]);
+        Assert.Equal("fail", verdict["runtime_unlock_post_tuna_fallback_transport_proof_handoff_verdict"]);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task AnalyzeRetained_PostTunaFallbackScheduleBeforeRuntimeTerminalization_RemainsUnresolved(
@@ -7100,6 +7216,167 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("0", verdict["runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_recovered_count"]);
         Assert.Equal("1", verdict["runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_unresolved_count"]);
         Assert.Equal("fail", verdict["runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_verdict"]);
+    }
+
+    private static string[] BuildPostTunaFallbackExactActivationDispositionFixture(
+        bool duplicateStarted,
+        string mutation)
+    {
+        const string sessionId = "sess_post_tuna_fallback_handoff";
+        const string transferId = "transfer_post_tuna_fallback_handoff";
+        const string authorityId = "fta2-post-tuna-activation-1";
+        const long installGeneration = 9;
+        var lines = BuildPostTunaFallbackTransportProofHandoffFixture(
+            exactArtifactSequence: false,
+            includeRecoveryOutcome: false).ToList();
+        var scheduledIndex = lines.FindIndex(line =>
+            line.Contains("status=negotiation_scheduled_runtime_unlock", StringComparison.Ordinal));
+        Assert.True(scheduledIndex >= 0);
+
+        const string scope =
+            $"session_id={sessionId}; transfer_id={transferId}; direction=outbound; " +
+            "route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; " +
+            "runtime_generation=3; terminal_generation=0; leg_generation=3; " +
+            "route_publication_generation=5; route_commit_generation=0; " +
+            "target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; " +
+            "fallback_leg_generation=3; fallback_transport_epoch=1; " +
+            "fallback_bridge_recovery_generation=1; data_session_generation=1; " +
+            "admission_granted=1; admission_reason=fallback_tail_paired_yield; intent_generation=1";
+        var intent =
+            $"event=runtime_unlock_post_tuna_fallback_activation_intent_retained; {scope}; " +
+            "fallback_leg_state=recovered; fallback_leg_can_send_data=1; " +
+            "fallback_checkpoint_request_id=(none); trigger=route_hint; " +
+            "decision_reason=post_tuna_fallback_activation_intent_retained";
+
+        string InstallLine(string eventName, string suffix, string reason, long? generation = installGeneration)
+            => RuntimeUnlockRetryInstallLine(
+                    eventName,
+                    transferId,
+                    suffix,
+                    reason,
+                    authorityId: authorityId,
+                    installGeneration: generation)
+                .Replace(
+                    "sess_runtime_unlock_dispatch_proof",
+                    sessionId,
+                    StringComparison.Ordinal)
+                .Replace(
+                    "release_kind=RegularV4RepairSettlement",
+                    "release_kind=FallbackPairedTailYield",
+                    StringComparison.Ordinal);
+
+        var installLines = new[]
+        {
+            InstallLine(
+                "runtime_unlock_retry_dispatch_decision_staged",
+                "; stage_status=Staged; decision_status=Granted",
+                "retry_dispatch_decision_staged",
+                generation: null),
+            InstallLine(
+                "runtime_unlock_retry_dispatch_install_receipt_issued",
+                "; decision_status=Granted",
+                "retry_dispatch_install_receipt_issued"),
+            InstallLine(
+                "runtime_unlock_retry_dispatch_install_committed",
+                "; install_status=Installed; decision_status=Granted",
+                "retry_dispatch_install_committed"),
+            InstallLine(
+                "runtime_unlock_retry_dispatch_authority_granted",
+                "; install_status=Installed; decision_status=Granted",
+                "runtime_unlock_retry_dispatch_authority_granted")
+        };
+
+        lines.Insert(scheduledIndex++, LogLine(intent, secondsOffset: scheduledIndex));
+        foreach (var installLine in installLines)
+        {
+            lines.Insert(scheduledIndex++, LogLine(installLine, secondsOffset: scheduledIndex));
+        }
+
+        var disposition =
+            $"event=runtime_unlock_post_tuna_fallback_activation_disposition; disposition=started; {scope}; " +
+            $"operation_generation=1; retry_authority_id={authorityId}; install_generation={installGeneration}; " +
+            "payer_decision_id=8; trigger=runtime_unlock; decision_reason=negotiation_scheduled_runtime_unlock";
+        disposition = mutation switch
+        {
+            "intent_generation" => disposition.Replace(
+                "intent_generation=1",
+                "intent_generation=2",
+                StringComparison.Ordinal),
+            "operation_without_started" => disposition.Replace(
+                "disposition=started",
+                "disposition=held",
+                StringComparison.Ordinal),
+            "retry_authority" => disposition.Replace(
+                $"retry_authority_id={authorityId}",
+                "retry_authority_id=fta2-post-tuna-activation-other",
+                StringComparison.Ordinal),
+            _ => disposition
+        };
+
+        var scheduleLineIndex = lines.FindIndex(line =>
+            line.Contains("status=negotiation_scheduled_runtime_unlock", StringComparison.Ordinal));
+        Assert.True(scheduleLineIndex >= 0);
+        lines.Insert(scheduleLineIndex + 1, LogLine(disposition, secondsOffset: scheduleLineIndex + 1));
+        if (duplicateStarted)
+        {
+            var copiedStarted = disposition.Replace(
+                "event=runtime_unlock_post_tuna_fallback_activation_disposition; disposition=started",
+                "event=tuna_acceleration_negotiation_scheduling_started",
+                StringComparison.Ordinal);
+            lines.Insert(scheduleLineIndex + 2, LogLine(copiedStarted, secondsOffset: scheduleLineIndex + 2));
+        }
+        if (mutation is not "started_only" and not "operation_without_started")
+        {
+            var terminalDisposition = disposition
+                .Replace(
+                    "disposition=started",
+                    "disposition=completed",
+                    StringComparison.Ordinal)
+                .Replace(
+                    "decision_reason=negotiation_scheduled_runtime_unlock",
+                    "decision_reason=negotiation_operation_completed",
+                    StringComparison.Ordinal);
+            var terminalDispositionIndex = scheduleLineIndex + (duplicateStarted ? 3 : 2);
+            lines.Insert(
+                terminalDispositionIndex,
+                LogLine(terminalDisposition, secondsOffset: terminalDispositionIndex));
+        }
+
+        string NormalizePostTunaAuthorityLine(string line)
+            => line
+                .Replace(
+                    "sess_runtime_unlock_dispatch_proof",
+                    sessionId,
+                    StringComparison.Ordinal)
+                .Replace(
+                    "release_kind=RegularV4RepairSettlement",
+                    "release_kind=FallbackPairedTailYield",
+                    StringComparison.Ordinal);
+
+        var settlementLines = new[]
+        {
+            NormalizePostTunaAuthorityLine(RuntimeUnlockRetrySchema2Line(
+                "runtime_unlock_retry_dispatch_contract_settled",
+                transferId,
+                suffix: "; settlement_outcome=DispatchObserved; dispatch_observed=1",
+                authorityId: authorityId)),
+            NormalizePostTunaAuthorityLine(RuntimeUnlockRetrySettlementReportedLine(
+                transferId,
+                "DispatchObserved",
+                authorityId: authorityId)),
+            NormalizePostTunaAuthorityLine(RuntimeUnlockRetrySettlementDecidedLine(
+                transferId,
+                "DispatchObserved",
+                authorityId: authorityId))
+        };
+        var terminalIndex = lines.FindIndex(line =>
+            line.Contains("event=file_transfer_outbound_terminal", StringComparison.Ordinal));
+        Assert.True(terminalIndex >= 0);
+        foreach (var settlementLine in settlementLines)
+        {
+            lines.Insert(terminalIndex++, LogLine(settlementLine, secondsOffset: terminalIndex));
+        }
+        return lines.ToArray();
     }
 
     private static string[] BuildPostTunaFallbackTransportProofHandoffFixture(

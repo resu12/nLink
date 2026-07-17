@@ -503,7 +503,11 @@ public sealed partial class NknSignalingTransport
 
             if (session is null)
             {
-                session = new TransportFileTransferDataSession(this, normalizedSessionId, normalizedTransferId);
+                session = new TransportFileTransferDataSession(
+                    this,
+                    normalizedSessionId,
+                    normalizedTransferId,
+                    ++fileTransferDataSessionNextGeneration);
                 fileTransferDataSessions[normalizedTransferId] = session;
                 createdSession = true;
             }
@@ -2727,6 +2731,17 @@ public sealed partial class NknSignalingTransport
             "NKN.Tuna",
             $"event=filetransfer_route_hint_authorized_publication_accepted; session_id={SanitizeLogToken(notification.SessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; direction={FormatFileTransferDirection(authority.Direction)}; route={selection.TelemetryToken}; protocol_version={normalizedProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; source={normalizedSource}; fallback_leg_generation={notification.FallbackLegGeneration}; fallback_transport_epoch={notification.FallbackTransportEpoch}; fallback_bridge_recovery_generation={notification.FallbackBridgeRecoveryGeneration}; route_publication_generation={authority.RoutePublicationGeneration}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.LegGeneration}; route_commit_generation={authority.RouteCommitGeneration ?? 0}; target_route={SanitizeLogToken(authority.TargetRouteToken)}; target_protocol_version={authority.TargetProtocolVersion}; target_transport={FormatFileTransferTransportKindForLog(authority.TargetTransport)}; route_publication_action_kind={SanitizeLogToken(authority.RoutePublicationActionKind)}; coordinator_decision_reason={SanitizeLogToken(authority.CoordinatorDecisionReason)}");
 
+        var postTunaFallbackActivationIntent =
+            RetainRuntimeUnlockPostTunaFallbackActivationIntent(notification);
+        if (postTunaFallbackActivationIntent is null)
+        {
+            InvalidateRuntimeUnlockPostTunaFallbackActivationIntent(
+                normalizedSessionId,
+                normalizedTransferId,
+                authority.Direction,
+                "route_publication_replaced");
+        }
+
         if (client is RealNknClientAdapter realClient)
         {
             if (route == FileTransferRoute.PostTunaFallbackV6)
@@ -2764,19 +2779,23 @@ public sealed partial class NknSignalingTransport
                 ClearRuntimeUnlockPublishedRouteCommitUnsafe();
             }
 
-            var fallbackYieldRetryKey = $"{normalizedTransferId}|{notification.FallbackLegGeneration}";
-            ConsumePostTunaFileFallbackRoute(
-                sessionId: null,
-                transferId: normalizedTransferId,
-                reason: string.IsNullOrWhiteSpace(notification.RuntimeUnlockAdmissionReason)
-                    ? "fallback_tail_quiescent"
-                    : notification.RuntimeUnlockAdmissionReason);
-            ScheduleRuntimeUnlockAfterPostTunaFallbackYield(
-                normalizedTransferId,
-                fallbackYieldRetryKey,
-                string.IsNullOrWhiteSpace(notification.RuntimeUnlockAdmissionReason)
-                    ? "fallback_tail_quiescent"
-                    : notification.RuntimeUnlockAdmissionReason);
+            if (postTunaFallbackActivationIntent is not null)
+            {
+                var fallbackYieldRetryKey =
+                    $"{normalizedTransferId}|{notification.FallbackLegGeneration}|{postTunaFallbackActivationIntent.IntentGeneration}";
+                ScheduleRuntimeUnlockAfterPostTunaFallbackYield(
+                    normalizedTransferId,
+                    fallbackYieldRetryKey,
+                    string.IsNullOrWhiteSpace(notification.RuntimeUnlockAdmissionReason)
+                        ? "fallback_tail_quiescent"
+                        : notification.RuntimeUnlockAdmissionReason);
+            }
+            else
+            {
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=runtime_unlock_after_post_tuna_fallback_yield_retry_suppressed; transfer_id={SanitizeLogToken(normalizedTransferId)}; owner_key=(none); reason=post_tuna_fallback_activation_intent_missing");
+            }
         }
         else if (route == FileTransferRoute.PostTunaFallbackV6 &&
                  normalizedProtocolVersion == FileTransferProtocol.ProtocolVersionV6)
@@ -7384,7 +7403,11 @@ public sealed partial class NknSignalingTransport
                     }
                 }
 
-                session = new TransportFileTransferDataSession(this, frame.SessionId, frame.TransferId);
+                session = new TransportFileTransferDataSession(
+                    this,
+                    frame.SessionId,
+                    frame.TransferId,
+                    ++fileTransferDataSessionNextGeneration);
                 fileTransferDataSessions[frame.TransferId] = session;
                 createdSession = true;
             }
@@ -7764,6 +7787,11 @@ public sealed partial class NknSignalingTransport
 
         if (removed)
         {
+            InvalidateRuntimeUnlockPostTunaFallbackActivationIntent(
+                session.SessionId,
+                session.TransferId,
+                direction: null,
+                "data_session_replaced");
             ClearPendingFileTransferV6Handoffs($"data_session_removed_{reason}", session.SessionId);
         }
 
@@ -7839,17 +7867,24 @@ public sealed partial class NknSignalingTransport
         private EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? availabilityChanged;
         private EventHandler<FileTransferRuntimeUnlockAuthorityFrameReceivedEventArgs>? runtimeUnlockAuthorityFrameReceived;
 
-        public TransportFileTransferDataSession(NknSignalingTransport owner, string sessionId, string transferId)
+        public TransportFileTransferDataSession(
+            NknSignalingTransport owner,
+            string sessionId,
+            string transferId,
+            long generation)
         {
             this.owner = owner;
             SessionId = sessionId;
             TransferId = transferId;
+            Generation = generation;
             owner.RegisterActiveFileTransferDataSession(transferId);
         }
 
         public string SessionId { get; }
 
         public string TransferId { get; }
+
+        public long Generation { get; }
 
         public bool IsAvailable => Volatile.Read(ref available) != 0;
 

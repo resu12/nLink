@@ -200,6 +200,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly Dictionary<string, DateTimeOffset> fileTransferCancelEchoLastSent = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTimeOffset> fileTransferCompleteEchoLastSent = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TransportFileTransferDataSession> fileTransferDataSessions = new(StringComparer.Ordinal);
+    private long fileTransferDataSessionNextGeneration;
     private readonly Dictionary<FileTransferRouteHintKey, FileTransferRouteHint> fileTransferRouteHints = new();
     private readonly Dictionary<FileTransferRouteHintKey, FileTransferRoutePublicationAuthority> fileTransferRoutePublicationAuthorities = new();
     private readonly Dictionary<string, FileTransferRuntimeUnlockAuthorityRequirement> fileTransferRuntimeUnlockAuthorityRequirements = new(StringComparer.Ordinal);

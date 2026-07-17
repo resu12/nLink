@@ -15050,7 +15050,8 @@ function Get-FileTransferRuntimeUnlockRegularV4RecoverySettlementCorrelation {
 
 function Get-FileTransferRuntimeUnlockPostTunaFallbackTransportProofHandoffCorrelation {
     param(
-        [AllowEmptyCollection()][object[]]$Events = @()
+        [AllowEmptyCollection()][object[]]$Events = @(),
+        [AllowEmptyCollection()][object[]]$EffectiveGrantEvents = @()
     )
 
     [object[]]$events = @($Events | Where-Object { $null -ne $_ } | Sort-Object Sequence, LineNumber)
@@ -15070,10 +15071,13 @@ function Get-FileTransferRuntimeUnlockPostTunaFallbackTransportProofHandoffCorre
         ($_.EventName -eq 'filetransfer_runtime_unlock_fallback_survival_resume_held' -and
             (Get-FileTransferEventField -Event $_ -Name 'admission_reason' -Default '') -eq 'fallback_proof_replay_pending'))
     })
+    [object[]]$activationIntentEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_post_tuna_fallback_activation_intent_retained'
+    })
     [object[]]$scheduledEvents = @($events | Where-Object {
         $_.EventName -eq 'tuna_acceleration_timeline' -and
-        (Get-FileTransferEventField -Event $_ -Name 'status' -Default '') -eq
-            'negotiation_scheduled_runtime_unlock'
+        (Get-FileTransferEventField -Event $_ -Name 'status' -Default '') -like
+            'negotiation_scheduled_runtime_unlock*'
     })
 
     function Test-HandoffSessionMatch {
@@ -15173,6 +15177,145 @@ function Get-FileTransferRuntimeUnlockPostTunaFallbackTransportProofHandoffCorre
         return $true
     }
 
+    function Test-HandoffPositiveGeneration {
+        param(
+            [Parameter(Mandatory = $true)]$Event,
+            [Parameter(Mandatory = $true)][string]$Name
+        )
+
+        [int64]$generation = 0
+        $value = Get-FileTransferEventField -Event $Event -Name $Name -Default ''
+        return [int64]::TryParse($value, [ref]$generation) -and $generation -gt 0
+    }
+
+    function Test-HandoffExactFieldMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Left,
+            [Parameter(Mandatory = $true)]$Right,
+            [Parameter(Mandatory = $true)][string[]]$Fields
+        )
+
+        foreach ($field in $Fields) {
+            $leftValue = Get-FileTransferEventField -Event $Left -Name $field -Default ''
+            $rightValue = Get-FileTransferEventField -Event $Right -Name $field -Default ''
+            if ([string]::IsNullOrWhiteSpace($leftValue) -or
+                $leftValue -in @('(none)', 'none') -or
+                [string]::IsNullOrWhiteSpace($rightValue) -or
+                $rightValue -in @('(none)', 'none') -or
+                -not [string]::Equals(
+                    $leftValue,
+                    $rightValue,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    [string[]]$exactIntentScopeFields = @(
+        'session_id',
+        'transfer_id',
+        'direction',
+        'route',
+        'protocol_version',
+        'live_route_epoch',
+        'runtime_generation',
+        'terminal_generation',
+        'leg_generation',
+        'route_publication_generation',
+        'route_commit_generation',
+        'target_route',
+        'target_protocol_version',
+        'target_transport',
+        'fallback_leg_generation',
+        'fallback_transport_epoch',
+        'fallback_bridge_recovery_generation',
+        'data_session_generation',
+        'admission_granted',
+        'admission_reason',
+        'intent_generation')
+    [string[]]$exactOperationScopeFields = @(
+        $exactIntentScopeFields + @(
+            'operation_generation',
+            'payer_decision_id',
+            'retry_authority_id',
+            'install_generation'))
+
+    function Test-HandoffExactIntentScopeComplete {
+        param([Parameter(Mandatory = $true)]$Event)
+
+        if (-not (Test-HandoffExactFieldMatch `
+                -Left $Event `
+                -Right $Event `
+                -Fields $exactIntentScopeFields)) {
+            return $false
+        }
+        return (Test-HandoffPositiveGeneration -Event $Event -Name 'intent_generation')
+    }
+
+    function Test-HandoffExactOperationScopeComplete {
+        param([Parameter(Mandatory = $true)]$Event)
+
+        if (-not (Test-HandoffExactFieldMatch `
+                -Left $Event `
+                -Right $Event `
+                -Fields $exactOperationScopeFields)) {
+            return $false
+        }
+        return (Test-HandoffPositiveGeneration -Event $Event -Name 'intent_generation') -and
+            (Test-HandoffPositiveGeneration -Event $Event -Name 'operation_generation')
+    }
+
+    function Test-HandoffEffectiveGrantMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Scheduled,
+            [Parameter(Mandatory = $true)]$Grant
+        )
+
+        if ([int64]$Grant.Sequence -ge [int64]$Scheduled.Sequence -or
+            -not (Test-HandoffExactFieldMatch `
+                -Left $Scheduled `
+                -Right $Grant `
+                -Fields @('session_id', 'transfer_id', 'direction'))) {
+            return $false
+        }
+
+        $retryAuthorityId = Get-FileTransferEventField `
+            -Event $Scheduled `
+            -Name 'retry_authority_id' `
+            -Default ''
+        $grantAuthorityId = Get-FileTransferEventField -Event $Grant -Name 'authority_id' -Default ''
+        $scheduledInstallGeneration = Get-FileTransferEventField `
+            -Event $Scheduled `
+            -Name 'install_generation' `
+            -Default ''
+        $grantInstallGeneration = Get-FileTransferEventField `
+            -Event $Grant `
+            -Name 'install_generation' `
+            -Default ''
+        if ([string]::IsNullOrWhiteSpace($retryAuthorityId) -or
+            $retryAuthorityId -in @('(none)', 'none') -or
+            -not [string]::Equals($retryAuthorityId, $grantAuthorityId, [System.StringComparison]::Ordinal) -or
+            [string]::IsNullOrWhiteSpace($scheduledInstallGeneration) -or
+            -not [string]::Equals(
+                $scheduledInstallGeneration,
+                $grantInstallGeneration,
+                [System.StringComparison]::Ordinal)) {
+            return $false
+        }
+
+        $predecessor = Get-FileTransferEventField -Event $Grant -Name 'predecessor_authority_id' -Default ''
+        return (Get-FileTransferEventField -Event $Grant -Name 'release_kind' -Default '') -eq
+                'FallbackPairedTailYield' -and
+            (Get-FileTransferEventField -Event $Grant -Name 'dispatch_attempt_generation' -Default '') -eq '1' -and
+            (Get-FileTransferEventField -Event $Grant -Name 'missing_dispatch_successor_generation' -Default '') -eq '0' -and
+            $predecessor -in @('(none)', 'none') -and
+            (Get-FileTransferEventField `
+                -Event $Grant `
+                -Name 'request_active_predecessor_supersession' `
+                -Default '') -eq '0'
+    }
+
     function Get-HandoffScopeKey {
         param([Parameter(Mandatory = $true)]$Event)
 
@@ -15261,6 +15404,7 @@ function Get-FileTransferRuntimeUnlockPostTunaFallbackTransportProofHandoffCorre
         param([Parameter(Mandatory = $true)]$Event)
 
         if ($Event.EventName -in @(
+                'runtime_unlock_post_tuna_fallback_activation_disposition',
                 'runtime_unlock_filetransfer_owner_accepted_before_path_lease',
                 'runtime_unlock_filetransfer_owner_rejected_before_path_lease',
                 'runtime_unlock_filetransfer_owner_missing_before_path_lease',
@@ -15275,9 +15419,15 @@ function Get-FileTransferRuntimeUnlockPostTunaFallbackTransportProofHandoffCorre
                 'runtime_unlock_precommit_probe_sent',
                 'tuna_acceleration_runtime_unlock_dispatch_deferred_for_regular_v4_receive_recovery',
                 'tuna_acceleration_runtime_unlock_retry_suppressed',
+                'tuna_acceleration_negotiation_scheduling_started',
                 'tuna_acceleration_negotiation_scheduling_held',
                 'tuna_acceleration_negotiation_scheduling_rejected',
-                'tuna_acceleration_negotiation_scheduling_invalidated')) {
+                'tuna_acceleration_negotiation_scheduling_invalidated',
+                'tuna_acceleration_negotiation_scheduling_completed')) {
+            if ($Event.EventName -eq 'runtime_unlock_post_tuna_fallback_activation_disposition') {
+                return (Get-FileTransferEventField -Event $Event -Name 'disposition' -Default '') -in @(
+                    'started', 'held', 'rejected', 'invalidated', 'completed')
+            }
             return $true
         }
         if ($Event.EventName -eq 'tuna_acceleration_timeline') {
@@ -15292,16 +15442,25 @@ function Get-FileTransferRuntimeUnlockPostTunaFallbackTransportProofHandoffCorre
         return $false
     }
 
-    function Test-HandoffDispositionMatch {
+    function Get-HandoffNewDisposition {
+        param([Parameter(Mandatory = $true)]$Event)
+
+        if ($Event.EventName -eq 'runtime_unlock_post_tuna_fallback_activation_disposition') {
+            return Get-FileTransferEventField -Event $Event -Name 'disposition' -Default ''
+        }
+        if ($Event.EventName -like 'tuna_acceleration_negotiation_scheduling_*') {
+            return $Event.EventName.Substring('tuna_acceleration_negotiation_scheduling_'.Length)
+        }
+        return ''
+    }
+
+    function Test-HandoffLegacyDispositionIdentityMatch {
         param(
             [Parameter(Mandatory = $true)]$Scheduled,
             [Parameter(Mandatory = $true)]$Scope,
             [Parameter(Mandatory = $true)]$Candidate
         )
 
-        if (-not (Test-HandoffDisposition $Candidate)) {
-            return $false
-        }
         $scheduledPayerDecisionId = Get-FileTransferEventField -Event $Scheduled -Name 'payer_decision_id' -Default ''
         $candidatePayerDecisionId = Get-FileTransferEventField -Event $Candidate -Name 'payer_decision_id' -Default ''
         if (-not [string]::IsNullOrWhiteSpace($candidatePayerDecisionId) -and
@@ -15314,6 +15473,89 @@ function Get-FileTransferRuntimeUnlockPostTunaFallbackTransportProofHandoffCorre
                     [System.StringComparison]::OrdinalIgnoreCase)
         }
         return Test-HandoffScopeMatch -Scope $Scope -Candidate $Candidate
+    }
+
+    function Test-HandoffExactStartedEvidence {
+        param(
+            [Parameter(Mandatory = $true)]$Scheduled,
+            [Parameter(Mandatory = $true)]$Scope,
+            [Parameter(Mandatory = $true)]$Started
+        )
+
+        if ((Get-HandoffNewDisposition -Event $Started) -ne 'started' -or
+            -not (Test-HandoffExactOperationScopeComplete -Event $Started) -or
+            -not (Test-HandoffLegacyDispositionIdentityMatch `
+                -Scheduled $Scheduled `
+                -Scope $Scope `
+                -Candidate $Started)) {
+            return $false
+        }
+
+        [object[]]$matchingIntents = @($activationIntentEvents | Where-Object {
+            [int64]$_.Sequence -lt [int64]$Started.Sequence -and
+            (Test-HandoffExactIntentScopeComplete -Event $_) -and
+            (Test-HandoffExactFieldMatch `
+                -Left $Started `
+                -Right $_ `
+                -Fields $exactIntentScopeFields)
+        })
+        [object[]]$matchingGrants = @($EffectiveGrantEvents | Where-Object {
+            Test-HandoffEffectiveGrantMatch -Scheduled $Started -Grant $_
+        })
+        return $matchingIntents.Count -gt 0 -and $matchingGrants.Count -gt 0
+    }
+
+    function Test-HandoffDispositionMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Scheduled,
+            [Parameter(Mandatory = $true)]$Scope,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        if (-not (Test-HandoffDisposition $Candidate)) {
+            return $false
+        }
+
+        $newDisposition = Get-HandoffNewDisposition -Event $Candidate
+        if ($newDisposition -eq 'started') {
+            return $false
+        }
+
+        [object[]]$matchingStarted = @($events | Where-Object {
+            [int64]$_.Sequence -gt [int64]$Scheduled.Sequence -and
+            [int64]$_.Sequence -lt [int64]$Candidate.Sequence -and
+            (Test-HandoffExactStartedEvidence `
+                -Scheduled $Scheduled `
+                -Scope $Scope `
+                -Started $_)
+        })
+
+        if (-not [string]::IsNullOrWhiteSpace($newDisposition)) {
+            if ($newDisposition -notin @('held', 'rejected', 'invalidated', 'completed') -or
+                -not (Test-HandoffExactOperationScopeComplete -Event $Candidate)) {
+                return $false
+            }
+            return @($matchingStarted | Where-Object {
+                Test-HandoffExactFieldMatch `
+                    -Left $_ `
+                    -Right $Candidate `
+                    -Fields $exactOperationScopeFields
+            }).Count -gt 0
+        }
+
+        if (-not (Test-HandoffLegacyDispositionIdentityMatch `
+                -Scheduled $Scheduled `
+                -Scope $Scope `
+                -Candidate $Candidate)) {
+            return $false
+        }
+
+        [object[]]$matchingNewIntents = @($activationIntentEvents | Where-Object {
+            [int64]$_.Sequence -lt [int64]$Candidate.Sequence -and
+            (Test-HandoffExactIntentScopeComplete -Event $_) -and
+            (Test-HandoffScopeMatch -Scope $Scope -Candidate $_)
+        })
+        return $matchingNewIntents.Count -eq 0 -or $matchingStarted.Count -gt 0
     }
 
     function Test-HandoffReplacement {
@@ -15459,6 +15701,11 @@ function Get-FileTransferRuntimeUnlockPostTunaFallbackTransportProofHandoffCorre
         # ambiguity.
         $matchingRetry = @($matchingRetry | Sort-Object Sequence, LineNumber)
         $retry = $matchingRetry[-1]
+        $hasExactIntent = @($activationIntentEvents | Where-Object {
+            [int64]$_.Sequence -lt $scheduledSequence -and
+            (Test-HandoffExactIntentScopeComplete -Event $_) -and
+            (Test-HandoffScopeMatch -Scope $scope -Candidate $_)
+        }).Count -gt 0
 
         $rawCandidates.Add($scheduled) | Out-Null
         $key = (@(
@@ -15479,6 +15726,7 @@ function Get-FileTransferRuntimeUnlockPostTunaFallbackTransportProofHandoffCorre
                 Held = $held
                 Scope = $scope
                 Key = $key
+                HasExactIntent = $hasExactIntent
             }
         }
     }
@@ -15516,10 +15764,11 @@ function Get-FileTransferRuntimeUnlockPostTunaFallbackTransportProofHandoffCorre
         if ($dispositions.Count -gt 0) {
             $recovered.Add($scheduled) | Out-Null
         }
-        elseif ($replacementEvents.Count -gt 0) {
+        elseif (-not $record.HasExactIntent -and $replacementEvents.Count -gt 0) {
             $recovered.Add($scheduled) | Out-Null
         }
-        elseif ($terminalEvents.Count -gt 0) {
+        elseif ($terminalEvents.Count -gt 0 -or
+            ($record.HasExactIntent -and $replacementEvents.Count -gt 0)) {
             $unresolved.Add($scheduled) | Out-Null
         }
     }
@@ -17338,7 +17587,8 @@ function Get-FileTransferRecoveryFailureClassification {
             -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents
     $runtimeUnlockPostTunaFallbackTransportProofHandoffProof =
         Get-FileTransferRuntimeUnlockPostTunaFallbackTransportProofHandoffCorrelation `
-            -Events $events
+            -Events $events `
+            -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents
     $runtimeUnlockRetryFallbackTailUnblockRecheckProof =
         Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation `
             -Events $events `
