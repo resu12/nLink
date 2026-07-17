@@ -1401,6 +1401,16 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $fallbackTailOwnerGenerationMismatchCount =
         @($fallbackTailBridgeRecoveryPairingProof.OtherOwnerGenerationMismatchEvents).Count
     $compactProofChainCandidates = New-Object System.Collections.Generic.List[object]
+    foreach ($candidateEvent in @($runtimeUnlockRetryDispatchInstallProof.GrantEvidenceUnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete'
+            Event = $candidateEvent
+            Reason = Get-FileTransferEventField `
+                -Event $candidateEvent `
+                -Name 'decision_reason' `
+                -Default 'retry_dispatch_grant_install_chain_incomplete'
+        }) | Out-Null
+    }
     foreach ($candidateEvent in $runtimeUnlockRetryRegularV4RecoverySettlementMissingUncoveredEvents) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'runtime_unlock_retry_regular_v4_recovery_settlement_missing'
@@ -1570,7 +1580,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $gateStatus = 'warn'
     }
 
-    if ($regularV4FrontierRepairSettlementDispositionProof.UnresolvedCount -gt 0) {
+    if ($runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteUnresolvedCount -gt 0 -or
+        $regularV4FrontierRepairSettlementDispositionProof.UnresolvedCount -gt 0) {
         $verdict = 'INCONCLUSIVE'
         $gateStatus = 'fail'
         $acceptanceFailureClass = 'incomplete_proof'
@@ -1670,6 +1681,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_sequence={0}" -f $firstProofChainFailureSequence),
         ("first_proof_chain_failure_source_path={0}" -f $firstProofChainFailureSourcePath),
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
+        ("runtime_unlock_retry_dispatch_authority_granted_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.AuthorityGrantedRawCount),
         ("runtime_unlock_retry_dispatch_decision_staged_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.DecisionStagedCount),
         ("runtime_unlock_retry_dispatch_install_receipt_issued_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.ReceiptIssuedCount),
         ("runtime_unlock_retry_dispatch_install_committed_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.CommittedCount),
@@ -1677,6 +1689,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.EffectiveGrantEvents.Count),
         ("runtime_unlock_retry_dispatch_observed_count={0}" -f $runtimeUnlockRetryDispatchObservedCount),
         ("runtime_unlock_retry_dispatch_install_verdict={0}" -f $runtimeUnlockRetryDispatchInstallProof.Verdict),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRawCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_distinct_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteDistinctCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRecoveredCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_verdict={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceVerdict),
         ("runtime_unlock_retry_dispatch_proof_verdict={0}" -f $runtimeUnlockRetryDispatchProofVerdict),
         ("regular_v4_frontier_repair_missing_range_not_preserved_raw_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.RawCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_distinct_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.DistinctCount),
@@ -1795,6 +1812,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_sequence={0}" -f $firstProofChainFailureSequence),
         ("first_proof_chain_failure_source_path={0}" -f $firstProofChainFailureSourcePath),
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
+        ("runtime_unlock_retry_dispatch_authority_granted_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.AuthorityGrantedRawCount),
+        ("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.EffectiveGrantEvents.Count),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRawCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_distinct_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteDistinctCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRecoveredCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_verdict={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceVerdict),
         ("regular_v4_frontier_repair_missing_range_not_preserved_raw_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.RawCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_distinct_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.DistinctCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.RecoveredCount),
@@ -1904,6 +1928,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_sequence={0}" -f $firstProofChainFailureSequence),
         ("first_proof_chain_failure_source_path={0}" -f $firstProofChainFailureSourcePath),
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
+        ("runtime_unlock_retry_dispatch_authority_granted_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.AuthorityGrantedRawCount),
+        ("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.EffectiveGrantEvents.Count),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRawCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_distinct_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteDistinctCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRecoveredCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_verdict={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceVerdict),
         ("regular_v4_frontier_repair_missing_range_not_preserved_raw_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.RawCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_distinct_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.DistinctCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.RecoveredCount),
@@ -2000,6 +2031,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_sequence={0}" -f $firstProofChainFailureSequence),
         ("first_proof_chain_failure_source_path={0}" -f $firstProofChainFailureSourcePath),
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
+        ("runtime_unlock_retry_dispatch_authority_granted_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.AuthorityGrantedRawCount),
         ("runtime_unlock_retry_dispatch_decision_staged_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.DecisionStagedCount),
         ("runtime_unlock_retry_dispatch_install_receipt_issued_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.ReceiptIssuedCount),
         ("runtime_unlock_retry_dispatch_install_committed_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.CommittedCount),
@@ -2007,6 +2039,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.EffectiveGrantEvents.Count),
         ("runtime_unlock_retry_dispatch_observed_count={0}" -f $runtimeUnlockRetryDispatchObservedCount),
         ("runtime_unlock_retry_dispatch_install_verdict={0}" -f $runtimeUnlockRetryDispatchInstallProof.Verdict),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRawCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_distinct_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteDistinctCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRecoveredCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_verdict={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceVerdict),
         ("runtime_unlock_retry_dispatch_proof_verdict={0}" -f $runtimeUnlockRetryDispatchProofVerdict),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_raw_count={0}" -f $regularV4PeerSilenceReplayMissingDispatchRangeProof.RawCount),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_distinct_count={0}" -f $regularV4PeerSilenceReplayMissingDispatchRangeProof.DistinctCount),
@@ -2098,6 +2135,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         first_proof_chain_failure_sequence = $firstProofChainFailureSequence
         first_proof_chain_failure_source_path = $firstProofChainFailureSourcePath
         first_proof_chain_failure_line_number = $firstProofChainFailureLineNumber
+        runtime_unlock_retry_dispatch_authority_granted_raw_count = $runtimeUnlockRetryDispatchInstallProof.AuthorityGrantedRawCount
         runtime_unlock_retry_dispatch_decision_staged_count = $runtimeUnlockRetryDispatchInstallProof.DecisionStagedCount
         runtime_unlock_retry_dispatch_install_receipt_issued_count = $runtimeUnlockRetryDispatchInstallProof.ReceiptIssuedCount
         runtime_unlock_retry_dispatch_install_committed_count = $runtimeUnlockRetryDispatchInstallProof.CommittedCount
@@ -2105,6 +2143,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         runtime_unlock_retry_dispatch_authority_granted_count = $runtimeUnlockRetryDispatchInstallProof.EffectiveGrantEvents.Count
         runtime_unlock_retry_dispatch_observed_count = $runtimeUnlockRetryDispatchObservedCount
         runtime_unlock_retry_dispatch_install_verdict = $runtimeUnlockRetryDispatchInstallProof.Verdict
+        runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count = $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRawCount
+        runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_distinct_count = $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteDistinctCount
+        runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count = $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRecoveredCount
+        runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count = $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteUnresolvedCount
+        runtime_unlock_retry_dispatch_install_grant_evidence_verdict = $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceVerdict
         runtime_unlock_retry_dispatch_proof_verdict = $runtimeUnlockRetryDispatchProofVerdict
         regular_v4_frontier_repair_missing_range_not_preserved_raw_count = $regularV4FrontierRepairMissingRangePreservationProof.RawCount
         regular_v4_frontier_repair_missing_range_not_preserved_distinct_count = $regularV4FrontierRepairMissingRangePreservationProof.DistinctCount

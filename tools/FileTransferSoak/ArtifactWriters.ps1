@@ -6758,6 +6758,13 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("first_proof_chain_failure_sequence={0}" -f $RecoveryClassification.FirstProofChainFailureSequence)) | Out-Null
     $lines.Add(("first_proof_chain_failure_source_path={0}" -f $RecoveryClassification.FirstProofChainFailureSourcePath)) | Out-Null
     $lines.Add(("first_proof_chain_failure_line_number={0}" -f $RecoveryClassification.FirstProofChainFailureLineNumber)) | Out-Null
+    $lines.Add(("runtime_unlock_retry_dispatch_authority_granted_raw_count={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedRawCount)) | Out-Null
+    $lines.Add(("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedCount)) | Out-Null
+    $lines.Add(("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount)) | Out-Null
+    $lines.Add(("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_distinct_count={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount)) | Out-Null
+    $lines.Add(("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount)) | Out-Null
+    $lines.Add(("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount)) | Out-Null
+    $lines.Add(("runtime_unlock_retry_dispatch_install_grant_evidence_verdict={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchInstallGrantEvidenceVerdict)) | Out-Null
     $lines.Add(("regular_v4_frontier_repair_settlement_disposition_unverifiable_raw_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairSettlementDispositionUnverifiableRawCount)) | Out-Null
     $lines.Add(("regular_v4_frontier_repair_settlement_disposition_unverifiable_distinct_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairSettlementDispositionUnverifiableDistinctCount)) | Out-Null
     $lines.Add(("regular_v4_frontier_repair_settlement_disposition_unverifiable_recovered_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount)) | Out-Null
@@ -8617,12 +8624,18 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_retry_dispatch_proof_verdict={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchProofVerdict),
         ("runtime_unlock_retry_dispatch_chain_closure_proof_verdict={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchChainClosureProofVerdict),
         ("runtime_unlock_retry_release_count={0}" -f $recoveryClassification.RuntimeUnlockRetryReleaseCount),
+        ("runtime_unlock_retry_dispatch_authority_granted_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedRawCount),
         ("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedCount),
         ("runtime_unlock_retry_dispatch_decision_staged_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchDecisionStagedCount),
         ("runtime_unlock_retry_dispatch_install_receipt_issued_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchInstallReceiptIssuedCount),
         ("runtime_unlock_retry_dispatch_install_committed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchInstallCommittedCount),
         ("runtime_unlock_retry_dispatch_install_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchInstallRejectedCount),
         ("runtime_unlock_retry_dispatch_install_verdict={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchInstallVerdict),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_verdict={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchInstallGrantEvidenceVerdict),
         ("runtime_unlock_retry_dispatch_authority_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchAuthorityRejectedCount),
         ("runtime_unlock_retry_dispatch_successor_attempt_mismatch_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSuccessorAttemptMismatchCount),
         ("runtime_unlock_retry_dispatch_decision_tuple_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchDecisionTupleRejectedCount),
@@ -15153,6 +15166,99 @@ function Get-FileTransferRuntimeUnlockRetryDispatchInstallProof {
             $generation -gt 0
     }
 
+    function Get-InstallGrantBoundaryKey {
+        param([Parameter(Mandatory = $true)]$Event)
+
+        return (@(
+                'session_id',
+                'transfer_id',
+                'direction',
+                'authority_id',
+                'install_generation') | ForEach-Object {
+                Get-FileTransferEventField -Event $Event -Name $_ -Default '(missing)'
+            }) -join '|'
+    }
+
+    function Test-InstallGrantBoundaryMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Left,
+            [Parameter(Mandatory = $true)]$Right
+        )
+
+        return (Get-InstallGrantBoundaryKey -Event $Left) -eq
+            (Get-InstallGrantBoundaryKey -Event $Right)
+    }
+
+    function Get-InstallGrantEvidenceFailureReason {
+        param([Parameter(Mandatory = $true)]$Grant)
+
+        foreach ($field in $requestTupleFields) {
+            $value = Get-FileTransferEventField -Event $Grant -Name $field -Default ''
+            if ([string]::IsNullOrWhiteSpace($value) -or $value -in @('(none)', 'none')) {
+                return "retry_dispatch_grant_${field}_missing"
+            }
+        }
+
+        [object[]]$referenceEvents = @(
+            @($distinctCommitted + $distinctReceipts + $distinctStages) | Where-Object {
+                (Test-InstallGrantBoundaryMatch -Left $Grant -Right $_) -and
+                (Test-InstallEventBefore -Earlier $_ -Later $Grant)
+            } | Sort-Object Sequence, LineNumber -Descending
+        )
+        if ($referenceEvents.Count -eq 0) {
+            return 'retry_dispatch_grant_install_chain_missing'
+        }
+
+        $reference = $referenceEvents[0]
+        foreach ($field in $requestTupleFields) {
+            $grantValue = Get-FileTransferEventField -Event $Grant -Name $field -Default ''
+            $referenceValue = Get-FileTransferEventField -Event $reference -Name $field -Default ''
+            if ([string]::IsNullOrWhiteSpace($referenceValue) -or
+                -not [string]::Equals($grantValue, $referenceValue, [System.StringComparison]::Ordinal)) {
+                return "retry_dispatch_grant_${field}_mismatch"
+            }
+        }
+
+        foreach ($field in $authorityTupleFields) {
+            $grantValue = Get-FileTransferEventField -Event $Grant -Name $field -Default ''
+            $referenceValue = Get-FileTransferEventField -Event $reference -Name $field -Default ''
+            if ([string]::IsNullOrWhiteSpace($grantValue) -or
+                [string]::IsNullOrWhiteSpace($referenceValue) -or
+                -not [string]::Equals($grantValue, $referenceValue, [System.StringComparison]::Ordinal)) {
+                return 'retry_dispatch_grant_authority_tuple_mismatch'
+            }
+        }
+
+        return 'retry_dispatch_grant_install_chain_incomplete'
+    }
+
+    function New-InstallGrantEvidenceCandidateEvent {
+        param(
+            [Parameter(Mandatory = $true)]$Event,
+            [Parameter(Mandatory = $true)][string]$Reason
+        )
+
+        $fields = @{}
+        if ($null -ne $Event.Fields) {
+            foreach ($key in @($Event.Fields.Keys)) {
+                $fields[$key] = $Event.Fields[$key]
+            }
+        }
+        $fields['decision_reason'] = $Reason
+
+        return [pscustomobject]@{
+            EventName = [string]$Event.EventName
+            Sequence = [int64]$Event.Sequence
+            LineNumber = [int]$Event.LineNumber
+            FilePath = [string]$Event.FilePath
+            FileName = [string]$Event.FileName
+            Message = [string]$Event.Message
+            RawLine = [string]$Event.RawLine
+            TransferId = [string]$Event.TransferId
+            Fields = $fields
+        }
+    }
+
     function Test-InstallRejectionDisposition {
         param(
             [Parameter(Mandatory = $true)]$Rejection,
@@ -15237,9 +15343,14 @@ function Get-FileTransferRuntimeUnlockRetryDispatchInstallProof {
                 # than being accepted through the legacy artifact path.
                 $uncommittedGrants.Add($grant) | Out-Null
             }
-            else {
-                # Legacy artifacts predate the two-phase protocol.
+            elseif (-not $phase2ProtocolObserved) {
+                # Legacy artifacts predate the two-phase protocol. Once any
+                # Phase-2 evidence exists in an artifact, a grant without its
+                # install generation cannot borrow the legacy path.
                 $effectiveGrants.Add($grant) | Out-Null
+            }
+            else {
+                $uncommittedGrants.Add($grant) | Out-Null
             }
             continue
         }
@@ -15394,10 +15505,74 @@ function Get-FileTransferRuntimeUnlockRetryDispatchInstallProof {
         -not $validChain
     })
 
+    # A Phase-2 authority grant is effective only when its own complete tuple
+    # correlates to stage, receipt, and commit.  Keep malformed retained copies
+    # as evidence, but group them by the stable install boundary so a later
+    # exact duplicate can recover the boundary without inflating grant count.
+    $incompleteGrantRawCandidates = New-Object System.Collections.Generic.List[object]
+    foreach ($grant in $grantEvents) {
+        if (-not (Test-InstallGenerationPositive -Event $grant)) {
+            continue
+        }
+
+        $exactEffectiveGrant = @($effectiveGrants.ToArray() | Where-Object {
+            Test-InstallScopeMatch `
+                -Left $grant `
+                -Right $_ `
+                -RequireInstallGeneration `
+                -RequireRequestTuple
+        }).Count -gt 0
+        if ($exactEffectiveGrant) {
+            continue
+        }
+
+        $reason = Get-InstallGrantEvidenceFailureReason -Grant $grant
+        $incompleteGrantRawCandidates.Add(
+            (New-InstallGrantEvidenceCandidateEvent -Event $grant -Reason $reason)) | Out-Null
+    }
+
+    $incompleteGrantDistinctCandidates = New-Object System.Collections.Generic.List[object]
+    $incompleteGrantRecoveredCandidates = New-Object System.Collections.Generic.List[object]
+    $incompleteGrantUnresolvedCandidates = New-Object System.Collections.Generic.List[object]
+    $seenIncompleteGrantBoundaries = @{}
+    foreach ($candidate in @($incompleteGrantRawCandidates.ToArray() | Sort-Object Sequence, LineNumber)) {
+        $boundaryKey = Get-InstallGrantBoundaryKey -Event $candidate
+        if ($seenIncompleteGrantBoundaries.ContainsKey($boundaryKey)) {
+            continue
+        }
+        $seenIncompleteGrantBoundaries[$boundaryKey] = $true
+        $incompleteGrantDistinctCandidates.Add($candidate) | Out-Null
+
+        $recovered = @($effectiveGrants.ToArray() | Where-Object {
+            Test-InstallGrantBoundaryMatch -Left $candidate -Right $_
+        }).Count -gt 0
+        if ($recovered) {
+            $incompleteGrantRecoveredCandidates.Add($candidate) | Out-Null
+        }
+        else {
+            $incompleteGrantUnresolvedCandidates.Add($candidate) | Out-Null
+        }
+    }
+
+    $grantEvidenceVerdict = if ($phase2DeclaredGrantEvents.Count -eq 0) {
+        'none'
+    }
+    elseif ($incompleteGrantUnresolvedCandidates.Count -gt 0) {
+        'fail'
+    }
+    else {
+        'pass'
+    }
+
+    [object[]]$otherUncommittedGrantEvents = @($uncommittedGrants.ToArray() | Where-Object {
+        -not (Test-InstallGenerationPositive -Event $_)
+    })
+
     $verdict = if ($pendingStages.Count -gt 0 -or
         $pendingReceipts.Count -gt 0 -or
         $orphanCommitted.Count -gt 0 -or
-        $uncommittedGrants.Count -gt 0) {
+        $otherUncommittedGrantEvents.Count -gt 0 -or
+        $incompleteGrantUnresolvedCandidates.Count -gt 0) {
         'incomplete'
     }
     elseif ($phase2Events.Count -eq 0) {
@@ -15414,9 +15589,19 @@ function Get-FileTransferRuntimeUnlockRetryDispatchInstallProof {
         RejectedCount = $distinctRejected.Count
         Verdict = $verdict
         ProtocolObserved = $phase2ProtocolObserved
+        AuthorityGrantedRawCount = $grantEvents.Count
         EffectiveGrantEvents = @($effectiveGrants.ToArray())
-        UncommittedGrantEvents = @($uncommittedGrants.ToArray())
+        UncommittedGrantEvents = @($otherUncommittedGrantEvents + $incompleteGrantUnresolvedCandidates.ToArray())
         OrphanCommittedEvents = @($orphanCommitted)
+        GrantEvidenceIncompleteRawCount = $incompleteGrantRawCandidates.Count
+        GrantEvidenceIncompleteDistinctCount = $incompleteGrantDistinctCandidates.Count
+        GrantEvidenceIncompleteRecoveredCount = $incompleteGrantRecoveredCandidates.Count
+        GrantEvidenceIncompleteUnresolvedCount = $incompleteGrantUnresolvedCandidates.Count
+        GrantEvidenceVerdict = $grantEvidenceVerdict
+        GrantEvidenceRawCandidateEvents = @($incompleteGrantRawCandidates.ToArray())
+        GrantEvidenceDistinctCandidateEvents = @($incompleteGrantDistinctCandidates.ToArray())
+        GrantEvidenceRecoveredCandidateEvents = @($incompleteGrantRecoveredCandidates.ToArray())
+        GrantEvidenceUnresolvedCandidateEvents = @($incompleteGrantUnresolvedCandidates.ToArray())
     }
 }
 
@@ -18740,6 +18925,10 @@ function Get-FileTransferRecoveryFailureClassification {
     $proofChainFailureCandidates = New-Object System.Collections.Generic.List[object]
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete' `
+        -Events @($runtimeUnlockRetryDispatchInstallProof.GrantEvidenceUnresolvedCandidateEvents)
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_filetransfer_owner_missing_before_path_lease' `
         -Events $runtimeUnlockFileTransferOwnerMissingBeforePathLeaseUnresolvedEvents
     Add-FileTransferProofChainFailureCandidates `
@@ -19534,12 +19723,18 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockRetryDispatchProofVerdict = $runtimeUnlockRetryDispatchProofVerdict
         RuntimeUnlockRetryDispatchChainClosureProofVerdict = $runtimeUnlockRetryDispatchChainClosureProofVerdict
         RuntimeUnlockRetryReleaseCount = $runtimeUnlockRetryDispatchReleaseCount
+        RuntimeUnlockRetryDispatchAuthorityGrantedRawCount = $runtimeUnlockRetryDispatchInstallProof.AuthorityGrantedRawCount
         RuntimeUnlockRetryDispatchAuthorityGrantedCount = $runtimeUnlockRetryDispatchAuthorityGrantedEvents.Count
         RuntimeUnlockRetryDispatchDecisionStagedCount = $runtimeUnlockRetryDispatchInstallProof.DecisionStagedCount
         RuntimeUnlockRetryDispatchInstallReceiptIssuedCount = $runtimeUnlockRetryDispatchInstallProof.ReceiptIssuedCount
         RuntimeUnlockRetryDispatchInstallCommittedCount = $runtimeUnlockRetryDispatchInstallProof.CommittedCount
         RuntimeUnlockRetryDispatchInstallRejectedCount = $runtimeUnlockRetryDispatchInstallProof.RejectedCount
         RuntimeUnlockRetryDispatchInstallVerdict = $runtimeUnlockRetryDispatchInstallProof.Verdict
+        RuntimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount = $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRawCount
+        RuntimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount = $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteDistinctCount
+        RuntimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount = $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRecoveredCount
+        RuntimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount = $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteUnresolvedCount
+        RuntimeUnlockRetryDispatchInstallGrantEvidenceVerdict = $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceVerdict
         RuntimeUnlockRetryDispatchAuthorityRejectedCount = $runtimeUnlockRetryDispatchAuthorityRejectedEvents.Count
         RuntimeUnlockRetryDispatchSuccessorAttemptMismatchCount = $runtimeUnlockRetryDispatchSuccessorAttemptMismatchEvents.Count
         RuntimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount = $runtimeUnlockRetryZeroOfferSuccessorProof.RawCount
@@ -20058,6 +20253,13 @@ function New-FileTransferInvariantLedgerObject {
         invariant_failure_class = $combinedInvariant.FailureClass
         goodput_bytes_per_second = $goodput
         recovery_failure_class = $recoveryClassification.Class
+        runtime_unlock_retry_dispatch_authority_granted_raw_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedRawCount
+        runtime_unlock_retry_dispatch_authority_granted_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedCount
+        runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount
+        runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_distinct_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount
+        runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount
+        runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount
+        runtime_unlock_retry_dispatch_install_grant_evidence_verdict = $recoveryClassification.RuntimeUnlockRetryDispatchInstallGrantEvidenceVerdict
         regular_v4_frontier_repair_settlement_disposition_unverifiable_raw_count = [string]$recoveryClassification.RegularV4FrontierRepairSettlementDispositionUnverifiableRawCount
         regular_v4_frontier_repair_settlement_disposition_unverifiable_distinct_count = [string]$recoveryClassification.RegularV4FrontierRepairSettlementDispositionUnverifiableDistinctCount
         regular_v4_frontier_repair_settlement_disposition_unverifiable_recovered_count = [string]$recoveryClassification.RegularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount
@@ -20427,7 +20629,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("gate_status={0}" -f $effectiveGateStatus),
         ("transfer_id={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.TransferId)) { '(none)' } else { $Summary.TransferId }))),
         ("next_artifact={0}" -f $effectiveNextArtifact),
-        ("acceptance_failure_class={0}" -f ($(if ($recoveryClassification.Class -in @('runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery')) { 'incomplete_proof' } elseif ($recoveryClassification.Class -in @('runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_repair_missing_range_not_preserved')) { 'route_runtime' } elseif ($invariantMayOwnAcceptanceFailure) { $combinedInvariant.FailureClass } else { 'none' }))),
+        ("acceptance_failure_class={0}" -f ($(if ($recoveryClassification.Class -in @('runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery')) { 'incomplete_proof' } elseif ($recoveryClassification.Class -in @('runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_repair_missing_range_not_preserved')) { 'route_runtime' } elseif ($invariantMayOwnAcceptanceFailure) { $combinedInvariant.FailureClass } else { 'none' }))),
         ("release_route_law_verdict={0}" -f $releaseRouteLaw.Verdict),
         ("terminal_lifecycle_invariant_verdict={0}" -f $terminalLifecycleInvariant.Verdict),
         ("control_priority_invariant_verdict={0}" -f $controlPriorityInvariant.Verdict),
@@ -20490,12 +20692,18 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_retry_dispatch_proof_verdict={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchProofVerdict),
         ("runtime_unlock_retry_dispatch_chain_closure_proof_verdict={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchChainClosureProofVerdict),
         ("runtime_unlock_retry_release_count={0}" -f $recoveryClassification.RuntimeUnlockRetryReleaseCount),
+        ("runtime_unlock_retry_dispatch_authority_granted_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedRawCount),
         ("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedCount),
         ("runtime_unlock_retry_dispatch_decision_staged_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchDecisionStagedCount),
         ("runtime_unlock_retry_dispatch_install_receipt_issued_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchInstallReceiptIssuedCount),
         ("runtime_unlock_retry_dispatch_install_committed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchInstallCommittedCount),
         ("runtime_unlock_retry_dispatch_install_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchInstallRejectedCount),
         ("runtime_unlock_retry_dispatch_install_verdict={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchInstallVerdict),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_verdict={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchInstallGrantEvidenceVerdict),
         ("runtime_unlock_retry_dispatch_authority_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchAuthorityRejectedCount),
         ("runtime_unlock_retry_dispatch_successor_attempt_mismatch_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSuccessorAttemptMismatchCount),
         ("runtime_unlock_retry_dispatch_decision_tuple_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchDecisionTupleRejectedCount),

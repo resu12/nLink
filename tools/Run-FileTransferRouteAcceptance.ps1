@@ -323,6 +323,17 @@ function Write-RouteAcceptanceFakeCursorEvidence {
     }
 }
 
+function Test-RouteAcceptanceIncompleteProofRuntimeCandidate {
+    param([AllowEmptyString()][string]$Candidate)
+
+    return $Candidate -in @(
+        'regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved',
+        'regular_v4_frontier_repair_successor_pressure_install_missing',
+        'regular_v4_frontier_repair_settlement_disposition_unverifiable',
+        'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery',
+        'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete')
+}
+
 function Set-RouteAcceptanceResultEvidence {
     param(
         [Parameter(Mandatory = $true)]$Result,
@@ -389,6 +400,7 @@ function Set-RouteAcceptanceResultEvidence {
     }
 
     if (-not [bool]$Result.currentRuntimeProof -or
+        (Test-RouteAcceptanceIncompleteProofRuntimeCandidate -Candidate ([string]$Result.runtimeFailureCandidate)) -or
         -not [string]::Equals([string]$Result.transferEvidenceStatus, 'complete', [System.StringComparison]::OrdinalIgnoreCase)) {
         $Result.runtimeCorrectnessVerdict = 'incomplete_proof'
         $Result.evidenceClassification = 'incomplete_proof'
@@ -962,6 +974,13 @@ function New-RouteAcceptanceRunResult {
         transferEvidenceStatus = 'not_started'
         runtimeCorrectnessVerdict = 'incomplete_proof'
         runtimeFailureCandidate = '(none)'
+        runtimeUnlockRetryDispatchAuthorityGrantedRawCount = 0
+        runtimeUnlockRetryDispatchAuthorityGrantedCount = 0
+        runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount = 0
+        runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount = 0
+        runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount = 0
+        runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount = 0
+        runtimeUnlockRetryDispatchInstallGrantEvidenceVerdict = 'none'
         regularV4FrontierRepairMissingRangeNotPreservedRawCount = 0
         regularV4FrontierRepairMissingRangeNotPreservedDistinctCount = 0
         regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount = 0
@@ -2424,6 +2443,13 @@ function Assert-Phase4OperatorVerdict {
     }
     $Result.runtimeFailureCandidate = $firstProofClass
     $Result.firstProofChainFailureClass = $firstProofClass
+    $Result.runtimeUnlockRetryDispatchAuthorityGrantedRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_authority_granted_raw_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchAuthorityGrantedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_authority_granted_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_distinct_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchInstallGrantEvidenceVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_install_grant_evidence_verdict' -DefaultValue 'none'
     $Result.regularV4FrontierRepairMissingRangeNotPreservedRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_missing_range_not_preserved_raw_count' -DefaultValue '0')
     $Result.regularV4FrontierRepairMissingRangeNotPreservedDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_missing_range_not_preserved_distinct_count' -DefaultValue '0')
     $Result.regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_missing_range_not_preserved_recovered_count' -DefaultValue '0')
@@ -4104,6 +4130,40 @@ function Write-RouteAcceptanceFakePhase4Run {
             $reportPath = Join-Path $ArtifactDir $reportName
             $reportText = Get-Content -LiteralPath $reportPath -Raw
             foreach ($fixtureLine in $closureLivenessFixtureLines) {
+                $separatorIndex = $fixtureLine.IndexOf('=')
+                $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
+                $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
+                if ([regex]::IsMatch($reportText, $fixturePattern)) {
+                    $reportText = [regex]::Replace($reportText, $fixturePattern, $fixtureLine)
+                }
+                else {
+                    $reportText = $reportText.TrimEnd("`r", "`n") + [Environment]::NewLine + $fixtureLine + [Environment]::NewLine
+                }
+            }
+            Set-Content -LiteralPath $reportPath -Value $reportText -Encoding UTF8
+        }
+    }
+
+    if (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RETRY_DISPATCH_INSTALL_GRANT_EVIDENCE_SUMMARY_FIXTURE') {
+        $grantEvidenceFixtureLines = @(
+            'runtime_unlock_retry_dispatch_authority_granted_raw_count=2',
+            'runtime_unlock_retry_dispatch_authority_granted_count=0',
+            'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count=2',
+            'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_distinct_count=2',
+            'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count=0',
+            'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count=2',
+            'runtime_unlock_retry_dispatch_install_grant_evidence_verdict=fail',
+            'first_proof_chain_failure_class=runtime_unlock_retry_dispatch_install_grant_evidence_incomplete',
+            'first_proof_chain_failure_event=runtime_unlock_retry_dispatch_authority_granted',
+            'first_proof_chain_failure_reason=retry_dispatch_grant_request_active_predecessor_supersession_missing',
+            'first_proof_chain_failure_sequence=5510',
+            'first_proof_chain_failure_source_path=filetransfer-retained-log-slice.log',
+            'first_proof_chain_failure_line_number=5510'
+        )
+        foreach ($reportName in @('filetransfer-route-consistency-summary.txt', 'filetransfer-operator-verdict.txt')) {
+            $reportPath = Join-Path $ArtifactDir $reportName
+            $reportText = Get-Content -LiteralPath $reportPath -Raw
+            foreach ($fixtureLine in $grantEvidenceFixtureLines) {
                 $separatorIndex = $fixtureLine.IndexOf('=')
                 $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
                 $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
@@ -7059,11 +7119,7 @@ function Get-RouteAcceptanceResultFailureClass {
         -not [string]::IsNullOrWhiteSpace([string]$Result.runtimeFailureCandidate) -and
         -not [string]::Equals([string]$Result.runtimeFailureCandidate, '(none)', [System.StringComparison]::OrdinalIgnoreCase) -and
         -not [string]::Equals([string]$Result.runtimeFailureCandidate, 'none', [System.StringComparison]::OrdinalIgnoreCase)) {
-        if ([string]$Result.runtimeFailureCandidate -in @(
-                'regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved',
-                'regular_v4_frontier_repair_successor_pressure_install_missing',
-                'regular_v4_frontier_repair_settlement_disposition_unverifiable',
-                'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery')) {
+        if (Test-RouteAcceptanceIncompleteProofRuntimeCandidate -Candidate ([string]$Result.runtimeFailureCandidate)) {
             return 'incomplete_proof'
         }
         if ([string]$Result.runtimeFailureCandidate -in @('active_file_tuna_v6_evidence', 'diagnostic_regular_nkn_v6_evidence')) {
@@ -7603,6 +7659,13 @@ function New-RouteAcceptanceSummaryRunDto {
         transferEvidenceStatus = [string]$Result.transferEvidenceStatus
         runtimeCorrectnessVerdict = [string]$Result.runtimeCorrectnessVerdict
         runtimeFailureCandidate = [string]$Result.runtimeFailureCandidate
+        runtimeUnlockRetryDispatchAuthorityGrantedRawCount = [int]$Result.runtimeUnlockRetryDispatchAuthorityGrantedRawCount
+        runtimeUnlockRetryDispatchAuthorityGrantedCount = [int]$Result.runtimeUnlockRetryDispatchAuthorityGrantedCount
+        runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount = [int]$Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount
+        runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount = [int]$Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount
+        runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount = [int]$Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount
+        runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount = [int]$Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount
+        runtimeUnlockRetryDispatchInstallGrantEvidenceVerdict = [string]$Result.runtimeUnlockRetryDispatchInstallGrantEvidenceVerdict
         regularV4FrontierRepairMissingRangeNotPreservedRawCount = [int]$Result.regularV4FrontierRepairMissingRangeNotPreservedRawCount
         regularV4FrontierRepairMissingRangeNotPreservedDistinctCount = [int]$Result.regularV4FrontierRepairMissingRangeNotPreservedDistinctCount
         regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount = [int]$Result.regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount
@@ -7823,6 +7886,12 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingRecoveredCount = 0
     $runtimeUnlockRegularV4RecoveryLeaseClosureOfferTimeoutHandoffMissingUnresolvedCount = 0
     $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount = 0
+    $runtimeUnlockRetryDispatchAuthorityGrantedRawCount = 0
+    $runtimeUnlockRetryDispatchAuthorityGrantedCount = 0
+    $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount = 0
+    $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount = 0
+    $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount = 0
+    $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount = 0
     $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount = 0
     $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount = 0
     $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRawCount = 0
@@ -7834,6 +7903,12 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount = 0
     $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedUnresolvedCount = 0
     foreach ($runDto in $runDtos) {
+        $runtimeUnlockRetryDispatchAuthorityGrantedRawCount += [int]$runDto.runtimeUnlockRetryDispatchAuthorityGrantedRawCount
+        $runtimeUnlockRetryDispatchAuthorityGrantedCount += [int]$runDto.runtimeUnlockRetryDispatchAuthorityGrantedCount
+        $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount += [int]$runDto.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount
+        $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount += [int]$runDto.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount
+        $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount += [int]$runDto.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount
+        $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount += [int]$runDto.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount
         $fallbackTailBridgeRecoveryGenerationMismatchRawCount += [int]$runDto.fallbackTailBridgeRecoveryGenerationMismatchRawCount
         $fallbackTailBridgeRecoveryGenerationMismatchDistinctCount += [int]$runDto.fallbackTailBridgeRecoveryGenerationMismatchDistinctCount
         $fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount += [int]$runDto.fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount
@@ -7978,6 +8053,18 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     else {
         'none'
     }
+    $runtimeUnlockRetryDispatchInstallGrantEvidenceVerdict = if (
+        $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.runtimeUnlockRetryDispatchInstallGrantEvidenceVerdict -eq 'fail' }).Count -gt 0) {
+        'fail'
+    }
+    elseif ($runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.runtimeUnlockRetryDispatchInstallGrantEvidenceVerdict -eq 'pass' }).Count -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
+    }
     $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict = if (
         $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount -gt 0 -or
         @($runDtos | Where-Object { [string]$_.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict -eq 'fail' }).Count -gt 0) {
@@ -8049,7 +8136,9 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $correctnessVerdict = if ($correctnessFailureLines.Count -eq 0 -and $script:RunResults.Count -eq $expectedRunCount) { 'PASS' } else { 'FAIL' }
     $performanceVerdict = if ($performanceFailureLines.Count -eq 0) { 'PASS' } else { 'FAIL' }
     $runtimeCorrectnessVerdict = if ($AcceptancePhase -eq 'phase5' -and
-        (-not [bool]$evidence.CurrentRuntimeProof -or $transferEvidenceStatus -ne 'complete')) {
+        (-not [bool]$evidence.CurrentRuntimeProof -or
+            $transferEvidenceStatus -ne 'complete' -or
+            (Test-RouteAcceptanceIncompleteProofRuntimeCandidate -Candidate $runtimeFailureCandidate))) {
         'incomplete_proof'
     }
     elseif ($correctnessVerdict -eq 'PASS' -and $runtimeFailureCandidate -eq '(none)') {
@@ -8088,6 +8177,13 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("transfer_evidence_status={0}" -f $transferEvidenceStatus),
         ("runtime_correctness_verdict={0}" -f $runtimeCorrectnessVerdict),
         ("runtime_failure_candidate={0}" -f $runtimeFailureCandidate),
+        ("runtime_unlock_retry_dispatch_authority_granted_raw_count={0}" -f $runtimeUnlockRetryDispatchAuthorityGrantedRawCount),
+        ("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $runtimeUnlockRetryDispatchAuthorityGrantedCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_distinct_count={0}" -f $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count={0}" -f $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count={0}" -f $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_install_grant_evidence_verdict={0}" -f $runtimeUnlockRetryDispatchInstallGrantEvidenceVerdict),
         ("first_proof_chain_failure_class={0}" -f $firstProofChainFailureClass),
         ("first_proof_chain_failure_event={0}" -f $firstProofChainFailureEvent),
         ("first_proof_chain_failure_reason={0}" -f $firstProofChainFailureReason),
@@ -8211,6 +8307,13 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.transfer_evidence_status={1}" -f $prefix, $result.transferEvidenceStatus)
         $textLines += ("{0}.runtime_correctness_verdict={1}" -f $prefix, $result.runtimeCorrectnessVerdict)
         $textLines += ("{0}.runtime_failure_candidate={1}" -f $prefix, $result.runtimeFailureCandidate)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_authority_granted_raw_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchAuthorityGrantedRawCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_authority_granted_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchAuthorityGrantedCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_distinct_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_install_grant_evidence_verdict={1}" -f $prefix, $result.runtimeUnlockRetryDispatchInstallGrantEvidenceVerdict)
         $textLines += ("{0}.regular_v4_frontier_repair_missing_range_not_preserved_raw_count={1}" -f $prefix, $result.regularV4FrontierRepairMissingRangeNotPreservedRawCount)
         $textLines += ("{0}.regular_v4_frontier_repair_missing_range_not_preserved_distinct_count={1}" -f $prefix, $result.regularV4FrontierRepairMissingRangeNotPreservedDistinctCount)
         $textLines += ("{0}.regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={1}" -f $prefix, $result.regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount)
@@ -8404,6 +8507,13 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         transferEvidenceStatus = $transferEvidenceStatus
         runtimeCorrectnessVerdict = $runtimeCorrectnessVerdict
         runtimeFailureCandidate = $runtimeFailureCandidate
+        runtimeUnlockRetryDispatchAuthorityGrantedRawCount = $runtimeUnlockRetryDispatchAuthorityGrantedRawCount
+        runtimeUnlockRetryDispatchAuthorityGrantedCount = $runtimeUnlockRetryDispatchAuthorityGrantedCount
+        runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount = $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount
+        runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount = $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount
+        runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount = $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount
+        runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount = $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount
+        runtimeUnlockRetryDispatchInstallGrantEvidenceVerdict = $runtimeUnlockRetryDispatchInstallGrantEvidenceVerdict
         firstProofChainFailureClass = $firstProofChainFailureClass
         firstProofChainFailureEvent = $firstProofChainFailureEvent
         firstProofChainFailureReason = $firstProofChainFailureReason

@@ -13684,9 +13684,25 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             Assert.Contains("event=runtime_unlock_retry_dispatch_stale_callback_ignored;", tail, StringComparison.Ordinal);
             Assert.DoesNotContain("decision_reason=runtime_unlock_retry_state_replaced", tail, StringComparison.Ordinal);
             Assert.Contains("settlement_outcome=Superseded", tail, StringComparison.Ordinal);
+            var grantLines = tail
+                .Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries)
+                .Where(line => line.Contains(
+                    "event=runtime_unlock_retry_dispatch_authority_granted;",
+                    StringComparison.Ordinal))
+                .ToArray();
             Assert.Equal(
                 3,
-                tail.Split("event=runtime_unlock_retry_dispatch_authority_granted;", StringSplitOptions.None).Length - 1);
+                grantLines.Length);
+            Assert.Equal(
+                1,
+                grantLines.Count(line => line.Contains(
+                    "request_active_predecessor_supersession=0",
+                    StringComparison.Ordinal)));
+            Assert.Equal(
+                2,
+                grantLines.Count(line => line.Contains(
+                    "request_active_predecessor_supersession=1",
+                    StringComparison.Ordinal)));
             Assert.Equal(
                 3,
                 tail.Split("event=runtime_unlock_retry_dispatch_contract_settled;", StringSplitOptions.None).Length - 1);
@@ -13771,9 +13787,15 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         Assert.Contains("current_authority_id=", tail, StringComparison.Ordinal);
         Assert.Contains("event=runtime_unlock_retry_dispatch_install_committed;", tail, StringComparison.Ordinal);
         Assert.Contains("install_generation=1", tail, StringComparison.Ordinal);
-        Assert.Equal(
-            1,
-            tail.Split("event=runtime_unlock_retry_dispatch_authority_granted;", StringSplitOptions.None).Length - 1);
+        var grantLine = Assert.Single(
+            tail.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries)
+                .Where(line => line.Contains(
+                    "event=runtime_unlock_retry_dispatch_authority_granted;",
+                    StringComparison.Ordinal)));
+        Assert.Contains(
+            "request_active_predecessor_supersession=0",
+            grantLine,
+            StringComparison.Ordinal);
     }
 
     [Fact]

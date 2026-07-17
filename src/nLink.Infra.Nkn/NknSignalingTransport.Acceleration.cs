@@ -14806,11 +14806,15 @@ public sealed partial class NknSignalingTransport
         long stageExpiresUtcMs,
         FileTransferAuthorityId? currentAuthorityId)
         => $"{FormatRuntimeUnlockRetryDispatchAuthorityTuple(authority)}; " +
-           $"request_regular_v4_liveness_generation={request?.RegularV4LivenessGeneration ?? 0}; " +
-           $"request_bridge_decision_generation={request?.BridgeDecisionGeneration ?? 0}; " +
-           $"request_active_predecessor_supersession={(request?.RequestActivePredecessorSupersession == true ? 1 : 0)}; " +
+           $"{FormatRuntimeUnlockRetryDispatchInstallRequestTelemetry(request)}; " +
            $"install_generation={installGeneration}; stage_expires_utc_ms={stageExpiresUtcMs}; " +
            $"current_authority_id={SanitizeLogToken(currentAuthorityId?.ToString() ?? "(none)")}";
+
+    private static string FormatRuntimeUnlockRetryDispatchInstallRequestTelemetry(
+        RuntimeUnlockRetryDispatchAuthorityRequest? request)
+        => $"request_regular_v4_liveness_generation={request?.RegularV4LivenessGeneration ?? 0}; " +
+           $"request_bridge_decision_generation={request?.BridgeDecisionGeneration ?? 0}; " +
+           $"request_active_predecessor_supersession={(request?.RequestActivePredecessorSupersession == true ? 1 : 0)}";
 
     private static void LogRuntimeUnlockRetryDispatchInstallRejected(
         RuntimeUnlockRetryDispatchInstallReceipt receipt,
@@ -16145,7 +16149,7 @@ public sealed partial class NknSignalingTransport
         {
             LocalOperationalLog.Info(
                 "NKN.Tuna",
-                $"event=runtime_unlock_retry_dispatch_authority_granted; {FormatRuntimeUnlockRetryDispatchAuthorityTuple(followUp.Contract.Authority)}; request_regular_v4_liveness_generation={followUp.Request.RegularV4LivenessGeneration}; request_bridge_decision_generation={followUp.Request.BridgeDecisionGeneration}; offer_generation=0; offer_nonce=(none); attempt_phase={SanitizeLogToken(followUp.Contract.AttemptPhase.ToString())}; successor_authority_id=(none); install_generation={followUp.Receipt.InstallGeneration}; queued_behind_active_negotiation={(followUp.State.QueuedBehindActiveNegotiation ? 1 : 0)}; decision_reason={SanitizeLogToken(followUp.DecisionReason)}");
+                $"event=runtime_unlock_retry_dispatch_authority_granted; {FormatRuntimeUnlockRetryDispatchAuthorityTuple(followUp.Contract.Authority)}; {FormatRuntimeUnlockRetryDispatchInstallRequestTelemetry(followUp.Request)}; offer_generation=0; offer_nonce=(none); attempt_phase={SanitizeLogToken(followUp.Contract.AttemptPhase.ToString())}; successor_authority_id=(none); install_generation={followUp.Receipt.InstallGeneration}; queued_behind_active_negotiation={(followUp.State.QueuedBehindActiveNegotiation ? 1 : 0)}; decision_reason={SanitizeLogToken(followUp.DecisionReason)}");
         }
         ScheduleRuntimeUnlockRetryDispatchAuthoritySettlementCheck(followUp.State);
         ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed(
