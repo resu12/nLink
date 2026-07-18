@@ -801,11 +801,18 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Equal(0L, GetPrivateProperty<long>(context, "DataSessionGeneration"));
         using var replacement = new RecordingDataSession($"session_{transferId}", transferId);
 
-        typeof(SessionFileTransferService)
+        var replacementAccepted = Assert.IsType<bool>(typeof(SessionFileTransferService)
             .GetMethod("ReplaceInboundDataSessionLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, replacement]);
+            .Invoke(service, [context, replacement]));
 
+        Assert.True(replacementAccepted);
         Assert.Equal(1L, GetPrivateProperty<long>(context, "DataSessionGeneration"));
+        var replacementSettlement = Assert.Single(transport.RegularV4FrontierRepairSettlements.Where(
+            settlement => settlement.AuthorityId == originalAuthorityId));
+        Assert.Equal(FileTransferRegularV4FrontierRepairSettlementOutcome.StaleRejected, replacementSettlement.Outcome);
+        Assert.Null(GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureBinding"));
+        Assert.Null(GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
+        Assert.Null(GetPrivatePropertyValue(context, "RetainedRegularV4FrontierRepairPressurePredecessor"));
         Assert.Null(GetPrivatePropertyValue(context, "V4RegularFrontierRepairProjection"));
         Assert.True(GetPrivateProperty<bool>(context, "V4RegularFrontierRepairProjectionRefreshRequired"));
 
@@ -819,6 +826,135 @@ public sealed partial class SessionFileTransferV4SenderTests
         var reboundAuthorityId = Assert.IsType<FileTransferAuthorityId>(
             reboundAuthority!.GetType().GetProperty("AuthorityId")!.GetValue(reboundAuthority));
         Assert.NotEqual(originalAuthorityId, reboundAuthorityId);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public void RegularV4Projection_DataSessionReplacementFailsClosedWhenPressureRetirementFails()
+    {
+        const string transferId = "transfer_regular_v4_projection_data_session_retirement_failed";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateProjectionInboundContext(transferId);
+        typeof(SessionFileTransferService)
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "projection_data_session_retirement_failed");
+        _ = CreateInboundState(service, context, "frontier_stall_repair_due", forceMissingRange: true);
+        var installedBinding = GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding");
+        Assert.NotNull(installedBinding);
+        var originalSession = GetPrivatePropertyValue(context, "DataSession");
+        Assert.NotNull(originalSession);
+        transport.RegularV4PressureSettlementApplyOverride = command => new(
+            command,
+            FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+            "unit_test_pressure_retirement_rejected",
+            CurrentAuthorityCleared: false,
+            RetainedPredecessorCleared: false);
+        using var replacement = new RecordingDataSession($"session_{transferId}", transferId);
+
+        var replacementAccepted = Assert.IsType<bool>(typeof(SessionFileTransferService)
+            .GetMethod("ReplaceInboundDataSessionLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, replacement]));
+
+        Assert.False(replacementAccepted);
+        Assert.Same(originalSession, GetPrivatePropertyValue(context, "DataSession"));
+        Assert.Equal(0L, GetPrivateProperty<long>(context, "DataSessionGeneration"));
+        Assert.Equal(installedBinding, GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
+        Assert.NotNull(GetPrivatePropertyValue(context, "V4RegularFrontierRepairProjection"));
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public void RegularV4Projection_DataSessionReplacementRetriesMalformedPendingInstallBeforeExactRetirement()
+    {
+        const string transferId = "transfer_regular_v4_projection_data_session_pending_only";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var installAttempt = 0;
+        transport.RegularV4PressureInstallOverride = pressure =>
+        {
+            installAttempt++;
+            var authority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(pressure.RepairAuthority);
+            return new(
+                authority,
+                installAttempt == 1
+                    ? FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed
+                    : FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent,
+                installAttempt == 1
+                    ? "unit_test_applied_receipt_generation_malformed"
+                    : "regular_v4_frontier_repair_pressure_already_installed",
+                installAttempt == 1 ? 2 : 1,
+                pressure.Reason);
+        };
+        var context = CreateProjectionInboundContext(transferId);
+        typeof(SessionFileTransferService)
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "projection_data_session_pending_only");
+        _ = CreateInboundState(service, context, "frontier_stall_repair_due", forceMissingRange: true);
+        Assert.NotNull(GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureBinding"));
+        Assert.Null(GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
+        Assert.Single(transport.RegularV4PressureInstallReceipts);
+        using var replacement = new RecordingDataSession($"session_{transferId}", transferId);
+
+        var replacementAccepted = Assert.IsType<bool>(typeof(SessionFileTransferService)
+            .GetMethod("ReplaceInboundDataSessionLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, replacement]));
+
+        Assert.True(replacementAccepted);
+        var receipts = transport.RegularV4PressureInstallReceipts.ToArray();
+        Assert.Equal(2, receipts.Length);
+        Assert.Equal(receipts[0].Authority.AuthorityId, receipts[1].Authority.AuthorityId);
+        Assert.Equal(new long[] { 2, 1 }, receipts.Select(static receipt => receipt.InstallGeneration).ToArray());
+        var settlement = Assert.Single(transport.RegularV4FrontierRepairSettlements);
+        Assert.Equal(receipts[1].Authority.AuthorityId, settlement.AuthorityId);
+        Assert.Equal(FileTransferRegularV4FrontierRepairSettlementOutcome.StaleRejected, settlement.Outcome);
+        Assert.Null(GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureBinding"));
+        Assert.Null(GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
+        Assert.Equal(1L, GetPrivateProperty<long>(context, "DataSessionGeneration"));
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public void RegularV4Projection_DataSessionReplacementRejectedPendingInstallPreservesBindingAndContext()
+    {
+        const string transferId = "transfer_regular_v4_projection_data_session_pending_rejected";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        transport.RegularV4PressureInstallOverride = pressure =>
+        {
+            var authority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(pressure.RepairAuthority);
+            return new(
+                authority,
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected,
+                "unit_test_pending_install_rejected",
+                1,
+                pressure.Reason);
+        };
+        var context = CreateProjectionInboundContext(transferId);
+        typeof(SessionFileTransferService)
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "projection_data_session_pending_rejected");
+        _ = CreateInboundState(service, context, "frontier_stall_repair_due", forceMissingRange: true);
+        var pending = GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureBinding");
+        Assert.NotNull(pending);
+        using var replacement = new RecordingDataSession($"session_{transferId}", transferId);
+
+        var replacementAccepted = Assert.IsType<bool>(typeof(SessionFileTransferService)
+            .GetMethod("ReplaceInboundDataSessionLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, replacement]));
+
+        Assert.False(replacementAccepted);
+        Assert.Equal(2, transport.RegularV4PressureInstallReceipts.Count);
+        Assert.Empty(transport.RegularV4FrontierRepairSettlements);
+        Assert.Equal(pending, GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureBinding"));
+        Assert.Null(GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
+        Assert.Equal(0L, GetPrivateProperty<long>(context, "DataSessionGeneration"));
     }
 
     [Theory]

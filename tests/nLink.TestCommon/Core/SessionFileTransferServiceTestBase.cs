@@ -161,7 +161,6 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         private int activeDataSessionSends;
         private int maxConcurrentDataSessionSends;
         private int dataSessionSendCount;
-        private long regularV4PressureInstallGeneration;
         private bool shouldUseFileTransferV6ForAcceleration;
         private bool isFileTunaActiveForRouteSelection;
         public LoopbackFileTransferTransport(string sessionId)
@@ -230,6 +229,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public ConcurrentQueue<FileTransferRegularV4FrontierRepairSettlement> RegularV4FrontierRepairSettlements { get; } = [];
         internal ConcurrentQueue<FileTransferRegularV4FrontierRepairPressureInstallReceipt> RegularV4PressureInstallReceipts { get; } = [];
         internal Func<FileTransferRegularV4ControlFeedbackPressure, FileTransferRegularV4FrontierRepairPressureInstallReceipt>? RegularV4PressureInstallOverride { get; set; }
+        internal Func<FileTransferRegularV4FrontierRepairPressureSettlementCommand, FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt>? RegularV4PressureSettlementApplyOverride { get; set; }
         public ConcurrentQueue<FileTransferRouteCompletedNotification> RouteCompletionNotifications { get; } = [];
         public ConcurrentQueue<FileTransferRouteHintNotification> ObservedRouteHints { get; } = [];
         public ConcurrentQueue<string> RuntimeUnlockProbeEvents { get; } = [];
@@ -356,10 +356,11 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             => RegularV4ControlFeedbackPressures.Enqueue(pressure);
 
         FileTransferRegularV4FrontierRepairPressureInstallReceipt IFileTransferRegularV4FrontierRepairPressureInstallBridge.InstallRegularV4FrontierRepairPressure(
-            FileTransferRegularV4ControlFeedbackPressure pressure)
+            FileTransferRegularV4FrontierRepairPressureInstallCommand command)
         {
+            var pressure = command.Pressure;
             RegularV4ControlFeedbackPressures.Enqueue(pressure);
-            var installGeneration = Interlocked.Increment(ref regularV4PressureInstallGeneration);
+            var installGeneration = command.InstallGeneration;
             var authority = pressure.RepairAuthority;
             FileTransferRegularV4FrontierRepairPressureInstallReceipt receipt;
             if (RegularV4PressureInstallOverride is { } installOverride)
@@ -412,8 +413,33 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             return receipt;
         }
 
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt
+            IFileTransferRegularV4FrontierRepairPressureInstallBridge.ApplyRegularV4FrontierRepairPressureSettlement(
+                FileTransferRegularV4FrontierRepairPressureSettlementCommand command)
+        {
+            RegularV4FrontierRepairSettlements.Enqueue(command.Settlement);
+            if (RegularV4PressureSettlementApplyOverride is { } settlementOverride)
+            {
+                return settlementOverride(command);
+            }
+
+            return new(
+                command,
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+                "regular_v4_frontier_repair_pressure_settlement_applied",
+                CurrentAuthorityCleared:
+                    command.Settlement.Outcome != FileTransferRegularV4FrontierRepairSettlementOutcome.Superseded,
+                RetainedPredecessorCleared:
+                    command.Settlement.Outcome == FileTransferRegularV4FrontierRepairSettlementOutcome.Superseded);
+        }
+
         public void ObserveRegularV4FrontierRepairSettlement(FileTransferRegularV4FrontierRepairSettlement settlement)
-            => RegularV4FrontierRepairSettlements.Enqueue(settlement);
+        {
+            if (!RegularV4FrontierRepairSettlements.Contains(settlement))
+            {
+                RegularV4FrontierRepairSettlements.Enqueue(settlement);
+            }
+        }
 
         public void ObserveFileTransferRouteCompleted(FileTransferRouteCompletedNotification notification)
         {

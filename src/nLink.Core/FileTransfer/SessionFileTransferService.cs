@@ -2940,7 +2940,11 @@ public sealed partial class SessionFileTransferService : IDisposable
                         return;
                     }
 
-                    ReplaceInboundDataSessionLocked(context, session);
+                    if (!ReplaceInboundDataSessionLocked(context, session))
+                    {
+                        session.Dispose();
+                        return;
+                    }
                     context.PullSessionActive = true;
                     context.NegotiatedDataProtocolVersion = context.RouteSelection.ProtocolVersion;
                     context.StatusMessage = "Waiting for V4 file-transfer manifest.";
@@ -3009,7 +3013,11 @@ public sealed partial class SessionFileTransferService : IDisposable
                         return;
                     }
 
-                    ReplaceInboundDataSessionLocked(context, session);
+                    if (!ReplaceInboundDataSessionLocked(context, session))
+                    {
+                        session.Dispose();
+                        return;
+                    }
                     context.PullSessionActive = true;
                     context.NegotiatedDataProtocolVersion = context.RouteSelection.ProtocolVersion;
                     context.StatusMessage = "Waiting for V6 file-transfer manifest.";
@@ -3086,7 +3094,11 @@ public sealed partial class SessionFileTransferService : IDisposable
                         return;
                     }
 
-                    ReplaceInboundDataSessionLocked(context, session);
+                    if (!ReplaceInboundDataSessionLocked(context, session))
+                    {
+                        session.Dispose();
+                        return;
+                    }
                     context.PullSessionActive = true;
                     context.NegotiatedDataProtocolVersion = context.RouteSelection.ProtocolVersion;
                     context.StatusMessage = "Waiting for V6 file-transfer manifest.";
@@ -4981,7 +4993,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private static string FormatFileTransferLegState(FileTransferLegState state)
         => FileTransferCoordinator.FormatLegState(state);
 
-    private static FileTransferLeg? EnsureOutboundTransferLegLocked(
+    private FileTransferLeg? EnsureOutboundTransferLegLocked(
         OutboundTransferContext context,
         string reason,
         FileTransferInitialTunaReadinessEvidence? initialTunaReadinessEvidence = null,
@@ -4997,7 +5009,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             allowInitialRouteFallback: initialRouteFallbackSelection.HasValue,
             initialRouteFallbackSelection: initialRouteFallbackSelection);
 
-    private static FileTransferLeg? EnsureInboundTransferLegLocked(
+    private FileTransferLeg? EnsureInboundTransferLegLocked(
         InboundTransferContext context,
         string reason,
         FileTransferInitialTunaReadinessEvidence? initialTunaReadinessEvidence = null)
@@ -5656,7 +5668,13 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.LastRuntimeUnlockRegularV4RecoveryLifecycle,
             context.RuntimeUnlockRecoveryLeaseClosureAvailable,
             context.PendingFallbackTailYieldTransportEpochReauthorization,
-            context.LastFallbackTailYieldTransportEpochReauthorizationGeneration);
+            context.LastFallbackTailYieldTransportEpochReauthorizationGeneration,
+            context.PendingRegularV4FrontierRepairPressureBinding,
+            context.InstalledRegularV4FrontierRepairPressureBinding,
+            context.RetainedRegularV4FrontierRepairPressurePredecessor,
+            context.LastRegularV4FrontierRepairPressureSettlement,
+            context.LastRegularV4FrontierRepairPressureInstallGeneration,
+            context.LastRegularV4FrontierRepairPressureSettlementApplyReceipt);
 
     private static void ApplyCoordinatorDecisionToContextLocked(
         OutboundTransferContext context,
@@ -5714,6 +5732,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             decision.Reason);
         context.CurrentRepairReplayDecision = decision.State.CurrentRepairReplayDecision;
         context.LastRepairReplayGeneration = decision.State.LastRepairReplayGeneration;
+        ApplyRegularV4FrontierRepairPressureBindingStateLocked(context, decision.State);
         context.CurrentTransportEpochDecision = decision.State.CurrentTransportEpochDecision;
         context.LastTransportEpochDecisionGeneration = decision.State.LastTransportEpochDecisionGeneration;
         context.CurrentBridgeRecoveryDecision = decision.State.CurrentBridgeRecoveryDecision;
@@ -5834,6 +5853,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             decision.Reason);
         context.CurrentRepairReplayDecision = decision.State.CurrentRepairReplayDecision;
         context.LastRepairReplayGeneration = decision.State.LastRepairReplayGeneration;
+        ApplyRegularV4FrontierRepairPressureBindingStateLocked(context, decision.State);
         context.CurrentTransportEpochDecision = decision.State.CurrentTransportEpochDecision;
         context.LastTransportEpochDecisionGeneration = decision.State.LastTransportEpochDecisionGeneration;
         context.CurrentBridgeRecoveryDecision = decision.State.CurrentBridgeRecoveryDecision;
@@ -5962,6 +5982,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             decision.RejectionReason);
         context.CurrentRepairReplayDecision = decision.State.CurrentRepairReplayDecision;
         context.LastRepairReplayGeneration = decision.State.LastRepairReplayGeneration;
+        ApplyRegularV4FrontierRepairPressureBindingStateLocked(context, decision.State);
         context.CurrentTransportEpochDecision = decision.State.CurrentTransportEpochDecision;
         context.LastTransportEpochDecisionGeneration = decision.State.LastTransportEpochDecisionGeneration;
         context.CurrentBridgeRecoveryDecision = decision.State.CurrentBridgeRecoveryDecision;
@@ -6028,6 +6049,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             decision.RejectionReason);
         context.CurrentRepairReplayDecision = decision.State.CurrentRepairReplayDecision;
         context.LastRepairReplayGeneration = decision.State.LastRepairReplayGeneration;
+        ApplyRegularV4FrontierRepairPressureBindingStateLocked(context, decision.State);
         context.CurrentTransportEpochDecision = decision.State.CurrentTransportEpochDecision;
         context.LastTransportEpochDecisionGeneration = decision.State.LastTransportEpochDecisionGeneration;
         context.CurrentBridgeRecoveryDecision = decision.State.CurrentBridgeRecoveryDecision;
@@ -6397,7 +6419,49 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.LastRuntimeUnlockRegularV4RecoveryLifecycle,
             context.RuntimeUnlockRecoveryLeaseClosureAvailable,
             context.PendingFallbackTailYieldTransportEpochReauthorization,
-            context.LastFallbackTailYieldTransportEpochReauthorizationGeneration);
+            context.LastFallbackTailYieldTransportEpochReauthorizationGeneration,
+            context.PendingRegularV4FrontierRepairPressureBinding,
+            context.InstalledRegularV4FrontierRepairPressureBinding,
+            context.RetainedRegularV4FrontierRepairPressurePredecessor,
+            context.LastRegularV4FrontierRepairPressureSettlement,
+            context.LastRegularV4FrontierRepairPressureInstallGeneration,
+            context.LastRegularV4FrontierRepairPressureSettlementApplyReceipt);
+
+    private static void ApplyRegularV4FrontierRepairPressureBindingStateLocked(
+        OutboundTransferContext context,
+        FileTransferCoordinatorState state)
+    {
+        context.PendingRegularV4FrontierRepairPressureBinding =
+            state.PendingRegularV4FrontierRepairPressureBinding;
+        context.InstalledRegularV4FrontierRepairPressureBinding =
+            state.InstalledRegularV4FrontierRepairPressureBinding;
+        context.RetainedRegularV4FrontierRepairPressurePredecessor =
+            state.RetainedRegularV4FrontierRepairPressurePredecessor;
+        context.LastRegularV4FrontierRepairPressureSettlement =
+            state.LastRegularV4FrontierRepairPressureSettlement;
+        context.LastRegularV4FrontierRepairPressureInstallGeneration =
+            state.LastRegularV4FrontierRepairPressureInstallGeneration;
+        context.LastRegularV4FrontierRepairPressureSettlementApplyReceipt =
+            state.LastRegularV4FrontierRepairPressureSettlementApplyReceipt;
+    }
+
+    private static void ApplyRegularV4FrontierRepairPressureBindingStateLocked(
+        InboundTransferContext context,
+        FileTransferCoordinatorState state)
+    {
+        context.PendingRegularV4FrontierRepairPressureBinding =
+            state.PendingRegularV4FrontierRepairPressureBinding;
+        context.InstalledRegularV4FrontierRepairPressureBinding =
+            state.InstalledRegularV4FrontierRepairPressureBinding;
+        context.RetainedRegularV4FrontierRepairPressurePredecessor =
+            state.RetainedRegularV4FrontierRepairPressurePredecessor;
+        context.LastRegularV4FrontierRepairPressureSettlement =
+            state.LastRegularV4FrontierRepairPressureSettlement;
+        context.LastRegularV4FrontierRepairPressureInstallGeneration =
+            state.LastRegularV4FrontierRepairPressureInstallGeneration;
+        context.LastRegularV4FrontierRepairPressureSettlementApplyReceipt =
+            state.LastRegularV4FrontierRepairPressureSettlementApplyReceipt;
+    }
 
     private static bool TryCaptureRuntimeOwnerLocked(
         OutboundTransferContext context,
@@ -9669,7 +9733,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             $"event=filetransfer_runtime_owner_workers_retired; direction=inbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; retired_runtime_generation={retiredOwner.Value.RuntimeGeneration}; current_runtime_generation={context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; retired_route={FormatProtocolLogValue(retiredOwner.Value.RouteToken)}; current_route={FormatProtocolLogValue(context.CurrentRuntimeOwner?.RouteToken ?? "(none)")}; reason={FormatProtocolLogValue(reason)}");
     }
 
-    private static FileTransferLeg? StartOutboundTransferLegLocked(
+    private FileTransferLeg? StartOutboundTransferLegLocked(
         OutboundTransferContext context,
         FileTransferRouteSelection routeSelection,
         string reason,
@@ -9691,8 +9755,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             : context.V6TransportEpoch?.EpochId ?? Math.Max(0, context.PullTransportRebindGeneration));
         var bridgeRecoveryGeneration = bridgeRecoveryGenerationOverride ?? Math.Max(0, context.PullTransportRebindGeneration);
         var retiredOwner = context.CurrentRuntimeOwner;
-        var decision = FileTransferCoordinator.Apply(
-            new FileTransferCoordinatorEvent(
+        var coordinatorEvent = new FileTransferCoordinatorEvent(
                 FileTransferCoordinatorEventKind.StartTransfer,
                 routeSelection,
                 FileTransferTransportHandoffKind.None,
@@ -9711,8 +9774,29 @@ public sealed partial class SessionFileTransferService : IDisposable
                 AllowInitialRouteFallback: allowInitialRouteFallback,
                 InitialRouteFallbackSelection: initialRouteFallbackSelection,
                 FallbackTailYieldTransportEpochReauthorizationRequest:
-                    fallbackTailYieldTransportEpochReauthorizationRequest),
+                    fallbackTailYieldTransportEpochReauthorizationRequest);
+        var decision = FileTransferCoordinator.Apply(
+            coordinatorEvent,
             CreateCoordinatorStateLocked(context));
+        if (string.Equals(
+                decision.MutationRejectedReason,
+                "regular_v4_frontier_repair_pressure_retirement_required",
+                StringComparison.Ordinal))
+        {
+            if (!TryRetireRegularV4FrontierRepairPressureForScopeReplacementLocked(
+                    context,
+                    $"start_transfer_{reason}"))
+            {
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_start_transfer_rejected; direction=outbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; requested_route={FormatProtocolLogValue(routeSelection.TelemetryToken)}; requested_transport_epoch={transportEpoch}; requested_bridge_recovery_generation={bridgeRecoveryGeneration}; decision_reason=regular_v4_frontier_repair_pressure_retirement_failed");
+                return null;
+            }
+
+            decision = FileTransferCoordinator.Apply(
+                coordinatorEvent,
+                CreateCoordinatorStateLocked(context));
+        }
         LogInitialTunaRouteSelectionDecision(
             FileTransferDirection.Outbound,
             context.TransferId,
@@ -9768,7 +9852,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         return leg;
     }
 
-    private static FileTransferLeg? StartInboundTransferLegLocked(
+    private FileTransferLeg? StartInboundTransferLegLocked(
         InboundTransferContext context,
         FileTransferRouteSelection routeSelection,
         string reason,
@@ -9786,8 +9870,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         var transportEpoch = transportEpochOverride ?? context.V6TransportEpoch?.EpochId ?? Math.Max(0, context.PullTransportRebindGeneration);
         var bridgeRecoveryGeneration = bridgeRecoveryGenerationOverride ?? Math.Max(0, context.PullTransportRebindGeneration);
         var retiredOwner = context.CurrentRuntimeOwner;
-        var decision = FileTransferCoordinator.Apply(
-            new FileTransferCoordinatorEvent(
+        var coordinatorEvent = new FileTransferCoordinatorEvent(
                 FileTransferCoordinatorEventKind.StartTransfer,
                 routeSelection,
                 FileTransferTransportHandoffKind.None,
@@ -9804,8 +9887,29 @@ public sealed partial class SessionFileTransferService : IDisposable
                 FreezeCurrentLeg: freezeCurrent,
                 InitialTunaReadinessEvidence: initialTunaReadinessEvidence,
                 FallbackTailYieldTransportEpochReauthorizationRequest:
-                    fallbackTailYieldTransportEpochReauthorizationRequest),
+                    fallbackTailYieldTransportEpochReauthorizationRequest);
+        var decision = FileTransferCoordinator.Apply(
+            coordinatorEvent,
             CreateCoordinatorStateLocked(context));
+        if (string.Equals(
+                decision.MutationRejectedReason,
+                "regular_v4_frontier_repair_pressure_retirement_required",
+                StringComparison.Ordinal))
+        {
+            if (!TryRetireRegularV4FrontierRepairPressureForScopeReplacementLocked(
+                    context,
+                    $"start_transfer_{reason}"))
+            {
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_start_transfer_rejected; direction=inbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; requested_route={FormatProtocolLogValue(routeSelection.TelemetryToken)}; requested_transport_epoch={transportEpoch}; requested_bridge_recovery_generation={bridgeRecoveryGeneration}; decision_reason=regular_v4_frontier_repair_pressure_retirement_failed");
+                return null;
+            }
+
+            decision = FileTransferCoordinator.Apply(
+                coordinatorEvent,
+                CreateCoordinatorStateLocked(context));
+        }
         LogInitialTunaRouteSelectionDecision(
             FileTransferDirection.Inbound,
             context.TransferId,
@@ -16924,7 +17028,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             "FileTransferService",
             $"event=filetransfer_fallback_leg_authority_checkpoint_accepted; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; leg_id={FormatProtocolLogValue(leg.LegId)}; leg_generation={leg.Generation}; route={leg.RouteSelection.TelemetryToken}; protocol_version={leg.ProtocolVersion}; live_route_epoch={leg.LiveRouteEpochId}; transport_epoch={leg.TransportEpochId}; bridge_recovery_generation={leg.BridgeRecoveryGeneration}; checkpoint_request_id={FormatProtocolLogValue(requestId ?? "(none)")}; proven_committed_chunk={leg.ProvenCommittedChunkIndex}; proven_highest_observed_chunk={leg.ProvenHighestObservedChunkIndex}; reason={FormatProtocolLogValue(reason)}");
 
-    private static bool MarkOutboundFallbackCheckpointRequestedLocked(
+    private bool MarkOutboundFallbackCheckpointRequestedLocked(
         OutboundTransferContext context,
         FileTransferFrontierRequestFrameV6 request,
         string reason)
@@ -16982,7 +17086,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         return true;
     }
 
-    private static bool MarkInboundFallbackCheckpointRequestedLocked(
+    private bool MarkInboundFallbackCheckpointRequestedLocked(
         InboundTransferContext context,
         FileTransferFrontierRequestFrameV6 request,
         string reason)
@@ -17020,7 +17124,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         return true;
     }
 
-    private static void StartInboundFallbackCheckpointRecoveryLegIfNeededLocked(
+    private void StartInboundFallbackCheckpointRecoveryLegIfNeededLocked(
         InboundTransferContext context,
         FileTransferFrontierRequestFrameV6 request,
         string reason)
@@ -20002,6 +20106,19 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public RegularV4FrontierRepairContract? CurrentRegularV4FrontierRepairContract { get; set; }
 
+        public RegularV4FrontierRepairPressureBinding? PendingRegularV4FrontierRepairPressureBinding { get; set; }
+
+        public RegularV4FrontierRepairPressureBinding? InstalledRegularV4FrontierRepairPressureBinding { get; set; }
+
+        public RegularV4FrontierRepairPressureBinding? RetainedRegularV4FrontierRepairPressurePredecessor { get; set; }
+
+        public FileTransferRegularV4FrontierRepairSettlement? LastRegularV4FrontierRepairPressureSettlement { get; set; }
+
+        public long LastRegularV4FrontierRepairPressureInstallGeneration { get; set; }
+
+        public FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
+            LastRegularV4FrontierRepairPressureSettlementApplyReceipt { get; set; }
+
         public PullV4QueuedRepairSend? PendingRegularV4FrontierRepairPressureInstallRetry { get; set; }
 
         public FallbackFrontierRepairContract? CurrentFallbackFrontierRepairContract { get; set; }
@@ -20588,7 +20705,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         long CreditExhaustedTimeMsAtDecision,
         RuntimeOwnerToken? RuntimeOwner = null,
         RegularV4FrontierRepairContract? RegularV4RepairContract = null,
-        FallbackFrontierRepairContract? FallbackFrontierRepairContract = null);
+        FallbackFrontierRepairContract? FallbackFrontierRepairContract = null,
+        bool PeerSilenceReplayWrappedToFrontier = false);
 
     private sealed class RegularV4FrontierRepairContract
     {
@@ -20604,9 +20722,17 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public string? PendingPressureInstallReason { get; set; }
 
+        public int? PendingPressureInstallFrontierLagChunks { get; set; }
+
+        public int? PendingPressureInstallRepairCount { get; set; }
+
+        public string? PendingPressureInstallBoundary { get; set; }
+
         public long? PressureInstallDataSessionGeneration { get; set; }
 
         public FileTransferRegularV4FrontierRepairPressureInstallReceipt? PressureInstallReceipt { get; set; }
+
+        public RegularV4FrontierRepairPressureBinding? PressureBinding { get; set; }
     }
 
     private enum InboundRegularV4FrontierRepairProjectionKind
@@ -21185,6 +21311,19 @@ public sealed partial class SessionFileTransferService : IDisposable
         public RepairReplayDecision? CurrentRepairReplayDecision { get; set; }
 
         public RegularV4FrontierRepairContract? CurrentRegularV4FrontierRepairContract { get; set; }
+
+        public RegularV4FrontierRepairPressureBinding? PendingRegularV4FrontierRepairPressureBinding { get; set; }
+
+        public RegularV4FrontierRepairPressureBinding? InstalledRegularV4FrontierRepairPressureBinding { get; set; }
+
+        public RegularV4FrontierRepairPressureBinding? RetainedRegularV4FrontierRepairPressurePredecessor { get; set; }
+
+        public FileTransferRegularV4FrontierRepairSettlement? LastRegularV4FrontierRepairPressureSettlement { get; set; }
+
+        public long LastRegularV4FrontierRepairPressureInstallGeneration { get; set; }
+
+        public FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
+            LastRegularV4FrontierRepairPressureSettlementApplyReceipt { get; set; }
 
         public FallbackFrontierRepairContract? CurrentFallbackFrontierRepairContract { get; set; }
 

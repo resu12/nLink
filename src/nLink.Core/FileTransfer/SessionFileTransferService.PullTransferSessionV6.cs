@@ -64,7 +64,11 @@ public sealed partial class SessionFileTransferService
                     return;
                 }
 
-                ReplaceOutboundDataSessionLocked(context, dataSession);
+                if (!ReplaceOutboundDataSessionLocked(context, dataSession))
+                {
+                    dataSession.Dispose();
+                    return;
+                }
                 context.PullSessionActive = true;
                 context.PullCurrentPipelineDepth = ResolveOutboundPipelineDepth(context);
                 context.RemoteNextExpectedChunkIndex = 0;

@@ -3028,6 +3028,96 @@ public sealed partial class SessionFileTransferV4SenderTests
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "SparseWorkerHandoff")]
+    public async Task OutboundSparseReceiveSupervisor_RegularV4FrontierRepairPressureInstalledDuringOpenRejectsLateSession()
+    {
+        const string transferId = "transfer_sparse_open_pressure_session_race";
+        var sessionId = $"session_{transferId}";
+        using var lateOpenedSession = new DisposableTrackingDataSession(sessionId, transferId);
+        using var attachedSession = new RecordingDataSession(sessionId, transferId);
+        using var transport = new ControlledOpenLoopbackTransport(sessionId);
+        using var peer = new LoopbackFileTransferTransport(sessionId);
+        transport.Connect(peer);
+        using var service = new SessionFileTransferService();
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        var initialSession = Assert.IsAssignableFrom<IDisposable>(
+            GetPrivatePropertyValue(context, "DataSession"));
+        initialSession.Dispose();
+        SetPrivateProperty(context, "DataSession", null);
+        SetPrivateProperty(context, "DataSessionGeneration", 0L);
+        SetPrivateProperty(context, "PullSourceCanSeek", true);
+        SetPrivateProperty(
+            context,
+            "PullV4LastPeerFrameReceivedUtc",
+            DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        var openStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseOpen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        transport.OpenOverrideAsync = async (_, _, _, ct) =>
+        {
+            openStarted.TrySetResult();
+            await releaseOpen.Task.WaitAsync(ct);
+            return lateOpenedSession;
+        };
+        var supervisor = StartSparseReceiveSupervisor(service, context);
+
+        try
+        {
+            await openStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            object installedBinding;
+            lock (GetServiceGate(service))
+            {
+                ReplaceOutboundDataSession(service, context, attachedSession);
+                Assert.Same(attachedSession, GetPrivatePropertyValue(context, "DataSession"));
+                Assert.True((bool)typeof(SessionFileTransferService)
+                    .GetMethod(
+                        "MaybeQueueOutboundRegularNknV4PeerSilenceSafetyReplayLocked",
+                        BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .Invoke(service, [context, "session_open_race_pressure_install"])!);
+                installedBinding = Assert.IsType<RegularV4FrontierRepairPressureBinding>(
+                    GetPrivatePropertyValue(
+                        context,
+                        "InstalledRegularV4FrontierRepairPressureBinding"));
+                SetPrivateProperty(context, "UserPaused", true);
+            }
+
+            releaseOpen.TrySetResult();
+            await lateOpenedSession.Disposed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            lock (GetServiceGate(service))
+            {
+                Assert.Same(attachedSession, GetPrivatePropertyValue(context, "DataSession"));
+                Assert.Equal(1L, GetPrivateProperty<long>(context, "DataSessionGeneration"));
+                Assert.Equal(
+                    installedBinding,
+                    GetPrivatePropertyValue(
+                        context,
+                        "InstalledRegularV4FrontierRepairPressureBinding"));
+                Assert.Null(GetPrivatePropertyValue(
+                    context,
+                    "PendingRegularV4FrontierRepairPressureBinding"));
+            }
+
+            Assert.Empty(transport.RegularV4FrontierRepairSettlements);
+            Assert.Equal(1, lateOpenedSession.DisposeCount);
+        }
+        finally
+        {
+            releaseOpen.TrySetResult();
+            TryCancelContextLifetime(context);
+            await supervisor.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "SparseWorkerHandoff")]
     public async Task OutboundSparseReceiveSupervisor_StaleOpenedSessionDisposedWhenNextStartupOpenFails()
     {
         const string transferId = "transfer_sparse_stale_open_disposed_after_next_failure";

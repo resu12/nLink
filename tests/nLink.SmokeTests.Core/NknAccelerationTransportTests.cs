@@ -2687,6 +2687,11 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             InstallRuntimeUnlockRetryDispatchCoordinatorForTests(host);
             var grantedLogStart = GetOperationalLogLength();
             InvokePrivateMethod(host, "RequestRuntimeUnlockRetryDispatchAuthority", sessionId, "test_frontier_release");
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(grantedLogStart).Contains(
+                    "event=runtime_unlock_retry_dispatch_authority_granted;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3));
             var grantedArgs = new object?[] { sessionId, "runtime_unlock", 18L, null, 0L };
             var deferredAfterGrant = Assert.IsType<bool>(method.Invoke(host, grantedArgs));
 
@@ -14926,6 +14931,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 "regular_v4_recovery_settlement_consumption_already_used",
                 Assert.IsType<string>(freshStateType.GetProperty("AuthorityFailureReason")!.GetValue(freshState)));
 
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
             var tail = ReadOperationalLogTail(logStart);
             Assert.Equal(
                 2,
@@ -15025,6 +15031,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             Assert.Same(
                 successor,
                 successorState.GetType().GetProperty("DispatchContract")!.GetValue(successorState));
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
             var tail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=runtime_unlock_retry_dispatch_settlement_reported;", tail, StringComparison.Ordinal);
             Assert.Contains("event=runtime_unlock_retry_dispatch_settlement_decided;", tail, StringComparison.Ordinal);
@@ -26394,7 +26401,15 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             Assert.Equal(
                 1,
                 CountEvent(finalTail, "runtime_unlock_regular_v4_recovery_lease_closure_consumed"));
-            Assert.Equal(1, CountEvent(finalTail, "runtime_unlock_retry_dispatch_authority_granted"));
+            Assert.Equal(
+                1,
+                finalTail.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries).Count(
+                    line => line.Contains(
+                                "event=runtime_unlock_retry_dispatch_authority_granted;",
+                                StringComparison.Ordinal) &&
+                            line.Contains(
+                                $"authority_id={grantedContract.Authority.AuthorityId};",
+                                StringComparison.Ordinal)));
             Assert.Equal(2, authorityRequests.Count);
             Assert.DoesNotContain(
                 "event=runtime_unlock_retry_dispatch_current_authority_rejected;",

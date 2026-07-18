@@ -93,11 +93,22 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
+            if (!TryRetireRegularV4FrontierRepairPressureForScopeReplacementLocked(
+                    context,
+                    "outbound_transfer_terminal",
+                    FileTransferRegularV4FrontierRepairSettlementOutcome.TransferTerminal) ||
+                !SettleAndClearRegularV4FrontierRepairContractLocked(
+                    context,
+                    FileTransferRegularV4FrontierRepairSettlementOutcome.TransferTerminal,
+                    "outbound_transfer_terminal"))
+            {
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_terminal_transition_rejected; direction=outbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; decision_reason=regular_v4_frontier_repair_pressure_retirement_failed");
+                return false;
+            }
+
             context.CancelLifetime();
-            SettleAndClearRegularV4FrontierRepairContractLocked(
-                context,
-                FileTransferRegularV4FrontierRepairSettlementOutcome.TransferTerminal,
-                "outbound_transfer_terminal");
             SettleAndClearFallbackFrontierRepairContractLocked(
                 context,
                 FallbackFrontierRepairSettlementOutcome.TransferTerminal,
@@ -348,11 +359,22 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
+            if (!TryRetireRegularV4FrontierRepairPressureForScopeReplacementLocked(
+                    context,
+                    "inbound_transfer_terminal",
+                    FileTransferRegularV4FrontierRepairSettlementOutcome.TransferTerminal) ||
+                !SettleAndClearRegularV4FrontierRepairContractLocked(
+                    context,
+                    FileTransferRegularV4FrontierRepairSettlementOutcome.TransferTerminal,
+                    "inbound_transfer_terminal"))
+            {
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_terminal_transition_rejected; direction=inbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; decision_reason=regular_v4_frontier_repair_pressure_retirement_failed");
+                return;
+            }
+
             context.CancelLifetime();
-            SettleAndClearRegularV4FrontierRepairContractLocked(
-                context,
-                FileTransferRegularV4FrontierRepairSettlementOutcome.TransferTerminal,
-                "inbound_transfer_terminal");
             SettleAndClearFallbackFrontierRepairContractLocked(
                 context,
                 FallbackFrontierRepairSettlementOutcome.TransferTerminal,

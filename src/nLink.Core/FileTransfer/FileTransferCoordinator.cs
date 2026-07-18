@@ -479,6 +479,44 @@ internal readonly record struct RegularV4FrontierRepairAuthorityRequest(
     int PendingRepairCount,
     string DecisionReason);
 
+internal enum RegularV4FrontierRepairPressureBindingState
+{
+    Pending = 1,
+    Installed = 2,
+    RetainedPredecessor = 3,
+    Retired = 4,
+    Invalidated = 5,
+}
+
+internal readonly record struct RegularV4FrontierRepairPressureBinding(
+    FileTransferRegularV4FrontierRepairAuthority Authority,
+    string PressureReason,
+    long InstallGeneration,
+    RegularV4FrontierRepairPressureBindingState State,
+    FileTransferAuthorityId? PredecessorAuthorityId,
+    FileTransferRegularV4FrontierRepairSettlement? FinalSettlement)
+{
+    public bool IsDefault => Authority.AuthorityId.IsDefault ||
+                             InstallGeneration <= 0 ||
+                             string.IsNullOrWhiteSpace(PressureReason);
+}
+
+internal enum RegularV4FrontierRepairPressureBindingDecisionStatus
+{
+    Accepted,
+    Idempotent,
+    Rejected,
+}
+
+internal readonly record struct RegularV4FrontierRepairPressureBindingDecision(
+    RegularV4FrontierRepairPressureBindingDecisionStatus Status,
+    string Reason,
+    RegularV4FrontierRepairPressureBinding? Binding,
+    FileTransferRegularV4FrontierRepairPressureSettlementCommand? SettlementCommand)
+{
+    public FileTransferCoordinatorState State { get; init; } = null!;
+}
+
 internal enum FallbackFrontierRepairSourceKind
 {
     Unknown = 0,
@@ -658,7 +696,14 @@ internal sealed record FileTransferCoordinatorState(
     RuntimeUnlockRegularV4RecoveryLifecycleReport? LastRuntimeUnlockRegularV4RecoveryLifecycle = null,
     bool RuntimeUnlockRecoveryLeaseClosureAvailable = false,
     FallbackTailYieldTransportEpochReauthorization? PendingFallbackTailYieldTransportEpochReauthorization = null,
-    int LastFallbackTailYieldTransportEpochReauthorizationGeneration = 0)
+    int LastFallbackTailYieldTransportEpochReauthorizationGeneration = 0,
+    RegularV4FrontierRepairPressureBinding? PendingRegularV4FrontierRepairPressureBinding = null,
+    RegularV4FrontierRepairPressureBinding? InstalledRegularV4FrontierRepairPressureBinding = null,
+    RegularV4FrontierRepairPressureBinding? RetainedRegularV4FrontierRepairPressurePredecessor = null,
+    FileTransferRegularV4FrontierRepairSettlement? LastRegularV4FrontierRepairPressureSettlement = null,
+    long LastRegularV4FrontierRepairPressureInstallGeneration = 0,
+    FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
+        LastRegularV4FrontierRepairPressureSettlementApplyReceipt = null)
 {
     public FileTransferRouteRuntimeDescriptor RouteRuntime => RouteSelection.RuntimeDescriptor;
 }
@@ -1288,6 +1333,39 @@ internal static class FileTransferCoordinator
                 request.Kind,
                 accepted: false,
                 recoveryRejectionReason);
+        }
+
+        if (HasRegularV4FrontierRepairPressureBinding(state) &&
+            RequiresRegularV4FrontierRepairPressureRetirement(request.Kind))
+        {
+            return ActionDecision(
+                state,
+                request.Kind,
+                accepted: false,
+                rejectionReason: "regular_v4_frontier_repair_pressure_retirement_required");
+        }
+
+        if (!ValidateRegularV4FrontierRepairPressureRepairReplayRequest(
+                state,
+                request,
+                out var idempotentRepairReplayDecision,
+                out var pressureRepairReplayRejectionReason))
+        {
+            return ActionDecision(
+                state,
+                request.Kind,
+                accepted: false,
+                pressureRepairReplayRejectionReason);
+        }
+
+        if (idempotentRepairReplayDecision is { } existingRepairReplayDecision)
+        {
+            return ActionDecision(
+                state,
+                request.Kind,
+                accepted: true,
+                rejectionReason: "accepted",
+                repairReplayDecision: existingRepairReplayDecision);
         }
 
         var issuedControlPlaneToken = request.Kind == FileTransferCoordinatorActionKind.ControlPlaneSend
@@ -3979,6 +4057,397 @@ internal static class FileTransferCoordinator
         return true;
     }
 
+    internal static RegularV4FrontierRepairPressureBindingDecision
+        StageRegularV4FrontierRepairPressureBinding(
+            FileTransferCoordinatorState state,
+            RepairReplayDecision repairDecision,
+            RegularV4FrontierRepairAuthorityRequest authorityRequest,
+            string pressureReason)
+    {
+        var normalizedReason = NormalizeReason(pressureReason);
+        if (state.IsTerminal)
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                "terminal_state");
+        }
+
+        if (!IsRepairReplayDecisionCurrent(state, repairDecision, out var currentnessReason))
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                currentnessReason);
+        }
+
+        if (!TryIssueRegularV4FrontierRepairAuthority(
+                repairDecision,
+                authorityRequest,
+                out var issuedAuthority,
+                out var issuanceReason) ||
+            issuedAuthority is null)
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                issuanceReason);
+        }
+
+        if (state.PendingRegularV4FrontierRepairPressureBinding is { } pending)
+        {
+            if (pending.Authority == issuedAuthority &&
+                string.Equals(pending.PressureReason, normalizedReason, StringComparison.Ordinal))
+            {
+                return RegularV4PressureBindingDecision(
+                    state,
+                    RegularV4FrontierRepairPressureBindingDecisionStatus.Idempotent,
+                    "regular_v4_frontier_repair_pressure_binding_already_pending",
+                    pending);
+            }
+
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                "regular_v4_frontier_repair_pressure_binding_pending_conflict");
+        }
+
+        var installed = state.InstalledRegularV4FrontierRepairPressureBinding;
+        if (installed is { } current && current.Authority == issuedAuthority)
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Idempotent,
+                "regular_v4_frontier_repair_pressure_binding_already_installed",
+                current);
+        }
+
+        if (installed is { } active)
+        {
+            if (issuedAuthority.PredecessorAuthorityId is not { IsDefault: false } predecessorId ||
+                predecessorId != active.Authority.AuthorityId)
+            {
+                return RegularV4PressureBindingDecision(
+                    state,
+                    RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                    "regular_v4_frontier_repair_pressure_binding_predecessor_mismatch");
+            }
+        }
+        else if (issuedAuthority.PredecessorAuthorityId is { IsDefault: false })
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                "regular_v4_frontier_repair_pressure_binding_predecessor_missing");
+        }
+
+        if (state.RetainedRegularV4FrontierRepairPressurePredecessor is not null)
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                "regular_v4_frontier_repair_pressure_binding_predecessor_retirement_pending");
+        }
+
+        var nextGeneration = Math.Max(
+            1,
+            state.LastRegularV4FrontierRepairPressureInstallGeneration + 1);
+        var binding = new RegularV4FrontierRepairPressureBinding(
+            issuedAuthority,
+            normalizedReason,
+            nextGeneration,
+            RegularV4FrontierRepairPressureBindingState.Pending,
+            issuedAuthority.PredecessorAuthorityId,
+            FinalSettlement: null);
+        var nextState = state with
+        {
+            PendingRegularV4FrontierRepairPressureBinding = binding,
+            LastRegularV4FrontierRepairPressureInstallGeneration = nextGeneration,
+        };
+        return RegularV4PressureBindingDecision(
+            nextState,
+            RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted,
+            "regular_v4_frontier_repair_pressure_binding_staged",
+            binding);
+    }
+
+    internal static RegularV4FrontierRepairPressureBindingDecision
+        CommitRegularV4FrontierRepairPressureBinding(
+            FileTransferCoordinatorState state,
+            FileTransferRegularV4FrontierRepairPressureInstallReceipt receipt)
+    {
+        if (state.InstalledRegularV4FrontierRepairPressureBinding is { } installed &&
+            installed.Authority == receipt.Authority &&
+            installed.InstallGeneration == receipt.InstallGeneration &&
+            string.Equals(installed.PressureReason, receipt.PressureReason, StringComparison.Ordinal))
+        {
+            if (receipt.Status is not (
+                    FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed or
+                    FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent) ||
+                string.IsNullOrWhiteSpace(receipt.Reason) ||
+                !string.Equals(receipt.Reason, NormalizeReason(receipt.Reason), StringComparison.Ordinal))
+            {
+                return RegularV4PressureBindingDecision(
+                    state,
+                    RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                    "regular_v4_frontier_repair_pressure_binding_install_receipt_mismatch");
+            }
+
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Idempotent,
+                "regular_v4_frontier_repair_pressure_binding_already_committed",
+                installed);
+        }
+
+        if (state.PendingRegularV4FrontierRepairPressureBinding is not { } pending)
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                "regular_v4_frontier_repair_pressure_binding_pending_missing");
+        }
+
+        if (receipt.Status is not (
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed or
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent) ||
+            receipt.Authority != pending.Authority ||
+            receipt.InstallGeneration != pending.InstallGeneration ||
+            !string.Equals(receipt.PressureReason, pending.PressureReason, StringComparison.Ordinal))
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                "regular_v4_frontier_repair_pressure_binding_install_receipt_mismatch");
+        }
+
+        var committed = pending with { State = RegularV4FrontierRepairPressureBindingState.Installed };
+        var predecessor = state.InstalledRegularV4FrontierRepairPressureBinding is { } current &&
+                          pending.PredecessorAuthorityId == current.Authority.AuthorityId
+            ? current with { State = RegularV4FrontierRepairPressureBindingState.RetainedPredecessor }
+            : state.RetainedRegularV4FrontierRepairPressurePredecessor;
+        var nextState = state with
+        {
+            PendingRegularV4FrontierRepairPressureBinding = null,
+            InstalledRegularV4FrontierRepairPressureBinding = committed,
+            RetainedRegularV4FrontierRepairPressurePredecessor = predecessor,
+        };
+        return RegularV4PressureBindingDecision(
+            nextState,
+            RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted,
+            "regular_v4_frontier_repair_pressure_binding_committed",
+            committed);
+    }
+
+    internal static RegularV4FrontierRepairPressureBindingDecision
+        PrepareRegularV4FrontierRepairPressureSettlement(
+            FileTransferCoordinatorState state,
+            FileTransferRegularV4FrontierRepairSettlement settlement)
+    {
+        if (state.LastRegularV4FrontierRepairPressureSettlement == settlement)
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Idempotent,
+                "regular_v4_frontier_repair_pressure_settlement_already_committed");
+        }
+
+        var installed = state.InstalledRegularV4FrontierRepairPressureBinding;
+        var retained = state.RetainedRegularV4FrontierRepairPressurePredecessor;
+        var settlingRetained = retained is { } predecessor &&
+                              predecessor.Authority.AuthorityId == settlement.AuthorityId;
+        var settlingCurrent = installed is { } current &&
+                             current.Authority.AuthorityId == settlement.AuthorityId;
+        if (!settlingRetained && !settlingCurrent)
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                "regular_v4_frontier_repair_pressure_settlement_binding_missing");
+        }
+
+        var settlingBinding = settlingRetained ? retained!.Value : installed!.Value;
+        if (!RegularV4FrontierRepairPressureBindingMatchesSettlement(
+                settlingBinding,
+                settlement))
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                "regular_v4_frontier_repair_pressure_settlement_authority_mismatch");
+        }
+
+        var retainedSuccessorMatches = settlement.SuccessorAuthorityId is { IsDefault: false } successorId &&
+                                      installed is { } successor &&
+                                      successor.Authority.AuthorityId == successorId;
+        if (settlingRetained &&
+            (settlement.Outcome != FileTransferRegularV4FrontierRepairSettlementOutcome.Superseded ||
+             !retainedSuccessorMatches))
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                "regular_v4_frontier_repair_pressure_predecessor_settlement_mismatch");
+        }
+
+        if (settlingCurrent && settlement.Outcome == FileTransferRegularV4FrontierRepairSettlementOutcome.Superseded)
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                "regular_v4_frontier_repair_pressure_successor_binding_missing");
+        }
+
+        if (settlingCurrent && retained is not null)
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                "regular_v4_frontier_repair_pressure_binding_predecessor_retirement_pending");
+        }
+
+        var commandCurrentAuthorityId = installed!.Value.Authority.AuthorityId;
+        var command = new FileTransferRegularV4FrontierRepairPressureSettlementCommand(
+            settlement,
+            installed!.Value.InstallGeneration,
+            commandCurrentAuthorityId,
+            retained?.Authority.AuthorityId);
+        return RegularV4PressureBindingDecision(
+            state,
+            RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted,
+            "regular_v4_frontier_repair_pressure_settlement_prepared",
+            settlingRetained ? retained : installed,
+            command);
+    }
+
+    internal static RegularV4FrontierRepairPressureBindingDecision
+        CommitRegularV4FrontierRepairPressureSettlement(
+            FileTransferCoordinatorState state,
+            FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt receipt)
+    {
+        var prepared = PrepareRegularV4FrontierRepairPressureSettlement(
+            state,
+            receipt.Command.Settlement);
+        if (prepared.Status == RegularV4FrontierRepairPressureBindingDecisionStatus.Idempotent)
+        {
+            var committedReceipt = state.LastRegularV4FrontierRepairPressureSettlementApplyReceipt;
+            if (committedReceipt is null ||
+                committedReceipt.Command != receipt.Command ||
+                receipt.Status is not (
+                    FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied or
+                    FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent) ||
+                committedReceipt.CurrentAuthorityCleared != receipt.CurrentAuthorityCleared ||
+                committedReceipt.RetainedPredecessorCleared != receipt.RetainedPredecessorCleared)
+            {
+                return RegularV4PressureBindingDecision(
+                    state,
+                    RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                    "regular_v4_frontier_repair_pressure_settlement_apply_receipt_mismatch");
+            }
+
+            return prepared;
+        }
+
+        if (prepared.Status != RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted ||
+            prepared.SettlementCommand != receipt.Command ||
+            receipt.Status is not (
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied or
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent))
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                "regular_v4_frontier_repair_pressure_settlement_apply_receipt_mismatch");
+        }
+
+        var settlement = receipt.Command.Settlement;
+        var settlingRetained = state.RetainedRegularV4FrontierRepairPressurePredecessor is { } retained &&
+                              retained.Authority.AuthorityId == settlement.AuthorityId;
+        if (settlingRetained &&
+            (!receipt.RetainedPredecessorCleared || receipt.CurrentAuthorityCleared))
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                "regular_v4_frontier_repair_pressure_predecessor_clear_scope_mismatch");
+        }
+
+        if (!settlingRetained &&
+            (!receipt.CurrentAuthorityCleared || receipt.RetainedPredecessorCleared))
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                "regular_v4_frontier_repair_pressure_current_clear_scope_mismatch");
+        }
+
+        var nextState = settlingRetained
+            ? state with
+            {
+                RetainedRegularV4FrontierRepairPressurePredecessor = null,
+                LastRegularV4FrontierRepairPressureSettlement = settlement,
+                LastRegularV4FrontierRepairPressureSettlementApplyReceipt = receipt,
+            }
+            : state with
+            {
+                InstalledRegularV4FrontierRepairPressureBinding = null,
+                PendingRegularV4FrontierRepairPressureBinding = null,
+                LastRegularV4FrontierRepairPressureSettlement = settlement,
+                LastRegularV4FrontierRepairPressureSettlementApplyReceipt = receipt,
+            };
+        return RegularV4PressureBindingDecision(
+            nextState,
+            RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted,
+            "regular_v4_frontier_repair_pressure_settlement_committed");
+    }
+
+    private static bool RegularV4FrontierRepairPressureBindingMatchesSettlement(
+        RegularV4FrontierRepairPressureBinding binding,
+        FileTransferRegularV4FrontierRepairSettlement settlement)
+    {
+        var authority = binding.Authority;
+        return !settlement.AuthorityId.IsDefault &&
+               authority.AuthorityId == settlement.AuthorityId &&
+               string.Equals(authority.SessionId, settlement.SessionId, StringComparison.Ordinal) &&
+               string.Equals(authority.TransferId, settlement.TransferId, StringComparison.Ordinal) &&
+               authority.Direction == settlement.Direction &&
+               string.Equals(authority.RouteToken, settlement.RouteToken, StringComparison.Ordinal) &&
+               authority.ProtocolVersion == settlement.ProtocolVersion &&
+               authority.LiveRouteEpoch == settlement.LiveRouteEpoch &&
+               authority.RuntimeGeneration == settlement.RuntimeGeneration &&
+               authority.TerminalGeneration == settlement.TerminalGeneration &&
+               authority.LegGeneration == settlement.LegGeneration &&
+               authority.TransportEpoch == settlement.TransportEpoch &&
+               authority.BridgeRecoveryGeneration == settlement.BridgeRecoveryGeneration &&
+               authority.BridgeDecisionGeneration == settlement.BridgeDecisionGeneration &&
+               authority.RoutePublicationGeneration == settlement.RoutePublicationGeneration &&
+               authority.RouteCommitGeneration == settlement.RouteCommitGeneration &&
+               authority.TargetTransport == settlement.TargetTransport &&
+               string.Equals(authority.RepairKey, settlement.RepairKey, StringComparison.Ordinal) &&
+               authority.FrontierChunkIndex == settlement.FrontierChunkIndex &&
+               authority.DurableReceivedHighestChunkIndex == settlement.DurableReceivedHighestChunkIndex &&
+               authority.PendingRepairCount == settlement.RequestedChunkCount &&
+               authority.DecisionGeneration == settlement.DecisionGeneration;
+    }
+
+    internal static FileTransferCoordinatorState InvalidateRegularV4FrontierRepairPressureBinding(
+        FileTransferCoordinatorState state,
+        string reason)
+        => state with
+        {
+            PendingRegularV4FrontierRepairPressureBinding = null,
+            InstalledRegularV4FrontierRepairPressureBinding = null,
+            RetainedRegularV4FrontierRepairPressurePredecessor = null,
+        };
+
+    private static RegularV4FrontierRepairPressureBindingDecision RegularV4PressureBindingDecision(
+        FileTransferCoordinatorState state,
+        RegularV4FrontierRepairPressureBindingDecisionStatus status,
+        string reason,
+        RegularV4FrontierRepairPressureBinding? binding = null,
+        FileTransferRegularV4FrontierRepairPressureSettlementCommand? settlementCommand = null)
+        => new(status, NormalizeReason(reason), binding, settlementCommand) { State = state };
+
     internal static bool TryIssueFallbackFrontierRepairAuthority(
         RepairReplayDecision repairDecision,
         FallbackFrontierRepairAuthorityRequest request,
@@ -4113,15 +4582,16 @@ internal static class FileTransferCoordinator
             return false;
         }
 
-        if (repairDecision.IsDefault || repairDecision.AuthorityId.IsDefault)
+        if (!repairDecision.Accepted ||
+            repairDecision.IsDefault ||
+            repairDecision.AuthorityId.IsDefault)
         {
             rejectionReason = "repair_replay_decision_missing";
             return false;
         }
 
         if (state.CurrentRepairReplayDecision is not { } currentRepair ||
-            currentRepair.AuthorityId != repairDecision.AuthorityId ||
-            currentRepair.RepairGeneration != repairDecision.RepairGeneration)
+            currentRepair != repairDecision)
         {
             rejectionReason = "repair_replay_decision_superseded";
             return false;
@@ -6207,6 +6677,15 @@ internal static class FileTransferCoordinator
             }
         }
 
+        if (HasRegularV4FrontierRepairPressureBinding(state))
+        {
+            return MutationRejected(
+                state,
+                reason,
+                "regular_v4_frontier_repair_pressure_retirement_required",
+                initialTunaRouteSelectionDecision: initialTunaDecision);
+        }
+
         var frozenLeg = coordinatorEvent.FreezeCurrentLeg
             ? FreezeLeg(state.CurrentLeg, DateTimeOffset.UtcNow)
             : null;
@@ -6378,6 +6857,14 @@ internal static class FileTransferCoordinator
         string reason,
         bool recoverEpoch)
     {
+        if (HasRegularV4FrontierRepairPressureBinding(state))
+        {
+            return MutationRejected(
+                state,
+                reason,
+                "regular_v4_frontier_repair_pressure_retirement_required");
+        }
+
         var frozenLeg = FreezeLeg(state.CurrentLeg, DateTimeOffset.UtcNow);
         var epoch = StartLiveRouteEpoch(
             state.LastLiveRouteEpochId,
@@ -6469,6 +6956,16 @@ internal static class FileTransferCoordinator
             return MutationRejected(state, reason, "transport_epoch_mismatch");
         }
 
+        if (HasRegularV4FrontierRepairPressureBinding(state) &&
+            coordinatorEvent.TransportEpochId > 0 &&
+            coordinatorEvent.TransportEpochId != leg.TransportEpochId)
+        {
+            return MutationRejected(
+                state,
+                reason,
+                "regular_v4_frontier_repair_pressure_retirement_required");
+        }
+
         var previousTransportEpoch = leg.TransportEpochId;
         MarkFallbackCheckpointRequested(
             leg,
@@ -6524,6 +7021,16 @@ internal static class FileTransferCoordinator
             coordinatorEvent.TransportEpochId < leg.TransportEpochId)
         {
             return MutationRejected(state, reason, "transport_epoch_mismatch");
+        }
+
+        if (HasRegularV4FrontierRepairPressureBinding(state) &&
+            coordinatorEvent.TransportEpochId > 0 &&
+            coordinatorEvent.TransportEpochId != leg.TransportEpochId)
+        {
+            return MutationRejected(
+                state,
+                reason,
+                "regular_v4_frontier_repair_pressure_retirement_required");
         }
 
         if (!string.IsNullOrWhiteSpace(coordinatorEvent.CheckpointRequestId) &&
@@ -6622,6 +7129,16 @@ internal static class FileTransferCoordinator
             coordinatorEvent.TransportEpochId < leg.TransportEpochId)
         {
             return MutationRejected(state, reason, "transport_epoch_mismatch");
+        }
+
+        if (HasRegularV4FrontierRepairPressureBinding(state) &&
+            coordinatorEvent.TransportEpochId > 0 &&
+            coordinatorEvent.TransportEpochId != leg.TransportEpochId)
+        {
+            return MutationRejected(
+                state,
+                reason,
+                "regular_v4_frontier_repair_pressure_retirement_required");
         }
 
         var reauthorization =
@@ -7033,7 +7550,16 @@ internal static class FileTransferCoordinator
     private static FileTransferCoordinatorDecision RetireRuntimeUnlockAdmission(
         FileTransferCoordinatorState state,
         string reason)
-        => Decision(
+    {
+        if (HasRegularV4FrontierRepairPressureBinding(state))
+        {
+            return MutationRejected(
+                state,
+                reason,
+                "regular_v4_frontier_repair_pressure_retirement_required");
+        }
+
+        return Decision(
             state with
             {
                 CurrentRuntimeUnlockAdmission = null,
@@ -7043,6 +7569,7 @@ internal static class FileTransferCoordinator
                 CurrentRuntimeUnlockPendingPreCommitProbe = null,
             },
             reason);
+    }
 
     private static FileTransferCoordinatorDecision ApplyRuntimeUnlockCommit(
         FileTransferCoordinatorEvent coordinatorEvent,
@@ -7072,6 +7599,14 @@ internal static class FileTransferCoordinator
             state,
             reason,
             recoverEpoch: true);
+        if (transition.MutationRejectedReason is { } transitionRejectionReason)
+        {
+            return transition with
+            {
+                RuntimeUnlockCommitRejectedReason = transitionRejectionReason,
+            };
+        }
+
         if (transition.State.CurrentRuntimeOwner is not { } runtimeOwner ||
             proof.AdmissionToken is not { } admissionToken)
         {
@@ -7151,6 +7686,14 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         string reason)
     {
+        if (HasRegularV4FrontierRepairPressureBinding(state))
+        {
+            return MutationRejected(
+                state,
+                reason,
+                "regular_v4_frontier_repair_pressure_retirement_required");
+        }
+
         var leg = state.CurrentLeg;
         TerminalizeLeg(leg);
         var nextTerminalGeneration = Math.Max(1, state.TerminalGeneration + 1);
@@ -8002,6 +8545,86 @@ internal static class FileTransferCoordinator
     private static bool IsRoutePublicationAuthorityAction(FileTransferCoordinatorActionKind kind)
         => kind is FileTransferCoordinatorActionKind.RoutePublication or
                    FileTransferCoordinatorActionKind.RouteCommitPublication;
+
+    private static bool HasRegularV4FrontierRepairPressureBinding(FileTransferCoordinatorState state)
+        => state.PendingRegularV4FrontierRepairPressureBinding is not null ||
+           state.InstalledRegularV4FrontierRepairPressureBinding is not null ||
+           state.RetainedRegularV4FrontierRepairPressurePredecessor is not null;
+
+    private static bool ValidateRegularV4FrontierRepairPressureRepairReplayRequest(
+        FileTransferCoordinatorState state,
+        FileTransferCoordinatorActionRequest request,
+        out RepairReplayDecision? idempotentDecision,
+        out string rejectionReason)
+    {
+        idempotentDecision = null;
+        rejectionReason = "accepted";
+        if (request.Kind != FileTransferCoordinatorActionKind.RepairReplay ||
+            !HasRegularV4FrontierRepairPressureBinding(state))
+        {
+            return true;
+        }
+
+        var governingBinding =
+            state.PendingRegularV4FrontierRepairPressureBinding ??
+            state.InstalledRegularV4FrontierRepairPressureBinding;
+        if (governingBinding is not { } binding ||
+            state.CurrentRepairReplayDecision is not { } currentDecision ||
+            !IsRepairReplayDecisionCurrent(state, currentDecision, out _) ||
+            currentDecision.AuthorityId != binding.Authority.AuthorityId ||
+            currentDecision.RepairGeneration != binding.Authority.DecisionGeneration)
+        {
+            rejectionReason =
+                "regular_v4_frontier_repair_pressure_binding_repair_replay_decision_mismatch";
+            return false;
+        }
+
+        var requestedPredecessor = request.PredecessorAuthorityId is { IsDefault: false }
+            ? request.PredecessorAuthorityId
+            : null;
+        var exactRepeat =
+            (request.RepairReplayKind ?? RepairReplayKind.Unknown) == currentDecision.RepairKind &&
+            string.Equals(
+                NormalizeReason(request.Reason),
+                currentDecision.Reason,
+                StringComparison.Ordinal) &&
+            requestedPredecessor == currentDecision.PredecessorAuthorityId;
+        if (exactRepeat)
+        {
+            idempotentDecision = currentDecision;
+            return true;
+        }
+
+        if (state.PendingRegularV4FrontierRepairPressureBinding is not null)
+        {
+            rejectionReason =
+                "regular_v4_frontier_repair_pressure_binding_repair_replay_pending_conflict";
+            return false;
+        }
+
+        if (state.RetainedRegularV4FrontierRepairPressurePredecessor is not null)
+        {
+            rejectionReason =
+                "regular_v4_frontier_repair_pressure_binding_predecessor_retirement_pending";
+            return false;
+        }
+
+        if (state.InstalledRegularV4FrontierRepairPressureBinding is not { } installed ||
+            requestedPredecessor != installed.Authority.AuthorityId)
+        {
+            rejectionReason =
+                "regular_v4_frontier_repair_pressure_binding_predecessor_mismatch";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool RequiresRegularV4FrontierRepairPressureRetirement(
+        FileTransferCoordinatorActionKind kind)
+        => IsRoutePublicationAuthorityAction(kind) ||
+           IsTransportEpochAuthorityAction(kind) ||
+           IsBridgeRecoveryAuthorityAction(kind);
 
     private static bool IsLegalRoutePublicationTarget(
         FileTransferRoute route,

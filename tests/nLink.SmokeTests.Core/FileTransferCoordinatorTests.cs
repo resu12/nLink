@@ -1369,6 +1369,554 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4FrontierRepairPressure")]
+    public void RegularV4FrontierRepairPressure_RejectsSameAuthorityDecisionTupleMutation()
+    {
+        var (state, decision) = AuthorizeRegularV4FrontierRepair();
+        var publication = Assert.IsType<RoutePublicationToken>(decision.RoutePublicationToken);
+        var mutations = new (string Name, RepairReplayDecision Decision, string ExpectedReason)[]
+        {
+            (
+                "accepted",
+                decision with { Accepted = false },
+                "repair_replay_decision_missing"),
+            (
+                "predecessor",
+                decision with
+                {
+                    PredecessorAuthorityId = new FileTransferAuthorityId(
+                        "fta2-regular-v4-pressure-mutated-predecessor"),
+                },
+                "repair_replay_decision_superseded"),
+            (
+                "repair_kind",
+                decision with { RepairKind = RepairReplayKind.PeerSilenceReplay },
+                "repair_replay_decision_superseded"),
+            (
+                "reason",
+                decision with { Reason = decision.Reason + "_mutated" },
+                "repair_replay_decision_superseded"),
+            (
+                "bridge_decision_generation",
+                decision with { BridgeDecisionGeneration = decision.BridgeDecisionGeneration + 1 },
+                "repair_replay_decision_superseded"),
+            (
+                "route_publication_token",
+                decision with
+                {
+                    RoutePublicationToken = publication with
+                    {
+                        PublicationGeneration = publication.PublicationGeneration + 1,
+                    },
+                },
+                "repair_replay_decision_superseded"),
+        };
+
+        foreach (var mutation in mutations)
+        {
+            Assert.Equal(decision.AuthorityId, mutation.Decision.AuthorityId);
+            Assert.False(
+                FileTransferCoordinator.IsRepairReplayDecisionCurrent(
+                    state,
+                    mutation.Decision,
+                    out var currentReason),
+                mutation.Name);
+            Assert.Equal(mutation.ExpectedReason, currentReason);
+
+            var staged = FileTransferCoordinator.StageRegularV4FrontierRepairPressureBinding(
+                state,
+                mutation.Decision,
+                RegularV4PressureAuthorityRequest($"regular-v4-pressure:tuple:{mutation.Name}"),
+                "regular_v4_receiver_frontier_repair_due");
+            Assert.Equal(RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected, staged.Status);
+            Assert.Equal(mutation.ExpectedReason, staged.Reason);
+            Assert.Null(staged.Binding);
+            Assert.Null(staged.State.PendingRegularV4FrontierRepairPressureBinding);
+            Assert.Null(staged.State.InstalledRegularV4FrontierRepairPressureBinding);
+        }
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4FrontierRepairPressure")]
+    public void RegularV4FrontierRepairPressure_CoordinatorOwnsInstallAndExactSettlement()
+    {
+        var (initialState, initialDecision) = AuthorizeRegularV4FrontierRepair();
+        var request = RegularV4PressureAuthorityRequest("regular-v4-pressure:12:2");
+        var staged = FileTransferCoordinator.StageRegularV4FrontierRepairPressureBinding(
+            initialState,
+            initialDecision,
+            request,
+            "regular_v4_receiver_frontier_repair_due");
+
+        Assert.Equal(RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted, staged.Status);
+        var pending = Assert.IsType<RegularV4FrontierRepairPressureBinding>(staged.Binding);
+        Assert.Equal(1, pending.InstallGeneration);
+        Assert.Equal(RegularV4FrontierRepairPressureBindingState.Pending, pending.State);
+        Assert.Null(staged.State.InstalledRegularV4FrontierRepairPressureBinding);
+
+        var duplicateStage = FileTransferCoordinator.StageRegularV4FrontierRepairPressureBinding(
+            staged.State,
+            initialDecision,
+            request,
+            "regular_v4_receiver_frontier_repair_due");
+        Assert.Equal(RegularV4FrontierRepairPressureBindingDecisionStatus.Idempotent, duplicateStage.Status);
+        Assert.Equal(pending, duplicateStage.Binding);
+
+        var pendingRepeat = FileTransferCoordinator.AuthorizeAction(
+            staged.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RepairReplay,
+                initialDecision.RuntimeOwner,
+                staged.State.CurrentLeg!,
+                reason: initialDecision.Reason,
+                repairReplayKind: initialDecision.RepairKind,
+                predecessorAuthorityId: initialDecision.PredecessorAuthorityId));
+        Assert.True(pendingRepeat.Accepted);
+        Assert.Same(staged.State, pendingRepeat.State);
+        Assert.Equal(initialDecision, pendingRepeat.RepairReplayDecision);
+        Assert.Equal(
+            staged.State.LastRepairReplayGeneration,
+            pendingRepeat.State.LastRepairReplayGeneration);
+
+        var rejectedReceipt = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureBinding(
+            staged.State,
+            new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                pending.Authority,
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected,
+                "adapter_rejected",
+                pending.InstallGeneration,
+                pending.PressureReason));
+        Assert.Equal(RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected, rejectedReceipt.Status);
+        Assert.Equal(pending, rejectedReceipt.State.PendingRegularV4FrontierRepairPressureBinding);
+        Assert.Null(rejectedReceipt.State.InstalledRegularV4FrontierRepairPressureBinding);
+
+        var committed = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureBinding(
+            rejectedReceipt.State,
+            new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                pending.Authority,
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
+                "installed",
+                pending.InstallGeneration,
+                pending.PressureReason));
+        Assert.Equal(RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted, committed.Status);
+        Assert.Null(committed.State.PendingRegularV4FrontierRepairPressureBinding);
+        Assert.Equal(
+            RegularV4FrontierRepairPressureBindingState.Installed,
+            committed.State.InstalledRegularV4FrontierRepairPressureBinding!.Value.State);
+
+        var duplicateCommit = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureBinding(
+            committed.State,
+            new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                pending.Authority,
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent,
+                "installed",
+                pending.InstallGeneration,
+                pending.PressureReason));
+        Assert.Equal(RegularV4FrontierRepairPressureBindingDecisionStatus.Idempotent, duplicateCommit.Status);
+        Assert.Equal(
+            committed.State.LastRegularV4FrontierRepairPressureInstallGeneration,
+            duplicateCommit.State.LastRegularV4FrontierRepairPressureInstallGeneration);
+
+        var rejectedDuplicateCommit = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureBinding(
+            duplicateCommit.State,
+            new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                pending.Authority,
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected,
+                "adapter_rejected_late",
+                pending.InstallGeneration,
+                pending.PressureReason));
+        Assert.Equal(
+            RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+            rejectedDuplicateCommit.Status);
+        Assert.Equal(
+            duplicateCommit.State.InstalledRegularV4FrontierRepairPressureBinding,
+            rejectedDuplicateCommit.State.InstalledRegularV4FrontierRepairPressureBinding);
+
+        var missingReasonDuplicateCommit = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureBinding(
+            duplicateCommit.State,
+            new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                pending.Authority,
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent,
+                " ",
+                pending.InstallGeneration,
+                pending.PressureReason));
+        Assert.Equal(
+            RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+            missingReasonDuplicateCommit.Status);
+
+        var conflict = FileTransferCoordinator.AuthorizeAction(
+            committed.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RepairReplay,
+                committed.State.CurrentRuntimeOwner!.Value,
+                committed.State.CurrentLeg!,
+                reason: "regular_v4_pressure_conflicting_no_predecessor",
+                repairReplayKind: RepairReplayKind.V4Repair));
+        Assert.False(conflict.Accepted);
+        Assert.Equal(
+            "regular_v4_frontier_repair_pressure_binding_predecessor_mismatch",
+            conflict.RejectionReason);
+        Assert.Same(committed.State, conflict.State);
+        Assert.Equal(
+            committed.State.CurrentRepairReplayDecision,
+            conflict.State.CurrentRepairReplayDecision);
+        Assert.Equal(
+            committed.State.InstalledRegularV4FrontierRepairPressureBinding,
+            conflict.State.InstalledRegularV4FrontierRepairPressureBinding);
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4FrontierRepairPressure")]
+    public void RegularV4FrontierRepairPressure_SuccessorRetiresOnlyExactPredecessor()
+    {
+        var (initialState, initialDecision) = AuthorizeRegularV4FrontierRepair();
+        var initialStage = FileTransferCoordinator.StageRegularV4FrontierRepairPressureBinding(
+            initialState,
+            initialDecision,
+            RegularV4PressureAuthorityRequest("regular-v4-pressure:12:2"),
+            "regular_v4_receiver_frontier_repair_due");
+        var initial = initialStage.Binding!.Value;
+        var installedInitial = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureBinding(
+            initialStage.State,
+            new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                initial.Authority,
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
+                "installed",
+                initial.InstallGeneration,
+                initial.PressureReason));
+
+        var (successorState, successorDecision) = AuthorizeRegularV4FrontierRepair(
+            installedInitial.State,
+            initial.Authority.AuthorityId);
+        Assert.Equal(initial.Authority.AuthorityId, successorDecision.PredecessorAuthorityId);
+        Assert.Equal(initialDecision.RepairGeneration + 1, successorDecision.RepairGeneration);
+        Assert.Equal(successorDecision, successorState.CurrentRepairReplayDecision);
+        Assert.Equal(
+            initial.Authority.AuthorityId,
+            installedInitial.State.InstalledRegularV4FrontierRepairPressureBinding!.Value.Authority.AuthorityId);
+        var successorStage = FileTransferCoordinator.StageRegularV4FrontierRepairPressureBinding(
+            successorState,
+            successorDecision,
+            RegularV4PressureAuthorityRequest("regular-v4-pressure:12:1"),
+            "regular_v4_frontier_repair_successor_pressure");
+        var successor = successorStage.Binding!.Value;
+        Assert.Equal(2, successor.InstallGeneration);
+        Assert.Null(successorStage.State.RetainedRegularV4FrontierRepairPressurePredecessor);
+
+        var installedSuccessor = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureBinding(
+            successorStage.State,
+            new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                successor.Authority,
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
+                "installed",
+                successor.InstallGeneration,
+                successor.PressureReason));
+        Assert.Equal(
+            initial.Authority.AuthorityId,
+            installedSuccessor.State.RetainedRegularV4FrontierRepairPressurePredecessor!.Value.Authority.AuthorityId);
+        var successorSettlement = RegularV4PressureSettlement(
+            successor.Authority,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled);
+        var outOfOrderSuccessor = FileTransferCoordinator.PrepareRegularV4FrontierRepairPressureSettlement(
+            installedSuccessor.State,
+            successorSettlement);
+        Assert.Equal(RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected, outOfOrderSuccessor.Status);
+        Assert.Equal(
+            "regular_v4_frontier_repair_pressure_binding_predecessor_retirement_pending",
+            outOfOrderSuccessor.Reason);
+        Assert.Null(outOfOrderSuccessor.SettlementCommand);
+
+        var predecessorSettlement = RegularV4PressureSettlement(
+            initial.Authority,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.Superseded,
+            successor.Authority.AuthorityId);
+        var prepared = FileTransferCoordinator.PrepareRegularV4FrontierRepairPressureSettlement(
+            installedSuccessor.State,
+            predecessorSettlement);
+        Assert.Equal(RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted, prepared.Status);
+        Assert.Equal(successor.InstallGeneration, prepared.SettlementCommand!.InstallGeneration);
+        Assert.Equal(successor.Authority.AuthorityId, prepared.SettlementCommand.CurrentAuthorityId);
+
+        var predecessorWrongScope = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureSettlement(
+            installedSuccessor.State,
+            new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                prepared.SettlementCommand!,
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+                "predecessor_and_current_cleared",
+                CurrentAuthorityCleared: true,
+                RetainedPredecessorCleared: true));
+        Assert.Equal(
+            RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+            predecessorWrongScope.Status);
+        Assert.Equal(
+            "regular_v4_frontier_repair_pressure_predecessor_clear_scope_mismatch",
+            predecessorWrongScope.Reason);
+        Assert.Equal(
+            installedSuccessor.State.InstalledRegularV4FrontierRepairPressureBinding,
+            predecessorWrongScope.State.InstalledRegularV4FrontierRepairPressureBinding);
+        Assert.Equal(
+            installedSuccessor.State.RetainedRegularV4FrontierRepairPressurePredecessor,
+            predecessorWrongScope.State.RetainedRegularV4FrontierRepairPressurePredecessor);
+
+        var predecessorRetired = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureSettlement(
+            installedSuccessor.State,
+            new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                prepared.SettlementCommand!,
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+                "predecessor_retired",
+                CurrentAuthorityCleared: false,
+                RetainedPredecessorCleared: true));
+        Assert.Equal(RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted, predecessorRetired.Status);
+        Assert.Null(predecessorRetired.State.RetainedRegularV4FrontierRepairPressurePredecessor);
+        Assert.Equal(
+            successor.Authority.AuthorityId,
+            predecessorRetired.State.InstalledRegularV4FrontierRepairPressureBinding!.Value.Authority.AuthorityId);
+
+        var exactPredecessorDuplicate = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureSettlement(
+            predecessorRetired.State,
+            new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                prepared.SettlementCommand!,
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent,
+                "regular_v4_frontier_repair_pressure_settlement_apply_idempotent",
+                CurrentAuthorityCleared: false,
+                RetainedPredecessorCleared: true));
+        Assert.Equal(
+            RegularV4FrontierRepairPressureBindingDecisionStatus.Idempotent,
+            exactPredecessorDuplicate.Status);
+
+        var rejectedPredecessorDuplicate = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureSettlement(
+            predecessorRetired.State,
+            new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                prepared.SettlementCommand!,
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+                "regular_v4_frontier_repair_pressure_settlement_rejected_late",
+                CurrentAuthorityCleared: false,
+                RetainedPredecessorCleared: true));
+        Assert.Equal(
+            RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+            rejectedPredecessorDuplicate.Status);
+
+        var mismatchedPredecessorDuplicate = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureSettlement(
+            predecessorRetired.State,
+            new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                prepared.SettlementCommand! with { RetainedPredecessorAuthorityId = null },
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent,
+                "regular_v4_frontier_repair_pressure_settlement_apply_idempotent",
+                CurrentAuthorityCleared: false,
+                RetainedPredecessorCleared: true));
+        Assert.Equal(
+            RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+            mismatchedPredecessorDuplicate.Status);
+
+        var preparedSuccessor = FileTransferCoordinator.PrepareRegularV4FrontierRepairPressureSettlement(
+            predecessorRetired.State,
+            successorSettlement);
+        Assert.Equal(RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted, preparedSuccessor.Status);
+        var successorWrongScope = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureSettlement(
+            predecessorRetired.State,
+            new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                preparedSuccessor.SettlementCommand!,
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+                "current_and_predecessor_cleared",
+                CurrentAuthorityCleared: true,
+                RetainedPredecessorCleared: true));
+        Assert.Equal(
+            RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+            successorWrongScope.Status);
+        Assert.Equal(
+            "regular_v4_frontier_repair_pressure_current_clear_scope_mismatch",
+            successorWrongScope.Reason);
+        Assert.Equal(
+            predecessorRetired.State.InstalledRegularV4FrontierRepairPressureBinding,
+            successorWrongScope.State.InstalledRegularV4FrontierRepairPressureBinding);
+
+        var retiredSuccessor = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureSettlement(
+            predecessorRetired.State,
+            new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                preparedSuccessor.SettlementCommand!,
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+                "successor_retired",
+                CurrentAuthorityCleared: true,
+                RetainedPredecessorCleared: false));
+        Assert.Null(retiredSuccessor.State.InstalledRegularV4FrontierRepairPressureBinding);
+        Assert.Null(retiredSuccessor.State.RetainedRegularV4FrontierRepairPressurePredecessor);
+
+        var exactSuccessorDuplicate = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureSettlement(
+            retiredSuccessor.State,
+            new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                preparedSuccessor.SettlementCommand!,
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent,
+                "regular_v4_frontier_repair_pressure_settlement_apply_idempotent",
+                CurrentAuthorityCleared: true,
+                RetainedPredecessorCleared: false));
+        Assert.Equal(
+            RegularV4FrontierRepairPressureBindingDecisionStatus.Idempotent,
+            exactSuccessorDuplicate.Status);
+
+        var mismatchedSuccessorDuplicate = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureSettlement(
+            retiredSuccessor.State,
+            new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                preparedSuccessor.SettlementCommand! with
+                {
+                    RetainedPredecessorAuthorityId = initial.Authority.AuthorityId,
+                },
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent,
+                "regular_v4_frontier_repair_pressure_settlement_apply_idempotent",
+                CurrentAuthorityCleared: true,
+                RetainedPredecessorCleared: false));
+        Assert.Equal(
+            RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+            mismatchedSuccessorDuplicate.Status);
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4FrontierRepairPressure")]
+    public void RegularV4FrontierRepairPressure_SettlementRequiresCompleteAuthorityTuple()
+    {
+        var installed = StateWithInstalledRegularV4FrontierRepairPressure();
+        var authority = installed.InstalledRegularV4FrontierRepairPressureBinding!.Value.Authority;
+        var exact = RegularV4PressureSettlement(
+            authority,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled);
+        var mismatches = new[]
+        {
+            exact with { SessionId = exact.SessionId + "-stale" },
+            exact with { RuntimeGeneration = exact.RuntimeGeneration + 1 },
+            exact with { BridgeDecisionGeneration = exact.BridgeDecisionGeneration + 1 },
+            exact with { RoutePublicationGeneration = exact.RoutePublicationGeneration + 1 },
+            exact with { RepairKey = exact.RepairKey + ":stale" },
+            exact with { DurableReceivedHighestChunkIndex = exact.DurableReceivedHighestChunkIndex + 1 },
+            exact with { RequestedChunkCount = exact.RequestedChunkCount + 1 },
+            exact with { TargetTransport = FileTransferTransportKind.Tuna },
+        };
+
+        foreach (var mismatch in mismatches)
+        {
+            var decision = FileTransferCoordinator.PrepareRegularV4FrontierRepairPressureSettlement(
+                installed,
+                mismatch);
+            Assert.Equal(RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected, decision.Status);
+            Assert.Equal(
+                "regular_v4_frontier_repair_pressure_settlement_authority_mismatch",
+                decision.Reason);
+            Assert.Null(decision.SettlementCommand);
+            Assert.Equal(
+                authority.AuthorityId,
+                decision.State.InstalledRegularV4FrontierRepairPressureBinding!.Value.Authority.AuthorityId);
+        }
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4FrontierRepairPressure")]
+    public void RegularV4FrontierRepairPressure_ScopeChangingEventsRequireExactRetirement()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        foreach (var (bindingKind, state) in StatesWithRegularV4FrontierRepairPressure())
+        {
+            var start = FileTransferCoordinator.Apply(
+                CoordinatorEvent(
+                    FileTransferCoordinatorEventKind.StartTransfer,
+                    regular,
+                    reason: $"start_with_{bindingKind}_pressure"),
+                state);
+            AssertPressureRetirementRequired(state, start, $"start:{bindingKind}");
+
+            var transition = ActivateTuna(state, tuna, committedChunk: 3);
+            AssertPressureRetirementRequired(state, transition, $"transition:{bindingKind}");
+
+            var admission = RequestRuntimeUnlockAdmission(state, state.CurrentRuntimeOwner);
+            var admissionToken = admission.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken!.Value;
+            var transaction = BuildCommitReadyRuntimeUnlockTransaction(admission.State);
+            var proof = WithCurrentTunaLease(
+                RuntimeUnlockTransaction.CreateRouteCommitProof(
+                    transaction,
+                    "answer_received",
+                    admissionToken));
+            var routeCommit = FileTransferCoordinator.Apply(
+                CoordinatorEvent(
+                    FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested,
+                    tuna,
+                    FileTransferTransportHandoffKind.NormalToTunaActivation,
+                    FileTransferTransportKind.Tuna,
+                    "runtime_unlock_commit_with_pressure",
+                    FileTransferLegState.Active,
+                    canSendData: true,
+                    runtimeUnlockCommitProof: proof),
+                admission.State);
+            AssertPressureRetirementRequired(
+                admission.State,
+                routeCommit,
+                $"route-commit:{bindingKind}");
+            Assert.Equal(
+                "regular_v4_frontier_repair_pressure_retirement_required",
+                routeCommit.RuntimeUnlockCommitRejectedReason);
+
+            var terminal = FileTransferCoordinator.Apply(
+                CoordinatorEvent(
+                    FileTransferCoordinatorEventKind.Terminalized,
+                    regular,
+                    reason: $"terminal_with_{bindingKind}_pressure"),
+                state);
+            AssertPressureRetirementRequired(state, terminal, $"terminal:{bindingKind}");
+
+            var admissionRetirement = FileTransferCoordinator.Apply(
+                CoordinatorEvent(
+                    FileTransferCoordinatorEventKind.RuntimeUnlockAdmissionRetired,
+                    regular,
+                    reason: $"admission_retirement_with_{bindingKind}_pressure"),
+                state);
+            AssertPressureRetirementRequired(
+                state,
+                admissionRetirement,
+                $"admission-retirement:{bindingKind}");
+        }
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4FrontierRepairPressure")]
+    public void RegularV4FrontierRepairPressure_ScopeChangingAuthorityIssuanceRequiresExactRetirement()
+    {
+        foreach (var (bindingKind, state) in StatesWithRegularV4FrontierRepairPressure())
+        {
+            var owner = state.CurrentRuntimeOwner!.Value;
+            var leg = state.CurrentLeg!;
+            var routePublication = FileTransferCoordinator.AuthorizeAction(
+                state,
+                new FileTransferCoordinatorActionRequest(
+                    FileTransferCoordinatorActionKind.RoutePublication,
+                    Source: "test",
+                    Reason: $"publication_with_{bindingKind}_pressure",
+                    RuntimeOwner: owner,
+                    Route: state.RouteSelection.Route,
+                    ProtocolVersion: state.RouteSelection.ProtocolVersion,
+                    LiveRouteEpoch: leg.LiveRouteEpochId,
+                    LegGeneration: leg.Generation,
+                    RuntimeGeneration: owner.RuntimeGeneration,
+                    TerminalGeneration: state.TerminalGeneration));
+            AssertPressureRetirementRequired(state, routePublication, $"publication:{bindingKind}");
+
+            var transportEpoch = FileTransferCoordinator.AuthorizeAction(
+                state,
+                RecoveryActionRequest(
+                    FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                    owner,
+                    leg,
+                    transportEpochActionKind: TransportEpochActionKind.Adopt));
+            AssertPressureRetirementRequired(state, transportEpoch, $"transport:{bindingKind}");
+
+            var bridgeRecovery = FileTransferCoordinator.AuthorizeAction(
+                state,
+                RecoveryActionRequest(
+                    FileTransferCoordinatorActionKind.BridgeReceiveStallRecovery,
+                    owner,
+                    leg,
+                    bridgeRecoveryKind: BridgeRecoveryKind.BridgeReceiveStallRecovery));
+            AssertPressureRetirementRequired(state, bridgeRecovery, $"bridge:{bindingKind}");
+        }
+    }
+
+    [Fact]
     public void FallbackFrontierRepairAuthority_ForwardsCoordinatorIdentityAndFullTuple()
     {
         var predecessorAuthorityId = new FileTransferAuthorityId("fta2-fallback-frontier-predecessor");
@@ -7161,6 +7709,178 @@ public sealed class FileTransferCoordinatorTests
         Assert.True(repair.Accepted);
         Assert.NotNull(repair.RepairReplayDecision);
         return (repair.State, repair.RepairReplayDecision!.Value);
+    }
+
+    private static (FileTransferCoordinatorState State, RepairReplayDecision Decision)
+        AuthorizeRegularV4FrontierRepair(
+            FileTransferCoordinatorState? currentState = null,
+            FileTransferAuthorityId? predecessorAuthorityId = null)
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var state = currentState ?? StartRegular(regular).State;
+        if (state.CurrentRoutePublicationToken is null)
+        {
+            var owner = state.CurrentRuntimeOwner!.Value;
+            var leg = state.CurrentLeg!;
+            var publication = FileTransferCoordinator.AuthorizeAction(
+                state,
+                new FileTransferCoordinatorActionRequest(
+                    FileTransferCoordinatorActionKind.RoutePublication,
+                    Source: "test",
+                    Reason: "regular_v4_pressure_publication",
+                    RuntimeOwner: owner,
+                    Route: regular.Route,
+                    ProtocolVersion: regular.ProtocolVersion,
+                    LiveRouteEpoch: leg.LiveRouteEpochId,
+                    LegGeneration: leg.Generation,
+                    RuntimeGeneration: owner.RuntimeGeneration,
+                    TerminalGeneration: state.TerminalGeneration));
+            Assert.True(publication.Accepted);
+            state = publication.State;
+        }
+
+        var repair = FileTransferCoordinator.AuthorizeAction(
+            state,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RepairReplay,
+                state.CurrentRuntimeOwner!.Value,
+                state.CurrentLeg!,
+                repairReplayKind: RepairReplayKind.V4Repair,
+                predecessorAuthorityId: predecessorAuthorityId));
+        Assert.True(repair.Accepted);
+        Assert.NotNull(repair.RepairReplayDecision);
+        return (repair.State, repair.RepairReplayDecision!.Value);
+    }
+
+    private static RegularV4FrontierRepairAuthorityRequest RegularV4PressureAuthorityRequest(
+        string repairKey)
+        => new(
+            repairKey,
+            FrontierChunkIndex: 12,
+            DurableReceivedHighestChunkIndex: 13,
+            PendingRepairCount: 2,
+            DecisionReason: "regular_v4_frontier_repair");
+
+    private static FileTransferRegularV4FrontierRepairSettlement RegularV4PressureSettlement(
+        FileTransferRegularV4FrontierRepairAuthority authority,
+        FileTransferRegularV4FrontierRepairSettlementOutcome outcome,
+        FileTransferAuthorityId? successorAuthorityId = null)
+        => new(
+            authority.SessionId,
+            authority.TransferId,
+            authority.Direction,
+            authority.RouteToken,
+            authority.ProtocolVersion,
+            authority.LiveRouteEpoch,
+            authority.RuntimeGeneration,
+            authority.TerminalGeneration,
+            authority.LegGeneration,
+            authority.TransportEpoch,
+            authority.BridgeRecoveryGeneration,
+            authority.BridgeDecisionGeneration,
+            authority.RoutePublicationGeneration,
+            authority.RouteCommitGeneration,
+            authority.RepairKey,
+            authority.FrontierChunkIndex,
+            authority.DurableReceivedHighestChunkIndex,
+            authority.PendingRepairCount,
+            authority.DecisionGeneration,
+            authority.DecisionReason,
+            outcome,
+            authority.TargetTransport)
+        {
+            AuthorityId = authority.AuthorityId,
+            SuccessorAuthorityId = successorAuthorityId,
+        };
+
+    private static FileTransferCoordinatorState StateWithInstalledRegularV4FrontierRepairPressure()
+    {
+        var (state, decision) = AuthorizeRegularV4FrontierRepair();
+        var staged = FileTransferCoordinator.StageRegularV4FrontierRepairPressureBinding(
+            state,
+            decision,
+            RegularV4PressureAuthorityRequest("regular-v4-pressure:scope-invalidation"),
+            "regular_v4_receiver_frontier_repair_due");
+        var binding = staged.Binding!.Value;
+        var committed = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureBinding(
+            staged.State,
+            new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                binding.Authority,
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
+                "installed",
+                binding.InstallGeneration,
+                binding.PressureReason));
+        Assert.Equal(RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted, committed.Status);
+        return committed.State;
+    }
+
+    private static IReadOnlyList<(string BindingKind, FileTransferCoordinatorState State)>
+        StatesWithRegularV4FrontierRepairPressure()
+    {
+        var (pendingSource, pendingDecision) = AuthorizeRegularV4FrontierRepair();
+        var pending = FileTransferCoordinator.StageRegularV4FrontierRepairPressureBinding(
+            pendingSource,
+            pendingDecision,
+            RegularV4PressureAuthorityRequest("regular-v4-pressure:scope-pending"),
+            "regular_v4_receiver_frontier_repair_due");
+        Assert.Equal(RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted, pending.Status);
+
+        var installed = StateWithInstalledRegularV4FrontierRepairPressure();
+
+        var retainedSource = StateWithInstalledRegularV4FrontierRepairPressure();
+        var predecessor = retainedSource.InstalledRegularV4FrontierRepairPressureBinding!.Value;
+        var (successorSource, successorDecision) = AuthorizeRegularV4FrontierRepair(
+            retainedSource,
+            predecessor.Authority.AuthorityId);
+        var successorStage = FileTransferCoordinator.StageRegularV4FrontierRepairPressureBinding(
+            successorSource,
+            successorDecision,
+            RegularV4PressureAuthorityRequest("regular-v4-pressure:scope-successor"),
+            "regular_v4_frontier_repair_successor_pressure");
+        var successor = Assert.IsType<RegularV4FrontierRepairPressureBinding>(successorStage.Binding);
+        var retained = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureBinding(
+            successorStage.State,
+            new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                successor.Authority,
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
+                "installed",
+                successor.InstallGeneration,
+                successor.PressureReason));
+        Assert.Equal(RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted, retained.Status);
+        Assert.NotNull(retained.State.RetainedRegularV4FrontierRepairPressurePredecessor);
+
+        return
+        [
+            ("pending", pending.State),
+            ("installed", installed),
+            ("retained", retained.State),
+        ];
+    }
+
+    private static void AssertPressureRetirementRequired(
+        FileTransferCoordinatorState expectedState,
+        FileTransferCoordinatorDecision decision,
+        string scope)
+    {
+        Assert.Equal(
+            "regular_v4_frontier_repair_pressure_retirement_required",
+            decision.MutationRejectedReason);
+        Assert.Same(expectedState, decision.State);
+        Assert.False(decision.RouteChanged, scope);
+        Assert.False(decision.TerminalMutationRejected, scope);
+    }
+
+    private static void AssertPressureRetirementRequired(
+        FileTransferCoordinatorState expectedState,
+        FileTransferCoordinatorActionDecision decision,
+        string scope)
+    {
+        Assert.False(decision.Accepted, scope);
+        Assert.Equal(
+            "regular_v4_frontier_repair_pressure_retirement_required",
+            decision.RejectionReason);
+        Assert.Same(expectedState, decision.State);
+        Assert.False(decision.TerminalMutationRejected, scope);
     }
 
     private static FileTransferCoordinatorState StateWithRecoveryAuthority(FileTransferCoordinatorState state)

@@ -2248,8 +2248,8 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             .GetField("inboundTransfer", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!
-            .Invoke(null, [context, "unit_control_plane_failure"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .Invoke(service, [context, "unit_control_plane_failure"]);
 
         var state = new FileTransferReceiverStateFrameV6
         {

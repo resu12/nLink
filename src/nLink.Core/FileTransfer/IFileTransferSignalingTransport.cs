@@ -314,10 +314,38 @@ internal sealed record FileTransferRegularV4FrontierRepairPressureInstallReceipt
     long InstallGeneration,
     string PressureReason);
 
+internal sealed record FileTransferRegularV4FrontierRepairPressureInstallCommand(
+    FileTransferRegularV4ControlFeedbackPressure Pressure,
+    long InstallGeneration);
+
+internal enum FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus
+{
+    Applied,
+    Idempotent,
+    Rejected,
+}
+
+internal sealed record FileTransferRegularV4FrontierRepairPressureSettlementCommand(
+    FileTransferRegularV4FrontierRepairSettlement Settlement,
+    long InstallGeneration,
+    FileTransferAuthorityId CurrentAuthorityId,
+    FileTransferAuthorityId? RetainedPredecessorAuthorityId);
+
+internal sealed record FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+    FileTransferRegularV4FrontierRepairPressureSettlementCommand Command,
+    FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus Status,
+    string Reason,
+    bool CurrentAuthorityCleared,
+    bool RetainedPredecessorCleared);
+
 internal interface IFileTransferRegularV4FrontierRepairPressureInstallBridge
 {
     FileTransferRegularV4FrontierRepairPressureInstallReceipt InstallRegularV4FrontierRepairPressure(
-        FileTransferRegularV4ControlFeedbackPressure pressure);
+        FileTransferRegularV4FrontierRepairPressureInstallCommand command);
+
+    FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt
+        ApplyRegularV4FrontierRepairPressureSettlement(
+            FileTransferRegularV4FrontierRepairPressureSettlementCommand command);
 }
 
 public interface IFileTransferRegularV4FrontierRepairSettlementObserver

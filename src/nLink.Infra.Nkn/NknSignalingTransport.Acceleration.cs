@@ -3404,8 +3404,9 @@ public sealed partial class NknSignalingTransport
 
     FileTransferRegularV4FrontierRepairPressureInstallReceipt
         IFileTransferRegularV4FrontierRepairPressureInstallBridge.InstallRegularV4FrontierRepairPressure(
-            FileTransferRegularV4ControlFeedbackPressure pressure)
+            FileTransferRegularV4FrontierRepairPressureInstallCommand command)
     {
+        var pressure = command.Pressure;
         var sessionId = string.IsNullOrWhiteSpace(pressure.SessionId)
             ? currentSessionSecurityState.SessionId?.Value ?? "none"
             : pressure.SessionId.Trim();
@@ -3445,16 +3446,40 @@ public sealed partial class NknSignalingTransport
                 authority,
                 FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected,
                 decisionReason,
-                0,
+                Math.Max(0, command.InstallGeneration),
                 pressureReason);
         }
 
-        return realClient.InstallRegularV4FrontierRepairPressure(pressure with
+        return realClient.InstallRegularV4FrontierRepairPressure(command with
         {
-            SessionId = sessionId,
-            TransferId = transferId,
-            Reason = pressureReason,
+            Pressure = pressure with
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                Reason = pressureReason,
+            },
         });
+    }
+
+    FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt
+        IFileTransferRegularV4FrontierRepairPressureInstallBridge.ApplyRegularV4FrontierRepairPressureSettlement(
+            FileTransferRegularV4FrontierRepairPressureSettlementCommand command)
+    {
+        if (client is RealNknClientAdapter realClient)
+        {
+            return realClient.ApplyRegularV4FrontierRepairPressureSettlement(command);
+        }
+
+        const string decisionReason = "regular_v4_frontier_repair_pressure_settlement_apply_unsupported";
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_rejected; source=nkn_bridge_pressure; stage=settlement_apply; session_id={SanitizeLogToken(command.Settlement.SessionId)}; transfer_id={SanitizeLogToken(command.Settlement.TransferId)}; authority_id={SanitizeLogToken(command.Settlement.AuthorityId.ToString())}; current_authority_id={SanitizeLogToken(command.CurrentAuthorityId.ToString())}; retained_predecessor_authority_id={SanitizeLogToken(command.RetainedPredecessorAuthorityId?.ToString() ?? "(none)")}; install_generation={command.InstallGeneration}; decision_reason={decisionReason}");
+        return new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+            command,
+            FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+            decisionReason,
+            CurrentAuthorityCleared: false,
+            RetainedPredecessorCleared: false);
     }
 
     public void ObserveRegularV4FrontierRepairSettlement(FileTransferRegularV4FrontierRepairSettlement settlement)
@@ -3472,19 +3497,22 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
-        var accepted = realClient.ReportRegularV4FrontierRepairSettlement(settlement with
+        var normalizedSettlement = settlement with
         {
             SessionId = sessionId ?? "none",
             TransferId = transferId,
-        });
-        if (accepted && settlement.Outcome != FileTransferRegularV4FrontierRepairSettlementOutcome.Superseded)
+        };
+        if (!realClient.IsRegularV4FrontierRepairSettlementApplied(normalizedSettlement))
         {
-            HandleAcceptedRegularV4FrontierRepairSettlement(
-                settlement with
-                {
-                    SessionId = sessionId ?? "none",
-                    TransferId = transferId,
-                });
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=filetransfer_regular_v4_frontier_repair_settlement_handoff_rejected; source=nkn_bridge_pressure; stage=settlement_handoff; session_id={SanitizeLogToken(normalizedSettlement.SessionId)}; transfer_id={SanitizeLogToken(normalizedSettlement.TransferId)}; authority_id={SanitizeLogToken(normalizedSettlement.AuthorityId.ToString())}; outcome={SanitizeLogToken(normalizedSettlement.Outcome.ToString())}; decision_reason=coordinator_pressure_settlement_not_applied");
+            return;
+        }
+
+        if (normalizedSettlement.Outcome != FileTransferRegularV4FrontierRepairSettlementOutcome.Superseded)
+        {
+            HandleAcceptedRegularV4FrontierRepairSettlement(normalizedSettlement);
         }
     }
 

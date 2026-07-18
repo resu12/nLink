@@ -426,6 +426,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         const string transferId = "transfer_file_tuna_v4_post_tuna_frontier_replay";
         var logStart = GetOperationalLogLength();
         using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
         var context = CreateFileTunaV4OutboundContext(
             transferId,
             remoteNextExpectedChunkIndex: 100,
@@ -454,6 +456,74 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Contains("route=file_tuna_v4; protocol_version=4", log, StringComparison.Ordinal);
         Assert.Contains("reactivation_generation=1", log, StringComparison.Ordinal);
         Assert.DoesNotContain("file_tuna_v6", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public void FileTunaV4PostTunaReactivation_RejectedInitialPressureInstallRetriesExactAuthority()
+    {
+        const string transferId = "transfer_file_tuna_v4_initial_pressure_retry";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var installAttempt = 0;
+        transport.RegularV4PressureInstallOverride = pressure =>
+        {
+            installAttempt++;
+            var authority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(pressure.RepairAuthority);
+            return new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                authority,
+                installAttempt == 1
+                    ? FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected
+                    : FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
+                installAttempt == 1
+                    ? "unit_test_initial_pressure_install_rejected"
+                    : "regular_v4_frontier_repair_initial_pressure_installed",
+                1,
+                pressure.Reason);
+        };
+        var context = CreateFileTunaV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256);
+        SetPrivateProperty(context, "PullFileTunaV4PostTunaReactivationGeneration", 1);
+        SetPrivateProperty(context, "PullFileTunaV4PostTunaReactivationStartedUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        SetPrivateProperty(context, "PullV4LastPeerFrameReceivedUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var queueReplay = typeof(SessionFileTransferService)
+            .GetMethod("MaybeQueueOutboundFileTunaV4PostTunaFrontierReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        Assert.False((bool)queueReplay.Invoke(service, [context, "initial_boundary"])!);
+        var stagedContract = GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract");
+        Assert.True(stagedContract is not null, ReadV4SenderLogSnapshot(logStart));
+        var stagedAuthority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(
+            GetPrivatePropertyValue(stagedContract!, "Authority"));
+        Assert.Empty(GetQueuedV4RepairSends(context));
+        Assert.Equal(0, GetPrivateProperty<int>(context, "PullFileTunaV4PostTunaFrontierReplayCount"));
+        Assert.NotNull(GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureInstallRetry"));
+        Assert.Empty(transport.RegularV4FrontierRepairSettlements);
+
+        Assert.True((bool)queueReplay.Invoke(service, [context, "matching_retry_boundary"])!);
+
+        var receipts = transport.RegularV4PressureInstallReceipts.ToArray();
+        Assert.Equal(2, receipts.Length);
+        Assert.All(receipts, receipt => Assert.Equal(stagedAuthority.AuthorityId, receipt.Authority.AuthorityId));
+        Assert.All(receipts, receipt => Assert.Equal(1L, receipt.InstallGeneration));
+        Assert.Equal(
+            new[]
+            {
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected,
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
+            },
+            receipts.Select(static receipt => receipt.Status).ToArray());
+        Assert.Single(GetQueuedV4RepairSends(context));
+        Assert.Equal(1, GetPrivateProperty<int>(context, "PullFileTunaV4PostTunaFrontierReplayCount"));
+        Assert.Null(GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureInstallRetry"));
+        Assert.Empty(transport.RegularV4FrontierRepairSettlements);
     }
 
     [Fact]
@@ -526,6 +596,74 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Contains("post_rebind_frontier_exclusive=0", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_v6_exact_frontier_repair_enqueued;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_fallback_frontier_repair_authority_granted;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public void RegularV4ReceiverStateRepair_RejectedInitialPressureInstallRetriesExactAuthority()
+    {
+        const string transferId = "transfer_regular_v4_receiver_state_initial_pressure_retry";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var installAttempt = 0;
+        transport.RegularV4PressureInstallOverride = pressure =>
+        {
+            installAttempt++;
+            var authority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(pressure.RepairAuthority);
+            return new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                authority,
+                installAttempt == 1
+                    ? FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected
+                    : FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
+                installAttempt == 1
+                    ? "unit_test_initial_pressure_install_rejected"
+                    : "regular_v4_frontier_repair_initial_pressure_installed",
+                1,
+                pressure.Reason);
+        };
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Outbound, "unit_test_receiver_state_pressure_retry");
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        var state = new FileTransferStateFrameV4
+        {
+            SessionId = $"session_{transferId}",
+            TransferId = transferId,
+            Epoch = 1,
+            ContiguousCommittedChunkIndex = 100,
+            DurableReceivedHighestChunkIndex = 100,
+            CreditUntilChunkIndexExclusive = 256,
+            MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 100, ChunkCount = 1 }],
+            BytesCommitted = 100L * 21 * 1024,
+        };
+        var enqueue = typeof(SessionFileTransferService)
+            .GetMethod("EnqueueV4RepairsFromState", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+        enqueue.Invoke(service, [context, state]);
+        var stagedContract = GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract");
+        Assert.NotNull(stagedContract);
+        var stagedAuthority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(
+            GetPrivatePropertyValue(stagedContract!, "Authority"));
+        Assert.Empty(GetQueuedV4RepairSends(context));
+        Assert.NotNull(GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureInstallRetry"));
+        Assert.Empty(transport.RegularV4FrontierRepairSettlements);
+
+        enqueue.Invoke(service, [context, state]);
+
+        var receipts = transport.RegularV4PressureInstallReceipts.ToArray();
+        Assert.Equal(2, receipts.Length);
+        Assert.All(receipts, receipt => Assert.Equal(stagedAuthority.AuthorityId, receipt.Authority.AuthorityId));
+        Assert.All(receipts, receipt => Assert.Equal(1L, receipt.InstallGeneration));
+        Assert.Single(GetQueuedV4RepairSends(context));
+        Assert.Null(GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureInstallRetry"));
+        Assert.Empty(transport.RegularV4FrontierRepairSettlements);
     }
 
     [Fact]
@@ -1982,6 +2120,278 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public void RegularNknV4PeerSilenceSafetyReplay_DataSessionReplacementRetiresInstalledPressure()
+    {
+        const string transferId = "transfer_regular_v4_peer_silence_data_session_replacement";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        using var originalSession = new RecordingDataSession($"session_{transferId}", transferId);
+        using var replacementSession = new RecordingDataSession($"session_{transferId}", transferId);
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        SetPrivateProperty(context, "DataSession", originalSession);
+        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Outbound, "unit_test_data_session_replacement");
+        SetPrivateProperty(context, "PullSourceCanSeek", true);
+        SetPrivateProperty(context, "PullV4LastPeerFrameReceivedUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        Assert.True((bool)typeof(SessionFileTransferService)
+            .GetMethod("MaybeQueueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "session_liveness_timeout_pending"])!);
+        var installedBinding = GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding");
+        Assert.NotNull(installedBinding);
+        var originalDataSessionGeneration = GetPrivateProperty<long>(context, "DataSessionGeneration");
+
+        var replacementAccepted = Assert.IsType<bool>(typeof(SessionFileTransferService)
+            .GetMethod("ReplaceOutboundDataSessionLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, replacementSession]));
+
+        Assert.True(replacementAccepted);
+        Assert.Same(replacementSession, GetPrivatePropertyValue(context, "DataSession"));
+        Assert.Equal(
+            originalDataSessionGeneration + 1,
+            GetPrivateProperty<long>(context, "DataSessionGeneration"));
+        var settlement = Assert.Single(transport.RegularV4FrontierRepairSettlements);
+        Assert.Equal(FileTransferRegularV4FrontierRepairSettlementOutcome.StaleRejected, settlement.Outcome);
+        Assert.Null(GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureBinding"));
+        Assert.Null(GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
+        Assert.Null(GetPrivatePropertyValue(context, "RetainedRegularV4FrontierRepairPressurePredecessor"));
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public void RegularNknV4PeerSilenceSafetyReplay_DataSessionReplacementPartialSettlementFailsClosed()
+    {
+        const string transferId = "transfer_regular_v4_peer_silence_data_session_partial_settlement";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        using var originalSession = new RecordingDataSession($"session_{transferId}", transferId);
+        using var replacementSession = new RecordingDataSession($"session_{transferId}", transferId);
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        SetPrivateProperty(context, "DataSession", originalSession);
+        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Outbound, "unit_test_data_session_partial_settlement");
+        SetPrivateProperty(context, "PullSourceCanSeek", true);
+        SetPrivateProperty(context, "PullV4LastPeerFrameReceivedUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        Assert.True((bool)typeof(SessionFileTransferService)
+            .GetMethod("MaybeQueueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "session_liveness_timeout_pending"])!);
+        var predecessorRepair = Assert.Single(GetQueuedV4RepairSends(context));
+        var predecessorContract = GetPrivatePropertyValue(predecessorRepair, "RegularV4RepairContract");
+        Assert.NotNull(predecessorContract);
+        var repairQueue = context.GetType()
+            .GetProperty("PullV4SenderPumpRepairQueue", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!
+            .GetValue(context)!;
+        var dequeuedRepair = repairQueue.GetType().GetMethod("Dequeue")!.Invoke(repairQueue, null)!;
+        var queuedChunkIndices = context.GetType()
+            .GetProperty("PullV4SenderPumpRepairQueuedChunkIndices", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!
+            .GetValue(context)!;
+        queuedChunkIndices.GetType().GetMethod("Clear")!.Invoke(queuedChunkIndices, null);
+        transport.RegularV4PressureSettlementApplyOverride = command => new(
+            command,
+            FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+            "unit_test_predecessor_retirement_barrier",
+            CurrentAuthorityCleared: false,
+            RetainedPredecessorCleared: false);
+
+        var requeueArgs = new object?[] { context, dequeuedRepair, 0, null, false };
+        Assert.False((bool)typeof(SessionFileTransferService)
+            .GetMethod("TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, requeueArgs)!);
+        var successorContract = GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract");
+        Assert.NotNull(successorContract);
+        Assert.NotNull(GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
+        Assert.NotNull(GetPrivatePropertyValue(context, "RetainedRegularV4FrontierRepairPressurePredecessor"));
+        var originalDataSessionGeneration = GetPrivateProperty<long>(context, "DataSessionGeneration");
+
+        transport.RegularV4PressureSettlementApplyOverride = command =>
+            command.Settlement.Outcome == FileTransferRegularV4FrontierRepairSettlementOutcome.Superseded
+                ? new(
+                    command,
+                    FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+                    "regular_v4_frontier_repair_pressure_settlement_applied",
+                    CurrentAuthorityCleared: false,
+                    RetainedPredecessorCleared: true)
+                : new(
+                    command,
+                    FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+                    "unit_test_current_retirement_rejected",
+                    CurrentAuthorityCleared: false,
+                    RetainedPredecessorCleared: false);
+
+        var replacementAccepted = Assert.IsType<bool>(typeof(SessionFileTransferService)
+            .GetMethod("ReplaceOutboundDataSessionLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, replacementSession]));
+
+        Assert.False(replacementAccepted);
+        Assert.Same(originalSession, GetPrivatePropertyValue(context, "DataSession"));
+        Assert.Equal(
+            originalDataSessionGeneration,
+            GetPrivateProperty<long>(context, "DataSessionGeneration"));
+        Assert.Null(GetPrivatePropertyValue(context, "RetainedRegularV4FrontierRepairPressurePredecessor"));
+        Assert.NotNull(GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
+        Assert.Equal(
+            FileTransferRegularV4FrontierRepairSettlementOutcome.Superseded,
+            Assert.IsType<FileTransferRegularV4FrontierRepairSettlementOutcome>(
+                GetPrivatePropertyValue(GetPrivatePropertyValue(predecessorContract!, "Lifecycle")!, "SettlementOutcome")));
+        Assert.False(GetPrivateProperty<bool>(GetPrivatePropertyValue(successorContract!, "Lifecycle")!, "IsSettled"));
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public void RegularNknV4PeerSilenceSafetyReplay_RejectedInitialPressureInstallRetriesExactAuthority()
+    {
+        const string transferId = "transfer_regular_v4_peer_silence_initial_pressure_retry";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        using var dataSession = new RecordingDataSession($"session_{transferId}", transferId);
+        service.AttachTransport(transport);
+        var installAttempt = 0;
+        transport.RegularV4PressureInstallOverride = pressure =>
+        {
+            installAttempt++;
+            var authority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(pressure.RepairAuthority);
+            return new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                authority,
+                installAttempt == 1
+                    ? FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected
+                    : FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
+                installAttempt == 1
+                    ? "unit_test_initial_pressure_install_rejected"
+                    : "regular_v4_frontier_repair_initial_pressure_installed",
+                1,
+                pressure.Reason);
+        };
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        SetPrivateProperty(context, "DataSession", dataSession);
+        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Outbound, "unit_test_initial_pressure_retry");
+        SetPrivateProperty(context, "PullSourceCanSeek", true);
+        SetPrivateProperty(context, "PullV4LastPeerFrameReceivedUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var queueReplay = typeof(SessionFileTransferService)
+            .GetMethod("MaybeQueueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        Assert.False((bool)queueReplay.Invoke(service, [context, "initial_boundary"])!);
+        var stagedContract = GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract");
+        Assert.NotNull(stagedContract);
+        var stagedAuthority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(
+            GetPrivatePropertyValue(stagedContract!, "Authority"));
+        Assert.Empty(GetQueuedV4RepairSends(context));
+        Assert.Equal(0, GetPrivateProperty<int>(context, "PullRegularNknV4PeerSilenceSafetyReplayCount"));
+        Assert.NotNull(GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureInstallRetry"));
+        Assert.Empty(transport.RegularV4FrontierRepairSettlements);
+
+        Assert.True((bool)queueReplay.Invoke(service, [context, "matching_retry_boundary"])!);
+
+        var receipts = transport.RegularV4PressureInstallReceipts.ToArray();
+        Assert.Equal(2, receipts.Length);
+        Assert.All(receipts, receipt => Assert.Equal(stagedAuthority.AuthorityId, receipt.Authority.AuthorityId));
+        Assert.All(receipts, receipt => Assert.Equal(1L, receipt.InstallGeneration));
+        Assert.Equal(
+            new[]
+            {
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected,
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
+            },
+            receipts.Select(static receipt => receipt.Status).ToArray());
+        Assert.Single(GetQueuedV4RepairSends(context));
+        Assert.Equal(1, GetPrivateProperty<int>(context, "PullRegularNknV4PeerSilenceSafetyReplayCount"));
+        Assert.Null(GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureInstallRetry"));
+        Assert.Empty(transport.RegularV4FrontierRepairSettlements);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public void RegularNknV4PeerSilenceSafetyReplay_StaleRetirementRetriesMalformedPendingInstallBeforeSettlement()
+    {
+        const string transferId = "transfer_regular_v4_peer_silence_pending_stale_retirement";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        using var dataSession = new RecordingDataSession($"session_{transferId}", transferId);
+        service.AttachTransport(transport);
+        var installAttempt = 0;
+        transport.RegularV4PressureInstallOverride = pressure =>
+        {
+            installAttempt++;
+            var authority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(pressure.RepairAuthority);
+            return new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                authority,
+                installAttempt == 1
+                    ? FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed
+                    : FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent,
+                installAttempt == 1
+                    ? "unit_test_applied_receipt_generation_malformed"
+                    : "regular_v4_frontier_repair_pressure_already_installed",
+                installAttempt == 1 ? 2 : 1,
+                pressure.Reason);
+        };
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        SetPrivateProperty(context, "DataSession", dataSession);
+        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Outbound, "unit_test_pending_stale_retirement");
+        SetPrivateProperty(context, "PullSourceCanSeek", true);
+        SetPrivateProperty(context, "PullV4LastPeerFrameReceivedUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        Assert.False((bool)typeof(SessionFileTransferService)
+            .GetMethod("MaybeQueueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "initial_boundary"])!);
+        var stagedContract = GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract");
+        var stagedAuthority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(
+            GetPrivatePropertyValue(stagedContract!, "Authority"));
+
+        var settleAndClear = typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Single(method =>
+                string.Equals(method.Name, "SettleAndClearRegularV4FrontierRepairContractLocked", StringComparison.Ordinal) &&
+                method.GetParameters()[0].ParameterType == context.GetType());
+        Assert.True(Assert.IsType<bool>(settleAndClear.Invoke(
+            service,
+            [context, FileTransferRegularV4FrontierRepairSettlementOutcome.StaleRejected, "unit_test_scope_replaced"])));
+
+        var receipts = transport.RegularV4PressureInstallReceipts.ToArray();
+        Assert.Equal(2, receipts.Length);
+        Assert.All(receipts, receipt => Assert.Equal(stagedAuthority.AuthorityId, receipt.Authority.AuthorityId));
+        Assert.Equal(new long[] { 2, 1 }, receipts.Select(static receipt => receipt.InstallGeneration).ToArray());
+        var settlement = Assert.Single(transport.RegularV4FrontierRepairSettlements);
+        Assert.Equal(stagedAuthority.AuthorityId, settlement.AuthorityId);
+        Assert.Equal(FileTransferRegularV4FrontierRepairSettlementOutcome.StaleRejected, settlement.Outcome);
+        Assert.Null(GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
+        Assert.Null(GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureBinding"));
+        Assert.Null(GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
     public void RegularNknV4PeerSilenceSafetyReplay_TimeoutSuccessorPressureRejectedInstallRetriesExactSuccessorAtLaterBoundary()
     {
         const string transferId = "transfer_regular_v4_peer_silence_pressure_retry";
@@ -2091,7 +2501,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     [InlineData(FileTransferRegularV4FrontierRepairSettlementOutcome.StaleRejected)]
     [InlineData(FileTransferRegularV4FrontierRepairSettlementOutcome.TransferTerminal)]
     [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
-    public void RegularNknV4PeerSilenceSafetyReplay_TimeoutSuccessorPressureRejectedInstallInvalidationSettlesOnlyPredecessor(
+    public void RegularNknV4PeerSilenceSafetyReplay_TimeoutSuccessorPressureRejectedInstallInvalidationPreservesBothBindings(
         FileTransferRegularV4FrontierRepairSettlementOutcome outcome)
     {
         const string transferId = "transfer_regular_v4_peer_silence_pressure_invalidation";
@@ -2150,23 +2560,28 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             SetPrivateProperty(context, "CurrentRuntimeOwner", owner with { RuntimeGeneration = owner.RuntimeGeneration + 1 });
         }
 
-        typeof(SessionFileTransferService)
+        var retired = Assert.IsType<bool>(typeof(SessionFileTransferService)
             .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
             .Single(method =>
-                string.Equals(method.Name, "SettleAndClearRegularV4FrontierRepairContractLocked", StringComparison.Ordinal) &&
+                string.Equals(method.Name, "TryRetireRegularV4FrontierRepairPressureForScopeReplacementLocked", StringComparison.Ordinal) &&
                 method.GetParameters()[0].ParameterType == context.GetType())
-            .Invoke(service, [context, outcome, "unit_test_pressure_install_invalidated"]);
+            .Invoke(service, [context, "unit_test_pressure_install_invalidated", outcome]));
 
-        var settlement = Assert.Single(transport.RegularV4FrontierRepairSettlements);
         var predecessorAuthority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(
             GetPrivatePropertyValue(predecessorContract!, "Authority"));
-        Assert.Equal(predecessorAuthority.AuthorityId, settlement.AuthorityId);
-        Assert.Equal(outcome, settlement.Outcome);
-        Assert.True(GetPrivateProperty<bool>(GetPrivatePropertyValue(predecessorContract!, "Lifecycle")!, "IsSettled"));
-        Assert.True(GetPrivateProperty<bool>(GetPrivatePropertyValue(successorContract!, "Lifecycle")!, "IsSettled"));
-        Assert.Null(GetPrivatePropertyValue(successorContract!, "PendingPressureInstallPredecessorContract"));
-        Assert.Null(GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
-        Assert.Null(GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureInstallRetry"));
+        var successorAuthority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(
+            GetPrivatePropertyValue(successorContract!, "Authority"));
+        Assert.False(retired);
+        Assert.Empty(transport.RegularV4FrontierRepairSettlements);
+        Assert.False(GetPrivateProperty<bool>(GetPrivatePropertyValue(predecessorContract!, "Lifecycle")!, "IsSettled"));
+        Assert.False(GetPrivateProperty<bool>(GetPrivatePropertyValue(successorContract!, "Lifecycle")!, "IsSettled"));
+        Assert.Same(predecessorContract, GetPrivatePropertyValue(successorContract!, "PendingPressureInstallPredecessorContract"));
+        Assert.Same(successorContract, GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
+        Assert.Same(dequeuedRepair, GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureInstallRetry"));
+        var pendingBinding = GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureBinding");
+        var installedBinding = GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding");
+        Assert.Equal(successorAuthority.AuthorityId, GetPrivateProperty<FileTransferRegularV4FrontierRepairAuthority>(pendingBinding!, "Authority").AuthorityId);
+        Assert.Equal(predecessorAuthority.AuthorityId, GetPrivateProperty<FileTransferRegularV4FrontierRepairAuthority>(installedBinding!, "Authority").AuthorityId);
         Assert.Empty(GetQueuedV4RepairSends(context));
     }
 
@@ -3367,7 +3782,45 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         SetPrivateProperty(context, "RemoteNextExpectedChunkIndex", remoteNextExpectedChunkIndex);
         SetPrivateProperty(context, "RemoteGrantedUntilExclusive", remoteGrantedUntilExclusive);
         SetPrivateProperty(context, "ChunksAcceptedForTransport", chunksAcceptedForTransport);
-        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Outbound, "unit_test_file_tuna_v4");
+        SetPrivateProperty(
+            context,
+            "DataSession",
+            new RecordingDataSession($"session_{transferId}", transferId));
+        SetPrivateProperty(context, "DataSessionGeneration", 1L);
+        var leg = SeedCurrentRuntimeOwnerForTest(
+            context,
+            FileTransferDirection.Outbound,
+            "unit_test_file_tuna_v4");
+        var owner = Assert.IsType<RuntimeOwnerToken>(GetPrivatePropertyValue(context, "CurrentRuntimeOwner"));
+        var admission = SeedRuntimeUnlockAdmissionForTest(
+            context,
+            FileTransferDirection.Outbound,
+            "unit_test_file_tuna_v4");
+        var routeCommit = new RouteCommitToken(
+            $"session_{transferId}",
+            transferId,
+            FileTransferDirection.Outbound,
+            owner,
+            admission,
+            routeSelection.Route,
+            routeSelection.TelemetryToken,
+            routeSelection.ProtocolVersion,
+            owner.LiveRouteEpoch,
+            owner.RuntimeGeneration,
+            owner.TerminalGeneration,
+            leg.Generation,
+            TransactionGeneration: 1,
+            OfferGeneration: 1,
+            TunaPathLeaseGeneration: 1,
+            TunaPathLeaseListenerRunId: "unit_test_file_tuna_v4_listener",
+            SamePathTunaProbeAckId: "unit_test_file_tuna_v4_probe_ack",
+            TargetRoute: FileTransferRoute.FileTunaV4,
+            TargetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+            TargetTransport: FileTransferTransportKind.Tuna,
+            CommitGeneration: 1,
+            Reason: "unit_test_file_tuna_v4");
+        SetPrivateProperty(context, "RuntimeUnlockRouteCommitToken", routeCommit);
+        SetPrivateProperty(context, "LastRuntimeUnlockRouteCommitGeneration", 1);
         return context;
     }
 
@@ -3819,6 +4272,79 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public void RegularNknV4FrontierRepairLiveness_RejectedInitialPressureInstallRetriesExactAuthority()
+    {
+        const string transferId = "transfer_regular_v4_liveness_initial_pressure_retry";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var installAttempt = 0;
+        transport.RegularV4PressureInstallOverride = pressure =>
+        {
+            installAttempt++;
+            var authority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(pressure.RepairAuthority);
+            return new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                authority,
+                installAttempt == 1
+                    ? FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected
+                    : FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
+                installAttempt == 1
+                    ? "unit_test_initial_pressure_install_rejected"
+                    : "regular_v4_frontier_repair_initial_pressure_installed",
+                1,
+                pressure.Reason);
+        };
+        var context = CreateRegularNknV4InboundContext(
+            transferId,
+            nextChunkIndex: 240,
+            durableHighestChunkIndex: 255,
+            creditUntilChunkIndexExclusive: 252);
+        SetPrivateProperty(
+            context,
+            "DataSession",
+            new RecordingDataSession($"session_{transferId}", transferId));
+        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "unit_test_liveness_pressure_retry");
+        typeof(SessionFileTransferService)
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        var settleStalled = typeof(SessionFileTransferService)
+            .GetMethod("TrySettleInboundRegularV4FrontierRepairStalledLocked", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var args = new object?[]
+        {
+            context,
+            "regular_v4_frontier_repair_liveness_retry",
+            "unit_test_repeated_frontier_repair_without_progress",
+            240,
+            255,
+            12,
+            2,
+            11_000L,
+        };
+
+        Assert.False(Assert.IsType<bool>(settleStalled.Invoke(service, args)));
+        var stagedContract = GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract");
+        Assert.NotNull(stagedContract);
+        var stagedAuthority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(
+            GetPrivatePropertyValue(stagedContract!, "Authority"));
+        Assert.False(GetPrivateProperty<bool>(GetPrivatePropertyValue(stagedContract!, "Lifecycle")!, "IsSettled"));
+        Assert.Empty(transport.RegularV4FrontierRepairSettlements);
+
+        Assert.True(
+            Assert.IsType<bool>(settleStalled.Invoke(service, args)),
+            ReadV4SenderLogSnapshot(logStart));
+
+        var receipts = transport.RegularV4PressureInstallReceipts.ToArray();
+        Assert.Equal(2, receipts.Length);
+        Assert.All(receipts, receipt => Assert.Equal(stagedAuthority.AuthorityId, receipt.Authority.AuthorityId));
+        Assert.All(receipts, receipt => Assert.Equal(1L, receipt.InstallGeneration));
+        var settlement = Assert.Single(transport.RegularV4FrontierRepairSettlements);
+        Assert.Equal(stagedAuthority.AuthorityId, settlement.AuthorityId);
+        Assert.Equal(FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled, settlement.Outcome);
+    }
+
+    [Fact]
     public void RegularNknV4FrontierRepairState_SettledStallClearsPressureAndSuppressesRefresh()
     {
         var logStart = GetOperationalLogLength();
@@ -3907,8 +4433,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         written[100] = false;
         SetPrivateProperty(context, "ReceiverSparseChunksWritten", written);
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_frontier_state_metadata"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_frontier_state_metadata"]);
         SetPrivateProperty(context, "V6LastFrontierRequestChunkIndex", 100);
         SetPrivateProperty(context, "V6LastFrontierRequestId", "v6-frontier:100:12");
 
@@ -3937,8 +4463,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         written[100] = false;
         SetPrivateProperty(context, "ReceiverSparseChunksWritten", written);
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_frontier_state_allocates_metadata"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_frontier_state_allocates_metadata"]);
 
         var state = Assert.IsType<FileTransferReceiverStateFrameV6>(serviceType
             .GetMethod("CreateInboundV4StateLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -3966,8 +4492,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         written[100] = false;
         SetPrivateProperty(context, "ReceiverSparseChunksWritten", written);
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_current_leg_frontier_state_metadata"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_current_leg_frontier_state_metadata"]);
         SetPrivateProperty(context, "PullPostTunaRecoveryActive", false);
         SetPrivateProperty(context, "PullTransportRebindGeneration", 0);
         SetPrivateProperty(context, "V6LastFrontierRequestChunkIndex", 100);
@@ -3992,8 +4518,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var context = CreatePostTunaFallbackV6InboundContext(
             "transfer_post_tuna_fallback_checkpoint_current_leg_authority");
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_current_leg_checkpoint_authority"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_current_leg_checkpoint_authority"]);
         SetPrivateProperty(context, "PullPostTunaRecoveryActive", false);
         SetPrivateProperty(context, "PullTransportRebindGeneration", 0);
 
@@ -4018,8 +4544,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         written[100] = false;
         SetPrivateProperty(context, "ReceiverSparseChunksWritten", written);
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_checkpoint_state_metadata"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_checkpoint_state_metadata"]);
         var checkpointRequest = new FileTransferFrontierRequestFrameV6
         {
             SessionId = "session_transfer_post_tuna_fallback_frontier_state_pending_checkpoint",
@@ -4058,8 +4584,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         SetPrivateProperty(context, "V4CreditUntilChunkIndexExclusive", 160);
         SetPrivateProperty(context, "ReceiverSparseChunksWritten", new System.Collections.BitArray(256, true));
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_state_refresh_without_pending_checkpoint"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_state_refresh_without_pending_checkpoint"]);
 
         var handoffType = serviceType.Assembly.GetType("NLink.Core.FileTransfer.TransportHandoffEpoch");
         Assert.NotNull(handoffType);
@@ -4113,8 +4639,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_inbound_checkpoint_new_epoch"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_inbound_checkpoint_new_epoch"]);
 
         var firstRequest = new FileTransferFrontierRequestFrameV6
         {
@@ -4242,8 +4768,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_inbound_checkpoint_pending_new_epoch"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_inbound_checkpoint_pending_new_epoch"]);
 
         var firstLeg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
         firstLeg.TransportEpochId = 2;
@@ -4296,8 +4822,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         SetPrivateProperty(context, "PullTransportRebindGeneration", 3);
         SetPrivateProperty(context, "V6ReceiverTransportEpoch", 3L);
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_frontier_control_plane_metadata"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_frontier_control_plane_metadata"]);
 
         var frontier = new FileTransferFrontierRequestFrameV6
         {
@@ -4336,8 +4862,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var context = CreatePostTunaFallbackV6OutboundContext(
             "transfer_post_tuna_fallback_checkpoint_control_plane_durable");
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_checkpoint_control_plane_durable"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_checkpoint_control_plane_durable"]);
 
         var checkpointRequest = new FileTransferFrontierRequestFrameV6
         {
@@ -4391,8 +4917,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         SetPrivateProperty(context, "PullTransportRebindGeneration", 3);
         SetPrivateProperty(context, "V6ReceiverTransportEpoch", 3L);
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_checkpoint_proof_control_plane_durable"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_checkpoint_proof_control_plane_durable"]);
 
         var checkpointRequest = new FileTransferFrontierRequestFrameV6
         {
@@ -4469,8 +4995,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_inbound_checkpoint_retire"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_inbound_checkpoint_retire"]);
         var checkpointRequest = new FileTransferFrontierRequestFrameV6
         {
             SessionId = "session_transfer_post_tuna_fallback_v6_inbound_checkpoint_retire",
@@ -4546,8 +5072,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_inbound_checkpoint_replay"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_inbound_checkpoint_replay"]);
         var checkpointRequest = new FileTransferFrontierRequestFrameV6
         {
             SessionId = "session_transfer_post_tuna_fallback_v6_inbound_checkpoint_replay",
@@ -4600,8 +5126,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_old_transport_checkpoint_replay"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_old_transport_checkpoint_replay"]);
 
         var oldTransportRequest = new FileTransferFrontierRequestFrameV6
         {
@@ -4650,8 +5176,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_authority_revalidate"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_authority_revalidate"]);
         var checkpointRequest = new FileTransferFrontierRequestFrameV6
         {
             SessionId = "session_transfer_post_tuna_fallback_v6_authority_revalidate",
@@ -4740,8 +5266,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_frontier_singleflight"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_frontier_singleflight"]);
         SetPrivateProperty(context, "PullTransportFrontierOnlyRepairActive", false);
 
         var firstRequest = new FileTransferFrontierRequestFrameV6
@@ -4792,8 +5318,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_exact_frontier_stale_queue"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_exact_frontier_stale_queue"]);
 
         var repairStateType = serviceType.GetNestedType("V4SenderRepairRequestState", BindingFlags.NonPublic)!;
         var repairState = Activator.CreateInstance(
@@ -4855,8 +5381,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_checkpoint_window"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_checkpoint_window"]);
 
         var checkpointRequest = new FileTransferFrontierRequestFrameV6
         {
@@ -5171,8 +5697,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_reactivation_leg_reset"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_reactivation_leg_reset"]);
         var leg = SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Outbound, "test_reactivation_leg_reset");
         SeedPairedFallbackTailYieldForTest(context, leg);
         SetPrivateProperty(context, "PullPostTunaRecoveryActive", false);
@@ -5324,8 +5850,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_backfill_authority"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_backfill_authority"]);
         var checkpointRequest = new FileTransferFrontierRequestFrameV6
         {
             SessionId = $"session_{transferId}",
@@ -5426,8 +5952,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_tail_static"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_tail_static"]);
         SetPrivateProperty(context, "RemoteNextExpectedChunkIndex", 100);
         SetPrivateProperty(context, "RemoteGrantedUntilExclusive", 200);
         SetPrivateProperty(context, "ChunksAcceptedForTransport", 128);
@@ -10786,8 +11312,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         SetPrivateProperty(context, "LastLiveRouteEpochId", 4);
         SetPrivateProperty(context, "CurrentLiveRouteEpoch", liveRouteEpoch);
         typeof(SessionFileTransferService)
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "header_switch_off"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(sender, [context, "header_switch_off"]);
         var checkpointRequest = new FileTransferFrontierRequestFrameV6
         {
             SessionId = $"session_{transferId}",
@@ -10862,8 +11388,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(sender, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "header_switch_off"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(sender, [context, "header_switch_off"]);
         var checkpointRequest = new FileTransferFrontierRequestFrameV6
         {
             SessionId = $"session_{transferId}",
@@ -10937,8 +11463,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(sender, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "header_switch_off"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(sender, [context, "header_switch_off"]);
         var checkpointRequest = new FileTransferFrontierRequestFrameV6
         {
             SessionId = $"session_{transferId}",
@@ -12365,8 +12891,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_authority_start"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_authority_start"]);
 
         var request = new FileTransferFrontierRequestFrameV6
         {
@@ -12426,8 +12952,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_liveness_recovery_authority_start"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_liveness_recovery_authority_start"]);
 
         service.RequestFileTransferReceiveRecovery(
             new FileTransferReceiveRecoveryRequest(
@@ -12546,8 +13072,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_tail_reconciliation_fresh_owner"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_tail_reconciliation_fresh_owner"]);
 
         var initialCheckpoint = new FileTransferFrontierRequestFrameV6
         {
@@ -12636,6 +13162,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     [Fact]
     public void PostTunaFallbackV6TailReconciliation_ReusesCurrentOwnerTransportEpoch()
     {
+        using var service = new SessionFileTransferService();
         var serviceType = typeof(SessionFileTransferService);
         const string transferId = "transfer_post_tuna_fallback_v6_tail_reconciliation_reuse_epoch";
         var context = CreatePostTunaFallbackV6OutboundContext(
@@ -12645,8 +13172,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             remoteGrantedUntilExclusive: 1732,
             chunkCount: 4096);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_tail_reconciliation_reuse_epoch"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_tail_reconciliation_reuse_epoch"]);
 
         var currentLeg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         var currentGeneration = GetPrivateProperty<int>(currentLeg, "Generation");
@@ -12704,8 +13231,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_runtime_unlock_fresh_waits"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_runtime_unlock_fresh_waits"]);
 
         var logStart = GetOperationalLogLength();
         var started = (bool)serviceType
@@ -12738,8 +13265,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_runtime_unlock_transport_adopted"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_runtime_unlock_transport_adopted"]);
 
         var request = new FileTransferFrontierRequestFrameV6
         {
@@ -12812,8 +13339,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_runtime_unlock_tail_repair_waits"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_runtime_unlock_tail_repair_waits"]);
 
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestId", null);
@@ -12843,6 +13370,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
     public void RepeatedFallbackFrontierOnlyTailRepair_EmitsDeterministicTailTimeout()
     {
+        using var service = new SessionFileTransferService();
         var serviceType = typeof(SessionFileTransferService);
         const string transferId = "transfer_fallback_tail_repair_timeout";
         var context = CreatePostTunaFallbackV6OutboundContext(
@@ -12852,8 +13380,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             remoteGrantedUntilExclusive: 11652,
             chunkCount: 16384);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_tail_repair_timeout"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_tail_repair_timeout"]);
 
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestId", null);
@@ -12883,6 +13411,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
     public void FallbackFrontierOnlyTailRepairAfterYield_IsSuppressedByRetiredOwnerGuard()
     {
+        using var service = new SessionFileTransferService();
         var serviceType = typeof(SessionFileTransferService);
         const string transferId = "transfer_fallback_tail_retired_owner_guard";
         var context = CreatePostTunaFallbackV6OutboundContext(
@@ -12892,8 +13421,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             remoteGrantedUntilExclusive: 11652,
             chunkCount: 16384);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_tail_retired_owner_guard"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_tail_retired_owner_guard"]);
 
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestId", null);
@@ -12930,8 +13459,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             remoteGrantedUntilExclusive: 11652,
             chunkCount: 16384);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_tail_retired_owner_repair_enqueue"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_tail_retired_owner_repair_enqueue"]);
 
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestId", null);
@@ -12995,8 +13524,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_post_yield_receiver_state"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_post_yield_receiver_state"]);
 
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestId", null);
@@ -13067,8 +13596,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_post_yield_frontier_request"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_post_yield_frontier_request"]);
 
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestId", null);
@@ -13129,8 +13658,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_tail_retired_owner_frontier_stall"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_tail_retired_owner_frontier_stall"]);
 
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestId", null);
@@ -13178,8 +13707,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_outbound_restart_after_yield"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_outbound_restart_after_yield"]);
 
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestId", null);
@@ -13301,8 +13830,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Equal(3L, advancedRequest.TargetTransportEpoch);
 
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "transport_recovered_unproven"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "transport_recovered_unproven"]);
 
         var firstRecoveryLeg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
         Assert.NotSame(originalLeg, firstRecoveryLeg);
@@ -13346,8 +13875,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             ],
         };
         Assert.True((bool)serviceType
-            .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, activeCheckpoint, "reauthorization_checkpoint_barrier"])!);
+            .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, activeCheckpoint, "reauthorization_checkpoint_barrier"])!);
         Assert.Equal(activeCheckpoint.RepairRequestId, firstRecoveryLeg.CheckpointRequestId);
         Assert.Equal(
             pending,
@@ -13358,8 +13887,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             "PullPostTunaRecoveryFrontierChunkIndex");
         SetPrivateProperty(context, "PullPostTunaRecoveryFrontierChunkIndex", -1);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "duplicate_epoch_2_recovery_callback"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "duplicate_epoch_2_recovery_callback"]);
         Assert.Same(firstRecoveryLeg, GetPrivatePropertyValue(context, "CurrentTransferLeg"));
         Assert.Equal(activeCheckpoint.RepairRequestId, firstRecoveryLeg.CheckpointRequestId);
         Assert.Equal(
@@ -13378,8 +13907,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             originalRecoveryFrontier);
         SetPrivateProperty(context, "PullTransportRebindGeneration", 3);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "newer_authorized_transport_epoch"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "newer_authorized_transport_epoch"]);
         var recoveryLeg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
         Assert.NotSame(firstRecoveryLeg, recoveryLeg);
         Assert.Equal(3L, recoveryLeg.TransportEpochId);
@@ -13570,8 +14099,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
         var logStart = GetOperationalLogLength();
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "publication_replaced_before_reauthorization_start"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "publication_replaced_before_reauthorization_start"]);
 
         Assert.Same(originalLeg, GetPrivatePropertyValue(context, "CurrentTransferLeg"));
         Assert.Equal(originalOwner, GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner"));
@@ -13660,8 +14189,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Equal(predecessor.AuthorityId, pendingRequest.PredecessorDecision.AuthorityId);
 
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "transport_recovered_unproven"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "transport_recovered_unproven"]);
         var recoveryLeg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
         var pending = Assert.IsType<FallbackTailYieldTransportEpochReauthorization>(
             GetPrivatePropertyValue(context, "PendingFallbackTailYieldTransportEpochReauthorization"));
@@ -13817,8 +14346,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         serviceType
             .GetMethod(
                 $"Start{directionName}PostTunaRecoveryLocked",
-                BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "transport_recovered_unproven"]);
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "transport_recovered_unproven"]);
 
         var pending = Assert.IsType<FallbackTailYieldTransportEpochReauthorization>(
             GetPrivatePropertyValue(context, "PendingFallbackTailYieldTransportEpochReauthorization"));
@@ -13960,8 +14489,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             serviceType
                 .GetMethod(
                     $"Start{directionName}PostTunaRecoveryLocked",
-                    BindingFlags.Static | BindingFlags.NonPublic)!
-                .Invoke(null, [context, "transport_recovered_unproven"]);
+                    BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(service, [context, "transport_recovered_unproven"]);
 
             var recoveryLeg = Assert.IsType<FileTransferLeg>(
                 GetPrivatePropertyValue(context, "CurrentTransferLeg"));
@@ -14106,12 +14635,13 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
     public void InboundPostTunaFallbackRecoveryRestartAfterYield_DoesNotReopenOwner()
     {
+        using var service = new SessionFileTransferService();
         var serviceType = typeof(SessionFileTransferService);
         const string transferId = "transfer_fallback_tail_inbound_restart_after_yield";
         var context = CreatePostTunaFallbackV6InboundContext(transferId);
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_inbound_restart_after_yield"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_inbound_restart_after_yield"]);
 
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestId", null);
@@ -14125,8 +14655,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
         var logStart = GetOperationalLogLength();
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "transport_recovered_unproven"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "transport_recovered_unproven"]);
 
         var staleCheckpoint = new FileTransferFrontierRequestFrameV6
         {
@@ -14146,8 +14676,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             ],
         };
         serviceType
-            .GetMethod("StartInboundFallbackCheckpointRecoveryLegIfNeededLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, staleCheckpoint, "checkpoint_not_pending"]);
+            .GetMethod("StartInboundFallbackCheckpointRecoveryLegIfNeededLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, staleCheckpoint, "checkpoint_not_pending"]);
 
         Assert.Same(leg, GetPrivatePropertyValue(context, "CurrentTransferLeg"));
         Assert.False(GetPrivateProperty<bool>(context, "PullPostTunaRecoveryActive"));
@@ -14180,8 +14710,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_runtime_unlock_tail_repair_resumes"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_runtime_unlock_tail_repair_resumes"]);
 
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestId", null);
@@ -16122,8 +16652,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
         var logStart = GetOperationalLogLength();
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "bridge_receive_stall"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "bridge_receive_stall"]);
 
         Assert.Same(leg, GetPrivatePropertyValue(context, "CurrentTransferLeg"));
         Assert.False(GetPrivateProperty<bool>(context, "PullPostTunaRecoveryActive"));
@@ -16227,8 +16757,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_runtime_unlock_handoff_unblocks"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_runtime_unlock_handoff_unblocks"]);
 
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestId", null);
@@ -16293,8 +16823,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_tail_quiescent_progress"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_tail_quiescent_progress"]);
 
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestId", null);
@@ -16355,8 +16885,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_unresolved_frontier"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_unresolved_frontier"]);
 
         var leg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
         leg.CheckpointRequestId = null;
@@ -16410,8 +16940,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_tail_old_v4_epoch_progress"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_tail_old_v4_epoch_progress"]);
 
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestId", null);
@@ -16492,8 +17022,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_tail_moving_frontier_yields"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_tail_moving_frontier_yields"]);
 
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestId", null);
@@ -16592,8 +17122,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_tail_moving_frontier_no_gap_yields"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_tail_moving_frontier_no_gap_yields"]);
 
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestId", null);
@@ -16667,8 +17197,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_inbound_tail_yields"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_inbound_tail_yields"]);
 
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestId", null);
@@ -16728,8 +17258,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_inbound_ownerless_checkpoint_yields"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_inbound_ownerless_checkpoint_yields"]);
 
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestId", null);
@@ -16790,8 +17320,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_inbound_tail_replay_progress_yields"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_inbound_tail_replay_progress_yields"]);
 
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestId", null);
@@ -16847,12 +17377,13 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
     public void InboundPostTunaFallbackProductiveProgressWithoutFrontierGap_DoesNotForceControlState()
     {
+        using var service = new SessionFileTransferService();
         var serviceType = typeof(SessionFileTransferService);
         const string transferId = "transfer_inbound_post_tuna_fallback_tail_productive_progress_no_gap";
         var context = CreatePostTunaFallbackV6InboundContext(transferId);
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_inbound_tail_productive_progress_no_gap"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_inbound_tail_productive_progress_no_gap"]);
 
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestId", null);
@@ -16889,8 +17420,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_tail_late_repair_after_yield"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_tail_late_repair_after_yield"]);
 
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestId", null);
@@ -17002,8 +17533,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_tail_terminal_ready"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_tail_terminal_ready"]);
 
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestId", null);
@@ -17056,8 +17587,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_inbound_terminal_tail_consumed"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_inbound_terminal_tail_consumed"]);
 
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestId", null);
@@ -17111,8 +17642,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_precommit_fallback_survival"]);
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_precommit_fallback_survival"]);
         SetPrivateProperty(context, "RuntimeUnlockActivationWindowGranted", true);
 
         var dataSession = new RecordingDataSession(sessionId, transferId);
@@ -18075,6 +18606,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     [Fact]
     public void PostTunaFallbackV6TailReconciliation_TriggersWhenLiveCheckpointFrontierStalls()
     {
+        using var service = new SessionFileTransferService();
         var serviceType = typeof(SessionFileTransferService);
         var context = CreatePostTunaFallbackV6OutboundContext(
             "transfer_post_tuna_fallback_v6_live_checkpoint_tail_stall",
@@ -18083,8 +18615,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             remoteGrantedUntilExclusive: 2389,
             chunkCount: 6200);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_live_checkpoint_tail_stall"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_live_checkpoint_tail_stall"]);
         var initialCheckpoint = new FileTransferFrontierRequestFrameV6
         {
             SessionId = "session_transfer_post_tuna_fallback_v6_live_checkpoint_tail_stall",
@@ -18250,8 +18782,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_tail_reconciliation_accept"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_tail_reconciliation_accept"]);
         var request = new FileTransferFrontierRequestFrameV6
         {
             SessionId = "session_transfer_post_tuna_fallback_v6_tail_reconciliation_accept",
@@ -18323,8 +18855,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_tail_reconciliation_plain_state"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_tail_reconciliation_plain_state"]);
 
         var request = new FileTransferFrontierRequestFrameV6
         {
@@ -18403,8 +18935,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_tail_reconciliation_stale_plain_state"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_tail_reconciliation_stale_plain_state"]);
 
         var request = new FileTransferFrontierRequestFrameV6
         {
@@ -18477,8 +19009,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_tail_reconciliation_reissue_plain_state"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_tail_reconciliation_reissue_plain_state"]);
 
         var request = new FileTransferFrontierRequestFrameV6
         {
@@ -18568,8 +19100,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_tail_reconciliation_replay"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_tail_reconciliation_replay"]);
 
         var request = new FileTransferFrontierRequestFrameV6
         {
@@ -18628,8 +19160,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_pending_checkpoint_reuse"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_pending_checkpoint_reuse"]);
         SetPrivateProperty(context, "DataSession", new CompletingDataSession(
             $"session_{transferId}",
             transferId));
@@ -18711,6 +19243,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     [Fact]
     public void PostTunaFallbackV6TailReconciliation_RetiresPendingNormalCheckpoint()
     {
+        using var service = new SessionFileTransferService();
         var serviceType = typeof(SessionFileTransferService);
         const string transferId = "transfer_post_tuna_fallback_v6_tail_retire_normal_checkpoint";
         var context = CreatePostTunaFallbackV6OutboundContext(
@@ -18720,8 +19253,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             remoteGrantedUntilExclusive: 1198,
             chunkCount: 4096);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_tail_retire_normal_checkpoint"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_tail_retire_normal_checkpoint"]);
         SetPrivateProperty(context, "V6RegularNknStateRefreshSequence", 1L);
 
         var currentRequest = new FileTransferFrontierRequestFrameV6
@@ -18790,8 +19323,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_checkpoint_response_timeout"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_checkpoint_response_timeout"]);
         SetPrivateProperty(context, "DataSession", new CompletingDataSession(
             $"session_{transferId}",
             transferId));
@@ -18882,8 +19415,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_checkpoint_superseded_by_peer_state"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_checkpoint_superseded_by_peer_state"]);
         var initialLeg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         var checkpointTransportEpoch = GetPrivateProperty<long>(initialLeg, "TransportEpochId");
 
@@ -18964,8 +19497,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_same_epoch_checkpoint_peer_state"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_same_epoch_checkpoint_peer_state"]);
         var initialLeg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         var checkpointTransportEpoch = GetPrivateProperty<long>(initialLeg, "TransportEpochId");
 
@@ -19047,8 +19580,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_duplicate_checkpoint_coalesced"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_duplicate_checkpoint_coalesced"]);
 
         var request = new FileTransferFrontierRequestFrameV6
         {
@@ -19099,8 +19632,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_tail_checkpoint_resend"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_tail_checkpoint_resend"]);
 
         var request = new FileTransferFrontierRequestFrameV6
         {
@@ -19159,8 +19692,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_current_leg_frontier_sweep"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_current_leg_frontier_sweep"]);
         SetPrivateProperty(context, "PullTransportFrontierOnlyRepairActive", true);
         SetPrivateProperty(context, "PullTransportFrontierOnlyRepairStartChunkIndex", 100);
 
@@ -19214,8 +19747,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_current_leg_exact_frontier_wait"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_current_leg_exact_frontier_wait"]);
         SetPrivateProperty(context, "PullTransportFrontierOnlyRepairActive", true);
         SetPrivateProperty(context, "PullTransportFrontierOnlyRepairStartChunkIndex", 100);
 
@@ -19418,8 +19951,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         };
         var logStart = GetOperationalLogLength();
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "unit_test_checkpoint_retire"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "unit_test_checkpoint_retire"]);
         serviceType
             .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Static | BindingFlags.NonPublic)!
             .Invoke(null, [context, request, "unit_test_checkpoint_pending"]);
@@ -19486,8 +20019,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         };
         var logStart = GetOperationalLogLength();
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "unit_test_checkpoint_preserve_send_failure"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "unit_test_checkpoint_preserve_send_failure"]);
         serviceType
             .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Static | BindingFlags.NonPublic)!
             .Invoke(null, [context, request, "unit_test_checkpoint_pending"]);
@@ -19556,8 +20089,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         };
         var logStart = GetOperationalLogLength();
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "unit_test_checkpoint_retire_send_failure"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "unit_test_checkpoint_retire_send_failure"]);
         serviceType
             .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Static | BindingFlags.NonPublic)!
             .Invoke(null, [context, request, "unit_test_checkpoint_pending"]);
@@ -19628,6 +20161,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     [Fact]
     public void PostTunaFallbackV6PendingDeliveryRecovery_SuppressesNewStateRefreshRequestId()
     {
+        using var service = new SessionFileTransferService();
         var serviceType = typeof(SessionFileTransferService);
         var context = CreatePostTunaFallbackV6OutboundContext(
             "transfer_post_tuna_fallback_v6_delivery_recovery_suppresses_request",
@@ -19636,8 +20170,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             remoteGrantedUntilExclusive: 697,
             chunkCount: 5200);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "unit_test_delivery_recovery_suppresses_request"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "unit_test_delivery_recovery_suppresses_request"]);
         SetPrivateProperty(context, "V6RegularNknStateRefreshFailureCount", 3);
         SetPrivateProperty(context, "V6RegularNknFallbackCheckpointDeliveryRecoveryPending", true);
         SetPrivateProperty(context, "V6RegularNknFallbackCheckpointDeliveryRecoveryStartedUtc", DateTimeOffset.UtcNow);
@@ -19687,8 +20221,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "unit_test_delivery_recovery_checkpoint"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "unit_test_delivery_recovery_checkpoint"]);
         SetPrivateProperty(context, "DataSession", new RecordingDataSession(
             "session_transfer_post_tuna_fallback_v6_delivery_recovery_suppresses_explicit_checkpoint",
             "transfer_post_tuna_fallback_v6_delivery_recovery_suppresses_explicit_checkpoint"));
@@ -19737,8 +20271,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "unit_test_tail_preserve"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "unit_test_tail_preserve"]);
 
         var request = new FileTransferFrontierRequestFrameV6
         {
@@ -19806,8 +20340,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "unit_test_tail_failure_limit"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "unit_test_tail_failure_limit"]);
 
         var request = new FileTransferFrontierRequestFrameV6
         {
@@ -19883,8 +20417,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "unit_test_superseded_state_refresh"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "unit_test_superseded_state_refresh"]);
 
         var currentRequest = new FileTransferFrontierRequestFrameV6
         {
@@ -20041,8 +20575,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "unit_test_stale_owner_discard"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "unit_test_stale_owner_discard"]);
 
         var currentCheckpoint = new FileTransferFrontierRequestFrameV6
         {
@@ -20111,8 +20645,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_single_checkpoint_owner"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_single_checkpoint_owner"]);
 
         var currentRequest = new FileTransferFrontierRequestFrameV6
         {
@@ -20166,8 +20700,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "unit_test_pending_owner_coalesce"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "unit_test_pending_owner_coalesce"]);
 
         var currentRequest = new FileTransferFrontierRequestFrameV6
         {
@@ -20371,8 +20905,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_checkpoint_skip"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_checkpoint_skip"]);
         SetPrivateProperty(context, "DataSession", new CompletingDataSession(
             "session_transfer_post_tuna_fallback_v6_checkpoint_skip",
             "transfer_post_tuna_fallback_v6_checkpoint_skip"));
@@ -20412,8 +20946,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_control_plane_old_leg"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_control_plane_old_leg"]);
 
         var currentRequest = new FileTransferFrontierRequestFrameV6
         {
@@ -20506,8 +21040,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_control_plane_old_bridge_generation"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_control_plane_old_bridge_generation"]);
 
         var currentRequest = new FileTransferFrontierRequestFrameV6
         {
@@ -20602,8 +21136,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_terminal_callback"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_terminal_callback"]);
         var leg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
 
         var frame = new FileTransferFrontierRequestFrameV6
@@ -20673,8 +21207,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_delivery_failure_settlement"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_delivery_failure_settlement"]);
         var leg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
         var frame = new FileTransferFrontierRequestFrameV6
         {
@@ -20737,8 +21271,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var logStart = GetOperationalLogLength();
 
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_pipeline_reset"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_pipeline_reset"]);
 
         var afterGeneration = GetPrivateProperty<long>(context, "V6SenderPipelineGeneration");
         var log = ReadOperationalLogTail(logStart);
@@ -20760,8 +21294,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_stale_epoch_clear"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_stale_epoch_clear"]);
         var checkpointRequest = new FileTransferFrontierRequestFrameV6
         {
             SessionId = "session_transfer_post_tuna_fallback_v6_stale_epoch_clear",
@@ -20863,8 +21397,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_same_leg_epoch"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_same_leg_epoch"]);
         var checkpointRequest = new FileTransferFrontierRequestFrameV6
         {
             SessionId = "session_transfer_post_tuna_fallback_v6_newer_same_leg_epoch",
@@ -20974,8 +21508,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_ordinary_state_not_checkpoint"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_ordinary_state_not_checkpoint"]);
         var checkpointRequest = new FileTransferFrontierRequestFrameV6
         {
             SessionId = "session_transfer_post_tuna_fallback_v6_ordinary_state_not_checkpoint",
@@ -21043,8 +21577,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_ordinary_state_stale"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_ordinary_state_stale"]);
         SetPrivateProperty(context, "V4LastStateEpoch", 1642);
         SetPrivateProperty(context, "RemoteNextExpectedChunkIndex", 4568);
         SetPrivateProperty(context, "RemoteGrantedUntilExclusive", 5080);
@@ -21092,8 +21626,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_duplicate_checkpoint_proof"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_duplicate_checkpoint_proof"]);
         var checkpointRequest = new FileTransferFrontierRequestFrameV6
         {
             SessionId = "session_transfer_post_tuna_fallback_v6_duplicate_checkpoint_proof",
@@ -21158,8 +21692,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_bridge_restart_cancel"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_bridge_restart_cancel"]);
 
         var logStart = GetOperationalLogLength();
         var deferred = (bool)serviceType
@@ -21193,8 +21727,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_bridge_restart_send_failure"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_bridge_restart_send_failure"]);
 
         var logStart = GetOperationalLogLength();
         var deferred = (bool)serviceType
@@ -21437,8 +21971,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         serviceType
-            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, "test_sparse_progress_yields"]);
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_sparse_progress_yields"]);
         var initialLeg = (FileTransferLeg)GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         AcceptOutboundFallbackCheckpointForTest(
             context,
