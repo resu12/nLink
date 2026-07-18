@@ -16,7 +16,7 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.DevLocal;
 
 // DEV ONLY: local machine named-pipe transport for testing two app instances without real networking.
-public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IFileTransferSignalingTransport, IFileTransferSessionContextProvider, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider
+public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IFileTransferSignalingTransport, IFileTransferSessionContextProvider, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider, IFileTransferRegularV4FrontierRepairPressureInstallBridge, IFileTransferRegularV4FrontierRepairSettlementObserver
 {
     private const string HelpRequestFrameType = "help_request";
     private const string HelpRequestDecisionFrameType = "help_request_decision";
@@ -85,6 +85,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     private readonly SessionReplayWindow inboundFileTransferReplayWindow = new();
     private readonly Dictionary<string, FileTransferTransportState> fileTransferStates = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TransportFileTransferDataSession> fileTransferDataSessions = new(StringComparer.Ordinal);
+    private readonly object regularV4RepairPressureGate = new();
+    private readonly Dictionary<string, DevLocalRegularV4RepairPressureState> regularV4RepairPressures = new(StringComparer.Ordinal);
+    private long regularV4RepairPressureInstallGeneration;
     private const bool LocalRemoteControlSupported = true;
     private const bool LocalScreenShareCursorOverlaySupported = true;
     private readonly DevLocalImpairmentPolicy? impairmentPolicy;
@@ -122,6 +125,115 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         screenShareFrameReassembler.FrameReady += OnScreenShareFrameReady;
         screenShareFrameReassembler.KeyframeRequested += OnScreenShareKeyframeRequested;
     }
+
+    FileTransferRegularV4FrontierRepairPressureInstallReceipt
+        IFileTransferRegularV4FrontierRepairPressureInstallBridge.InstallRegularV4FrontierRepairPressure(
+            FileTransferRegularV4ControlFeedbackPressure pressure)
+    {
+        var authority = pressure.RepairAuthority ??
+                        throw new ArgumentException("Regular-V4 repair authority is required.", nameof(pressure));
+        var pressureReason = string.IsNullOrWhiteSpace(pressure.Reason)
+            ? "regular_v4_frontier_repair_pressure"
+            : pressure.Reason.Trim();
+        var key = GetRegularV4RepairPressureKey(
+            authority.SessionId,
+            authority.TransferId,
+            authority.Direction);
+
+        lock (regularV4RepairPressureGate)
+        {
+            regularV4RepairPressures.TryGetValue(key, out var current);
+            if (current is not null && Equals(current.Authority, authority))
+            {
+                var exactDuplicate = string.Equals(
+                    current.PressureReason,
+                    pressureReason,
+                    StringComparison.Ordinal);
+                return new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                    authority,
+                    exactDuplicate
+                        ? FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent
+                        : FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected,
+                    exactDuplicate
+                        ? "regular_v4_frontier_repair_pressure_install_idempotent"
+                        : "regular_v4_frontier_repair_pressure_reason_mismatch",
+                    exactDuplicate ? current.InstallGeneration : 0,
+                    pressureReason);
+            }
+
+            if (current is not null && current.Authority.AuthorityId == authority.AuthorityId)
+            {
+                return new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                    authority,
+                    FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected,
+                    "regular_v4_frontier_repair_authority_id_reuse",
+                    0,
+                    pressureReason);
+            }
+
+            var initialInstall = authority.PredecessorAuthorityId is null && current is null;
+            var successorInstall = authority.PredecessorAuthorityId is { IsDefault: false } predecessorAuthorityId &&
+                                   current is not null &&
+                                   current.Authority.AuthorityId == predecessorAuthorityId;
+            if (!initialInstall && !successorInstall)
+            {
+                return new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                    authority,
+                    FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected,
+                    authority.PredecessorAuthorityId is null
+                        ? "regular_v4_frontier_repair_initial_pressure_conflict"
+                        : "regular_v4_frontier_repair_predecessor_missing",
+                    0,
+                    pressureReason);
+            }
+
+            var installGeneration = ++regularV4RepairPressureInstallGeneration;
+            regularV4RepairPressures[key] = new DevLocalRegularV4RepairPressureState(
+                authority,
+                pressureReason,
+                installGeneration);
+            return new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                authority,
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
+                initialInstall
+                    ? "regular_v4_frontier_repair_initial_pressure_installed"
+                    : "regular_v4_frontier_repair_successor_pressure_installed",
+                installGeneration,
+                pressureReason);
+        }
+    }
+
+    public void ObserveRegularV4FrontierRepairSettlement(
+        FileTransferRegularV4FrontierRepairSettlement settlement)
+    {
+        var key = GetRegularV4RepairPressureKey(
+            settlement.SessionId,
+            settlement.TransferId,
+            settlement.Direction);
+        lock (regularV4RepairPressureGate)
+        {
+            if (!regularV4RepairPressures.TryGetValue(key, out var current))
+            {
+                return;
+            }
+
+            if (settlement.Outcome == FileTransferRegularV4FrontierRepairSettlementOutcome.Superseded)
+            {
+                return;
+            }
+
+            if (current.Authority.AuthorityId == settlement.AuthorityId)
+            {
+                regularV4RepairPressures.Remove(key);
+            }
+        }
+    }
+
+    private static string GetRegularV4RepairPressureKey(
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction)
+        => $"{sessionId}\u001f{transferId}\u001f{direction}";
 
     public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
     public event EventHandler<IncomingHelpRequestEventArgs>? IncomingHelpRequest;
@@ -4492,4 +4604,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         bool InviteValidated,
         SessionId? SessionId,
         CapabilityGrant RequestedCapabilities);
+
+    private sealed record DevLocalRegularV4RepairPressureState(
+        FileTransferRegularV4FrontierRepairAuthority Authority,
+        string PressureReason,
+        long InstallGeneration);
 }

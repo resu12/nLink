@@ -367,7 +367,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                 receipt = installOverride(pressure);
             }
             else if (authority is null ||
-                     authority.PredecessorAuthorityId is not { IsDefault: false })
+                     authority.PredecessorAuthorityId is { IsDefault: true })
             {
                 receipt = new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
                     authority ?? new FileTransferRegularV4FrontierRepairAuthority(
@@ -401,7 +401,9 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                 receipt = new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
                     authority,
                     FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
-                    "regular_v4_frontier_repair_pressure_installed",
+                    authority.PredecessorAuthorityId is null
+                        ? "regular_v4_frontier_repair_initial_pressure_installed"
+                        : "regular_v4_frontier_repair_pressure_installed",
                     installGeneration,
                     pressure.Reason);
             }

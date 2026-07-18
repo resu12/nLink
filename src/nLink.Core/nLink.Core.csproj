@@ -49,6 +49,9 @@
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
       <_Parameter1>nLink.Infra.Nkn</_Parameter1>
     </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>nLink.Infra.DevLocal</_Parameter1>
+    </AssemblyAttribute>
   </ItemGroup>
 
 </Project>

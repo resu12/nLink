@@ -3112,6 +3112,109 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
     [Trait("Category", "LegacySmoke")]
     [Trait("FileTransferInfraSuite", "RegularV4FrontierRepairPressure")]
     [Fact]
+    public void Bridge_RegularV4FrontierRepairPressure_InitialInstallIsIdempotentAndOwnsSettlement()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-regular-v4-frontier-initial", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "regular-v4-frontier-initial");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "regular-v4-frontier-initial");
+            var identity = new NknIdentity("regular-v4-frontier-initial", "regular-v4-frontier-initial.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+
+            var transferId = $"transfer-regular-v4-frontier-initial-{Guid.NewGuid():N}";
+            var authority = CreateRegularV4FrontierRepairAuthority(
+                transferId,
+                repairKey: "0:12:0:12",
+                frontierChunkIndex: 0,
+                durableReceivedHighestChunkIndex: -1,
+                pendingRepairCount: 12,
+                decisionGeneration: 1,
+                liveRouteEpoch: 0);
+            Assert.Null(authority.PredecessorAuthorityId);
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.RegisterActiveFileTransferRuntime(transferId);
+            var pressure = new FileTransferRegularV4ControlFeedbackPressure(
+                authority.SessionId,
+                authority.TransferId,
+                0,
+                12,
+                12,
+                "regular_v4_receiver_frontier_repair_due",
+                authority);
+
+            var installed = adapter.InstallRegularV4FrontierRepairPressure(pressure);
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed, installed.Status);
+            Assert.True(installed.InstallGeneration > 0);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out var blockerReason, out _));
+            Assert.Equal("regular_v4_control_feedback_pressure", blockerReason);
+
+            Thread.Sleep(25);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out var remainingBeforeDuplicateMs));
+            var duplicate = adapter.InstallRegularV4FrontierRepairPressure(pressure);
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent, duplicate.Status);
+            Assert.Equal(installed.InstallGeneration, duplicate.InstallGeneration);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out var remainingAfterDuplicateMs));
+            Assert.True(remainingAfterDuplicateMs <= remainingBeforeDuplicateMs);
+
+            var mutated = adapter.InstallRegularV4FrontierRepairPressure(pressure with
+            {
+                RepairAuthority = authority with { RepairKey = "0:11:0:11" },
+            });
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected, mutated.Status);
+            Assert.Equal("regular_v4_frontier_repair_authority_id_reuse", mutated.Reason);
+
+            Assert.True(adapter.ReportRegularV4FrontierRepairSettlement(new FileTransferRegularV4FrontierRepairSettlement(
+                authority.SessionId,
+                authority.TransferId,
+                authority.Direction,
+                authority.RouteToken,
+                authority.ProtocolVersion,
+                authority.LiveRouteEpoch,
+                authority.RuntimeGeneration,
+                authority.TerminalGeneration,
+                authority.LegGeneration,
+                authority.TransportEpoch,
+                authority.BridgeRecoveryGeneration,
+                authority.BridgeDecisionGeneration,
+                authority.RoutePublicationGeneration,
+                authority.RouteCommitGeneration,
+                authority.RepairKey,
+                authority.FrontierChunkIndex,
+                authority.DurableReceivedHighestChunkIndex,
+                authority.PendingRepairCount,
+                authority.DecisionGeneration,
+                "frontier_advanced",
+                FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved,
+                authority.TargetTransport)
+            {
+                AuthorityId = authority.AuthorityId,
+            }));
+            Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
+
+            adapter.UnregisterActiveFileTransferRuntime(transferId);
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "RegularV4FrontierRepairPressure")]
+    [Fact]
     public void Bridge_RegularV4FrontierRepairSettlement_PredecessorCannotClearAuthorizedSuccessor()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-regular-v4-frontier-successor", Guid.NewGuid().ToString("N"));

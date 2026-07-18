@@ -1123,6 +1123,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_projection_published') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_projection_cleared') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_projection_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_initial_pressure_install_staged') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_initial_pressure_install_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_successor_pressure_install_staged') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_successor_pressure_install_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_successor_pressure_install_accepted') +
@@ -1179,6 +1181,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             -Events $regularV4FrontierRepairProjectionEvents
     $regularV4FrontierRepairSuccessorPressureInstallProof =
         Get-FileTransferRegularV4FrontierRepairSuccessorPressureInstallProof `
+            -Events $regularV4FrontierRepairProjectionEvents
+    $regularV4FrontierRepairInitialPressureInstallProof =
+        Get-FileTransferRegularV4FrontierRepairInitialPressureInstallProof `
             -Events $regularV4FrontierRepairProjectionEvents
     [object[]]$runtimeUnlockRetryFallbackTailUnblockRecheckEvents = @(
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_authority_held') +
@@ -1580,6 +1585,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Reason = 'accepted_settlement_disposition_evidence_missing'
         }) | Out-Null
     }
+    foreach ($candidateEvent in @($regularV4FrontierRepairInitialPressureInstallProof.UnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'regular_v4_frontier_repair_initial_pressure_install_missing'
+            Event = $candidateEvent
+            Reason = 'regular_v4_frontier_repair_pressure_missing'
+        }) | Out-Null
+    }
     foreach ($candidateEvent in @($regularV4FrontierRepairSuccessorPressureInstallProof.UnresolvedCandidateEvents)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'regular_v4_frontier_repair_successor_pressure_install_missing'
@@ -1680,6 +1692,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'runtime_unlock_retry_regular_v4_recovery_settlement_missing',
                 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved',
                 'regular_v4_frontier_repair_settlement_disposition_unverifiable',
+                'regular_v4_frontier_repair_initial_pressure_install_missing',
                 'regular_v4_frontier_repair_successor_pressure_install_missing',
                 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery')) {
             $verdict = 'INCONCLUSIVE'
@@ -1847,6 +1860,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.RecoveredCount),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.UnresolvedCount),
         ("regular_v4_frontier_repair_successor_pressure_install_verdict={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.Verdict),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_raw_count={0}" -f $regularV4FrontierRepairInitialPressureInstallProof.RawCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_distinct_count={0}" -f $regularV4FrontierRepairInitialPressureInstallProof.DistinctCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_recovered_count={0}" -f $regularV4FrontierRepairInitialPressureInstallProof.RecoveredCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_unresolved_count={0}" -f $regularV4FrontierRepairInitialPressureInstallProof.UnresolvedCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_verdict={0}" -f $regularV4FrontierRepairInitialPressureInstallProof.Verdict),
         ("runtime_unlock_regular_v4_recovery_lease_closure_rejected_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureRejectedCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount),
@@ -2000,6 +2018,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.RecoveredCount),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.UnresolvedCount),
         ("regular_v4_frontier_repair_successor_pressure_install_verdict={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.Verdict),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_raw_count={0}" -f $regularV4FrontierRepairInitialPressureInstallProof.RawCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_distinct_count={0}" -f $regularV4FrontierRepairInitialPressureInstallProof.DistinctCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_recovered_count={0}" -f $regularV4FrontierRepairInitialPressureInstallProof.RecoveredCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_unresolved_count={0}" -f $regularV4FrontierRepairInitialPressureInstallProof.UnresolvedCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_verdict={0}" -f $regularV4FrontierRepairInitialPressureInstallProof.Verdict),
         ("runtime_unlock_regular_v4_recovery_lease_closure_rejected_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureRejectedCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount),
@@ -2145,6 +2168,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.RecoveredCount),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.UnresolvedCount),
         ("regular_v4_frontier_repair_successor_pressure_install_verdict={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.Verdict),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_raw_count={0}" -f $regularV4FrontierRepairInitialPressureInstallProof.RawCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_distinct_count={0}" -f $regularV4FrontierRepairInitialPressureInstallProof.DistinctCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_recovered_count={0}" -f $regularV4FrontierRepairInitialPressureInstallProof.RecoveredCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_unresolved_count={0}" -f $regularV4FrontierRepairInitialPressureInstallProof.UnresolvedCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_verdict={0}" -f $regularV4FrontierRepairInitialPressureInstallProof.Verdict),
         ("runtime_unlock_regular_v4_recovery_lease_closure_rejected_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureRejectedCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount),
@@ -2274,6 +2302,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.RecoveredCount),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.UnresolvedCount),
         ("regular_v4_frontier_repair_successor_pressure_install_verdict={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.Verdict),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_raw_count={0}" -f $regularV4FrontierRepairInitialPressureInstallProof.RawCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_distinct_count={0}" -f $regularV4FrontierRepairInitialPressureInstallProof.DistinctCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_recovered_count={0}" -f $regularV4FrontierRepairInitialPressureInstallProof.RecoveredCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_unresolved_count={0}" -f $regularV4FrontierRepairInitialPressureInstallProof.UnresolvedCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_verdict={0}" -f $regularV4FrontierRepairInitialPressureInstallProof.Verdict),
         ("runtime_unlock_regular_v4_recovery_lease_closure_rejected_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureRejectedCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount),
@@ -2417,6 +2450,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count = $regularV4FrontierRepairSuccessorPressureInstallProof.RecoveredCount
         regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count = $regularV4FrontierRepairSuccessorPressureInstallProof.UnresolvedCount
         regular_v4_frontier_repair_successor_pressure_install_verdict = $regularV4FrontierRepairSuccessorPressureInstallProof.Verdict
+        regular_v4_frontier_repair_initial_pressure_install_missing_raw_count = $regularV4FrontierRepairInitialPressureInstallProof.RawCount
+        regular_v4_frontier_repair_initial_pressure_install_missing_distinct_count = $regularV4FrontierRepairInitialPressureInstallProof.DistinctCount
+        regular_v4_frontier_repair_initial_pressure_install_missing_recovered_count = $regularV4FrontierRepairInitialPressureInstallProof.RecoveredCount
+        regular_v4_frontier_repair_initial_pressure_install_missing_unresolved_count = $regularV4FrontierRepairInitialPressureInstallProof.UnresolvedCount
+        regular_v4_frontier_repair_initial_pressure_install_verdict = $regularV4FrontierRepairInitialPressureInstallProof.Verdict
         runtime_unlock_regular_v4_recovery_lease_closure_rejected_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureRejectedCount
         runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount
         runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount

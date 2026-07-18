@@ -8,6 +8,62 @@ public sealed partial class SessionFileTransferV4SenderTests
 {
     [Fact]
     [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public void RegularV4Projection_InitialTailRepairInstallsPressureBeforeEarlyProgressSettlement()
+    {
+        const string transferId = "transfer_regular_v4_initial_pressure_startup_race";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4InboundContext(
+            transferId,
+            chunkCount: 256,
+            nextChunkIndex: 0,
+            durableHighestChunkIndex: -1,
+            creditUntilChunkIndexExclusive: 12);
+        SetPrivateProperty(
+            context,
+            "DataSession",
+            new RecordingDataSession($"session_{transferId}", transferId));
+        var written = Assert.IsType<BitArray>(GetPrivatePropertyValue(context, "ReceiverSparseChunksWritten"));
+        for (var chunkIndex = 0; chunkIndex < 12; chunkIndex++)
+        {
+            written[chunkIndex] = false;
+        }
+        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "initial_pressure_startup_race");
+
+        _ = CreateInboundState(service, context, "frontier_stall_repair_due", forceMissingRange: true);
+
+        var initialReceipt = Assert.Single(transport.RegularV4PressureInstallReceipts);
+        Assert.Null(initialReceipt.Authority.PredecessorAuthorityId);
+        Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed, initialReceipt.Status);
+        var contract = GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract");
+        Assert.NotNull(contract);
+
+        for (var chunkIndex = 0; chunkIndex < 3; chunkIndex++)
+        {
+            written[chunkIndex] = true;
+        }
+        SetPrivateProperty(context, "NextChunkIndex", 3);
+        SetPrivateProperty(context, "PullHighestReceivedChunkIndex", 2);
+        _ = CreateInboundState(service, context, "chunk_batch_committed");
+
+        var settlement = Assert.Single(transport.RegularV4FrontierRepairSettlements);
+        Assert.Equal(initialReceipt.Authority.AuthorityId, settlement.AuthorityId);
+        Assert.Equal(FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved, settlement.Outcome);
+        var log = ReadOperationalLogTail(logStart);
+        var installIndex = log.IndexOf(
+            $"event=filetransfer_regular_v4_frontier_repair_initial_pressure_install_decided; authority_schema=2; authority_id={initialReceipt.Authority.AuthorityId}",
+            StringComparison.Ordinal);
+        var settlementIndex = log.IndexOf(
+            $"event=filetransfer_regular_v4_frontier_repair_contract_settled; authority_schema=2; authority_id={initialReceipt.Authority.AuthorityId}",
+            StringComparison.Ordinal);
+        Assert.True(installIndex >= 0, log);
+        Assert.True(settlementIndex > installIndex, log);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
     public void RegularV4Projection_CadenceSuppressionPreservesNarrowedDurableGapAndAuthority()
     {
         const string transferId = "transfer_regular_v4_projection_narrowed";
@@ -107,9 +163,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         typeof(SessionFileTransferService)
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(peerService, peerContext);
-        typeof(SessionFileTransferService)
-            .GetMethod("ApplyOutboundV4State", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(peerService, [peerContext, retained]);
+        InvokeEnqueueAuthorizedV4RepairsFromState(peerService, peerContext, retained);
 
         Assert.NotNull(GetPrivatePropertyValue(peerContext, "CurrentRegularV4FrontierRepairContract"));
         Assert.Single(GetQueuedV4RepairSends(peerContext));
@@ -298,7 +352,11 @@ public sealed partial class SessionFileTransferV4SenderTests
         transportField.SetValue(service, null);
         try
         {
-            var withheld = CreateInboundState(service, context, "chunk_batch_committed");
+            var withheld = CreateInboundState(
+                service,
+                context,
+                "chunk_batch_committed",
+                ensureTransport: false);
 
             Assert.Empty(withheld.MissingRanges);
             Assert.Null(GetPrivatePropertyValue(context, "V4RegularFrontierRepairProjection"));
@@ -455,6 +513,22 @@ public sealed partial class SessionFileTransferV4SenderTests
             context,
             "V4FrontierStallStartedUtc",
             DateTimeOffset.UtcNow - TimeSpan.FromSeconds(11));
+        var successorAuthority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(
+            GetPrivatePropertyValue(successorAttemptContract!, "Authority"));
+        Assert.True(Assert.IsType<bool>(typeof(SessionFileTransferService)
+            .GetMethod("TrySettleInboundRegularV4FrontierRepairStalledLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    context,
+                    successorAuthority.RepairKey,
+                    "unit_test_immediate_successor_stall",
+                    dueState.ContiguousCommittedChunkIndex,
+                    dueState.DurableReceivedHighestChunkIndex,
+                    dueRange.ChunkCount,
+                    12,
+                    11_000L,
+                ])));
         var afterSuccessorRetention = CreateInboundState(
             service,
             context,
@@ -476,9 +550,8 @@ public sealed partial class SessionFileTransferV4SenderTests
 
         var predecessorAuthority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(
             GetPrivatePropertyValue(sourceContractBefore!, "Authority"));
-        var successorAuthority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(
-            GetPrivatePropertyValue(successorAttemptContract!, "Authority"));
-        var receipt = Assert.Single(transport.RegularV4PressureInstallReceipts);
+        var receipt = Assert.Single(transport.RegularV4PressureInstallReceipts.Where(
+            static candidate => candidate.Authority.PredecessorAuthorityId is not null));
         Assert.Equal(successorAuthority, receipt.Authority);
         var settlements = transport.RegularV4FrontierRepairSettlements.ToArray();
         Assert.Equal(2, settlements.Length);
@@ -647,6 +720,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         var apply = typeof(SessionFileTransferService)
             .GetMethod("ApplyOutboundV4State", BindingFlags.Instance | BindingFlags.NonPublic)!;
 
+        EnsureProjectionOutboundPressureScope(sendService, sendContext);
         apply.Invoke(sendService, [sendContext, newer]);
         var currentContract = GetPrivatePropertyValue(sendContext, "CurrentRegularV4FrontierRepairContract");
         Assert.NotNull(currentContract);
@@ -1195,6 +1269,10 @@ public sealed partial class SessionFileTransferV4SenderTests
             nextChunkIndex: 9,
             durableHighestChunkIndex: 20,
             creditUntilChunkIndexExclusive: 256);
+        SetPrivateProperty(
+            context,
+            "DataSession",
+            new RecordingDataSession($"session_{transferId}", transferId));
         var written = Assert.IsType<BitArray>(GetPrivatePropertyValue(context, "ReceiverSparseChunksWritten"));
         for (var chunkIndex = 9; chunkIndex < 21; chunkIndex++)
         {
@@ -1218,10 +1296,23 @@ public sealed partial class SessionFileTransferV4SenderTests
         SessionFileTransferService service,
         object context,
         string reason,
-        bool forceMissingRange = false)
-        => Assert.IsType<FileTransferStateFrameV4>(typeof(SessionFileTransferService)
+        bool forceMissingRange = false,
+        bool ensureTransport = true)
+    {
+        var transportField = typeof(SessionFileTransferService)
+            .GetField("transport", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        if (ensureTransport && transportField.GetValue(service) is null)
+        {
+            service.AttachTransport(new LoopbackFileTransferTransport(
+                Assert.IsType<string>(GetPrivatePropertyValue(context, "SessionId"))));
+        }
+        typeof(SessionFileTransferService)
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        return Assert.IsType<FileTransferStateFrameV4>(typeof(SessionFileTransferService)
             .GetMethod("CreateInboundV4StateLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, reason, false, forceMissingRange]));
+    }
 
     private static RuntimeUnlockRegularV4RecoveryLifecycleReport CreateProjectionRecoveryLifecycleReport(
         FileTransferCoordinatorState state,
@@ -1268,7 +1359,35 @@ public sealed partial class SessionFileTransferV4SenderTests
         SessionFileTransferService service,
         object context,
         FileTransferStateFrameV4 state)
-        => typeof(SessionFileTransferService)
+    {
+        EnsureProjectionOutboundPressureScope(service, context);
+        typeof(SessionFileTransferService)
             .GetMethod("EnqueueAuthorizedV4RepairsFromState", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, state, null, false, null, null, null, 0L]);
+    }
+
+    private static void EnsureProjectionOutboundPressureScope(
+        SessionFileTransferService service,
+        object context)
+    {
+        var transportField = typeof(SessionFileTransferService)
+            .GetField("transport", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        if (transportField.GetValue(service) is null)
+        {
+            transportField.SetValue(
+                service,
+                new LoopbackFileTransferTransport(
+                    Assert.IsType<string>(GetPrivatePropertyValue(context, "SessionId"))));
+        }
+
+        if (GetPrivatePropertyValue(context, "DataSession") is null)
+        {
+            SetPrivateProperty(
+                context,
+                "DataSession",
+                new RecordingDataSession(
+                    Assert.IsType<string>(GetPrivatePropertyValue(context, "SessionId")),
+                    Assert.IsType<string>(GetPrivatePropertyValue(context, "TransferId"))));
+        }
+    }
 }

@@ -3541,6 +3541,109 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
     }
 
     [Fact]
+    [Trait("RetainedV4Suite", "InitialPressureInstall")]
+    public async Task AnalyzeRetained_RegularV4InitialPressureInstallMissing_FullAndCompactAgree()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRegularV4InitialPressureInstallFixture(
+            "transfer_regular_v4_initial_pressure_missing",
+            installBeforeSettlement: false);
+        var full = await RunAnalyzeFixtureAsync(lines);
+        var compact = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: new Dictionary<string, string>
+            {
+                ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+            });
+
+        Assert.Equal(0, full.Script.ExitCode);
+        Assert.Equal(0, compact.Script.ExitCode);
+        var fullVerdict = ReadArtifactReport(full.ArtifactDir, "filetransfer-operator-verdict.txt");
+        var compactVerdict = ReadArtifactReport(compact.ArtifactDir, "filetransfer-operator-verdict.txt");
+        foreach (var field in new[]
+                 {
+                     "recovery_failure_class",
+                     "first_proof_chain_failure_class",
+                     "first_proof_chain_failure_event",
+                     "first_proof_chain_failure_reason",
+                     "first_proof_chain_failure_sequence",
+                     "acceptance_failure_class",
+                     "verdict",
+                     "gate_status",
+                     "regular_v4_frontier_repair_initial_pressure_install_missing_raw_count",
+                     "regular_v4_frontier_repair_initial_pressure_install_missing_distinct_count",
+                     "regular_v4_frontier_repair_initial_pressure_install_missing_recovered_count",
+                     "regular_v4_frontier_repair_initial_pressure_install_missing_unresolved_count",
+                     "regular_v4_frontier_repair_initial_pressure_install_verdict"
+                 })
+        {
+            Assert.Equal(fullVerdict[field], compactVerdict[field]);
+        }
+
+        Assert.Equal("incomplete_proof", fullVerdict["acceptance_failure_class"]);
+        Assert.Equal("INCONCLUSIVE", fullVerdict["verdict"]);
+        Assert.Equal("fail", fullVerdict["gate_status"]);
+        Assert.Equal("regular_v4_frontier_repair_initial_pressure_install_missing", fullVerdict["recovery_failure_class"]);
+        Assert.Equal("regular_v4_frontier_repair_initial_pressure_install_missing", fullVerdict["first_proof_chain_failure_class"]);
+        Assert.Equal("filetransfer_regular_v4_frontier_repair_settlement_rejected", fullVerdict["first_proof_chain_failure_event"]);
+        Assert.Equal("regular_v4_frontier_repair_pressure_missing", fullVerdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("564", fullVerdict["first_proof_chain_failure_sequence"]);
+        Assert.Equal("1", fullVerdict["regular_v4_frontier_repair_initial_pressure_install_missing_raw_count"]);
+        Assert.Equal("1", fullVerdict["regular_v4_frontier_repair_initial_pressure_install_missing_distinct_count"]);
+        Assert.Equal("0", fullVerdict["regular_v4_frontier_repair_initial_pressure_install_missing_recovered_count"]);
+        Assert.Equal("1", fullVerdict["regular_v4_frontier_repair_initial_pressure_install_missing_unresolved_count"]);
+        Assert.Equal("fail", fullVerdict["regular_v4_frontier_repair_initial_pressure_install_verdict"]);
+    }
+
+    [Fact]
+    [Trait("RetainedV4Suite", "InitialPressureInstall")]
+    public async Task AnalyzeRetained_RegularV4InitialPressureInstalledBeforeSettlement_DoesNotClassifyMissingInstall()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRegularV4InitialPressureInstallFixture(
+            "transfer_regular_v4_initial_pressure_installed",
+            installBeforeSettlement: true);
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("0", verdict["regular_v4_frontier_repair_initial_pressure_install_missing_unresolved_count"]);
+        Assert.Equal("none", verdict["regular_v4_frontier_repair_initial_pressure_install_verdict"]);
+        Assert.NotEqual("regular_v4_frontier_repair_initial_pressure_install_missing", verdict["first_proof_chain_failure_class"]);
+    }
+
+    private static List<string> BuildRegularV4InitialPressureInstallFixture(
+        string transferId,
+        bool installBeforeSettlement)
+    {
+        const string authorityId = "repair-initial";
+        const string repairKey = "0:12:0:12";
+        var lines = new List<string>
+        {
+            LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=0; route_publication_generation=1; route_commit_generation=0")
+        };
+        while (lines.Count < 562)
+        {
+            lines.Add(LogLine($"event=initial_pressure_fixture_noise; transfer_id={transferId}; session_id=sess_a; ordinal={lines.Count + 1}"));
+        }
+        if (installBeforeSettlement)
+        {
+            lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_initial_pressure_install_decided; authority_schema=2; authority_id={authorityId}; predecessor_authority_id=(none); install_kind=initial; session_id=sess_a; transfer_id={transferId}; direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=0; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn; repair_request_key={repairKey}; frontier_chunk_index=0; durable_received_highest_chunk_index=-1; decision_generation=1; install_generation=1; install_status=Installed; receipt_authority_id={authorityId}; pressure_reason=regular_v4_receiver_frontier_repair_due; decision_reason=regular_v4_frontier_repair_initial_pressure_installed"));
+        }
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_contract_settled; authority_schema=2; authority_id={authorityId}; successor_authority_id=(none); repair_request_key={repairKey}; settlement_outcome=ProgressObserved; dispatch_observed=0; decision_reason=frontier_advanced"));
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_settlement_rejected; source=nkn_bridge_pressure; stage=settlement; session_id=sess_a; transfer_id={transferId}; direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=0; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn; repair_request_key={repairKey}; frontier_chunk_index=0; durable_received_highest_chunk_index=-1; requested_chunk_count=12; decision_generation=1; authority_id={authorityId}; predecessor_authority_id=(none); retained_predecessor_authority_id=(none); current_successor_authority_id=(none); outcome=ProgressObserved; pressure_pending_repair_count=0; cleared_pressure=0; rejection_reason=regular_v4_frontier_repair_pressure_missing; decision_reason=regular_v4_frontier_repair_pressure_missing"));
+        return lines;
+    }
+
+    [Fact]
     [Trait("RetainedV4Suite", "SuccessorPressureInstall")]
     public async Task AnalyzeRetained_RegularV4SuccessorPressureInstallMissing_FullAndCompactAgree()
     {

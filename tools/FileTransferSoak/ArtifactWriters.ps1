@@ -8591,6 +8591,11 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount)) | Out-Null
     $lines.Add(("regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount)) | Out-Null
     $lines.Add(("regular_v4_frontier_repair_successor_pressure_install_verdict={0}" -f $RecoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallVerdict)) | Out-Null
+    $lines.Add(("regular_v4_frontier_repair_initial_pressure_install_missing_raw_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairInitialPressureInstallMissingRawCount)) | Out-Null
+    $lines.Add(("regular_v4_frontier_repair_initial_pressure_install_missing_distinct_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairInitialPressureInstallMissingDistinctCount)) | Out-Null
+    $lines.Add(("regular_v4_frontier_repair_initial_pressure_install_missing_recovered_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairInitialPressureInstallMissingRecoveredCount)) | Out-Null
+    $lines.Add(("regular_v4_frontier_repair_initial_pressure_install_missing_unresolved_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairInitialPressureInstallMissingUnresolvedCount)) | Out-Null
+    $lines.Add(("regular_v4_frontier_repair_initial_pressure_install_verdict={0}" -f $RecoveryClassification.RegularV4FrontierRepairInitialPressureInstallVerdict)) | Out-Null
     $lines.Add(("runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count={0}" -f $RecoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingRawCount)) | Out-Null
     $lines.Add(("runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count={0}" -f $RecoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount)) | Out-Null
     $lines.Add(("runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count={0}" -f $RecoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount)) | Out-Null
@@ -10383,6 +10388,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount),
         ("regular_v4_frontier_repair_successor_pressure_install_verdict={0}" -f $recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallVerdict),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_raw_count={0}" -f $recoveryClassification.RegularV4FrontierRepairInitialPressureInstallMissingRawCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_distinct_count={0}" -f $recoveryClassification.RegularV4FrontierRepairInitialPressureInstallMissingDistinctCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_recovered_count={0}" -f $recoveryClassification.RegularV4FrontierRepairInitialPressureInstallMissingRecoveredCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_unresolved_count={0}" -f $recoveryClassification.RegularV4FrontierRepairInitialPressureInstallMissingUnresolvedCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_verdict={0}" -f $recoveryClassification.RegularV4FrontierRepairInitialPressureInstallVerdict),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingRawCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount),
@@ -18386,6 +18396,142 @@ function Get-FileTransferRegularV4FrontierRepairSuccessorPressureInstallProof {
     }
 }
 
+function Get-FileTransferRegularV4FrontierRepairInitialPressureInstallProof {
+    param(
+        [AllowEmptyCollection()][object[]]$Events = @()
+    )
+
+    [object[]]$orderedEvents = @($Events | Where-Object { $null -ne $_ } | Sort-Object Sequence, LineNumber)
+    [object[]]$contractSettlements = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_contract_settled'
+    })
+    [object[]]$installEvents = @($orderedEvents | Where-Object {
+        $_.EventName -in @(
+            'filetransfer_regular_v4_frontier_repair_initial_pressure_install_staged',
+            'filetransfer_regular_v4_frontier_repair_initial_pressure_install_decided')
+    })
+    [object[]]$successorInstallEvents = @($orderedEvents | Where-Object {
+        $_.EventName -like 'filetransfer_regular_v4_frontier_repair_successor_pressure_install_*'
+    })
+    [object[]]$rejections = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_settlement_rejected'
+    })
+
+    function Get-InitialPressureField {
+        param($Event, [string[]]$Names)
+        foreach ($name in $Names) {
+            $value = Get-FileTransferEventField -Event $Event -Name $name -Default ''
+            if (-not [string]::IsNullOrWhiteSpace($value) -and $value -notin @('(none)', 'none')) {
+                return $value
+            }
+        }
+        return ''
+    }
+
+    function Test-InitialPressureIdentityMatch {
+        param($Left, $Right)
+        foreach ($names in @(
+                @('authority_id'), @('repair_request_key'), @('session_id'), @('transfer_id'), @('direction'),
+                @('route'), @('protocol_version'), @('live_route_epoch'), @('runtime_generation'),
+                @('terminal_generation'), @('leg_generation'), @('transport_epoch'),
+                @('bridge_recovery_generation'), @('bridge_decision_generation'),
+                @('route_publication_generation'), @('route_commit_generation'),
+                @('decision_generation', 'repair_generation'))) {
+            $leftValue = Get-InitialPressureField -Event $Left -Names $names
+            $rightValue = Get-InitialPressureField -Event $Right -Names $names
+            if ([string]::IsNullOrWhiteSpace($leftValue) -or
+                [string]::IsNullOrWhiteSpace($rightValue) -or
+                -not [string]::Equals($leftValue, $rightValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    $rawCandidates = New-Object System.Collections.Generic.List[object]
+    $distinctCandidates = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    foreach ($rejection in $rejections) {
+        $outcome = (Get-InitialPressureField -Event $rejection -Names @('outcome', 'settlement_outcome')).Replace('_', '').ToLowerInvariant()
+        if ($outcome -notin @('progressobserved', 'missingdispatch', 'settledstalled')) {
+            continue
+        }
+        $reason = Get-InitialPressureField -Event $rejection -Names @('mismatch_kind', 'rejection_reason', 'decision_reason', 'reason')
+        $legacyPressureMissing =
+            (Get-FileTransferEventField -Event $rejection -Name 'pressure_pending_repair_count' -Default '-1') -eq '0' -and
+            (Get-FileTransferEventField -Event $rejection -Name 'cleared_pressure' -Default '-1') -eq '0'
+        if ($reason -ne 'regular_v4_frontier_repair_pressure_missing' -and -not $legacyPressureMissing) {
+            continue
+        }
+
+        $authorityId = Get-InitialPressureField -Event $rejection -Names @('authority_id')
+        $repairKey = Get-InitialPressureField -Event $rejection -Names @('repair_request_key')
+        if ([string]::IsNullOrWhiteSpace($authorityId) -or [string]::IsNullOrWhiteSpace($repairKey)) {
+            continue
+        }
+        $hasSuccessorLineage = @($successorInstallEvents | Where-Object {
+            (Get-InitialPressureField -Event $_ -Names @('authority_id')) -eq $authorityId
+        }).Count -gt 0
+        if ($hasSuccessorLineage) {
+            continue
+        }
+
+        $settlement = @($contractSettlements | Where-Object {
+            [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
+            (Get-InitialPressureField -Event $_ -Names @('authority_id')) -eq $authorityId -and
+            (Get-InitialPressureField -Event $_ -Names @('repair_request_key')) -eq $repairKey -and
+            (Get-InitialPressureField -Event $_ -Names @('settlement_outcome', 'outcome')).Replace('_', '').ToLowerInvariant() -eq $outcome
+        } | Sort-Object Sequence, LineNumber -Descending | Select-Object -First 1)
+        if ($settlement.Count -eq 0) {
+            continue
+        }
+
+        $acceptedInstall = @($installEvents | Where-Object {
+            [int64]$_.Sequence -lt [int64]$settlement[0].Sequence -and
+            $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_initial_pressure_install_decided' -and
+            (Get-InitialPressureField -Event $_ -Names @('install_status', 'status')).ToLowerInvariant() -in @('installed', 'idempotent') -and
+            (Test-InitialPressureIdentityMatch -Left $_ -Right $rejection)
+        }).Count -gt 0
+        if ($acceptedInstall) {
+            continue
+        }
+
+        $rawCandidates.Add($rejection) | Out-Null
+        $logicalKey = [string]::Join('|', @(
+            (Get-InitialPressureField -Event $rejection -Names @('session_id')),
+            (Get-InitialPressureField -Event $rejection -Names @('transfer_id')),
+            (Get-InitialPressureField -Event $rejection -Names @('direction')),
+            (Get-InitialPressureField -Event $rejection -Names @('route')),
+            (Get-InitialPressureField -Event $rejection -Names @('protocol_version')),
+            (Get-InitialPressureField -Event $rejection -Names @('live_route_epoch')),
+            (Get-InitialPressureField -Event $rejection -Names @('runtime_generation')),
+            (Get-InitialPressureField -Event $rejection -Names @('terminal_generation')),
+            (Get-InitialPressureField -Event $rejection -Names @('leg_generation')),
+            (Get-InitialPressureField -Event $rejection -Names @('transport_epoch')),
+            (Get-InitialPressureField -Event $rejection -Names @('bridge_recovery_generation')),
+            (Get-InitialPressureField -Event $rejection -Names @('bridge_decision_generation')),
+            $authorityId,
+            $repairKey))
+        if (-not $seen.ContainsKey($logicalKey)) {
+            $seen[$logicalKey] = $true
+            $distinctCandidates.Add($rejection) | Out-Null
+        }
+    }
+
+    [object[]]$unresolved = @($distinctCandidates.ToArray())
+    return [pscustomobject]@{
+        RawCount = $rawCandidates.Count
+        DistinctCount = $distinctCandidates.Count
+        RecoveredCount = 0
+        UnresolvedCount = $unresolved.Count
+        Verdict = if ($unresolved.Count -gt 0) { 'fail' } elseif ($rawCandidates.Count -gt 0) { 'pass' } else { 'none' }
+        RawCandidateEvents = @($rawCandidates.ToArray())
+        DistinctCandidateEvents = @($distinctCandidates.ToArray())
+        RecoveredCandidateEvents = @()
+        UnresolvedCandidateEvents = $unresolved
+    }
+}
+
 function Test-FileTransferRuntimeUnlockRetryDispatchTupleMatch {
     param(
         [Parameter(Mandatory = $true)]$Left,
@@ -19374,6 +19520,8 @@ function Get-FileTransferRecoveryFailureClassification {
         Get-FileTransferRegularV4FrontierRepairSettlementDispositionProof -Events $events
     $regularV4FrontierRepairSuccessorPressureInstallProof =
         Get-FileTransferRegularV4FrontierRepairSuccessorPressureInstallProof -Events $events
+    $regularV4FrontierRepairInitialPressureInstallProof =
+        Get-FileTransferRegularV4FrontierRepairInitialPressureInstallProof -Events $events
     $runtimeUnlockRegularV4RecoverySettlementProtocolObserved =
         $runtimeUnlockRegularV4RecoverySettlementReportedEvents.Count -gt 0 -or
         $runtimeUnlockRegularV4RecoverySettlementDecidedEvents.Count -gt 0
@@ -22461,6 +22609,12 @@ function Get-FileTransferRecoveryFailureClassification {
         -UseDefaultReason
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
+        -Class 'regular_v4_frontier_repair_initial_pressure_install_missing' `
+        -Events @($regularV4FrontierRepairInitialPressureInstallProof.UnresolvedCandidateEvents) `
+        -DefaultReason 'regular_v4_frontier_repair_pressure_missing' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
         -Class 'regular_v4_frontier_repair_successor_pressure_install_missing' `
         -Events @($regularV4FrontierRepairSuccessorPressureInstallProof.UnresolvedCandidateEvents) `
         -DefaultReason 'regular_v4_frontier_repair_pressure_missing' `
@@ -22832,6 +22986,9 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($regularV4PeerSilenceReplayMissingDispatchRangeProof.UnresolvedCount -gt 0) {
         $class = 'regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved'
+    }
+    elseif ($regularV4FrontierRepairInitialPressureInstallProof.UnresolvedCount -gt 0) {
+        $class = 'regular_v4_frontier_repair_initial_pressure_install_missing'
     }
     elseif ($regularV4FrontierRepairSuccessorPressureInstallProof.UnresolvedCount -gt 0) {
         $class = 'regular_v4_frontier_repair_successor_pressure_install_missing'
@@ -23470,6 +23627,11 @@ function Get-FileTransferRecoveryFailureClassification {
         RegularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount = $regularV4FrontierRepairSuccessorPressureInstallProof.RecoveredCount
         RegularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount = $regularV4FrontierRepairSuccessorPressureInstallProof.UnresolvedCount
         RegularV4FrontierRepairSuccessorPressureInstallVerdict = $regularV4FrontierRepairSuccessorPressureInstallProof.Verdict
+        RegularV4FrontierRepairInitialPressureInstallMissingRawCount = $regularV4FrontierRepairInitialPressureInstallProof.RawCount
+        RegularV4FrontierRepairInitialPressureInstallMissingDistinctCount = $regularV4FrontierRepairInitialPressureInstallProof.DistinctCount
+        RegularV4FrontierRepairInitialPressureInstallMissingRecoveredCount = $regularV4FrontierRepairInitialPressureInstallProof.RecoveredCount
+        RegularV4FrontierRepairInitialPressureInstallMissingUnresolvedCount = $regularV4FrontierRepairInitialPressureInstallProof.UnresolvedCount
+        RegularV4FrontierRepairInitialPressureInstallVerdict = $regularV4FrontierRepairInitialPressureInstallProof.Verdict
         RuntimeUnlockRegularV4RouteCommitSendDrainMissingRawCount = $runtimeUnlockRegularV4RouteCommitSendDrainProof.RawCount
         RuntimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount = $runtimeUnlockRegularV4RouteCommitSendDrainProof.DistinctCount
         RuntimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount = $runtimeUnlockRegularV4RouteCommitSendDrainProof.RecoveredCount
@@ -23480,6 +23642,7 @@ function Get-FileTransferRecoveryFailureClassification {
             $regularV4FrontierRepairStalled -or
             $regularV4RepairLivenessAuthorityMissing -or
             $regularV4FrontierRepairProjectionReauthorizationProof.UnresolvedCount -gt 0 -or
+            $regularV4FrontierRepairInitialPressureInstallProof.UnresolvedCount -gt 0 -or
             $regularV4FrontierRepairSuccessorPressureInstallProof.UnresolvedCount -gt 0) {
             'fail'
         } elseif ($regularV4FrontierRepairProgressObservedEvents.Count -gt 0 -or
@@ -23831,6 +23994,11 @@ function New-FileTransferInvariantLedgerObject {
         regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count = [string]$recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount
         regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count = [string]$recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount
         regular_v4_frontier_repair_successor_pressure_install_verdict = $recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallVerdict
+        regular_v4_frontier_repair_initial_pressure_install_missing_raw_count = [string]$recoveryClassification.RegularV4FrontierRepairInitialPressureInstallMissingRawCount
+        regular_v4_frontier_repair_initial_pressure_install_missing_distinct_count = [string]$recoveryClassification.RegularV4FrontierRepairInitialPressureInstallMissingDistinctCount
+        regular_v4_frontier_repair_initial_pressure_install_missing_recovered_count = [string]$recoveryClassification.RegularV4FrontierRepairInitialPressureInstallMissingRecoveredCount
+        regular_v4_frontier_repair_initial_pressure_install_missing_unresolved_count = [string]$recoveryClassification.RegularV4FrontierRepairInitialPressureInstallMissingUnresolvedCount
+        regular_v4_frontier_repair_initial_pressure_install_verdict = $recoveryClassification.RegularV4FrontierRepairInitialPressureInstallVerdict
         runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingRawCount
         runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount
         runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount
@@ -24049,6 +24217,7 @@ function Write-FileTransferDiagnosticsArtifacts {
             'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
             'regular_v4_frontier_repair_missing_range_not_preserved',
             'regular_v4_frontier_repair_settlement_disposition_unverifiable',
+            'regular_v4_frontier_repair_initial_pressure_install_missing',
             'regular_v4_frontier_repair_successor_pressure_install_missing') -and
         $effectiveGateStatus -ne 'fail') {
         $effectiveVerdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
@@ -24127,6 +24296,10 @@ function Write-FileTransferDiagnosticsArtifacts {
                 'recovery: accepted regular-V4 repair settlement is missing durable disposition evidence'
                 break
             }
+            'regular_v4_frontier_repair_initial_pressure_install_missing' {
+                'recovery: initial regular-V4 repair pressure was not installed before settlement'
+                break
+            }
             'regular_v4_frontier_repair_successor_pressure_install_missing' {
                 'recovery: successor regular-V4 repair pressure was not installed before predecessor retirement'
                 break
@@ -24136,6 +24309,12 @@ function Write-FileTransferDiagnosticsArtifacts {
             }
         }
         $effectiveHardFailures.Add($dispatchFailureText) | Out-Null
+    }
+
+    if ($recoveryClassification.Class -eq 'regular_v4_frontier_repair_initial_pressure_install_missing') {
+        $effectiveVerdict = 'INCONCLUSIVE'
+        $effectiveGateStatus = 'fail'
+        $effectiveNextArtifact = 'filetransfer-operator-verdict.txt'
     }
 
     $verdictLines = @(
@@ -24187,7 +24366,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("gate_status={0}" -f $effectiveGateStatus),
         ("transfer_id={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.TransferId)) { '(none)' } else { $Summary.TransferId }))),
         ("next_artifact={0}" -f $effectiveNextArtifact),
-        ("acceptance_failure_class={0}" -f ($(if ($recoveryClassification.Class -in @('runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery')) { 'incomplete_proof' } elseif ($recoveryClassification.Class -in @('runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_repair_missing_range_not_preserved', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'runtime_unlock_regular_v4_route_commit_send_drain_missing')) { 'route_runtime' } elseif ($invariantMayOwnAcceptanceFailure) { $combinedInvariant.FailureClass } else { 'none' }))),
+        ("acceptance_failure_class={0}" -f ($(if ($recoveryClassification.Class -in @('runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_initial_pressure_install_missing', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery')) { 'incomplete_proof' } elseif ($recoveryClassification.Class -in @('runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_repair_missing_range_not_preserved', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'runtime_unlock_regular_v4_route_commit_send_drain_missing')) { 'route_runtime' } elseif ($invariantMayOwnAcceptanceFailure) { $combinedInvariant.FailureClass } else { 'none' }))),
         ("release_route_law_verdict={0}" -f $releaseRouteLaw.Verdict),
         ("terminal_lifecycle_invariant_verdict={0}" -f $terminalLifecycleInvariant.Verdict),
         ("control_priority_invariant_verdict={0}" -f $controlPriorityInvariant.Verdict),
@@ -24424,6 +24603,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount),
         ("regular_v4_frontier_repair_successor_pressure_install_verdict={0}" -f $recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallVerdict),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_raw_count={0}" -f $recoveryClassification.RegularV4FrontierRepairInitialPressureInstallMissingRawCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_distinct_count={0}" -f $recoveryClassification.RegularV4FrontierRepairInitialPressureInstallMissingDistinctCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_recovered_count={0}" -f $recoveryClassification.RegularV4FrontierRepairInitialPressureInstallMissingRecoveredCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_missing_unresolved_count={0}" -f $recoveryClassification.RegularV4FrontierRepairInitialPressureInstallMissingUnresolvedCount),
+        ("regular_v4_frontier_repair_initial_pressure_install_verdict={0}" -f $recoveryClassification.RegularV4FrontierRepairInitialPressureInstallVerdict),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingRawCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount),

@@ -1836,7 +1836,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 break;
             }
             case "data_session":
-                SetPrivateProperty(context, "DataSessionGeneration", 1L);
+                SetPrivateProperty(context, "DataSessionGeneration", 2L);
                 break;
             default:
                 throw new ArgumentOutOfRangeException(nameof(replacement), replacement, "Unknown cursor scope replacement.");
@@ -1911,7 +1911,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var successorDecision = Assert.IsType<RepairReplayDecision>(
             GetPrivatePropertyValue(successorContract!, "RepairDecision"));
         Assert.Equal(predecessorAuthority.AuthorityId, successorDecision.PredecessorAuthorityId);
-        var installReceipt = Assert.Single(transport.RegularV4PressureInstallReceipts);
+        var installReceipt = Assert.Single(transport.RegularV4PressureInstallReceipts.Where(
+            static candidate => candidate.Authority.PredecessorAuthorityId is not null));
         Assert.Equal(successorAuthority, installReceipt.Authority);
         Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed, installReceipt.Status);
         Assert.Equal("regular_v4_frontier_repair_successor_authorized", installReceipt.PressureReason);
@@ -2054,16 +2055,19 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .Invoke(service, [context, "later_matching_scheduling_boundary"])!);
         Assert.Equal(2, installAttempt);
         Assert.Same(stagedSuccessor, GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
+        var successorInstallReceipts = transport.RegularV4PressureInstallReceipts
+            .Where(static receipt => receipt.Authority.PredecessorAuthorityId is not null)
+            .ToArray();
         Assert.Equal(
             new[] { stagedAuthority.AuthorityId, stagedAuthority.AuthorityId },
-            transport.RegularV4PressureInstallReceipts.Select(static receipt => receipt.Authority.AuthorityId).ToArray());
+            successorInstallReceipts.Select(static receipt => receipt.Authority.AuthorityId).ToArray());
         Assert.Equal(
             new[]
             {
                 FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected,
                 FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
             },
-            transport.RegularV4PressureInstallReceipts.Select(static receipt => receipt.Status).ToArray());
+            successorInstallReceipts.Select(static receipt => receipt.Status).ToArray());
         Assert.Equal(2, GetPrivateProperty<int>(context, "PullRegularNknV4PeerSilenceSafetyReplayCount"));
         Assert.Single(GetQueuedV4RepairSends(context));
         Assert.Null(GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureInstallRetry"));
@@ -2079,7 +2083,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .Invoke(service, args)!);
         Assert.True(Assert.IsType<bool>(args[4]));
         Assert.Same(stagedSuccessor, GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
-        Assert.Equal(2, transport.RegularV4PressureInstallReceipts.Count);
+        Assert.Equal(2, successorInstallReceipts.Length);
         Assert.Single(GetQueuedV4RepairSends(context));
     }
 
@@ -3318,6 +3322,11 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         SetPrivateProperty(context, "ChunksAcceptedForTransport", chunksAcceptedForTransport);
         SetPrivateProperty(context, "RemoteGrantedUntilExclusive", remoteGrantedUntilExclusive);
         SetPrivateProperty(context, "PullV4LastGrantReceivedUtc", lastGrantReceivedUtc);
+        SetPrivateProperty(
+            context,
+            "DataSession",
+            new RecordingDataSession($"session_{transferId}", transferId));
+        SetPrivateProperty(context, "DataSessionGeneration", 1L);
         if (seedRuntimeOwner)
         {
             SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Outbound, "unit_test_regular");
