@@ -1503,6 +1503,89 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
         }
     }
 
+    [Trait("FileTransferRuntimeSuite", "SparseWorkerHandoff")]
+    [Fact]
+    public async Task NknTransport_PhysicalSendSubmission_PreservesFirstSuccessWhileRedundantRepairCopyRemainsInFlight()
+    {
+        FakeNknClient.ResetNetwork();
+        TaskCompletionSource<bool> bulkEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource<bool> releaseBulk = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            using CancellationTokenSource cts = new(TimeSpan.FromSeconds(8));
+            NknTransportOptions options = NknTransportOptions.Load();
+            FakeNknClient hostClient = new("host.filetransfer.physicalsend.v4.address");
+            FakeNknClient helperClient = new("helper.filetransfer.physicalsend.v4.address");
+            helperClient.BeforeSendCoreAsync = async (_, _, channel, _) =>
+            {
+                if (channel != NknBridgeChannel.Bulk)
+                {
+                    return;
+                }
+
+                bulkEntered.TrySetResult(true);
+                await releaseBulk.Task;
+            };
+            NknIdentity hostIdentity = new("host-physicalsend-v4-id", hostClient.Address);
+            NknIdentity helperIdentity = new("helper-physicalsend-v4-id", helperClient.Address);
+            using NknSignalingTransport host = new(hostClient, options, hostIdentity);
+            using NknSignalingTransport helper = new(helperClient, options, helperIdentity);
+
+            string sessionId = await CoreSmokeTestsBase.ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            IFileTransferDataSession outboundSession = await helper.OpenFileTransferDataSessionAsync(
+                sessionId,
+                "transfer_nkn_physicalsend_v4",
+                cts.Token);
+            ConcurrentQueue<NknIncomingMessage> deliveredFrames = new();
+            hostClient.MessageReceived += (_, message) =>
+            {
+                if (!message.IsTopic &&
+                    EnvelopeCodec.TryDeserialize(message.Payload, out Envelope envelope) &&
+                    envelope.Type == MsgType.FileTransferDataFrame)
+                {
+                    deliveredFrames.Enqueue(message);
+                }
+            };
+            IFileTransferPhysicalSendSubmissionSession submissionSession =
+                Assert.IsAssignableFrom<IFileTransferPhysicalSendSubmissionSession>(outboundSession);
+            FileTransferChunkBatchFrameV6 batch = new()
+            {
+                SessionId = sessionId,
+                TransferId = "transfer_nkn_physicalsend_v4",
+                StartChunkIndex = 9,
+                ChunkCount = 1,
+                DataSegments = [new byte[21 * 1024]],
+                BatchProfile = "v4_repair_21k",
+                RepairDeliveryMode = FileTransferV4RepairDeliveryMode.ControlBulkRedundant,
+            };
+            using CancellationTokenSource sendCts = new();
+
+            FileTransferPhysicalSendSubmission submission = submissionSession.SubmitPhysicalSend(
+                batch,
+                authority: null,
+                sendCts.Token);
+            await bulkEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await submission.DeliveryTask.WaitAsync(TimeSpan.FromSeconds(2));
+            sendCts.Cancel();
+
+            Assert.False(submission.PhysicalCompletionTask.IsCompleted);
+            Assert.Contains(deliveredFrames, static message => message.Channel == NknBridgeChannel.Control);
+            Assert.DoesNotContain(deliveredFrames, static message => message.Channel == NknBridgeChannel.Bulk);
+            releaseBulk.TrySetResult(true);
+            await submission.PhysicalCompletionTask.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Contains(deliveredFrames, static message => message.Channel == NknBridgeChannel.Bulk);
+        }
+        finally
+        {
+            releaseBulk.TrySetResult(true);
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
     [Trait("Category", "Smoke")]
     [Fact]
     public async Task NknTransport_PostTunaFallbackV6FrontierCancellation_DefersHardBothFailedEvidence()

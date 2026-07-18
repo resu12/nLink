@@ -636,6 +636,96 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
     }
 
     [Fact]
+    public async Task RunFileTransferRouteAcceptance_RouteCommitSendDrainFailureReachesScenarioAndRootSummaries()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string scenario = "regular-v4-live-activation-off-on-off-256mb";
+        const string candidate = "runtime_unlock_regular_v4_route_commit_send_drain_missing";
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-route-commit-send-drain-summary-propagation");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-route-commit-send-drain-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_REGULAR_V4_ROUTE_COMMIT_SEND_DRAIN_SUMMARY_FIXTURE"] = "1";
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ScenarioName", scenario,
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Expected fake route-commit send-drain summary propagation run to pass.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal(candidate, summary["runtime_failure_candidate"]);
+            Assert.Equal("filetransfer_data_path_send_result", summary["first_proof_chain_failure_event"]);
+            Assert.Equal(
+                "retired_regular_v4_send_completed_after_tuna_owner_install",
+                summary["first_proof_chain_failure_reason"]);
+            Assert.Equal("3900", summary["first_proof_chain_failure_sequence"]);
+            Assert.Equal("1315", summary["first_proof_chain_failure_writer_sequence"]);
+            Assert.Equal("route_runtime", summary["semantic_failure_domain"]);
+            Assert.Equal("6", summary["runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count"]);
+            Assert.Equal("1", summary["runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count"]);
+            Assert.Equal("0", summary["runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count"]);
+            Assert.Equal("1", summary["runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count"]);
+            Assert.Equal("fail", summary["runtime_unlock_regular_v4_route_commit_send_drain_verdict"]);
+            Assert.Equal(candidate, summary[$"{scenario}.runtime_failure_candidate"]);
+            Assert.Equal("route_runtime", summary[$"{scenario}.acceptance_failure_class"]);
+            Assert.Equal("incomplete_proof", summary[$"{scenario}.runtime_correctness_verdict"]);
+            Assert.Equal("1315", summary[$"{scenario}.first_proof_chain_failure_writer_sequence"]);
+            Assert.Equal("route_runtime", summary[$"{scenario}.semantic_failure_domain"]);
+            Assert.Equal("6", summary[$"{scenario}.runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count"]);
+            Assert.Equal("1", summary[$"{scenario}.runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count"]);
+            Assert.Equal("0", summary[$"{scenario}.runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count"]);
+            Assert.Equal("1", summary[$"{scenario}.runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count"]);
+            Assert.Equal("fail", summary[$"{scenario}.runtime_unlock_regular_v4_route_commit_send_drain_verdict"]);
+
+            using var summaryJson = JsonDocument.Parse(
+                await File.ReadAllTextAsync(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.json")));
+            var root = summaryJson.RootElement;
+            Assert.Equal(candidate, root.GetProperty("runtimeFailureCandidate").GetString());
+            Assert.Equal(6, root.GetProperty("runtimeUnlockRegularV4RouteCommitSendDrainMissingRawCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount").GetInt32());
+            Assert.Equal(0, root.GetProperty("runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount").GetInt32());
+            Assert.Equal("fail", root.GetProperty("runtimeUnlockRegularV4RouteCommitSendDrainVerdict").GetString());
+            Assert.Equal(1315, root.GetProperty("firstProofChainFailureWriterSequence").GetInt64());
+            Assert.Equal("route_runtime", root.GetProperty("semanticFailureDomain").GetString());
+
+            var run = Assert.Single(root.GetProperty("runs").EnumerateArray());
+            Assert.Equal(candidate, run.GetProperty("runtimeFailureCandidate").GetString());
+            Assert.Equal("route_runtime", run.GetProperty("acceptanceFailureClass").GetString());
+            Assert.Equal("incomplete_proof", run.GetProperty("runtimeCorrectnessVerdict").GetString());
+            Assert.Equal(1315, run.GetProperty("firstProofChainFailureWriterSequence").GetInt64());
+            Assert.Equal("route_runtime", run.GetProperty("semanticFailureDomain").GetString());
+            Assert.Equal(6, run.GetProperty("runtimeUnlockRegularV4RouteCommitSendDrainMissingRawCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount").GetInt32());
+            Assert.Equal(0, run.GetProperty("runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount").GetInt32());
+            Assert.Equal("fail", run.GetProperty("runtimeUnlockRegularV4RouteCommitSendDrainVerdict").GetString());
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
     public async Task RunFileTransferRouteAcceptance_SettlementDispositionFailureIsIncompleteProofInScenarioAndRootSummaries()
     {
         if (!OperatingSystem.IsWindows())

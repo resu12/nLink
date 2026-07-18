@@ -529,14 +529,17 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 TimeSpan.FromSeconds(15));
 
             var contractProvider = Assert.IsAssignableFrom<ISessionRecoveryStateContract>(host);
-            if (contractProvider.TryGetActiveSessionRecoveryContract(sessionId, out var snapshot))
-            {
-                Assert.Equal(SessionRecoveryContractKind.RuntimeUnlockActivation, snapshot.Kind);
-                Assert.True(snapshot.RetryRequired);
-                Assert.True(snapshot.QueuedBehindActiveNegotiation);
-                Assert.False(snapshot.RetryAuthorityGranted);
-                Assert.False(snapshot.RetryObserved);
-            }
+            await WaitUntilAsync(
+                () => contractProvider.TryGetActiveSessionRecoveryContract(sessionId, out var current) &&
+                      current.RetryRequired &&
+                      current.QueuedBehindActiveNegotiation,
+                TimeSpan.FromSeconds(2));
+            Assert.True(contractProvider.TryGetActiveSessionRecoveryContract(sessionId, out var snapshot));
+            Assert.Equal(SessionRecoveryContractKind.RuntimeUnlockActivation, snapshot.Kind);
+            Assert.True(snapshot.RetryRequired);
+            Assert.True(snapshot.QueuedBehindActiveNegotiation);
+            Assert.False(snapshot.RetryAuthorityGranted);
+            Assert.False(snapshot.RetryObserved);
 
             var logTail = ReadOperationalLogTail(logStart);
             var positiveLogTail = logTail + Environment.NewLine + LocalOperationalLog.GetRecentLogText();
@@ -15121,12 +15124,24 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             Assert.False(Assert.IsType<bool>(stateType.GetProperty("RetryDispatched")!.GetValue(state)));
             Assert.Equal(0L, Assert.IsType<long>(stateType.GetProperty("RetryDeadlineUtcMs")!.GetValue(state)));
             Assert.Equal(0L, Assert.IsType<long>(stateType.GetProperty("LivenessDeferralDeadlineUtcMs")!.GetValue(state)));
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart)
+                    .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                    .Any(line => line.Contains(
+                                     "event=runtime_unlock_retry_dispatch_authority_granted;",
+                                     StringComparison.Ordinal) &&
+                                 line.Contains($"transfer_id={transferId}", StringComparison.Ordinal)),
+                TimeSpan.FromSeconds(2));
             var tail = ReadOperationalLogTail(logStart);
             Assert.Contains("subscriber_present=0", tail, StringComparison.Ordinal);
             Assert.Contains("decision_reason=settlement_subscriber_missing", tail, StringComparison.Ordinal);
             Assert.Equal(
                 1,
-                tail.Split("event=runtime_unlock_retry_dispatch_authority_granted;", StringSplitOptions.None).Length - 1);
+                tail.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries).Count(
+                    line => line.Contains(
+                                "event=runtime_unlock_retry_dispatch_authority_granted;",
+                                StringComparison.Ordinal) &&
+                            line.Contains($"transfer_id={transferId}", StringComparison.Ordinal)));
         }
         finally
         {
@@ -15577,7 +15592,15 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                                StringComparison.Ordinal);
                 },
                 TimeSpan.FromSeconds(2));
+            var postTerminalTail = ReadOperationalLogTail(logStart);
+            var grantCountAfterTerminal = postTerminalTail
+                .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                .Count(line => line.Contains(
+                                   "event=runtime_unlock_retry_dispatch_authority_granted;",
+                                   StringComparison.Ordinal) &&
+                               line.Contains($"transfer_id={transferId}", StringComparison.Ordinal));
             InvokePrivateMethod(host, "ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed", "late_terminal_retry");
+            await Task.Delay(50);
 
             var tail = ReadOperationalLogTail(logStart);
             Assert.Contains("settlement_outcome=TransferTerminal", tail, StringComparison.Ordinal);
@@ -15591,7 +15614,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 1,
                 tail.Split("event=runtime_unlock_retry_dispatch_settlement_decided;", StringSplitOptions.None).Length - 1);
             Assert.Equal(
-                0,
+                grantCountAfterTerminal,
                 tail.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries).Count(
                     line => line.Contains(
                                 "event=runtime_unlock_retry_dispatch_authority_granted;",

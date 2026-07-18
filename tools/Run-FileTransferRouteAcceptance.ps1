@@ -1049,6 +1049,8 @@ function New-RouteAcceptanceRunResult {
         firstProofChainFailureReason = '(none)'
         firstProofChainFailureSequence = 0L
         firstProofChainFailureSource = '(none)'
+        firstProofChainFailureWriterSequence = 0L
+        semanticFailureDomain = '(none)'
         evidenceClassification = 'incomplete_proof'
         measurementContaminated = $false
         measurementContaminationReasons = @()
@@ -1083,6 +1085,11 @@ function New-RouteAcceptanceRunResult {
         fallbackTailTransportEpochReauthorizationMissingDistinctCount = 0
         fallbackTailTransportEpochReauthorizationMissingRecoveredCount = 0
         fallbackTailTransportEpochReauthorizationMissingUnresolvedCount = 0
+        runtimeUnlockRegularV4RouteCommitSendDrainVerdict = 'none'
+        runtimeUnlockRegularV4RouteCommitSendDrainMissingRawCount = 0
+        runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount = 0
+        runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount = 0
+        runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount = 0
         sessionLivenessTimeoutCount = 0
         bridgeLivenessStaleDeferralCount = 0
         bridgeLivenessTimeoutDuringValidRecoveryCount = 0
@@ -2257,6 +2264,11 @@ function Assert-Phase4RouteSummary {
     $Result.fallbackTailTransportEpochReauthorizationMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count' -DefaultValue '0')
     $Result.fallbackTailTransportEpochReauthorizationMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count' -DefaultValue '0')
     $Result.fallbackTailTransportEpochReauthorizationMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count' -DefaultValue '0')
+    $Result.runtimeUnlockRegularV4RouteCommitSendDrainVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'runtime_unlock_regular_v4_route_commit_send_drain_verdict' -DefaultValue 'none'
+    $Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count' -DefaultValue '0')
+    $Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count' -DefaultValue '0')
+    $Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count' -DefaultValue '0')
+    $Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count' -DefaultValue '0')
     $Result.bridgeLivenessStaleDeferralCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'bridge_liveness_stale_deferral_count' -DefaultValue '0')
     $Result.bridgeLivenessTimeoutDuringValidRecoveryCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'session_liveness_timeout_during_valid_recovery_count' -DefaultValue '0')
 
@@ -2460,6 +2472,11 @@ function Assert-Phase4OperatorVerdict {
     $Result.fallbackTailTransportEpochReauthorizationMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count' -DefaultValue ([string]$Result.fallbackTailTransportEpochReauthorizationMissingDistinctCount))
     $Result.fallbackTailTransportEpochReauthorizationMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count' -DefaultValue ([string]$Result.fallbackTailTransportEpochReauthorizationMissingRecoveredCount))
     $Result.fallbackTailTransportEpochReauthorizationMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count' -DefaultValue ([string]$Result.fallbackTailTransportEpochReauthorizationMissingUnresolvedCount))
+    $Result.runtimeUnlockRegularV4RouteCommitSendDrainVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_route_commit_send_drain_verdict' -DefaultValue ([string]$Result.runtimeUnlockRegularV4RouteCommitSendDrainVerdict)
+    $Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count' -DefaultValue ([string]$Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingRawCount))
+    $Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count' -DefaultValue ([string]$Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount))
+    $Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count' -DefaultValue ([string]$Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount))
+    $Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count' -DefaultValue ([string]$Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount))
     $Result.fallbackReceiverStateDeferredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'fallback_v6_receiver_state_deferred_count' -DefaultValue '0')
     $Result.fallbackReceiverStateCoalescedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'fallback_v6_receiver_state_coalesced_count' -DefaultValue '0')
     $firstProofClass = Get-RouteAcceptanceReportValue -Report $operator -Name 'first_proof_chain_failure_class' -DefaultValue '(none)'
@@ -2541,6 +2558,8 @@ function Assert-Phase4OperatorVerdict {
     $Result.firstProofChainFailureEvent = Get-RouteAcceptanceReportValue -Report $operator -Name 'first_proof_chain_failure_event' -DefaultValue '(none)'
     $Result.firstProofChainFailureReason = Get-RouteAcceptanceReportValue -Report $operator -Name 'first_proof_chain_failure_reason' -DefaultValue '(none)'
     $Result.firstProofChainFailureSequence = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'first_proof_chain_failure_sequence' -DefaultValue '0')
+    $Result.firstProofChainFailureWriterSequence = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'first_proof_chain_failure_writer_sequence' -DefaultValue '0')
+    $Result.semanticFailureDomain = Get-RouteAcceptanceReportValue -Report $operator -Name 'semantic_failure_domain' -DefaultValue '(none)'
     $firstProofSourcePath = Get-RouteAcceptanceReportValue -Report $operator -Name 'first_proof_chain_failure_source_path' -DefaultValue '(none)'
     $firstProofSourceLine = Get-RouteAcceptanceReportValue -Report $operator -Name 'first_proof_chain_failure_line_number' -DefaultValue '0'
     $Result.firstProofChainFailureSource = if ($firstProofSourcePath -eq '(none)') {
@@ -4107,6 +4126,40 @@ function Write-RouteAcceptanceFakePhase4Run {
             $reportPath = Join-Path $ArtifactDir $reportName
             $reportText = Get-Content -LiteralPath $reportPath -Raw
             foreach ($fixtureLine in $successorPressureInstallFixtureLines) {
+                $separatorIndex = $fixtureLine.IndexOf('=')
+                $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
+                $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
+                if ([regex]::IsMatch($reportText, $fixturePattern)) {
+                    $reportText = [regex]::Replace($reportText, $fixturePattern, $fixtureLine)
+                }
+                else {
+                    $reportText = $reportText.TrimEnd("`r", "`n") + [Environment]::NewLine + $fixtureLine + [Environment]::NewLine
+                }
+            }
+            Set-Content -LiteralPath $reportPath -Value $reportText -Encoding UTF8
+        }
+    }
+
+    if (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'REGULAR_V4_ROUTE_COMMIT_SEND_DRAIN_SUMMARY_FIXTURE') {
+        $routeCommitSendDrainFixtureLines = @(
+            'runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count=6',
+            'runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count=1',
+            'runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count=0',
+            'runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count=1',
+            'runtime_unlock_regular_v4_route_commit_send_drain_verdict=fail',
+            'first_proof_chain_failure_class=runtime_unlock_regular_v4_route_commit_send_drain_missing',
+            'first_proof_chain_failure_event=filetransfer_data_path_send_result',
+            'first_proof_chain_failure_reason=retired_regular_v4_send_completed_after_tuna_owner_install',
+            'first_proof_chain_failure_sequence=3900',
+            'first_proof_chain_failure_source_path=filetransfer-retained-log-slice.log',
+            'first_proof_chain_failure_line_number=3900',
+            'first_proof_chain_failure_writer_sequence=1315',
+            'semantic_failure_domain=route_runtime'
+        )
+        foreach ($reportName in @('filetransfer-route-consistency-summary.txt', 'filetransfer-operator-verdict.txt')) {
+            $reportPath = Join-Path $ArtifactDir $reportName
+            $reportText = Get-Content -LiteralPath $reportPath -Raw
+            foreach ($fixtureLine in $routeCommitSendDrainFixtureLines) {
                 $separatorIndex = $fixtureLine.IndexOf('=')
                 $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
                 $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
@@ -6132,6 +6185,11 @@ function Write-Phase5PreflightFailureSummaryFiles {
         'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count=0',
         'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count=0',
         'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count=0',
+        'runtime_unlock_regular_v4_route_commit_send_drain_verdict=none',
+        'runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count=0',
+        'runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count=0',
+        'runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count=0',
+        'runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count=0',
         ("baseline_manifest={0}" -f $BaselinePath),
         'correctness_gate_policy=strict_no_exceptions',
         'preflight_verdict=FAIL',
@@ -6206,6 +6264,11 @@ function Write-Phase5PreflightFailureSummaryFiles {
         fallbackTailTransportEpochReauthorizationMissingDistinctCount = 0
         fallbackTailTransportEpochReauthorizationMissingRecoveredCount = 0
         fallbackTailTransportEpochReauthorizationMissingUnresolvedCount = 0
+        runtimeUnlockRegularV4RouteCommitSendDrainVerdict = 'none'
+        runtimeUnlockRegularV4RouteCommitSendDrainMissingRawCount = 0
+        runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount = 0
+        runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount = 0
+        runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount = 0
         baselineManifest = $BaselinePath
         generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
         preflightVerdict = 'FAIL'
@@ -7208,7 +7271,8 @@ function Get-RouteAcceptanceResultFailureClass {
         if ([string]$Result.runtimeFailureCandidate -in @(
             'active_file_tuna_v6_evidence',
             'diagnostic_regular_nkn_v6_evidence',
-            'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing')) {
+            'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing',
+            'runtime_unlock_regular_v4_route_commit_send_drain_missing')) {
             return 'route_runtime'
         }
         return [string]$Result.runtimeFailureCandidate
@@ -7727,6 +7791,11 @@ function New-RouteAcceptanceSummaryRunDto {
         fallbackTailTransportEpochReauthorizationMissingDistinctCount = [int]$Result.fallbackTailTransportEpochReauthorizationMissingDistinctCount
         fallbackTailTransportEpochReauthorizationMissingRecoveredCount = [int]$Result.fallbackTailTransportEpochReauthorizationMissingRecoveredCount
         fallbackTailTransportEpochReauthorizationMissingUnresolvedCount = [int]$Result.fallbackTailTransportEpochReauthorizationMissingUnresolvedCount
+        runtimeUnlockRegularV4RouteCommitSendDrainVerdict = [string]$Result.runtimeUnlockRegularV4RouteCommitSendDrainVerdict
+        runtimeUnlockRegularV4RouteCommitSendDrainMissingRawCount = [int]$Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingRawCount
+        runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount = [int]$Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount
+        runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount = [int]$Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount
+        runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount = [int]$Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount
         operatorVerdict = [string]$Result.operatorVerdict
         hardFailureCount = [int]$Result.hardFailureCount
         warningCount = [int]$Result.warningCount
@@ -7825,6 +7894,8 @@ function New-RouteAcceptanceSummaryRunDto {
         firstProofChainFailureReason = [string]$Result.firstProofChainFailureReason
         firstProofChainFailureSequence = [long]$Result.firstProofChainFailureSequence
         firstProofChainFailureSource = [string]$Result.firstProofChainFailureSource
+        firstProofChainFailureWriterSequence = [long]$Result.firstProofChainFailureWriterSequence
+        semanticFailureDomain = [string]$Result.semanticFailureDomain
         evidenceClassification = [string]$Result.evidenceClassification
         measurementContaminated = [bool]$Result.measurementContaminated
         measurementContaminationReasons = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $Result.measurementContaminationReasons -Limit 32)
@@ -7950,6 +8021,8 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $firstProofChainFailureReason = if ($runtimeCandidateDtos.Count -gt 0) { [string]$runtimeCandidateDtos[0].firstProofChainFailureReason } else { '(none)' }
     $firstProofChainFailureSequence = if ($runtimeCandidateDtos.Count -gt 0) { [long]$runtimeCandidateDtos[0].firstProofChainFailureSequence } else { 0L }
     $firstProofChainFailureSource = if ($runtimeCandidateDtos.Count -gt 0) { [string]$runtimeCandidateDtos[0].firstProofChainFailureSource } else { '(none)' }
+    $firstProofChainFailureWriterSequence = if ($runtimeCandidateDtos.Count -gt 0) { [long]$runtimeCandidateDtos[0].firstProofChainFailureWriterSequence } else { 0L }
+    $semanticFailureDomain = if ($runtimeCandidateDtos.Count -gt 0) { [string]$runtimeCandidateDtos[0].semanticFailureDomain } else { '(none)' }
     $fallbackTailBridgeRecoveryGenerationMismatchRawCount = 0
     $fallbackTailBridgeRecoveryGenerationMismatchDistinctCount = 0
     $fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount = 0
@@ -7958,6 +8031,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $fallbackTailTransportEpochReauthorizationMissingDistinctCount = 0
     $fallbackTailTransportEpochReauthorizationMissingRecoveredCount = 0
     $fallbackTailTransportEpochReauthorizationMissingUnresolvedCount = 0
+    $runtimeUnlockRegularV4RouteCommitSendDrainMissingRawCount = 0
+    $runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount = 0
+    $runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount = 0
+    $runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount = 0
     $regularV4FrontierRepairMissingRangeNotPreservedRawCount = 0
     $regularV4FrontierRepairMissingRangeNotPreservedDistinctCount = 0
     $regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount = 0
@@ -8038,6 +8115,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $fallbackTailTransportEpochReauthorizationMissingDistinctCount += [int]$runDto.fallbackTailTransportEpochReauthorizationMissingDistinctCount
         $fallbackTailTransportEpochReauthorizationMissingRecoveredCount += [int]$runDto.fallbackTailTransportEpochReauthorizationMissingRecoveredCount
         $fallbackTailTransportEpochReauthorizationMissingUnresolvedCount += [int]$runDto.fallbackTailTransportEpochReauthorizationMissingUnresolvedCount
+        $runtimeUnlockRegularV4RouteCommitSendDrainMissingRawCount += [int]$runDto.runtimeUnlockRegularV4RouteCommitSendDrainMissingRawCount
+        $runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount += [int]$runDto.runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount
+        $runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount += [int]$runDto.runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount
+        $runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount += [int]$runDto.runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount
         $regularV4FrontierRepairMissingRangeNotPreservedRawCount += [int]$runDto.regularV4FrontierRepairMissingRangeNotPreservedRawCount
         $regularV4FrontierRepairMissingRangeNotPreservedDistinctCount += [int]$runDto.regularV4FrontierRepairMissingRangeNotPreservedDistinctCount
         $regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount += [int]$runDto.regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount
@@ -8081,6 +8162,18 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount += [int]$runDto.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount
         $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount += [int]$runDto.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount
         $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedUnresolvedCount += [int]$runDto.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedUnresolvedCount
+    }
+    $runtimeUnlockRegularV4RouteCommitSendDrainVerdict = if (
+        $runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.runtimeUnlockRegularV4RouteCommitSendDrainVerdict -eq 'fail' }).Count -gt 0) {
+        'fail'
+    }
+    elseif ($runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.runtimeUnlockRegularV4RouteCommitSendDrainVerdict -eq 'pass' }).Count -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
     }
     $regularV4FrontierRepairMissingRangePreservationVerdict = if (
         $regularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount -gt 0 -or
@@ -8366,6 +8459,8 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("first_proof_chain_failure_reason={0}" -f $firstProofChainFailureReason),
         ("first_proof_chain_failure_sequence={0}" -f $firstProofChainFailureSequence),
         ("first_proof_chain_failure_source={0}" -f $firstProofChainFailureSource),
+        ("first_proof_chain_failure_writer_sequence={0}" -f $firstProofChainFailureWriterSequence),
+        ("semantic_failure_domain={0}" -f $semanticFailureDomain),
         ("regular_v4_frontier_repair_missing_range_not_preserved_raw_count={0}" -f $regularV4FrontierRepairMissingRangeNotPreservedRawCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_distinct_count={0}" -f $regularV4FrontierRepairMissingRangeNotPreservedDistinctCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={0}" -f $regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount),
@@ -8429,6 +8524,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count={0}" -f $fallbackTailTransportEpochReauthorizationMissingDistinctCount),
         ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count={0}" -f $fallbackTailTransportEpochReauthorizationMissingRecoveredCount),
         ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count={0}" -f $fallbackTailTransportEpochReauthorizationMissingUnresolvedCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_verdict={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainVerdict),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainMissingRawCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount),
         ("baseline_manifest={0}" -f $BaselinePath),
         ("goodput_regression_tolerance_percent={0:F1}" -f [double]$GoodputRegressionTolerancePercent),
         'correctness_gate_policy=strict_no_exceptions',
@@ -8471,6 +8571,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count={1}" -f $prefix, $result.fallbackTailTransportEpochReauthorizationMissingDistinctCount)
         $textLines += ("{0}.post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count={1}" -f $prefix, $result.fallbackTailTransportEpochReauthorizationMissingRecoveredCount)
         $textLines += ("{0}.post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count={1}" -f $prefix, $result.fallbackTailTransportEpochReauthorizationMissingUnresolvedCount)
+        $textLines += ("{0}.runtime_unlock_regular_v4_route_commit_send_drain_verdict={1}" -f $prefix, $result.runtimeUnlockRegularV4RouteCommitSendDrainVerdict)
+        $textLines += ("{0}.runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RouteCommitSendDrainMissingRawCount)
+        $textLines += ("{0}.runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount)
+        $textLines += ("{0}.runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount)
+        $textLines += ("{0}.runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount)
         $textLines += ("{0}.operator_verdict={1}" -f $prefix, $result.operatorVerdict)
         $textLines += ("{0}.hard_failure_count={1}" -f $prefix, $result.hardFailureCount)
         $textLines += ("{0}.warning_count={1}" -f $prefix, $result.warningCount)
@@ -8570,6 +8675,8 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.first_proof_chain_failure_reason={1}" -f $prefix, $result.firstProofChainFailureReason)
         $textLines += ("{0}.first_proof_chain_failure_sequence={1}" -f $prefix, $result.firstProofChainFailureSequence)
         $textLines += ("{0}.first_proof_chain_failure_source={1}" -f $prefix, $result.firstProofChainFailureSource)
+        $textLines += ("{0}.first_proof_chain_failure_writer_sequence={1}" -f $prefix, $result.firstProofChainFailureWriterSequence)
+        $textLines += ("{0}.semantic_failure_domain={1}" -f $prefix, $result.semanticFailureDomain)
         $textLines += ("{0}.evidence_classification={1}" -f $prefix, $result.evidenceClassification)
         $textLines += ("{0}.measurement_contaminated={1}" -f $prefix, ($(if ($result.measurementContaminated) { 1 } else { 0 })))
         $textLines += ("{0}.measurement_contamination_reasons={1}" -f $prefix, (Join-RouteAcceptanceTokenList -Values $result.measurementContaminationReasons))
@@ -8727,6 +8834,8 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         firstProofChainFailureReason = $firstProofChainFailureReason
         firstProofChainFailureSequence = $firstProofChainFailureSequence
         firstProofChainFailureSource = $firstProofChainFailureSource
+        firstProofChainFailureWriterSequence = $firstProofChainFailureWriterSequence
+        semanticFailureDomain = $semanticFailureDomain
         regularV4FrontierRepairMissingRangeNotPreservedRawCount = $regularV4FrontierRepairMissingRangeNotPreservedRawCount
         regularV4FrontierRepairMissingRangeNotPreservedDistinctCount = $regularV4FrontierRepairMissingRangeNotPreservedDistinctCount
         regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount = $regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount
@@ -8790,6 +8899,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         fallbackTailTransportEpochReauthorizationMissingDistinctCount = $fallbackTailTransportEpochReauthorizationMissingDistinctCount
         fallbackTailTransportEpochReauthorizationMissingRecoveredCount = $fallbackTailTransportEpochReauthorizationMissingRecoveredCount
         fallbackTailTransportEpochReauthorizationMissingUnresolvedCount = $fallbackTailTransportEpochReauthorizationMissingUnresolvedCount
+        runtimeUnlockRegularV4RouteCommitSendDrainVerdict = $runtimeUnlockRegularV4RouteCommitSendDrainVerdict
+        runtimeUnlockRegularV4RouteCommitSendDrainMissingRawCount = $runtimeUnlockRegularV4RouteCommitSendDrainMissingRawCount
+        runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount = $runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount
+        runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount = $runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount
+        runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount = $runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount
         baselineManifest = $BaselinePath
         generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
         goodputRegressionTolerancePercent = $GoodputRegressionTolerancePercent

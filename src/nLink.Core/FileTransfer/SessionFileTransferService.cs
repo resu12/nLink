@@ -435,6 +435,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     internal static Func<string, string, Task>? OutboundSparseFailureAuthorizationBarrierForTests { get; set; }
     internal static Func<string, string, Task>? OutboundSparsePostInstallBarrierForTests { get; set; }
     internal static Func<string, string, Task>? OutboundSparseStateApplyBarrierForTests { get; set; }
+    internal static Func<string, string, Task>? OutboundRegularV4PhysicalSendPreReservationBarrierForTests { get; set; }
     public SessionFileTransferService(Func<string>? transferIdFactory = null)
     {
         this.transferIdFactory = transferIdFactory ?? (() => Guid.NewGuid().ToString("N"));
@@ -5740,6 +5741,36 @@ public sealed partial class SessionFileTransferService : IDisposable
         var legHistory = decision.State.LegHistory.ToList();
         context.TransferLegHistory.Clear();
         context.TransferLegHistory.AddRange(legHistory);
+        if (context.PendingRuntimeUnlockRegularV4RouteCommitDrain is { } pendingDrain)
+        {
+            var sourceScopeStillCurrent =
+                !context.IsTerminal &&
+                context.RouteRuntime.UsesRegularNknV4FastRuntime &&
+                context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+                context.CurrentRuntimeOwner == pendingDrain.SourceRuntimeOwner &&
+                context.CurrentRoutePublicationToken == pendingDrain.SourceRoutePublication &&
+                context.TerminalGeneration == pendingDrain.SourceTerminalGeneration &&
+                context.CurrentTransferLeg is { } currentLeg &&
+                currentLeg.Generation == pendingDrain.SourceLegGeneration &&
+                currentLeg.TransportEpochId == pendingDrain.SourceTransportEpoch &&
+                currentLeg.BridgeRecoveryGeneration == pendingDrain.SourceBridgeRecoveryGeneration &&
+                ReferenceEquals(context.DataSession, pendingDrain.SourceDataSession) &&
+                context.DataSessionGeneration == pendingDrain.SourceDataSessionGeneration;
+            var completedTunaTransition =
+                context.LastCompletedRuntimeUnlockRegularV4RouteCommitDrainGeneration ==
+                    pendingDrain.DrainGeneration &&
+                context.RouteRuntime.UsesFileTunaV4Runtime;
+            if (!sourceScopeStillCurrent && !completedTunaTransition)
+            {
+                InvalidateRuntimeUnlockRegularV4RouteCommitDrainLocked(
+                    context,
+                    pendingDrain,
+                    context.IsTerminal
+                        ? "terminal_context"
+                        : "coordinator_source_scope_replaced");
+            }
+        }
+
         if (context.CurrentRoutePublicationToken is { IsDefault: false } currentToken &&
             previousRoutePublicationToken?.PublicationGeneration != currentToken.PublicationGeneration)
         {
@@ -7175,7 +7206,11 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.RouteSelection,
             reason,
             routePublicationToken,
-            rejectionReason);
+            rejectionReason,
+            previousRouteSelection.Route == FileTransferRoute.RegularNknV4Fast &&
+            context.RouteSelection.Route == FileTransferRoute.FileTunaV4
+                ? context.LastCompletedRuntimeUnlockRegularV4RouteCommitDrainGeneration
+                : 0);
         return true;
     }
 
@@ -18621,11 +18656,12 @@ public sealed partial class SessionFileTransferService : IDisposable
         FileTransferRouteSelection routeSelection,
         string reason,
         RoutePublicationToken? routePublicationToken = null,
-        string? coordinatorDecisionReason = null)
+        string? coordinatorDecisionReason = null,
+        long completedSendDrainGeneration = 0)
     {
         LocalOperationalLog.Warn(
             "FileTransferService",
-            $"event=filetransfer_route_transitioned; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; route={routeSelection.TelemetryToken}; protocol_version={routeSelection.ProtocolVersion}; previous_route={previousRouteSelection.TelemetryToken}; new_route={routeSelection.TelemetryToken}; previous_protocol_version={previousRouteSelection.ProtocolVersion}; new_protocol_version={routeSelection.ProtocolVersion}; previous_runtime_profile={FormatFileTransferRouteRuntimeProfile(previousRouteSelection.RuntimeProfile)}; new_runtime_profile={FormatFileTransferRouteRuntimeProfile(routeSelection.RuntimeProfile)}; previous_frame_family={FormatFileTransferFrameFamily(previousRouteSelection.FrameFamily)}; new_frame_family={FormatFileTransferFrameFamily(routeSelection.FrameFamily)}; handoff_kind={FormatFileTransferTransportHandoffKind(routeSelection.HandoffKind)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(routeSelection.BridgeRecoveryPolicy)}; selection_reason={FormatProtocolLogValue(routeSelection.SelectionReason)}; reason={FormatProtocolLogValue(reason)}{FormatPublicationLiveRouteEpochSuffix(routePublicationToken, 0)}{FormatRoutePublicationAuthoritySuffix(routePublicationToken, coordinatorDecisionReason)}");
+            $"event=filetransfer_route_transitioned; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; route={routeSelection.TelemetryToken}; protocol_version={routeSelection.ProtocolVersion}; previous_route={previousRouteSelection.TelemetryToken}; new_route={routeSelection.TelemetryToken}; previous_protocol_version={previousRouteSelection.ProtocolVersion}; new_protocol_version={routeSelection.ProtocolVersion}; previous_runtime_profile={FormatFileTransferRouteRuntimeProfile(previousRouteSelection.RuntimeProfile)}; new_runtime_profile={FormatFileTransferRouteRuntimeProfile(routeSelection.RuntimeProfile)}; previous_frame_family={FormatFileTransferFrameFamily(previousRouteSelection.FrameFamily)}; new_frame_family={FormatFileTransferFrameFamily(routeSelection.FrameFamily)}; handoff_kind={FormatFileTransferTransportHandoffKind(routeSelection.HandoffKind)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(routeSelection.BridgeRecoveryPolicy)}; selection_reason={FormatProtocolLogValue(routeSelection.SelectionReason)}; completed_send_drain_generation={completedSendDrainGeneration}; reason={FormatProtocolLogValue(reason)}{FormatPublicationLiveRouteEpochSuffix(routePublicationToken, 0)}{FormatRoutePublicationAuthoritySuffix(routePublicationToken, coordinatorDecisionReason)}");
     }
 
     private static string FormatLiveRouteEpochSuffix(int liveRouteEpochId)
@@ -19549,6 +19585,36 @@ public sealed partial class SessionFileTransferService : IDisposable
         string? ProvingRepairKey,
         int ProvingDecisionGeneration);
 
+    private sealed record OutboundRegularV4PhysicalSendLease(
+        long LeaseGeneration,
+        RuntimeOwnerToken RuntimeOwner,
+        RoutePublicationToken RoutePublication,
+        int TerminalGeneration,
+        long LegGeneration,
+        long TransportEpoch,
+        int BridgeRecoveryGeneration,
+        IFileTransferDataSession DataSession,
+        long DataSessionGeneration,
+        int StartChunkIndex,
+        int ChunkCount,
+        bool RepairSend,
+        string RepairRequestKey);
+
+    private sealed record RuntimeUnlockRegularV4RouteCommitDrain(
+        long DrainGeneration,
+        RuntimeOwnerToken SourceRuntimeOwner,
+        RoutePublicationToken SourceRoutePublication,
+        int SourceTerminalGeneration,
+        long SourceLegGeneration,
+        long SourceTransportEpoch,
+        int SourceBridgeRecoveryGeneration,
+        IFileTransferDataSession SourceDataSession,
+        long SourceDataSessionGeneration,
+        long CapturedThroughSendLeaseGeneration,
+        long CapturedSendCount,
+        RuntimeUnlockRouteCommitSnapshot RouteCommitSnapshot,
+        string Reason);
+
     private sealed class OutboundTransferContext
     {
         private TaskCompletionSource<bool> controlSignal = CreateSignal();
@@ -19699,6 +19765,24 @@ public sealed partial class SessionFileTransferService : IDisposable
         public IFileTransferDataSession? DataSession { get; set; }
 
         public long DataSessionGeneration { get; set; }
+
+        public long LastOutboundRegularV4PhysicalSendLeaseGeneration { get; set; }
+
+        public long OutboundRegularV4PhysicalSendRegisteredCount { get; set; }
+
+        public long OutboundRegularV4PhysicalSendRetiredCount { get; set; }
+
+        public Dictionary<long, OutboundRegularV4PhysicalSendLease>
+            ActiveOutboundRegularV4PhysicalSendLeases { get; } = [];
+
+        public long LastRuntimeUnlockRegularV4RouteCommitDrainGeneration { get; set; }
+
+        public long LastCompletedRuntimeUnlockRegularV4RouteCommitDrainGeneration { get; set; }
+
+        public RuntimeUnlockRegularV4RouteCommitDrain?
+            PendingRuntimeUnlockRegularV4RouteCommitDrain { get; set; }
+
+        public bool RuntimeUnlockRegularV4RouteCommitDrainRecheckQueued { get; set; }
 
         public long LastOutboundSparsePumpInstallGeneration { get; set; }
 

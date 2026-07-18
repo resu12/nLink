@@ -6944,10 +6944,818 @@ function Test-FileTransferFileTunaV4DataPathSendShapeMatches {
     return Test-FileTransferFileTunaV4DataPathRangeMatches -Intent $Intent -Actual $Actual
 }
 
-function Get-FileTransferFileTunaV4DataPathMismatchProof {
+function Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation {
     param([object[]]$Events = @())
 
     [object[]]$orderedEvents = @($Events | Sort-Object Sequence, LineNumber)
+    [object[]]$ownerRetirements = @($orderedEvents | Where-Object {
+            $_.EventName -eq 'filetransfer_runtime_owner_workers_retired' -and
+            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+            (Get-FileTransferEventField -Event $_ -Name 'retired_route' -Default '') -eq 'regular_nkn_v4_fast' -and
+            (Get-FileTransferEventField -Event $_ -Name 'current_route' -Default '') -eq 'file_tuna_v4'
+        })
+    [object[]]$routePublications = @($orderedEvents | Where-Object {
+            $_.EventName -eq 'filetransfer_route_transitioned' -and
+            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+            (Get-FileTransferEventField -Event $_ -Name 'previous_route' -Default '') -eq 'regular_nkn_v4_fast' -and
+            (Get-FileTransferEventField -Event $_ -Name 'previous_protocol_version' -Default '') -eq '4' -and
+            (Get-FileTransferEventField -Event $_ -Name 'new_route' -Default '') -eq 'file_tuna_v4' -and
+            (Get-FileTransferEventField -Event $_ -Name 'new_protocol_version' -Default '') -eq '4'
+        })
+    [object[]]$tunaLegStarts = @($orderedEvents | Where-Object {
+            $_.EventName -eq 'filetransfer_leg_started' -and
+            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+            (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'file_tuna_v4' -and
+            (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq '4' -and
+            (Get-FileTransferEventField -Event $_ -Name 'state' -Default '') -eq 'active'
+        })
+    [object[]]$sendDrainEvents = @($orderedEvents | Where-Object {
+            $_.EventName -in @(
+                'runtime_unlock_regular_v4_route_commit_send_drain_staged',
+                'runtime_unlock_regular_v4_route_commit_send_drain_deferred',
+                'runtime_unlock_regular_v4_route_commit_send_drain_completed',
+                'runtime_unlock_regular_v4_route_commit_send_drain_invalidated')
+        })
+    [object[]]$terminalEvents = @($orderedEvents | Where-Object {
+            $_.EventName -in @(
+                'file_transfer_outbound_terminal',
+                'file_transfer_inbound_terminal',
+                'transfer_terminal',
+                'filetransfer_runtime_terminalized')
+        })
+    [object[]]$oldRouteSendResults = @($orderedEvents | Where-Object {
+            $_.EventName -eq 'filetransfer_data_path_send_result' -and
+            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+            (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'regular_nkn_v4_fast' -and
+            (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq '4' -and
+            (Get-FileTransferEventField -Event $_ -Name 'actual_transport' -Default '') -eq 'regular_nkn' -and
+            (Get-FileTransferEventField -Event $_ -Name 'delivery_transport' -Default '') -eq 'regular_nkn' -and
+            (Get-FileTransferEventField -Event $_ -Name 'target_transport' -Default '') -eq 'regular_nkn' -and
+            (Test-FileTransferFileTunaV4PayloadDataPathEvent -Event $_)
+        })
+
+    function Test-OldRouteWriteIdentityMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Left,
+            [Parameter(Mandatory = $true)]$Right
+        )
+
+        foreach ($fieldName in @('session_id', 'transfer_id')) {
+            $leftValue = Get-FileTransferEventField -Event $Left -Name $fieldName -Default ''
+            $rightValue = Get-FileTransferEventField -Event $Right -Name $fieldName -Default ''
+            if ([string]::IsNullOrWhiteSpace($leftValue) -or
+                [string]::IsNullOrWhiteSpace($rightValue) -or
+                -not [string]::Equals(
+                    $leftValue,
+                    $rightValue,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-CompleteOwnerRetirement {
+        param([Parameter(Mandatory = $true)]$Retirement)
+
+        foreach ($fieldName in @('session_id', 'transfer_id', 'log_writer_id')) {
+            if ([string]::IsNullOrWhiteSpace(
+                    (Get-FileTransferEventField -Event $Retirement -Name $fieldName -Default ''))) {
+                return $false
+            }
+        }
+
+        $retiredRuntimeGeneration = Get-FileTransferEventInt64Field `
+            -Event $Retirement `
+            -Name 'retired_runtime_generation' `
+            -Default 0
+        $currentRuntimeGeneration = Get-FileTransferEventInt64Field `
+            -Event $Retirement `
+            -Name 'current_runtime_generation' `
+            -Default 0
+        if ($retiredRuntimeGeneration -le 0 -or
+            $currentRuntimeGeneration -le $retiredRuntimeGeneration -or
+            (Get-FileTransferEventInt64Field -Event $Retirement -Name 'log_writer_sequence' -Default 0) -le 0) {
+            return $false
+        }
+
+        return $true
+    }
+
+    function Get-MatchingTunaOwnerInstall {
+        param(
+            [Parameter(Mandatory = $true)]$Retirement
+        )
+
+        $writerId = Get-FileTransferEventField -Event $Retirement -Name 'log_writer_id' -Default ''
+        $writerSequence = Get-FileTransferEventInt64Field `
+            -Event $Retirement `
+            -Name 'log_writer_sequence' `
+            -Default 0
+        $reason = Get-FileTransferEventField -Event $Retirement -Name 'reason' -Default ''
+        [object[]]$matchingStarts = @($tunaLegStarts | Where-Object {
+                (Test-OldRouteWriteIdentityMatch -Left $Retirement -Right $_) -and
+                [string]::Equals(
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default ''),
+                    $writerId,
+                    [System.StringComparison]::OrdinalIgnoreCase) -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -gt 0 -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -lt $writerSequence -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'live_route_epoch' -Default 0) -gt 0 -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'leg_generation' -Default 0) -gt 0 -and
+                -not [string]::IsNullOrWhiteSpace($reason) -and
+                [string]::Equals(
+                    (Get-FileTransferEventField -Event $_ -Name 'reason' -Default ''),
+                    $reason,
+                    [System.StringComparison]::OrdinalIgnoreCase)
+            } | Sort-Object {
+                Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0
+            } -Descending)
+        if ($matchingStarts.Count -eq 0) {
+            return $null
+        }
+
+        return $matchingStarts[0]
+    }
+
+    function Test-CompleteTunaOwnerInstallBoundary {
+        param([Parameter(Mandatory = $true)]$Boundary)
+
+        foreach ($fieldName in @('session_id', 'transfer_id', 'log_writer_id')) {
+            if ([string]::IsNullOrWhiteSpace(
+                    (Get-FileTransferEventField -Event $Boundary -Name $fieldName -Default ''))) {
+                return $false
+            }
+        }
+
+        if ((Get-FileTransferEventInt64Field -Event $Boundary -Name 'log_writer_sequence' -Default 0) -le 0 -or
+            (Get-FileTransferEventInt64Field -Event $Boundary -Name 'live_route_epoch' -Default 0) -le 0 -or
+            (Get-FileTransferEventInt64Field -Event $Boundary -Name 'leg_generation' -Default 0) -le 0) {
+            return $false
+        }
+
+        if ($Boundary.EventName -eq 'filetransfer_leg_started') {
+            return $true
+        }
+
+        return $Boundary.EventName -eq 'filetransfer_route_transitioned' -and
+            (Get-FileTransferEventInt64Field -Event $Boundary -Name 'runtime_generation' -Default 0) -gt 0
+    }
+
+    function Get-PriorTunaOwnerInstallBoundaryForSend {
+        param([Parameter(Mandatory = $true)]$Send)
+
+        $writerId = Get-FileTransferEventField -Event $Send -Name 'log_writer_id' -Default ''
+        $writerSequence = Get-FileTransferEventInt64Field `
+            -Event $Send `
+            -Name 'log_writer_sequence' `
+            -Default 0
+        $sendLiveRouteEpoch = Get-FileTransferEventInt64Field `
+            -Event $Send `
+            -Name 'live_route_epoch' `
+            -Default 0
+        $sendRuntimeGeneration = Get-FileTransferEventInt64Field `
+            -Event $Send `
+            -Name 'runtime_generation' `
+            -Default 0
+        $sendLegGeneration = Get-FileTransferEventInt64Field `
+            -Event $Send `
+            -Name 'leg_generation' `
+            -Default 0
+        if ([string]::IsNullOrWhiteSpace($writerId) -or
+            $writerSequence -le 0 -or
+            $sendRuntimeGeneration -le 0 -or
+            $sendLegGeneration -le 0) {
+            return $null
+        }
+
+        [object[]]$matchingLegStarts = @($tunaLegStarts | Where-Object {
+                (Test-OldRouteWriteIdentityMatch -Left $Send -Right $_) -and
+                [string]::Equals(
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default ''),
+                    $writerId,
+                    [System.StringComparison]::OrdinalIgnoreCase) -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -lt
+                    $writerSequence -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'live_route_epoch' -Default 0) -gt
+                    $sendLiveRouteEpoch -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'leg_generation' -Default 0) -gt
+                    $sendLegGeneration -and
+                (Test-CompleteTunaOwnerInstallBoundary -Boundary $_)
+            } | Sort-Object {
+                Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0
+            } -Descending)
+        if ($matchingLegStarts.Count -gt 0) {
+            # Leg installation is the earliest authoritative owner boundary. Prefer it
+            # over later worker-retirement or publication telemetry for the same route.
+            return $matchingLegStarts[0]
+        }
+
+        [object[]]$matchingRoutePublications = @($routePublications | Where-Object {
+                (Test-OldRouteWriteIdentityMatch -Left $Send -Right $_) -and
+                [string]::Equals(
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default ''),
+                    $writerId,
+                    [System.StringComparison]::OrdinalIgnoreCase) -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -lt
+                    $writerSequence -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'live_route_epoch' -Default 0) -gt
+                    $sendLiveRouteEpoch -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'runtime_generation' -Default 0) -gt
+                    $sendRuntimeGeneration -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'leg_generation' -Default 0) -gt
+                    $sendLegGeneration -and
+                (Test-CompleteTunaOwnerInstallBoundary -Boundary $_)
+            } | Sort-Object {
+                Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0
+            } -Descending)
+        if ($matchingRoutePublications.Count -gt 0) {
+            return $matchingRoutePublications[0]
+        }
+
+        return $null
+    }
+
+    function Test-ExactOldRouteWritePayloadMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Send,
+            [Parameter(Mandatory = $true)]$Receive
+        )
+
+        if (-not (Test-OldRouteWriteIdentityMatch -Left $Send -Right $Receive) -or
+            -not [string]::Equals(
+                (Get-FileTransferEventField -Event $Send -Name 'frame_type' -Default ''),
+                (Get-FileTransferEventField -Event $Receive -Name 'frame_type' -Default ''),
+                [System.StringComparison]::OrdinalIgnoreCase) -or
+            (Get-FileTransferEventInt64Field -Event $Send -Name 'raw_payload_bytes' -Default 0) -ne
+                (Get-FileTransferEventInt64Field -Event $Receive -Name 'raw_payload_bytes' -Default 0) -or
+            (Get-FileTransferEventInt64Field -Event $Send -Name 'batch_chunk_count' -Default 0) -ne
+                (Get-FileTransferEventInt64Field -Event $Receive -Name 'batch_chunk_count' -Default 0) -or
+            -not (Test-FileTransferFileTunaV4DataPathHasRange -Event $Send) -or
+            -not (Test-FileTransferFileTunaV4DataPathHasRange -Event $Receive)) {
+            return $false
+        }
+
+        return (Get-FileTransferFileTunaV4DataPathRangeStart -Event $Send) -eq
+                (Get-FileTransferFileTunaV4DataPathRangeStart -Event $Receive) -and
+            (Get-FileTransferFileTunaV4DataPathRangeEndExclusive -Event $Send) -eq
+                (Get-FileTransferFileTunaV4DataPathRangeEndExclusive -Event $Receive)
+    }
+
+    function Get-RouteCommitSendDrainIdentityKey {
+        param([Parameter(Mandatory = $true)]$Event)
+
+        $parts = New-Object System.Collections.Generic.List[string]
+        foreach ($fieldName in @('session_id', 'transfer_id', 'direction')) {
+            $value = Get-FileTransferEventField -Event $Event -Name $fieldName -Default ''
+            if ([string]::IsNullOrWhiteSpace($value) -or $value -in @('(none)', 'none')) {
+                return ''
+            }
+
+            $parts.Add($value.ToLowerInvariant()) | Out-Null
+        }
+
+        return [string]::Join('|', $parts)
+    }
+
+    function Get-RouteCommitSendDrainTupleKey {
+        param([Parameter(Mandatory = $true)]$Event)
+
+        if ((Get-FileTransferEventField -Event $Event -Name 'direction' -Default '') -ne 'outbound' -or
+            (Get-FileTransferEventField -Event $Event -Name 'source_route' -Default '') -ne 'regular_nkn_v4_fast' -or
+            (Get-FileTransferEventField -Event $Event -Name 'source_protocol_version' -Default '') -ne '4' -or
+            (Get-FileTransferEventField -Event $Event -Name 'target_route' -Default '') -ne 'file_tuna_v4' -or
+            (Get-FileTransferEventField -Event $Event -Name 'target_protocol_version' -Default '') -ne '4' -or
+            (Get-FileTransferEventField -Event $Event -Name 'target_transport' -Default '') -ne 'tuna' -or
+            (Get-FileTransferEventInt64Field -Event $Event -Name 'drain_generation' -Default 0) -le 0) {
+            return ''
+        }
+
+        $parts = New-Object System.Collections.Generic.List[string]
+        foreach ($fieldName in @(
+                'session_id',
+                'transfer_id',
+                'direction',
+                'drain_generation',
+                'source_route',
+                'source_protocol_version',
+                'source_live_route_epoch',
+                'source_runtime_generation',
+                'source_terminal_generation',
+                'source_leg_generation',
+                'source_transport_epoch',
+                'source_bridge_recovery_generation',
+                'source_route_publication_generation',
+                'source_route_commit_generation',
+                'source_data_session_generation',
+                'transaction_generation',
+                'offer_generation',
+                'tuna_path_lease_generation',
+                'tuna_path_lease_listener_run_id',
+                'target_route',
+                'target_protocol_version',
+                'target_transport',
+                'handoff_kind')) {
+            $value = Get-FileTransferEventField -Event $Event -Name $fieldName -Default ''
+            if ([string]::IsNullOrWhiteSpace($value) -or $value -in @('(none)', 'none')) {
+                return ''
+            }
+
+            $parts.Add($value.ToLowerInvariant()) | Out-Null
+        }
+
+        return [string]::Join('|', $parts)
+    }
+
+    function Test-RouteCommitSendDrainProbeProgression {
+        param(
+            [Parameter(Mandatory = $true)]$Stage,
+            [Parameter(Mandatory = $true)]$Disposition
+        )
+
+        $stageProbeId = Get-FileTransferEventField -Event $Stage -Name 'probe_id' -Default '(none)'
+        $dispositionProbeId = Get-FileTransferEventField -Event $Disposition -Name 'probe_id' -Default '(none)'
+        $stageHasProbe = $stageProbeId -notin @('', '(none)', 'none')
+        $dispositionHasProbe = $dispositionProbeId -notin @('', '(none)', 'none')
+        if ($stageHasProbe -and
+            (-not $dispositionHasProbe -or
+                -not [string]::Equals(
+                    $stageProbeId,
+                    $dispositionProbeId,
+                    [System.StringComparison]::OrdinalIgnoreCase))) {
+            return $false
+        }
+
+        $stageState = Get-FileTransferEventField -Event $Stage -Name 'probe_state' -Default '(none)'
+        $dispositionState = Get-FileTransferEventField -Event $Disposition -Name 'probe_state' -Default '(none)'
+        $stateRanks = @{
+            none = 0
+            '(none)' = 0
+            started = 1
+            pending = 1
+            acked = 2
+            acknowledged = 2
+            completed = 3
+        }
+        $normalizedStageState = $stageState.ToLowerInvariant()
+        $normalizedDispositionState = $dispositionState.ToLowerInvariant()
+        if ($stateRanks.ContainsKey($normalizedStageState) -and
+            $stateRanks.ContainsKey($normalizedDispositionState)) {
+            return [int]$stateRanks[$normalizedDispositionState] -ge
+                [int]$stateRanks[$normalizedStageState]
+        }
+
+        return [string]::Equals(
+            $stageState,
+            $dispositionState,
+            [System.StringComparison]::OrdinalIgnoreCase)
+    }
+
+    $rawCandidateRecords = New-Object System.Collections.Generic.List[object]
+    $distinctCandidateRecords = New-Object System.Collections.Generic.List[object]
+    $corroboratingEvents = New-Object System.Collections.Generic.List[object]
+    $corroboratingSequences = New-Object 'System.Collections.Generic.HashSet[int64]'
+    $distinctKeys = New-Object 'System.Collections.Generic.HashSet[string]'
+    $ownerInstallCandidateKeys = @{}
+    $routePublicationCandidateTuples = New-Object 'System.Collections.Generic.HashSet[string]'
+
+    function Add-RouteCommitSendDrainCandidate {
+        param(
+            [Parameter(Mandatory = $true)]$Event,
+            [Parameter(Mandatory = $true)][string]$DistinctKey,
+            [Parameter(Mandatory = $true)][string]$Reason
+        )
+
+        $record = [pscustomobject]@{
+            Event = $Event
+            Reason = $Reason
+        }
+        $rawCandidateRecords.Add($record) | Out-Null
+        if ($distinctKeys.Add($DistinctKey)) {
+            $distinctCandidateRecords.Add($record) | Out-Null
+        }
+    }
+
+    function Add-RouteCommitSendDrainCorroboratingMismatch {
+        param(
+            [Parameter(Mandatory = $true)]$Send,
+            [Parameter(Mandatory = $true)]$OwnerBoundary
+        )
+
+        $writerId = Get-FileTransferEventField -Event $Send -Name 'log_writer_id' -Default ''
+        $minimumSequence = [Math]::Max([int64]$Send.Sequence, [int64]$OwnerBoundary.Sequence)
+        [object[]]$receives = @($orderedEvents | Where-Object {
+                $_.EventName -eq 'filetransfer_data_path_receive_result' -and
+                [int64]$_.Sequence -gt $minimumSequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' -and
+                (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'file_tuna_v4' -and
+                (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq '4' -and
+                (Get-FileTransferEventField -Event $_ -Name 'actual_transport' -Default '') -eq 'regular_nkn' -and
+                (Get-FileTransferEventField -Event $_ -Name 'delivery_transport' -Default '') -eq 'regular_nkn' -and
+                (Get-FileTransferEventField -Event $_ -Name 'target_transport' -Default '') -eq 'tuna' -and
+                (Test-ExactOldRouteWritePayloadMatch -Send $Send -Receive $_)
+            })
+        foreach ($receive in @($receives)) {
+            $receiveWriterId = Get-FileTransferEventField -Event $receive -Name 'log_writer_id' -Default ''
+            $receiveWriterSequence = Get-FileTransferEventInt64Field -Event $receive -Name 'log_writer_sequence' -Default 0
+            if ([string]::IsNullOrWhiteSpace($receiveWriterId) -or
+                $receiveWriterSequence -le 0 -or
+                [string]::Equals($receiveWriterId, $writerId, [System.StringComparison]::OrdinalIgnoreCase)) {
+                continue
+            }
+
+            [object[]]$mismatches = @($orderedEvents | Where-Object {
+                    $_.EventName -eq 'filetransfer_tuna_data_path_mismatch' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'proof_direction' -Default '') -eq 'receive' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'mismatch_reason' -Default '') -eq 'file_tuna_v4_resolved_to_regular_nkn' -and
+                    [string]::Equals(
+                        (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default ''),
+                        $receiveWriterId,
+                        [System.StringComparison]::OrdinalIgnoreCase) -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -gt $receiveWriterSequence -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -le ($receiveWriterSequence + 8) -and
+                    (Test-ExactOldRouteWritePayloadMatch -Send $Send -Receive $_)
+                })
+            if ($mismatches.Count -ne 1) {
+                continue
+            }
+
+            $mismatch = $mismatches[0]
+            $mismatchWriterSequence = Get-FileTransferEventInt64Field `
+                -Event $mismatch `
+                -Name 'log_writer_sequence' `
+                -Default 0
+            [object[]]$ignoredEvents = @($orderedEvents | Where-Object {
+                    $_.EventName -eq 'filetransfer_data_frame_ignored' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'file_tuna_v4_payload_requires_tuna' -and
+                    [string]::Equals(
+                        (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default ''),
+                        $receiveWriterId,
+                        [System.StringComparison]::OrdinalIgnoreCase) -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -gt $mismatchWriterSequence -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -le ($mismatchWriterSequence + 8) -and
+                    (Test-OldRouteWriteIdentityMatch -Left $Send -Right $_) -and
+                    (Test-FileTransferFileTunaV4DataPathRangeMatches -Intent $Send -Actual $_)
+                })
+            if ($ignoredEvents.Count -ne 1) {
+                continue
+            }
+
+            foreach ($corroborating in @($receive, $mismatch)) {
+                if ($corroboratingSequences.Add([int64]$corroborating.Sequence)) {
+                    $corroboratingEvents.Add($corroborating) | Out-Null
+                }
+            }
+        }
+    }
+
+    [object[]]$stagedOrDeferredDrains = @($sendDrainEvents | Where-Object {
+            $_.EventName -in @(
+                'runtime_unlock_regular_v4_route_commit_send_drain_staged',
+                'runtime_unlock_regular_v4_route_commit_send_drain_deferred') -and
+            -not [string]::IsNullOrWhiteSpace((Get-RouteCommitSendDrainTupleKey -Event $_))
+        })
+    [object[]]$completedDrains = @($sendDrainEvents | Where-Object {
+            $_.EventName -eq 'runtime_unlock_regular_v4_route_commit_send_drain_completed' -and
+            -not [string]::IsNullOrWhiteSpace((Get-RouteCommitSendDrainTupleKey -Event $_))
+        })
+    [object[]]$invalidatedDrains = @($sendDrainEvents | Where-Object {
+            $_.EventName -eq 'runtime_unlock_regular_v4_route_commit_send_drain_invalidated' -and
+            -not [string]::IsNullOrWhiteSpace((Get-RouteCommitSendDrainTupleKey -Event $_))
+        })
+    $newDrainIdentityKeys = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($drainEvent in @($sendDrainEvents)) {
+        $identityKey = Get-RouteCommitSendDrainIdentityKey -Event $drainEvent
+        if (-not [string]::IsNullOrWhiteSpace($identityKey)) {
+            [void]$newDrainIdentityKeys.Add($identityKey)
+        }
+    }
+
+    $firstDrainByTuple = @{}
+    foreach ($drain in @($stagedOrDeferredDrains | Sort-Object Sequence, LineNumber)) {
+        $tupleKey = Get-RouteCommitSendDrainTupleKey -Event $drain
+        if (-not $firstDrainByTuple.ContainsKey($tupleKey)) {
+            $firstDrainByTuple[$tupleKey] = $drain
+        }
+    }
+
+    foreach ($routePublication in @($routePublications | Sort-Object Sequence, LineNumber)) {
+        $identityKey = Get-RouteCommitSendDrainIdentityKey -Event $routePublication
+        [object[]]$matchingStagedDrains = @($stagedOrDeferredDrains | Where-Object {
+                [int64]$_.Sequence -lt [int64]$routePublication.Sequence -and
+                (Get-RouteCommitSendDrainIdentityKey -Event $_) -eq $identityKey
+            } | Sort-Object Sequence, LineNumber -Descending)
+        if ($matchingStagedDrains.Count -eq 0) {
+            continue
+        }
+
+        $stagedDrain = $matchingStagedDrains[0]
+        $tupleKey = Get-RouteCommitSendDrainTupleKey -Event $stagedDrain
+        $drainGeneration = Get-FileTransferEventInt64Field `
+            -Event $stagedDrain `
+            -Name 'drain_generation' `
+            -Default 0
+        $publishedDrainGeneration = Get-FileTransferEventInt64Field `
+            -Event $routePublication `
+            -Name 'completed_send_drain_generation' `
+            -Default 0
+        [object[]]$matchingCompleted = @($completedDrains | Where-Object {
+                [int64]$_.Sequence -gt [int64]$stagedDrain.Sequence -and
+                [int64]$_.Sequence -lt [int64]$routePublication.Sequence -and
+                (Get-RouteCommitSendDrainTupleKey -Event $_) -eq $tupleKey -and
+                (Test-RouteCommitSendDrainProbeProgression -Stage $stagedDrain -Disposition $_)
+            })
+        if ($matchingCompleted.Count -gt 0 -and
+            $publishedDrainGeneration -eq $drainGeneration) {
+            continue
+        }
+
+        [object[]]$priorOwnerInstalls = @($ownerRetirements | Where-Object {
+                [int64]$_.Sequence -gt [int64]$stagedDrain.Sequence -and
+                [int64]$_.Sequence -lt [int64]$routePublication.Sequence -and
+                (Get-RouteCommitSendDrainIdentityKey -Event $_) -eq $identityKey -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'retired_runtime_generation' -Default 0) -eq
+                    (Get-FileTransferEventInt64Field -Event $stagedDrain -Name 'source_runtime_generation' -Default 0)
+            })
+        if ($priorOwnerInstalls.Count -gt 0) {
+            # The earlier owner-install boundary already proves the missing drain.
+            continue
+        }
+
+        [void]$routePublicationCandidateTuples.Add($tupleKey)
+        Add-RouteCommitSendDrainCandidate `
+            -Event $routePublication `
+            -DistinctKey ("new-route-without-drain|{0}" -f $tupleKey) `
+            -Reason 'tuna_route_published_without_current_send_drain_completion'
+    }
+
+    foreach ($ownerInstall in @($ownerRetirements | Sort-Object Sequence, LineNumber)) {
+        $identityKey = Get-RouteCommitSendDrainIdentityKey -Event $ownerInstall
+        if (-not $newDrainIdentityKeys.Contains($identityKey)) {
+            continue
+        }
+
+        $retiredRuntimeGeneration = Get-FileTransferEventInt64Field `
+            -Event $ownerInstall `
+            -Name 'retired_runtime_generation' `
+            -Default 0
+        [object[]]$matchingStagedDrains = @($stagedOrDeferredDrains | Where-Object {
+                [int64]$_.Sequence -lt [int64]$ownerInstall.Sequence -and
+                (Get-RouteCommitSendDrainIdentityKey -Event $_) -eq $identityKey -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'source_runtime_generation' -Default 0) -eq
+                    $retiredRuntimeGeneration
+            } | Sort-Object Sequence, LineNumber -Descending)
+        if ($matchingStagedDrains.Count -eq 0) {
+            continue
+        }
+
+        $stagedDrain = $matchingStagedDrains[0]
+        $tupleKey = Get-RouteCommitSendDrainTupleKey -Event $stagedDrain
+        if ($routePublicationCandidateTuples.Contains($tupleKey)) {
+            # A publication-before-install boundary for this exact drain is earlier.
+            continue
+        }
+        [object[]]$matchingCompleted = @($completedDrains | Where-Object {
+                [int64]$_.Sequence -gt [int64]$stagedDrain.Sequence -and
+                [int64]$_.Sequence -lt [int64]$ownerInstall.Sequence -and
+                (Get-RouteCommitSendDrainTupleKey -Event $_) -eq $tupleKey -and
+                (Test-RouteCommitSendDrainProbeProgression -Stage $stagedDrain -Disposition $_)
+            })
+        if ($matchingCompleted.Count -eq 0) {
+            $ownerInstallLookupKey = @(
+                $identityKey,
+                (Get-FileTransferEventField -Event $ownerInstall -Name 'retired_runtime_generation' -Default '(missing)'),
+                (Get-FileTransferEventField -Event $ownerInstall -Name 'current_runtime_generation' -Default '(missing)')) -join '|'
+            $ownerInstallKey = @(
+                'new-owner-without-drain',
+                $ownerInstallLookupKey,
+                (Get-FileTransferEventField -Event $stagedDrain -Name 'drain_generation' -Default '(missing)')) -join '|'
+            $ownerInstallCandidateKeys[$ownerInstallLookupKey] = $ownerInstallKey
+            Add-RouteCommitSendDrainCandidate `
+                -Event $ownerInstall `
+                -DistinctKey $ownerInstallKey `
+                -Reason 'tuna_owner_installed_without_current_send_drain_completion'
+        }
+    }
+
+    foreach ($tupleKey in @($firstDrainByTuple.Keys)) {
+        $drain = $firstDrainByTuple[$tupleKey]
+        [object[]]$exactCompletions = @($completedDrains | Where-Object {
+                [int64]$_.Sequence -gt [int64]$drain.Sequence -and
+                (Get-RouteCommitSendDrainTupleKey -Event $_) -eq $tupleKey -and
+                (Test-RouteCommitSendDrainProbeProgression -Stage $drain -Disposition $_)
+            })
+        if ($exactCompletions.Count -gt 0) {
+            continue
+        }
+
+        [object[]]$exactInvalidations = @($invalidatedDrains | Where-Object {
+                [int64]$_.Sequence -gt [int64]$drain.Sequence -and
+                (Get-RouteCommitSendDrainTupleKey -Event $_) -eq $tupleKey
+            })
+        if ($exactInvalidations.Count -gt 0) {
+            continue
+        }
+
+        $identityKey = Get-RouteCommitSendDrainIdentityKey -Event $drain
+        [object[]]$laterOwnerInstalls = @($ownerRetirements | Where-Object {
+                [int64]$_.Sequence -gt [int64]$drain.Sequence -and
+                (Get-RouteCommitSendDrainIdentityKey -Event $_) -eq $identityKey -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'retired_runtime_generation' -Default 0) -eq
+                    (Get-FileTransferEventInt64Field -Event $drain -Name 'source_runtime_generation' -Default 0)
+            })
+        if ($laterOwnerInstalls.Count -gt 0) {
+            continue
+        }
+
+        [object[]]$conclusiveBoundaries = @(
+            @($terminalEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$drain.Sequence -and
+                    (Get-RouteCommitSendDrainIdentityKey -Event $_) -eq $identityKey
+                }) |
+                Sort-Object Sequence, LineNumber
+        )
+        if ($conclusiveBoundaries.Count -eq 0) {
+            $conclusiveBoundaries = @($orderedEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$drain.Sequence -and
+                    (Get-RouteCommitSendDrainIdentityKey -Event $_) -eq $identityKey
+                } | Sort-Object Sequence, LineNumber -Descending | Select-Object -First 1)
+        }
+        if ($conclusiveBoundaries.Count -eq 0) {
+            continue
+        }
+
+        Add-RouteCommitSendDrainCandidate `
+            -Event $conclusiveBoundaries[0] `
+            -DistinctKey ("new-drain-missing|{0}" -f $tupleKey) `
+            -Reason 'regular_v4_route_commit_send_drain_completion_missing'
+    }
+
+    foreach ($send in @($oldRouteSendResults)) {
+        $writerId = Get-FileTransferEventField -Event $send -Name 'log_writer_id' -Default ''
+        $writerSequence = Get-FileTransferEventInt64Field -Event $send -Name 'log_writer_sequence' -Default 0
+        if ([string]::IsNullOrWhiteSpace($writerId) -or $writerSequence -le 0) {
+            continue
+        }
+
+        $sendRuntimeGeneration = Get-FileTransferEventInt64Field `
+            -Event $send `
+            -Name 'runtime_generation' `
+            -Default 0
+        $ownerInstall = Get-PriorTunaOwnerInstallBoundaryForSend -Send $send
+        [object[]]$priorOwnerRetirements = @($ownerRetirements | Where-Object {
+                (Test-OldRouteWriteIdentityMatch -Left $send -Right $_) -and
+                [string]::Equals(
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default ''),
+                    $writerId,
+                    [System.StringComparison]::OrdinalIgnoreCase) -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -gt 0 -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -lt $writerSequence
+            } | Sort-Object {
+                Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0
+            } -Descending)
+        $retirement = $null
+        if ($priorOwnerRetirements.Count -gt 0) {
+            $candidateRetirement = $priorOwnerRetirements[0]
+            if ((Test-CompleteOwnerRetirement -Retirement $candidateRetirement) -and
+                $sendRuntimeGeneration -eq (Get-FileTransferEventInt64Field `
+                    -Event $candidateRetirement `
+                    -Name 'retired_runtime_generation' `
+                    -Default 0)) {
+                $retirement = $candidateRetirement
+                if ($null -eq $ownerInstall) {
+                    $ownerInstall = Get-MatchingTunaOwnerInstall -Retirement $candidateRetirement
+                }
+            }
+        }
+
+        if ($null -eq $ownerInstall) {
+            [object[]]$laterOwnerRetirements = @($ownerRetirements | Where-Object {
+                    (Test-OldRouteWriteIdentityMatch -Left $send -Right $_) -and
+                    [string]::Equals(
+                        (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default ''),
+                        $writerId,
+                        [System.StringComparison]::OrdinalIgnoreCase) -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -gt $writerSequence -and
+                    (Test-CompleteOwnerRetirement -Retirement $_)
+                } | Sort-Object {
+                    Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0
+                })
+            if ($laterOwnerRetirements.Count -gt 0) {
+                $laterRetirement = $laterOwnerRetirements[0]
+                $laterRetiredRuntimeGeneration = Get-FileTransferEventInt64Field `
+                    -Event $laterRetirement `
+                    -Name 'retired_runtime_generation' `
+                    -Default 0
+                if ($sendRuntimeGeneration -eq $laterRetiredRuntimeGeneration -and
+                    $null -ne (Get-MatchingTunaOwnerInstall -Retirement $laterRetirement)) {
+                    Add-RouteCommitSendDrainCorroboratingMismatch `
+                        -Send $send `
+                        -OwnerBoundary $laterRetirement
+                }
+            }
+            continue
+        }
+
+        $ownerBoundaryWriterSequence = Get-FileTransferEventInt64Field `
+            -Event $ownerInstall `
+            -Name 'log_writer_sequence' `
+            -Default 0
+        if ($null -eq $retirement) {
+            $ownerBoundaryReason = Get-FileTransferEventField -Event $ownerInstall -Name 'reason' -Default ''
+            [object[]]$lineageRetirements = @($ownerRetirements | Where-Object {
+                    (Test-OldRouteWriteIdentityMatch -Left $send -Right $_) -and
+                    [string]::Equals(
+                        (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default ''),
+                        $writerId,
+                        [System.StringComparison]::OrdinalIgnoreCase) -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -gt
+                        $ownerBoundaryWriterSequence -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'retired_runtime_generation' -Default 0) -eq
+                        $sendRuntimeGeneration -and
+                    -not [string]::IsNullOrWhiteSpace($ownerBoundaryReason) -and
+                    [string]::Equals(
+                        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default ''),
+                        $ownerBoundaryReason,
+                        [System.StringComparison]::OrdinalIgnoreCase) -and
+                    (Test-CompleteOwnerRetirement -Retirement $_)
+                } | Sort-Object {
+                    Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0
+                })
+            if ($lineageRetirements.Count -gt 0) {
+                $retirement = $lineageRetirements[0]
+            }
+        }
+
+        [object[]]$interveningTerminals = @($terminalEvents | Where-Object {
+                (Test-OldRouteWriteIdentityMatch -Left $send -Right $_) -and
+                [string]::Equals(
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default ''),
+                    $writerId,
+                    [System.StringComparison]::OrdinalIgnoreCase) -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -gt $ownerBoundaryWriterSequence -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -lt $writerSequence
+            })
+        if ($interveningTerminals.Count -gt 0) {
+            continue
+        }
+
+        $distinctKey = @(
+            (Get-FileTransferEventField -Event $send -Name 'session_id' -Default '(missing)'),
+            (Get-FileTransferEventField -Event $send -Name 'transfer_id' -Default '(missing)'),
+            $writerId,
+            $ownerBoundaryWriterSequence,
+            $sendRuntimeGeneration,
+            (Get-FileTransferEventField -Event $ownerInstall -Name 'live_route_epoch' -Default '(missing)'),
+            (Get-FileTransferEventField -Event $ownerInstall -Name 'leg_generation' -Default '(missing)')) -join '|'
+        if ($null -ne $retirement) {
+            $retirementIdentityKey = Get-RouteCommitSendDrainIdentityKey -Event $retirement
+            $ownerInstallLookupKey = @(
+                $retirementIdentityKey,
+                (Get-FileTransferEventField -Event $retirement -Name 'retired_runtime_generation' -Default '(missing)'),
+                (Get-FileTransferEventField -Event $retirement -Name 'current_runtime_generation' -Default '(missing)')) -join '|'
+            if ($ownerInstallCandidateKeys.ContainsKey($ownerInstallLookupKey)) {
+                $distinctKey = [string]$ownerInstallCandidateKeys[$ownerInstallLookupKey]
+            }
+        }
+        Add-RouteCommitSendDrainCandidate `
+            -Event $send `
+            -DistinctKey $distinctKey `
+            -Reason 'retired_regular_v4_send_completed_after_tuna_owner_install'
+        Add-RouteCommitSendDrainCorroboratingMismatch `
+            -Send $send `
+            -OwnerBoundary $ownerInstall
+    }
+
+    $distinctCount = $distinctCandidateRecords.Count
+    return [pscustomobject]@{
+        RawCount = $rawCandidateRecords.Count
+        DistinctCount = $distinctCount
+        RecoveredCount = 0
+        UnresolvedCount = $distinctCount
+        Verdict = if ($distinctCount -gt 0) { 'fail' } else { 'pass' }
+        CandidateEvents = @($distinctCandidateRecords | ForEach-Object { $_.Event })
+        CandidateRecords = @($distinctCandidateRecords.ToArray())
+        UnresolvedCandidateEvents = @($distinctCandidateRecords | ForEach-Object { $_.Event })
+        UnresolvedCandidateRecords = @($distinctCandidateRecords.ToArray())
+        RawCandidateEvents = @($rawCandidateRecords | ForEach-Object { $_.Event })
+        CorroboratingMismatchEvents = @($corroboratingEvents.ToArray())
+        CorroboratingMismatchSequences = @($corroboratingSequences)
+    }
+}
+
+function Get-FileTransferFileTunaV4DataPathMismatchProof {
+    param(
+        [object[]]$Events = @(),
+        $RouteCommitSendDrainProof = $null
+    )
+
+    [object[]]$orderedEvents = @($Events | Sort-Object Sequence, LineNumber)
+    if ($null -eq $RouteCommitSendDrainProof) {
+        $RouteCommitSendDrainProof = Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation -Events $orderedEvents
+    }
+    [long[]]$corroboratingMismatchSequences = @($RouteCommitSendDrainProof.CorroboratingMismatchSequences)
     [object[]]$actualEvents = @($orderedEvents | Where-Object {
             Test-FileTransferFileTunaV4DataPathActualEvent -Event $_
         })
@@ -6957,6 +7765,7 @@ function Get-FileTransferFileTunaV4DataPathMismatchProof {
             (Get-FileTransferEventField -Event $_ -Name 'delivery_transport' -Default '') -eq 'regular_nkn'
         })
     [object[]]$effectiveMismatchEvents = @($rawMismatchEvents | Where-Object {
+            [int64]$_.Sequence -notin $corroboratingMismatchSequences -and
             -not (Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed -Mismatch $_ -Events $orderedEvents)
         })
 
@@ -6986,7 +7795,10 @@ function Get-FileTransferFileTunaV4DataPathProof {
     $events = @($events | Sort-Object Sequence)
     [object[]]$intentEvents = @($events | Where-Object { Test-FileTransferFileTunaV4DataPathIntentEvent -Event $_ })
     [object[]]$actualEvents = @($events | Where-Object { Test-FileTransferFileTunaV4DataPathActualEvent -Event $_ })
-    $mismatchProof = Get-FileTransferFileTunaV4DataPathMismatchProof -Events $events
+    $routeCommitSendDrainProof = Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation -Events $events
+    $mismatchProof = Get-FileTransferFileTunaV4DataPathMismatchProof `
+        -Events $events `
+        -RouteCommitSendDrainProof $routeCommitSendDrainProof
     [object[]]$mismatchEvents = @($mismatchProof.EffectiveEvents)
     [object[]]$tunaActualEvents = @($actualEvents | Where-Object {
             (Get-FileTransferEventField -Event $_ -Name 'actual_transport' -Default '') -eq 'tuna' -or
@@ -7195,6 +8007,7 @@ function Get-FileTransferFileTunaV4DataPathProof {
         PeerVisiblePayloadBytes = [long]$peerVisiblePayloadBytes
         Findings = $findings
         EvidenceEvents = @($evidence.ToArray() | Select-Object -First 20)
+        RouteCommitSendDrainProof = $routeCommitSendDrainProof
     }
     $Summary | Add-Member -NotePropertyName $cachePropertyName -NotePropertyValue $proof -Force
     return $proof
@@ -7730,6 +8543,7 @@ function New-FileTransferRouteConsistencySummaryLines {
     $fallbackRuntimeUnlockSeparationProof = Get-FileTransferFallbackRuntimeUnlockSeparationProof -Summary $Summary
     $publicationAuthorityFieldCoverageProof = Get-FileTransferPublicationAuthorityFieldCoverageProof -Summary $Summary
     $fileTunaV4DataPathProof = Get-FileTransferFileTunaV4DataPathProof -Summary $Summary
+    $runtimeUnlockRegularV4RouteCommitSendDrainProof = $fileTunaV4DataPathProof.RouteCommitSendDrainProof
     if ($null -eq $RecoveryClassification) {
         $RecoveryClassification = Get-FileTransferRecoveryFailureClassification -Summary $Summary
     }
@@ -7743,6 +8557,8 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("first_proof_chain_failure_sequence={0}" -f $RecoveryClassification.FirstProofChainFailureSequence)) | Out-Null
     $lines.Add(("first_proof_chain_failure_source_path={0}" -f $RecoveryClassification.FirstProofChainFailureSourcePath)) | Out-Null
     $lines.Add(("first_proof_chain_failure_line_number={0}" -f $RecoveryClassification.FirstProofChainFailureLineNumber)) | Out-Null
+    $lines.Add(("first_proof_chain_failure_writer_sequence={0}" -f $RecoveryClassification.FirstProofChainFailureWriterSequence)) | Out-Null
+    $lines.Add(("semantic_failure_domain={0}" -f $RecoveryClassification.SemanticFailureDomain)) | Out-Null
     $lines.Add(("runtime_unlock_retry_dispatch_authority_granted_raw_count={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedRawCount)) | Out-Null
     $lines.Add(("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedCount)) | Out-Null
     $lines.Add(("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount)) | Out-Null
@@ -7775,6 +8591,11 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount)) | Out-Null
     $lines.Add(("regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount)) | Out-Null
     $lines.Add(("regular_v4_frontier_repair_successor_pressure_install_verdict={0}" -f $RecoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallVerdict)) | Out-Null
+    $lines.Add(("runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count={0}" -f $RecoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingRawCount)) | Out-Null
+    $lines.Add(("runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count={0}" -f $RecoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount)) | Out-Null
+    $lines.Add(("runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count={0}" -f $RecoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount)) | Out-Null
+    $lines.Add(("runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count={0}" -f $RecoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount)) | Out-Null
+    $lines.Add(("runtime_unlock_regular_v4_route_commit_send_drain_verdict={0}" -f $RecoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainVerdict)) | Out-Null
     $lines.Add(("route_consistency_verdict={0}" -f ($(if ($null -ne $routeConsistency) { $routeConsistency.Verdict } else { 'legacy' })))) | Out-Null
     $lines.Add(("route_selected_count={0}" -f $routeSelectedEvents.Length)) | Out-Null
     $lines.Add(("route_aware_event_count={0}" -f $routeAwareEvents.Length)) | Out-Null
@@ -9535,6 +10356,8 @@ function New-FileTransferStabilityGateSummaryLines {
         ("first_proof_chain_failure_sequence={0}" -f $recoveryClassification.FirstProofChainFailureSequence),
         ("first_proof_chain_failure_source_path={0}" -f $recoveryClassification.FirstProofChainFailureSourcePath),
         ("first_proof_chain_failure_line_number={0}" -f $recoveryClassification.FirstProofChainFailureLineNumber),
+        ("first_proof_chain_failure_writer_sequence={0}" -f $recoveryClassification.FirstProofChainFailureWriterSequence),
+        ("semantic_failure_domain={0}" -f $recoveryClassification.SemanticFailureDomain),
         ("regular_v4_frontier_repair_settlement_disposition_unverifiable_raw_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSettlementDispositionUnverifiableRawCount),
         ("regular_v4_frontier_repair_settlement_disposition_unverifiable_distinct_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSettlementDispositionUnverifiableDistinctCount),
         ("regular_v4_frontier_repair_settlement_disposition_unverifiable_recovered_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount),
@@ -9560,6 +10383,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount),
         ("regular_v4_frontier_repair_successor_pressure_install_verdict={0}" -f $recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallVerdict),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingRawCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_verdict={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainVerdict),
         ("runtime_unlock_regular_v4_recovery_lease_closure_retained_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureRetainedCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_adopted_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureAdoptedCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureRejectedCount),
@@ -10360,6 +11188,10 @@ function Add-FileTransferProofChainFailureCandidates {
             Sequence = $sequence
             SourcePath = [string]$event.FilePath
             LineNumber = [int]$event.LineNumber
+            WriterSequence = Get-FileTransferEventInt64Field `
+                -Event $event `
+                -Name 'log_writer_sequence' `
+                -Default 0
         }) | Out-Null
     }
 }
@@ -19077,6 +19909,7 @@ function Get-FileTransferRecoveryFailureClassification {
     $fallbackRuntimeUnlockSeparationProof = Get-FileTransferFallbackRuntimeUnlockSeparationProof -Summary $Summary
     $publicationAuthorityFieldCoverageProof = Get-FileTransferPublicationAuthorityFieldCoverageProof -Summary $Summary
     $fileTunaV4DataPathProof = Get-FileTransferFileTunaV4DataPathProof -Summary $Summary
+    $runtimeUnlockRegularV4RouteCommitSendDrainProof = $fileTunaV4DataPathProof.RouteCommitSendDrainProof
 
     function Test-RuntimeUnlockRetryDispatchMatch {
         param(
@@ -21791,6 +22624,14 @@ function Get-FileTransferRecoveryFailureClassification {
             -DefaultReason 'publication_authority_missing' `
             -UseDefaultReason
     }
+    foreach ($candidateRecord in @($runtimeUnlockRegularV4RouteCommitSendDrainProof.UnresolvedCandidateRecords)) {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class 'runtime_unlock_regular_v4_route_commit_send_drain_missing' `
+            -Events @($candidateRecord.Event) `
+            -DefaultReason ([string]$candidateRecord.Reason) `
+            -UseDefaultReason
+    }
     if ($fileTunaV4DataPathProof.Verdict -eq 'fail') {
         Add-FileTransferProofChainFailureCandidates `
             -Candidates $proofChainFailureCandidates `
@@ -22000,6 +22841,9 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($publicationAuthorityFieldCoverageProof.Verdict -eq 'fail') {
         $class = 'publication_authority_missing'
+    }
+    elseif ($runtimeUnlockRegularV4RouteCommitSendDrainProof.UnresolvedCount -gt 0) {
+        $class = 'runtime_unlock_regular_v4_route_commit_send_drain_missing'
     }
     elseif ($fileTunaV4DataPathProof.Verdict -eq 'fail') {
         $class = 'file_tuna_data_path_mismatch'
@@ -22377,6 +23221,14 @@ function Get-FileTransferRecoveryFailureClassification {
         FirstProofChainFailureSequence = if ($null -ne $firstProofChainFailure) { $firstProofChainFailure.Sequence } else { -1L }
         FirstProofChainFailureSourcePath = if ($null -ne $firstProofChainFailure) { $firstProofChainFailure.SourcePath } else { '(none)' }
         FirstProofChainFailureLineNumber = if ($null -ne $firstProofChainFailure) { $firstProofChainFailure.LineNumber } else { 0 }
+        FirstProofChainFailureWriterSequence = if ($null -ne $firstProofChainFailure) {
+            [int64]$firstProofChainFailure.WriterSequence
+        } else { 0L }
+        SemanticFailureDomain = if ($class -eq 'runtime_unlock_regular_v4_route_commit_send_drain_missing') {
+            'route_runtime'
+        } else {
+            '(none)'
+        }
         RuntimeUnlockOfferNotObservedCount = $runtimeUnlockOfferNotObservedEvents.Count
         RuntimeUnlockRetryScheduledCount = $runtimeUnlockRetryScheduledEvents.Count
         RuntimeUnlockRetryQueuedBehindActiveNegotiationCount = $runtimeUnlockRetryQueuedBehindActiveNegotiationEvents.Count
@@ -22618,6 +23470,11 @@ function Get-FileTransferRecoveryFailureClassification {
         RegularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount = $regularV4FrontierRepairSuccessorPressureInstallProof.RecoveredCount
         RegularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount = $regularV4FrontierRepairSuccessorPressureInstallProof.UnresolvedCount
         RegularV4FrontierRepairSuccessorPressureInstallVerdict = $regularV4FrontierRepairSuccessorPressureInstallProof.Verdict
+        RuntimeUnlockRegularV4RouteCommitSendDrainMissingRawCount = $runtimeUnlockRegularV4RouteCommitSendDrainProof.RawCount
+        RuntimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount = $runtimeUnlockRegularV4RouteCommitSendDrainProof.DistinctCount
+        RuntimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount = $runtimeUnlockRegularV4RouteCommitSendDrainProof.RecoveredCount
+        RuntimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount = $runtimeUnlockRegularV4RouteCommitSendDrainProof.UnresolvedCount
+        RuntimeUnlockRegularV4RouteCommitSendDrainVerdict = $runtimeUnlockRegularV4RouteCommitSendDrainProof.Verdict
         RegularV4RecoveryPredecessorSettlementClosedSuccessorCount = $regularV4RecoveryPredecessorSettlementClosedSuccessorEvents.Count
         RegularV4FrontierRepairVerdict = if ($regularV4FrontierRepairSendDeferred -or
             $regularV4FrontierRepairStalled -or
@@ -22974,6 +23831,11 @@ function New-FileTransferInvariantLedgerObject {
         regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count = [string]$recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount
         regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count = [string]$recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount
         regular_v4_frontier_repair_successor_pressure_install_verdict = $recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallVerdict
+        runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingRawCount
+        runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount
+        runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount
+        runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount
+        runtime_unlock_regular_v4_route_commit_send_drain_verdict = $recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainVerdict
         runtime_unlock_regular_v4_recovery_lease_closure_rejected_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureRejectedCount
         runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseNotIssuedRawCount
         runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseNotIssuedDistinctCount
@@ -23032,6 +23894,8 @@ function New-FileTransferInvariantLedgerObject {
         first_proof_chain_failure_sequence = [string]$recoveryClassification.FirstProofChainFailureSequence
         first_proof_chain_failure_source_path = $recoveryClassification.FirstProofChainFailureSourcePath
         first_proof_chain_failure_line_number = [string]$recoveryClassification.FirstProofChainFailureLineNumber
+        first_proof_chain_failure_writer_sequence = [string]$recoveryClassification.FirstProofChainFailureWriterSequence
+        semantic_failure_domain = $recoveryClassification.SemanticFailureDomain
         runtime_unlock_retry_dispatch_proof_verdict = $recoveryClassification.RuntimeUnlockRetryDispatchProofVerdict
         runtime_unlock_retry_dispatch_chain_closure_proof_verdict = $recoveryClassification.RuntimeUnlockRetryDispatchChainClosureProofVerdict
         runtime_unlock_retry_dispatch_settlement_reported_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchSettlementReportedCount
@@ -23323,7 +24187,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("gate_status={0}" -f $effectiveGateStatus),
         ("transfer_id={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.TransferId)) { '(none)' } else { $Summary.TransferId }))),
         ("next_artifact={0}" -f $effectiveNextArtifact),
-        ("acceptance_failure_class={0}" -f ($(if ($recoveryClassification.Class -in @('runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery')) { 'incomplete_proof' } elseif ($recoveryClassification.Class -in @('runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_repair_missing_range_not_preserved', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing')) { 'route_runtime' } elseif ($invariantMayOwnAcceptanceFailure) { $combinedInvariant.FailureClass } else { 'none' }))),
+        ("acceptance_failure_class={0}" -f ($(if ($recoveryClassification.Class -in @('runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery')) { 'incomplete_proof' } elseif ($recoveryClassification.Class -in @('runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_repair_missing_range_not_preserved', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'runtime_unlock_regular_v4_route_commit_send_drain_missing')) { 'route_runtime' } elseif ($invariantMayOwnAcceptanceFailure) { $combinedInvariant.FailureClass } else { 'none' }))),
         ("release_route_law_verdict={0}" -f $releaseRouteLaw.Verdict),
         ("terminal_lifecycle_invariant_verdict={0}" -f $terminalLifecycleInvariant.Verdict),
         ("control_priority_invariant_verdict={0}" -f $controlPriorityInvariant.Verdict),
@@ -23371,6 +24235,8 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("first_proof_chain_failure_sequence={0}" -f $recoveryClassification.FirstProofChainFailureSequence),
         ("first_proof_chain_failure_source_path={0}" -f $recoveryClassification.FirstProofChainFailureSourcePath),
         ("first_proof_chain_failure_line_number={0}" -f $recoveryClassification.FirstProofChainFailureLineNumber),
+        ("first_proof_chain_failure_writer_sequence={0}" -f $recoveryClassification.FirstProofChainFailureWriterSequence),
+        ("semantic_failure_domain={0}" -f $recoveryClassification.SemanticFailureDomain),
         ("regular_v4_frontier_repair_settlement_disposition_unverifiable_raw_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSettlementDispositionUnverifiableRawCount),
         ("regular_v4_frontier_repair_settlement_disposition_unverifiable_distinct_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSettlementDispositionUnverifiableDistinctCount),
         ("regular_v4_frontier_repair_settlement_disposition_unverifiable_recovered_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount),
@@ -23558,6 +24424,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_unresolved_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingUnresolvedCount),
         ("regular_v4_frontier_repair_successor_pressure_install_verdict={0}" -f $recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallVerdict),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingRawCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_verdict={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RouteCommitSendDrainVerdict),
         ("regular_v4_recovery_predecessor_settlement_closed_successor_count={0}" -f $recoveryClassification.RegularV4RecoveryPredecessorSettlementClosedSuccessorCount),
         ("regular_v4_frontier_repair_verdict={0}" -f $recoveryClassification.RegularV4FrontierRepairVerdict),
         ("regular_v4_repair_cache_pressure_count={0}" -f $recoveryClassification.RegularV4RepairCachePressureCount),

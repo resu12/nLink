@@ -1350,6 +1350,18 @@ public interface IFileTransferDataPathAuthoritySession
     Task SendAsync(FileTransferDataFrame frame, FileTransferDataPathSendAuthority authority, CancellationToken ct);
 }
 
+internal sealed record FileTransferPhysicalSendSubmission(
+    Task DeliveryTask,
+    Task PhysicalCompletionTask);
+
+internal interface IFileTransferPhysicalSendSubmissionSession
+{
+    FileTransferPhysicalSendSubmission SubmitPhysicalSend(
+        FileTransferDataFrame frame,
+        FileTransferDataPathSendAuthority? authority,
+        CancellationToken ct);
+}
+
 public sealed class FileTransferRuntimeUnlockAuthorityFrameReceivedEventArgs : EventArgs
 {
     public FileTransferRuntimeUnlockAuthorityFrameReceivedEventArgs(FileTransferReceivedDataFrame receivedFrame)

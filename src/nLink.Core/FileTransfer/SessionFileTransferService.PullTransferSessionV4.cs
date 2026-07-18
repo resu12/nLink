@@ -13936,6 +13936,11 @@ public sealed partial class SessionFileTransferService
                     }
                 }
 
+                if (OutboundRegularV4PhysicalSendPreReservationBarrierForTests is { } preReservationBarrier)
+                {
+                    await preReservationBarrier(context.TransferId, context.SessionId).ConfigureAwait(false);
+                }
+
                 sendLifetimeToken.ThrowIfCancellationRequested();
                 lock (gate)
                 {
@@ -13973,11 +13978,17 @@ public sealed partial class SessionFileTransferService
                 Task sendTask;
                 CancellationTokenSource? sendCts = null;
                 FileTransferDataPathSendAuthority? sendAuthority = null;
+                OutboundRegularV4PhysicalSendLease? physicalSendLease = null;
+                Task? physicalCompletionTask = null;
+                string? physicalSendLeaseRejectionReason = null;
                 try
                 {
                     var sendToken = sendLifetimeToken;
                     if (ShouldBoundOutboundV4TransportSend(context) ||
-                        isRegularV4PeerSilenceSafetyRepair)
+                        isRegularV4PeerSilenceSafetyRepair ||
+                        (context.RouteRuntime.UsesRegularNknV4FastRuntime &&
+                         context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+                         context.RouteRuntime.FrameFamily == FileTransferFrameFamily.V4))
                     {
                         sendCts = CancellationTokenSource.CreateLinkedTokenSource(sendLifetimeToken);
                         sendToken = sendCts.Token;
@@ -14010,12 +14021,41 @@ public sealed partial class SessionFileTransferService
                             {
                                 sendException = new InvalidOperationException("File Tuna V4 data path authority session is required.");
                             }
+
+                            if (sendException is null &&
+                                !TryRegisterOutboundRegularV4PhysicalSendLeaseLocked(
+                                    context,
+                                    dataSession,
+                                    prepared,
+                                    repairSend,
+                                    repairRequestKey,
+                                    out physicalSendLease,
+                                    out physicalSendLeaseRejectionReason))
+                            {
+                                physicalSendLease = null;
+                            }
                         }
+                    }
+
+                    if (physicalSendLeaseRejectionReason is not null)
+                    {
+                        sendCts?.Dispose();
+                        return false;
                     }
 
                     if (sendException is not null)
                     {
                         sendTask = Task.FromException(sendException);
+                    }
+                    else if (physicalSendLease is not null &&
+                             dataSession is IFileTransferPhysicalSendSubmissionSession physicalSubmissionSession)
+                    {
+                        var submission = physicalSubmissionSession.SubmitPhysicalSend(
+                            prepared.Frame,
+                            sendAuthority,
+                            sendToken);
+                        sendTask = submission.DeliveryTask;
+                        physicalCompletionTask = submission.PhysicalCompletionTask;
                     }
                     else if (sendAuthority is not null &&
                              authoritySession is not null)
@@ -14032,6 +14072,14 @@ public sealed partial class SessionFileTransferService
                     sendCts?.Dispose();
                     sendCts = null;
                     sendTask = Task.FromException(ex);
+                }
+
+                if (physicalSendLease is not null)
+                {
+                    _ = ObserveOutboundRegularV4PhysicalSendLeaseAsync(
+                        context,
+                        physicalSendLease,
+                        physicalCompletionTask ?? sendTask);
                 }
 
                 var scheduledUtc = DateTimeOffset.UtcNow;
@@ -14930,6 +14978,147 @@ public sealed partial class SessionFileTransferService
                 reason,
                 authority));
         }
+    }
+
+    private bool TryRegisterOutboundRegularV4PhysicalSendLeaseLocked(
+        OutboundTransferContext context,
+        IFileTransferDataSession dataSession,
+        PreparedV4TransportSend prepared,
+        bool repairSend,
+        string repairRequestKey,
+        out OutboundRegularV4PhysicalSendLease? lease,
+        out string? rejectionReason)
+    {
+        lease = null;
+        rejectionReason = null;
+        if (!context.RouteRuntime.UsesRegularNknV4FastRuntime ||
+            context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV4)
+        {
+            return true;
+        }
+
+        if (context.PendingRuntimeUnlockRegularV4RouteCommitDrain is { } pendingDrain)
+        {
+            if (IsRuntimeUnlockRegularV4RouteCommitDrainSourceCurrentLocked(
+                    context,
+                    pendingDrain,
+                    out _))
+            {
+                rejectionReason = "runtime_unlock_regular_v4_route_commit_send_drain_pending";
+                return false;
+            }
+
+            InvalidateRuntimeUnlockRegularV4RouteCommitDrainLocked(
+                context,
+                pendingDrain,
+                "source_scope_replaced_before_send_registration");
+        }
+
+        if (!ReferenceEquals(outboundTransfer, context) ||
+            context.IsTerminal ||
+            !ReferenceEquals(context.DataSession, dataSession) ||
+            context.CurrentRuntimeOwner is not { IsDefault: false } runtimeOwner ||
+            context.CurrentRoutePublicationToken is not { IsDefault: false } routePublication ||
+            context.CurrentTransferLeg is not { } leg)
+        {
+            rejectionReason = "regular_v4_physical_send_scope_missing";
+            return false;
+        }
+
+        var leaseGeneration = Math.Max(
+            1,
+            context.LastOutboundRegularV4PhysicalSendLeaseGeneration + 1);
+        context.LastOutboundRegularV4PhysicalSendLeaseGeneration = leaseGeneration;
+        lease = new OutboundRegularV4PhysicalSendLease(
+            leaseGeneration,
+            runtimeOwner,
+            routePublication,
+            context.TerminalGeneration,
+            leg.Generation,
+            leg.TransportEpochId,
+            leg.BridgeRecoveryGeneration,
+            dataSession,
+            context.DataSessionGeneration,
+            prepared.StartChunkIndex,
+            prepared.ChunkCount,
+            repairSend,
+            repairRequestKey);
+        context.ActiveOutboundRegularV4PhysicalSendLeases[leaseGeneration] = lease;
+        context.OutboundRegularV4PhysicalSendRegisteredCount++;
+        return true;
+    }
+
+    private async Task ObserveOutboundRegularV4PhysicalSendLeaseAsync(
+        OutboundTransferContext context,
+        OutboundRegularV4PhysicalSendLease lease,
+        Task sendTask)
+    {
+        try
+        {
+            await sendTask.ConfigureAwait(false);
+        }
+        catch
+        {
+            // Delivery status remains observable through the sender pipeline; this observer owns only drain proof.
+        }
+        finally
+        {
+            RuntimeUnlockRegularV4RouteCommitDrain? drainToRecheck = null;
+            lock (gate)
+            {
+                if (context.ActiveOutboundRegularV4PhysicalSendLeases.Remove(lease.LeaseGeneration))
+                {
+                    context.OutboundRegularV4PhysicalSendRetiredCount++;
+                    if (context.PendingRuntimeUnlockRegularV4RouteCommitDrain is { } observedDrain &&
+                        IsOutboundRegularV4PhysicalSendLeaseForDrain(lease, observedDrain))
+                    {
+                        LogRuntimeUnlockRegularV4RouteCommitWriteRetired(
+                            context,
+                            lease,
+                            observedDrain,
+                            CountActiveOutboundRegularV4PhysicalSendLeasesForDrainLocked(
+                                context,
+                                observedDrain));
+                    }
+
+                    if (ReferenceEquals(outboundTransfer, context) &&
+                        context.PendingRuntimeUnlockRegularV4RouteCommitDrain is { } pendingDrain &&
+                        IsRuntimeUnlockRegularV4RouteCommitDrainSourceCurrentLocked(
+                            context,
+                            pendingDrain,
+                            out _) &&
+                        CountActiveOutboundRegularV4PhysicalSendLeasesForDrainLocked(
+                            context,
+                            pendingDrain) == 0 &&
+                        !context.RuntimeUnlockRegularV4RouteCommitDrainRecheckQueued)
+                    {
+                        context.RuntimeUnlockRegularV4RouteCommitDrainRecheckQueued = true;
+                        drainToRecheck = pendingDrain;
+                    }
+                }
+            }
+
+            if (drainToRecheck is not null)
+            {
+                _ = RecheckRuntimeUnlockRegularV4RouteCommitAfterSendDrainAsync(
+                    context,
+                    drainToRecheck);
+            }
+        }
+    }
+
+    private static void LogRuntimeUnlockRegularV4RouteCommitWriteRetired(
+        OutboundTransferContext context,
+        OutboundRegularV4PhysicalSendLease lease,
+        RuntimeUnlockRegularV4RouteCommitDrain drain,
+        int activeSendCount)
+    {
+        var matchingRetiredSendCount = Math.Max(
+            0,
+            drain.CapturedSendCount - activeSendCount);
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=runtime_unlock_regular_v4_route_commit_send_drain_write_retired; direction=outbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; drain_generation={drain.DrainGeneration}; send_lease_generation={lease.LeaseGeneration}; source_route={FormatProtocolLogValue(lease.RuntimeOwner.RouteToken)}; source_protocol_version={lease.RuntimeOwner.ProtocolVersion}; source_live_route_epoch={lease.RuntimeOwner.LiveRouteEpoch}; source_runtime_generation={lease.RuntimeOwner.RuntimeGeneration}; source_terminal_generation={lease.TerminalGeneration}; source_leg_generation={lease.LegGeneration}; source_transport_epoch={lease.TransportEpoch}; source_bridge_recovery_generation={lease.BridgeRecoveryGeneration}; source_route_publication_generation={lease.RoutePublication.PublicationGeneration}; source_route_commit_generation={lease.RoutePublication.RouteCommitGeneration ?? 0}; source_data_session_generation={lease.DataSessionGeneration}; start_chunk_index={lease.StartChunkIndex}; chunk_count={lease.ChunkCount}; repair_send={(lease.RepairSend ? 1 : 0)}; repair_request_key={FormatProtocolLogValue(lease.RepairRequestKey)}; captured_through_send_lease_generation={drain.CapturedThroughSendLeaseGeneration}; captured_send_count={drain.CapturedSendCount}; matching_retired_send_count={matchingRetiredSendCount}; active_send_count={activeSendCount}; registered_send_count={context.OutboundRegularV4PhysicalSendRegisteredCount}; retired_send_count={context.OutboundRegularV4PhysicalSendRetiredCount}; decision_reason=physical_send_task_completed");
     }
 
     private bool TryInstallRegularV4FrontierRepairPressureLocked(

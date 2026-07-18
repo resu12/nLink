@@ -1365,6 +1365,12 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_tuna_data_path_peer_visible') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_tuna_data_path_mismatch') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_data_frame_ignored') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_leg_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_owner_workers_retired') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_route_commit_send_drain_staged') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_route_commit_send_drain_deferred') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_route_commit_send_drain_completed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_route_commit_send_drain_invalidated') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transitioned') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_outbound_terminal') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_inbound_terminal') +
@@ -1372,8 +1378,12 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_terminalized') |
             Sort-Object Sequence, LineNumber
     )
+    $runtimeUnlockRegularV4RouteCommitSendDrainProof =
+        Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation -Events $fileTunaV4DataPathEvents
     $fileTunaV4DataPathMismatchProof =
-        Get-FileTransferFileTunaV4DataPathMismatchProof -Events $fileTunaV4DataPathEvents
+        Get-FileTransferFileTunaV4DataPathMismatchProof `
+            -Events $fileTunaV4DataPathEvents `
+            -RouteCommitSendDrainProof $runtimeUnlockRegularV4RouteCommitSendDrainProof
     $validFallbackTerminalProofCount =
         @($fallbackTailBridgeRecoveryPairingProof.ValidTerminalProofEvents).Count
     $fallbackPairedYield = @($fallbackTailBridgeRecoveryPairingProof.LifecycleValidPairedEvents).Count -gt 0 -or
@@ -1477,6 +1487,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Class = 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing'
             Event = $candidateEvent
             Reason = 'retired_owner_cross_transport_epoch_suppression'
+        }) | Out-Null
+    }
+    foreach ($candidateRecord in @($runtimeUnlockRegularV4RouteCommitSendDrainProof.UnresolvedCandidateRecords)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'runtime_unlock_regular_v4_route_commit_send_drain_missing'
+            Event = $candidateRecord.Event
+            Reason = $candidateRecord.Reason
         }) | Out-Null
     }
     if ($fileTunaV4DataPathMismatchProof.EffectiveCount -gt 0) {
@@ -1640,7 +1657,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $runtimeUnlockRetryFallbackTailUnblockRecheckProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RecoverySettlementProof.HandoffBypassCount -gt 0 -or
         $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.UnresolvedCount -gt 0 -or
-        $fallbackTailTransportEpochReauthorizationProof.UnresolvedCount -gt 0) {
+        $fallbackTailTransportEpochReauthorizationProof.UnresolvedCount -gt 0 -or
+        $runtimeUnlockRegularV4RouteCommitSendDrainProof.UnresolvedCount -gt 0) {
         $verdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
         $gateStatus = 'fail'
         $acceptanceFailureClass = 'route_runtime'
@@ -1677,7 +1695,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected',
                 'runtime_unlock_retry_dispatch_authority_tuple_mismatch',
                 'regular_v4_frontier_repair_missing_range_not_preserved',
-                'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing')) {
+                'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing',
+                'runtime_unlock_regular_v4_route_commit_send_drain_missing')) {
             $verdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
             $gateStatus = 'fail'
             $acceptanceFailureClass = 'route_runtime'
@@ -1725,6 +1744,18 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $firstProofChainFailureSequence = if ($null -ne $firstProofChainFailure) { [int64]$firstProofChainFailure.Sequence } else { -1L }
     $firstProofChainFailureSourcePath = if ($null -ne $firstProofChainFailure) { [string]$firstProofChainFailure.FilePath } else { '(none)' }
     $firstProofChainFailureLineNumber = if ($null -ne $firstProofChainFailure) { [int]$firstProofChainFailure.LineNumber } else { 0 }
+    $firstProofChainFailureWriterSequence = if ($null -ne $firstProofChainFailure) {
+        Get-FileTransferEventInt64Field -Event $firstProofChainFailure -Name 'log_writer_sequence' -Default 0
+    }
+    else {
+        0L
+    }
+    $semanticFailureDomain = if ($firstProofChainFailureClass -eq 'runtime_unlock_regular_v4_route_commit_send_drain_missing') {
+        'route_runtime'
+    }
+    else {
+        '(none)'
+    }
 
     $runtimeUnlockProbeCommitVerdict = if ($probeAckCount -gt 0 -and $pairedCommitCount -gt 0) { 'pass' } else { 'none' }
     $fallbackTailQuiescenceVerdict = if ($fallbackPairedYield -or $validFallbackTerminalProofCount -gt 0) { 'pass' } elseif ($fallbackYieldCount -gt 0) { 'fail' } elseif ($guiCompleted) { 'pass' } else { 'pending' }
@@ -1769,6 +1800,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_sequence={0}" -f $firstProofChainFailureSequence),
         ("first_proof_chain_failure_source_path={0}" -f $firstProofChainFailureSourcePath),
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
+        ("first_proof_chain_failure_writer_sequence={0}" -f $firstProofChainFailureWriterSequence),
+        ("semantic_failure_domain={0}" -f $semanticFailureDomain),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RawCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.DistinctCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RecoveredCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.UnresolvedCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_verdict={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.Verdict),
+        ("file_tuna_v4_data_path_mismatch_count={0}" -f $fileTunaV4DataPathMismatchProof.EffectiveCount),
         ("runtime_unlock_retry_dispatch_authority_granted_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.AuthorityGrantedRawCount),
         ("runtime_unlock_retry_dispatch_decision_staged_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.DecisionStagedCount),
         ("runtime_unlock_retry_dispatch_install_receipt_issued_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.ReceiptIssuedCount),
@@ -1921,6 +1960,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_sequence={0}" -f $firstProofChainFailureSequence),
         ("first_proof_chain_failure_source_path={0}" -f $firstProofChainFailureSourcePath),
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
+        ("first_proof_chain_failure_writer_sequence={0}" -f $firstProofChainFailureWriterSequence),
+        ("semantic_failure_domain={0}" -f $semanticFailureDomain),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RawCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.DistinctCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RecoveredCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.UnresolvedCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_verdict={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.Verdict),
+        ("file_tuna_v4_data_path_mismatch_count={0}" -f $fileTunaV4DataPathMismatchProof.EffectiveCount),
         ("runtime_unlock_retry_dispatch_authority_granted_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.AuthorityGrantedRawCount),
         ("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.EffectiveGrantEvents.Count),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRawCount),
@@ -2058,6 +2105,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_sequence={0}" -f $firstProofChainFailureSequence),
         ("first_proof_chain_failure_source_path={0}" -f $firstProofChainFailureSourcePath),
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
+        ("first_proof_chain_failure_writer_sequence={0}" -f $firstProofChainFailureWriterSequence),
+        ("semantic_failure_domain={0}" -f $semanticFailureDomain),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RawCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.DistinctCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RecoveredCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.UnresolvedCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_verdict={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.Verdict),
+        ("file_tuna_v4_data_path_mismatch_count={0}" -f $fileTunaV4DataPathMismatchProof.EffectiveCount),
         ("runtime_unlock_retry_dispatch_authority_granted_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.AuthorityGrantedRawCount),
         ("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.EffectiveGrantEvents.Count),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRawCount),
@@ -2182,6 +2237,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_sequence={0}" -f $firstProofChainFailureSequence),
         ("first_proof_chain_failure_source_path={0}" -f $firstProofChainFailureSourcePath),
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
+        ("first_proof_chain_failure_writer_sequence={0}" -f $firstProofChainFailureWriterSequence),
+        ("semantic_failure_domain={0}" -f $semanticFailureDomain),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RawCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.DistinctCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RecoveredCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.UnresolvedCount),
+        ("runtime_unlock_regular_v4_route_commit_send_drain_verdict={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.Verdict),
+        ("file_tuna_v4_data_path_mismatch_count={0}" -f $fileTunaV4DataPathMismatchProof.EffectiveCount),
         ("runtime_unlock_retry_dispatch_authority_granted_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.AuthorityGrantedRawCount),
         ("runtime_unlock_retry_dispatch_decision_staged_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.DecisionStagedCount),
         ("runtime_unlock_retry_dispatch_install_receipt_issued_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.ReceiptIssuedCount),
@@ -2307,6 +2370,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         first_proof_chain_failure_sequence = $firstProofChainFailureSequence
         first_proof_chain_failure_source_path = $firstProofChainFailureSourcePath
         first_proof_chain_failure_line_number = $firstProofChainFailureLineNumber
+        first_proof_chain_failure_writer_sequence = $firstProofChainFailureWriterSequence
+        semantic_failure_domain = $semanticFailureDomain
+        runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count = $runtimeUnlockRegularV4RouteCommitSendDrainProof.RawCount
+        runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count = $runtimeUnlockRegularV4RouteCommitSendDrainProof.DistinctCount
+        runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count = $runtimeUnlockRegularV4RouteCommitSendDrainProof.RecoveredCount
+        runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count = $runtimeUnlockRegularV4RouteCommitSendDrainProof.UnresolvedCount
+        runtime_unlock_regular_v4_route_commit_send_drain_verdict = $runtimeUnlockRegularV4RouteCommitSendDrainProof.Verdict
+        file_tuna_v4_data_path_mismatch_count = $fileTunaV4DataPathMismatchProof.EffectiveCount
         runtime_unlock_retry_dispatch_authority_granted_raw_count = $runtimeUnlockRetryDispatchInstallProof.AuthorityGrantedRawCount
         runtime_unlock_retry_dispatch_decision_staged_count = $runtimeUnlockRetryDispatchInstallProof.DecisionStagedCount
         runtime_unlock_retry_dispatch_install_receipt_issued_count = $runtimeUnlockRetryDispatchInstallProof.ReceiptIssuedCount

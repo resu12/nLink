@@ -7812,6 +7812,7 @@ public sealed partial class NknSignalingTransport
     private sealed class TransportFileTransferDataSession :
         IFileTransferDataSession,
         IFileTransferDataPathAuthoritySession,
+        IFileTransferPhysicalSendSubmissionSession,
         IFileTransferRuntimeUnlockPreCommitProbeAckAuthorizer,
         IFileTransferRuntimeUnlockTunaProbeSender,
         IFileTransferRuntimeUnlockAuthorityFrameReceiver
@@ -8135,6 +8136,46 @@ public sealed partial class NknSignalingTransport
             owner.TrackOutboundFileTransferDataFrameLifecycle(frame);
         }
 
+        public FileTransferPhysicalSendSubmission SubmitPhysicalSend(
+            FileTransferDataFrame frame,
+            FileTransferDataPathSendAuthority? authority,
+            CancellationToken ct)
+        {
+            ObjectDisposedException.ThrowIf(disposed != 0, this);
+            ArgumentNullException.ThrowIfNull(frame);
+            if (authority is not null)
+            {
+                ValidateDataPathSendAuthority(frame, authority);
+            }
+
+            var completion = new PhysicalSendCompletionTracker();
+            var deliveryTask = SendWithPhysicalCompletionTrackingAsync(
+                frame,
+                authority,
+                completion,
+                ct);
+            return new FileTransferPhysicalSendSubmission(
+                deliveryTask,
+                completion.WaitForCompletionAsync(deliveryTask));
+        }
+
+        private async Task SendWithPhysicalCompletionTrackingAsync(
+            FileTransferDataFrame frame,
+            FileTransferDataPathSendAuthority? authority,
+            PhysicalSendCompletionTracker completion,
+            CancellationToken ct)
+        {
+            try
+            {
+                await SendAsyncCore(frame, ct, authority, completion).ConfigureAwait(false);
+                owner.TrackOutboundFileTransferDataFrameLifecycle(frame);
+            }
+            finally
+            {
+                completion.Seal();
+            }
+        }
+
         private void ValidateDataPathSendAuthority(
             FileTransferDataFrame frame,
             FileTransferDataPathSendAuthority authority)
@@ -8162,7 +8203,8 @@ public sealed partial class NknSignalingTransport
         private async Task SendAsyncCore(
             FileTransferDataFrame frame,
             CancellationToken ct,
-            FileTransferDataPathSendAuthority? dataPathSendAuthority)
+            FileTransferDataPathSendAuthority? dataPathSendAuthority,
+            PhysicalSendCompletionTracker? physicalSendCompletion = null)
         {
             var sendCt = ct;
             CancellationTokenSource? activationPauseLinkedCts = null;
@@ -8191,7 +8233,12 @@ public sealed partial class NknSignalingTransport
 
                 if (frame is FileTransferChunkBatchFrameV4 v4Batch && v4Batch.DataSegments.Count > 0)
                 {
-                    await SendChunkBatchV4Async(v4Batch, dataPathSendAuthority, sendCt).ConfigureAwait(false);
+                    await SendChunkBatchV4Async(
+                            v4Batch,
+                            dataPathSendAuthority,
+                            physicalSendCompletion,
+                            sendCt)
+                        .ConfigureAwait(false);
                     return;
                 }
 
@@ -8667,10 +8714,72 @@ public sealed partial class NknSignalingTransport
 
         private readonly record struct RedundantFeedbackSendResult(string Lane, bool Succeeded, Exception? Error);
 
+        private sealed class PhysicalSendCompletionTracker
+        {
+            private readonly object gate = new();
+            private readonly List<Task> physicalOperations = [];
+            private bool sealedForRegistration;
+
+            public void Register(Task operation)
+            {
+                ArgumentNullException.ThrowIfNull(operation);
+                lock (gate)
+                {
+                    if (sealedForRegistration)
+                    {
+                        throw new InvalidOperationException("Physical send completion registration is closed.");
+                    }
+
+                    physicalOperations.Add(operation);
+                }
+            }
+
+            public void Seal()
+            {
+                lock (gate)
+                {
+                    sealedForRegistration = true;
+                }
+            }
+
+            public async Task WaitForCompletionAsync(Task deliveryTask)
+            {
+                try
+                {
+                    await deliveryTask.ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Delivery failures remain observable through DeliveryTask. Drain proof only waits for settlement.
+                }
+
+                Task[] operations;
+                lock (gate)
+                {
+                    operations = physicalOperations.ToArray();
+                }
+
+                if (operations.Length == 0)
+                {
+                    return;
+                }
+
+                try
+                {
+                    await Task.WhenAll(operations).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Individual delivery status is already reported by the existing send path.
+                }
+            }
+        }
+
         private async Task SendV4RepairChunkBatchWithBulkRedundancyAsync(
             FileTransferChunkBatchFrameV4 batch,
             byte[] serializedFrame,
             FileTransferDataPathSendAuthority? dataPathSendAuthority,
+            PhysicalSendCompletionTracker? physicalSendCompletion,
             CancellationToken ct)
         {
             var started = Stopwatch.StartNew();
@@ -8688,6 +8797,7 @@ public sealed partial class NknSignalingTransport
                 lane: "bulk",
                 dataPathSendAuthority: dataPathSendAuthority,
                 ct: ct);
+            physicalSendCompletion?.Register(Task.WhenAll(controlTask, bulkTask));
             var firstTask = await Task.WhenAny(controlTask, bulkTask).ConfigureAwait(false);
             var first = await firstTask.ConfigureAwait(false);
             var secondTask = ReferenceEquals(firstTask, controlTask) ? bulkTask : controlTask;
@@ -8796,6 +8906,7 @@ public sealed partial class NknSignalingTransport
         private async Task SendChunkBatchV4Async(
             FileTransferChunkBatchFrameV4 batch,
             FileTransferDataPathSendAuthority? dataPathSendAuthority,
+            PhysicalSendCompletionTracker? physicalSendCompletion,
             CancellationToken ct)
         {
             byte[]? serializedFrame = null;
@@ -8819,11 +8930,24 @@ public sealed partial class NknSignalingTransport
 
             if (fitsTransportBudget && serializedFrame is not null)
             {
-                await SendFittingChunkBatchV4Async(batch, serializedFrame, budgetMeasurement, dataPathSendAuthority, ct).ConfigureAwait(false);
+                await SendFittingChunkBatchV4Async(
+                        batch,
+                        serializedFrame,
+                        budgetMeasurement,
+                        dataPathSendAuthority,
+                        physicalSendCompletion,
+                        ct)
+                    .ConfigureAwait(false);
                 return;
             }
 
-            await SendChunkBatchAsFittingV4SubBatchesAsync(batch, "payload_budget_fallback", dataPathSendAuthority, ct).ConfigureAwait(false);
+            await SendChunkBatchAsFittingV4SubBatchesAsync(
+                    batch,
+                    "payload_budget_fallback",
+                    dataPathSendAuthority,
+                    physicalSendCompletion,
+                    ct)
+                .ConfigureAwait(false);
         }
 
         private async Task SendFittingChunkBatchV4Async(
@@ -8831,6 +8955,7 @@ public sealed partial class NknSignalingTransport
             byte[] serializedFrame,
             FileTransferTransportBudgetMeasurement budgetMeasurement,
             FileTransferDataPathSendAuthority? dataPathSendAuthority,
+            PhysicalSendCompletionTracker? physicalSendCompletion,
             CancellationToken ct)
         {
             var rawBytes = batch.DataSegments.Sum(static segment => segment?.Length ?? 0);
@@ -8896,7 +9021,13 @@ public sealed partial class NknSignalingTransport
                     return;
                 }
 
-                await SendV4RepairChunkBatchWithBulkRedundancyAsync(batch, serializedFrame, dataPathSendAuthority, ct).ConfigureAwait(false);
+                await SendV4RepairChunkBatchWithBulkRedundancyAsync(
+                        batch,
+                        serializedFrame,
+                        dataPathSendAuthority,
+                        physicalSendCompletion,
+                        ct)
+                    .ConfigureAwait(false);
                 return;
             }
 
@@ -8925,6 +9056,7 @@ public sealed partial class NknSignalingTransport
             FileTransferChunkBatchFrameV4 batch,
             string reason,
             FileTransferDataPathSendAuthority? dataPathSendAuthority,
+            PhysicalSendCompletionTracker? physicalSendCompletion,
             CancellationToken ct)
         {
             var perFrameRawBytes = string.Join(",", batch.DataSegments.Select(static segment => segment?.Length ?? 0));
@@ -9004,6 +9136,7 @@ public sealed partial class NknSignalingTransport
                         lastFittingPayload,
                         lastFittingMeasurement,
                         dataPathSendAuthority,
+                        physicalSendCompletion,
                         ct)
                     .ConfigureAwait(false);
                 startOffset = endOffsetExclusive;
