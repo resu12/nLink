@@ -1541,6 +1541,9 @@ public sealed partial class SessionFileTransferService
                         {
                             dataSessionReplaced = true;
                             retiredDataSession = context.DataSession;
+                            InvalidateFallbackTailYieldTransportEpochReauthorizationLocked(
+                                context,
+                                "data_session_replaced");
                             context.DataSession = openedDataSession;
                             context.DataSessionGeneration = Math.Max(1, context.DataSessionGeneration + 1);
                             context.PendingOutboundSparsePumpInstall = null;

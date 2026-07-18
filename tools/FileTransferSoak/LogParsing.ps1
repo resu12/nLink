@@ -73,15 +73,19 @@ function ConvertFrom-FileTransferLogLine {
         [Parameter(Mandatory = $true)][int]$Sequence
     )
 
-    if ($Line.IndexOf('event=', [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+    # Retained rotation slices can contain a UTF-8 BOM at the first line of an
+    # appended generation.  Normalize only that marker so the ordinary log
+    # envelope remains parseable without altering the retained raw line.
+    $normalizedLine = $Line.TrimStart([char[]]@([char]0xFEFF))
+    if ($normalizedLine.IndexOf('event=', [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
         return $null
     }
 
     $timestampText = ''
     $level = ''
     $source = ''
-    $message = $Line
-    $match = [regex]::Match($Line, '^\[(?<timestamp>[^\]]+)\]\s+\[(?<level>[^\]]+)\]\s+\[(?<source>[^\]]+)\]\s+(?<message>.*)$')
+    $message = $normalizedLine
+    $match = [regex]::Match($normalizedLine, '^\[(?<timestamp>[^\]]+)\]\s+\[(?<level>[^\]]+)\]\s+\[(?<source>[^\]]+)\]\s+(?<message>.*)$')
     if ($match.Success) {
         $timestampText = $match.Groups['timestamp'].Value
         $level = $match.Groups['level'].Value

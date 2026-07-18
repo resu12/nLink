@@ -4275,9 +4275,38 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
-        RetireOutboundFallbackCheckpointExchangeLocked(context, null, reason);
-
         var transportEpoch = ResolveOutboundFallbackCurrentTransportEpochLocked(context, generation);
+        var pendingFallbackTailYieldTransportEpochReauthorizationRequest =
+            context.PendingFallbackTailYieldTransportEpochReauthorizationRequest;
+        var pendingFallbackTailYieldTransportEpochReauthorization =
+            context.PendingFallbackTailYieldTransportEpochReauthorization;
+        if (pendingFallbackTailYieldTransportEpochReauthorization is { } pendingReauthorization &&
+            !TryRetireExpectedOutboundFallbackCheckpointBeforeReauthorizationRestartLocked(
+                context,
+                pendingReauthorization,
+                transportEpoch,
+                reason))
+        {
+            return;
+        }
+
+        var fallbackTailYieldTransportEpochReauthorizationRequest =
+            ResolveFallbackTailYieldTransportEpochReauthorizationRequestLocked(
+                context,
+                transportEpoch,
+                reason);
+        if ((pendingFallbackTailYieldTransportEpochReauthorization is not null ||
+             pendingFallbackTailYieldTransportEpochReauthorizationRequest is not null) &&
+            fallbackTailYieldTransportEpochReauthorizationRequest is null)
+        {
+            return;
+        }
+
+        if (pendingFallbackTailYieldTransportEpochReauthorization is null)
+        {
+            RetireOutboundFallbackCheckpointExchangeLocked(context, null, reason);
+        }
+
         var leg = StartOutboundTransferLegLocked(
             context,
             context.RouteSelection,
@@ -4285,7 +4314,9 @@ public sealed partial class SessionFileTransferService
             FileTransferLegState.CheckpointPending,
             canSendData: false,
             transportEpochOverride: transportEpoch,
-            bridgeRecoveryGenerationOverride: generation);
+            bridgeRecoveryGenerationOverride: generation,
+            fallbackTailYieldTransportEpochReauthorizationRequest:
+                fallbackTailYieldTransportEpochReauthorizationRequest);
         if (leg is null)
         {
             return;
@@ -4303,12 +4334,72 @@ public sealed partial class SessionFileTransferService
             $"event=filetransfer_post_tuna_recovery_started; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; recovery_generation={generation}; frontier_chunk_index={frontier}; remote_credit_until_chunk_index_exclusive={context.RemoteGrantedUntilExclusive}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}");
     }
 
+    private static bool TryRetireExpectedOutboundFallbackCheckpointBeforeReauthorizationRestartLocked(
+        OutboundTransferContext context,
+        FallbackTailYieldTransportEpochReauthorization pendingReauthorization,
+        long targetTransportEpoch,
+        string reason)
+    {
+        if (targetTransportEpoch <= pendingReauthorization.TargetTransportEpoch)
+        {
+            return true;
+        }
+
+        if (context.CurrentTransferLeg is not { } leg ||
+            string.IsNullOrWhiteSpace(leg.CheckpointRequestId))
+        {
+            return true;
+        }
+
+        var state = CreateCoordinatorStateLocked(context);
+        var currentCheckpointSnapshot =
+            FileTransferCoordinator.NormalizeFallbackTailYieldCheckpointRequestId(
+                state.CurrentFallbackCheckpointLease);
+        if (state.PendingFallbackTailYieldTransportEpochReauthorization != pendingReauthorization ||
+            state.LastFallbackTailYieldDecision is not null ||
+            context.FallbackTailYieldTransportEpochReauthorizationDataSessionGeneration !=
+            context.DataSessionGeneration ||
+            !string.Equals(
+                pendingReauthorization.TargetCheckpointRequestIdSnapshot,
+                "(none)",
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                currentCheckpointSnapshot,
+                leg.CheckpointRequestId,
+                StringComparison.Ordinal) ||
+            !FileTransferCoordinator.IsFallbackTailYieldTransportEpochReauthorizationTargetScopeCurrent(
+                state,
+                pendingReauthorization with
+                {
+                    TargetCheckpointRequestIdSnapshot = currentCheckpointSnapshot,
+                },
+                out _))
+        {
+            return false;
+        }
+
+        if (!RetireOutboundFallbackCheckpointExchangeLocked(
+                context,
+                leg.CheckpointRequestId,
+                reason))
+        {
+            return false;
+        }
+
+        return context.PendingFallbackTailYieldTransportEpochReauthorization == pendingReauthorization &&
+               FileTransferCoordinator.IsFallbackTailYieldTransportEpochReauthorizationCurrent(
+                   CreateCoordinatorStateLocked(context),
+                   pendingReauthorization,
+                   out _);
+    }
+
     private void StartOutboundPostTunaRecoveryWithSafetyReplayLocked(OutboundTransferContext context, string reason)
     {
         var previousLeg = context.CurrentTransferLeg;
         StartOutboundPostTunaRecoveryLocked(context, reason);
         if (ReferenceEquals(previousLeg, context.CurrentTransferLeg) &&
-            IsPostYieldFallbackTailOwnerRetiredAndYieldedLocked(context, context.CurrentTransferLeg))
+            (IsPostYieldFallbackTailOwnerRetiredAndYieldedLocked(context, context.CurrentTransferLeg) ||
+             HasPairedFallbackTailYieldForCurrentOwner(context)))
         {
             return;
         }
@@ -4499,6 +4590,22 @@ public sealed partial class SessionFileTransferService
         }
 
         var transportEpoch = context.V6TransportEpoch?.EpochId ?? generation;
+        var pendingFallbackTailYieldTransportEpochReauthorizationRequest =
+            context.PendingFallbackTailYieldTransportEpochReauthorizationRequest;
+        var pendingFallbackTailYieldTransportEpochReauthorization =
+            context.PendingFallbackTailYieldTransportEpochReauthorization;
+        var fallbackTailYieldTransportEpochReauthorizationRequest =
+            ResolveFallbackTailYieldTransportEpochReauthorizationRequestLocked(
+                context,
+                transportEpoch,
+                reason);
+        if ((pendingFallbackTailYieldTransportEpochReauthorization is not null ||
+             pendingFallbackTailYieldTransportEpochReauthorizationRequest is not null) &&
+            fallbackTailYieldTransportEpochReauthorizationRequest is null)
+        {
+            return;
+        }
+
         var leg = StartInboundTransferLegLocked(
             context,
             context.RouteSelection,
@@ -4506,7 +4613,9 @@ public sealed partial class SessionFileTransferService
             FileTransferLegState.CheckpointPending,
             canSendData: false,
             transportEpochOverride: transportEpoch,
-            bridgeRecoveryGenerationOverride: generation);
+            bridgeRecoveryGenerationOverride: generation,
+            fallbackTailYieldTransportEpochReauthorizationRequest:
+                fallbackTailYieldTransportEpochReauthorizationRequest);
         if (leg is null)
         {
             return;
@@ -4860,6 +4969,9 @@ public sealed partial class SessionFileTransferService
             context.DataSession.Dispose();
         }
 
+        InvalidateFallbackTailYieldTransportEpochReauthorizationLocked(
+            context,
+            "data_session_replaced");
         context.DataSession = session;
         context.DataSessionGeneration = Math.Max(1, context.DataSessionGeneration + 1);
         context.PendingOutboundSparsePumpInstall = null;
@@ -4883,6 +4995,9 @@ public sealed partial class SessionFileTransferService
             context.DataSession.Dispose();
         }
 
+        InvalidateFallbackTailYieldTransportEpochReauthorizationLocked(
+            context,
+            "data_session_replaced");
         context.DataSession = session;
         var previousDataSessionGeneration = context.DataSessionGeneration;
         context.DataSessionGeneration = Math.Max(1, context.DataSessionGeneration + 1);

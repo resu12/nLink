@@ -3931,6 +3931,681 @@ function Get-FileTransferFallbackTailBridgeRecoveryPairingProof {
     }
 }
 
+function Get-FileTransferFallbackTailTransportEpochReauthorizationProof {
+    param(
+        [AllowEmptyCollection()][object[]]$Events = @()
+    )
+
+    [object[]]$events = @($Events | Where-Object { $null -ne $_ } | Sort-Object Sequence, LineNumber)
+    [object[]]$suppressedEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_fallback_tail_retired_owner_update_suppressed'
+    })
+    [object[]]$adoptionEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_fallback_leg_transport_epoch_adopted'
+    })
+    [object[]]$retirementEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_fallback_tail_recovery_owner_retired_after_yield'
+    })
+    [object[]]$reauthorizationStagedEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_fallback_tail_transport_epoch_reauthorization_staged'
+    })
+    [object[]]$reauthorizationSuccessorEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_fallback_tail_transport_epoch_reauthorization_successor_issued'
+    })
+    [object[]]$reauthorizationInvalidatedEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_fallback_tail_transport_epoch_reauthorization_invalidated'
+    })
+    [object[]]$yieldEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_fallback_tail_quiescent_yield_granted'
+    })
+    [object[]]$proofSentEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_fallback_tail_yield_proof_sent'
+    })
+    [object[]]$pairedEvents = @(
+        (Get-FileTransferFallbackTailPairedYieldValidation -Events $events).ValidPairedEvents)
+    [object[]]$terminalProofEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_fallback_tail_terminal_proof_consumed'
+    })
+    [object[]]$tunaPublicationEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_route_selected' -and
+        (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'file_tuna_v4' -and
+        (Get-FileTransferEventInt64Field -Event $_ -Name 'protocol_version' -Default 0) -eq 4 -and
+        (Get-FileTransferEventField -Event $_ -Name 'target_route' -Default '') -eq 'file_tuna_v4' -and
+        (Get-FileTransferEventInt64Field -Event $_ -Name 'target_protocol_version' -Default 0) -eq 4 -and
+        (Get-FileTransferEventField -Event $_ -Name 'target_transport' -Default '') -eq 'tuna' -and
+        (Get-FileTransferEventField -Event $_ -Name 'route_publication_action_kind' -Default '') -eq 'RouteCommitPublication' -and
+        (Get-FileTransferEventInt64Field -Event $_ -Name 'route_commit_generation' -Default 0) -gt 0 -and
+        (Get-FileTransferEventField -Event $_ -Name 'coordinator_decision_reason' -Default '') -eq 'accepted'
+    })
+    [object[]]$mismatchEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_fallback_tail_owner_generation_mismatch'
+    })
+
+    function Test-FallbackTailTransportReauthorizationScope {
+        param(
+            [Parameter(Mandatory = $true)]$Anchor,
+            [Parameter(Mandatory = $true)]$Candidate,
+            [switch]$IgnoreDirection
+        )
+
+        foreach ($fieldName in @('session_id', 'transfer_id')) {
+            $left = ConvertTo-FileTransferFallbackTailPairingValue (
+                Get-FileTransferEventField -Event $Anchor -Name $fieldName -Default '')
+            $right = ConvertTo-FileTransferFallbackTailPairingValue (
+                Get-FileTransferEventField -Event $Candidate -Name $fieldName -Default '')
+            if ($left -eq '(none)' -or
+                $right -eq '(none)' -or
+                -not [string]::Equals($left, $right, [System.StringComparison]::Ordinal)) {
+                return $false
+            }
+        }
+
+        if (-not $IgnoreDirection) {
+            $leftDirection = Get-FileTransferEventField -Event $Anchor -Name 'direction' -Default ''
+            $rightDirection = Get-FileTransferEventField -Event $Candidate -Name 'direction' -Default ''
+            if (-not [string]::Equals(
+                    $leftDirection,
+                    $rightDirection,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-FallbackTailTransportReauthorizationRuntimeScope {
+        param(
+            [Parameter(Mandatory = $true)]$Anchor,
+            [Parameter(Mandatory = $true)]$Candidate,
+            [long]$ExpectedTransportEpoch,
+            [switch]$CandidateUsesCurrentCheckpoint
+        )
+
+        if (-not (Test-FallbackTailTransportReauthorizationScope -Anchor $Anchor -Candidate $Candidate)) {
+            return $false
+        }
+
+        foreach ($fieldName in @('route', 'protocol_version', 'live_route_epoch', 'leg_generation', 'bridge_recovery_generation')) {
+            $left = ConvertTo-FileTransferFallbackTailPairingValue (
+                Get-FileTransferEventField -Event $Anchor -Name $fieldName -Default '')
+            $right = ConvertTo-FileTransferFallbackTailPairingValue (
+                Get-FileTransferEventField -Event $Candidate -Name $fieldName -Default '')
+            if ($left -eq '(none)' -or
+                $right -eq '(none)' -or
+                -not [string]::Equals($left, $right, [System.StringComparison]::Ordinal)) {
+                return $false
+            }
+        }
+
+        if ((Get-FileTransferEventInt64Field -Event $Candidate -Name 'transport_epoch' -Default -1) -ne
+            $ExpectedTransportEpoch) {
+            return $false
+        }
+
+        $anchorCheckpoint = ConvertTo-FileTransferFallbackTailPairingValue (
+            Get-FileTransferEventField -Event $Anchor -Name 'checkpoint_request_id' -Default '')
+        $candidateCheckpointName = if ($CandidateUsesCurrentCheckpoint) {
+            'current_checkpoint_request_id'
+        }
+        else {
+            'checkpoint_request_id'
+        }
+        $candidateCheckpoint = ConvertTo-FileTransferFallbackTailPairingValue (
+            Get-FileTransferEventField -Event $Candidate -Name $candidateCheckpointName -Default (
+                Get-FileTransferEventField -Event $Candidate -Name 'checkpoint_request_id' -Default ''))
+        return [string]::Equals(
+            $anchorCheckpoint,
+            $candidateCheckpoint,
+            [System.StringComparison]::Ordinal)
+    }
+
+    function Test-FallbackTailTransportReauthorizationFieldMap {
+        param(
+            [Parameter(Mandatory = $true)]$Left,
+            [Parameter(Mandatory = $true)]$Right,
+            [Parameter(Mandatory = $true)][hashtable]$FieldMap
+        )
+
+        foreach ($leftFieldName in @($FieldMap.Keys)) {
+            $rightFieldName = [string]$FieldMap[$leftFieldName]
+            $leftRaw = Get-FileTransferEventField -Event $Left -Name $leftFieldName -Default '__missing__'
+            $rightRaw = Get-FileTransferEventField -Event $Right -Name $rightFieldName -Default '__missing__'
+            $leftValue = ConvertTo-FileTransferFallbackTailPairingValue $leftRaw
+            $rightValue = ConvertTo-FileTransferFallbackTailPairingValue $rightRaw
+            if ($leftRaw -eq '__missing__' -or
+                $rightRaw -eq '__missing__' -or
+                -not [string]::Equals($leftValue, $rightValue, [System.StringComparison]::Ordinal)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-FallbackTailTransportReauthorizationDescriptor {
+        param(
+            [Parameter(Mandatory = $true)]$Entry,
+            [Parameter(Mandatory = $true)]$Descriptor
+        )
+
+        $anchor = $Entry.Event
+        $predecessor = $Entry.Predecessor
+        if (-not (Test-FallbackTailTransportReauthorizationScope -Anchor $anchor -Candidate $Descriptor)) {
+            return $false
+        }
+
+        $predecessorAuthorityId = [string]$Entry.PredecessorAuthorityId
+        $predecessorOwnerKey = ConvertTo-FileTransferFallbackTailPairingValue (
+            Get-FileTransferEventField -Event $predecessor -Name 'owner_key' -Default '')
+        $predecessorPairKey = ConvertTo-FileTransferFallbackTailPairingValue (
+            Get-FileTransferEventField -Event $predecessor -Name 'pair_key' -Default '')
+        if ($predecessorOwnerKey -eq '(none)' -or
+            $predecessorPairKey -eq '(none)' -or
+            (ConvertTo-FileTransferFallbackTailPairingValue (
+                Get-FileTransferEventField -Event $Descriptor -Name 'predecessor_authority_id' -Default '')) -ne
+                $predecessorAuthorityId -or
+            (ConvertTo-FileTransferFallbackTailPairingValue (
+                Get-FileTransferEventField -Event $Descriptor -Name 'source_owner_key' -Default '')) -ne
+                $predecessorOwnerKey -or
+            (ConvertTo-FileTransferFallbackTailPairingValue (
+                Get-FileTransferEventField -Event $Descriptor -Name 'source_pair_key' -Default '')) -ne
+                $predecessorPairKey -or
+            (Get-FileTransferEventInt64Field -Event $Descriptor -Name 'source_transport_epoch' -Default -1) -ne
+                [long]$Entry.PreviousTransportEpoch -or
+            (Get-FileTransferEventInt64Field -Event $Descriptor -Name 'target_transport_epoch' -Default -1) -ne
+                [long]$Entry.CurrentTransportEpoch -or
+            (Get-FileTransferEventInt64Field -Event $Descriptor -Name 'reauthorization_generation' -Default 0) -le 0 -or
+            (Get-FileTransferEventInt64Field -Event $Descriptor -Name 'predecessor_yield_generation' -Default 0) -ne
+                (Get-FileTransferEventInt64Field -Event $predecessor -Name 'yield_generation' -Default 0) -or
+            (Get-FileTransferEventInt64Field -Event $Descriptor -Name 'predecessor_protocol_version' -Default 0) -ne
+                (Get-FileTransferEventInt64Field -Event $predecessor -Name 'protocol_version' -Default 0) -or
+            (Get-FileTransferEventInt64Field -Event $Descriptor -Name 'predecessor_live_route_epoch' -Default 0) -ne
+                (Get-FileTransferEventInt64Field -Event $predecessor -Name 'live_route_epoch' -Default 0) -or
+            (Get-FileTransferEventInt64Field -Event $Descriptor -Name 'predecessor_runtime_generation' -Default 0) -ne
+                (Get-FileTransferEventInt64Field -Event $predecessor -Name 'runtime_generation' -Default 0) -or
+            (Get-FileTransferEventInt64Field -Event $Descriptor -Name 'source_runtime_generation' -Default 0) -ne
+                (Get-FileTransferEventInt64Field -Event $predecessor -Name 'runtime_generation' -Default 0) -or
+            (Get-FileTransferEventInt64Field -Event $Descriptor -Name 'predecessor_terminal_generation' -Default -1) -ne
+                (Get-FileTransferEventInt64Field -Event $predecessor -Name 'terminal_generation' -Default -1) -or
+            (Get-FileTransferEventInt64Field -Event $Descriptor -Name 'predecessor_leg_generation' -Default 0) -ne
+                (Get-FileTransferEventInt64Field -Event $predecessor -Name 'leg_generation' -Default 0) -or
+            (Get-FileTransferEventInt64Field -Event $Descriptor -Name 'predecessor_bridge_recovery_generation' -Default -1) -ne
+                (Get-FileTransferEventInt64Field -Event $predecessor -Name 'bridge_recovery_generation' -Default -1) -or
+            (ConvertTo-FileTransferFallbackTailPairingValue (
+                Get-FileTransferEventField -Event $Descriptor -Name 'predecessor_checkpoint_request_id' -Default '')) -ne
+                (ConvertTo-FileTransferFallbackTailPairingValue (
+                    Get-FileTransferEventField -Event $predecessor -Name 'checkpoint_request_id' -Default ''))) {
+            return $false
+        }
+
+        $targetOwnerKey = ConvertTo-FileTransferFallbackTailPairingValue (
+            Get-FileTransferEventField -Event $Descriptor -Name 'target_owner_key' -Default '')
+        $targetPairKey = ConvertTo-FileTransferFallbackTailPairingValue (
+            Get-FileTransferEventField -Event $Descriptor -Name 'target_pair_key' -Default '')
+        $ownerParts = if ($targetOwnerKey -eq '(none)') { @() } else { @($targetOwnerKey.Split('|')) }
+        $pairParts = if ($targetPairKey -eq '(none)') { @() } else { @($targetPairKey.Split('|')) }
+        $targetCheckpoint = ConvertTo-FileTransferFallbackTailPairingValue (
+            Get-FileTransferEventField -Event $Descriptor -Name 'checkpoint_request_id' -Default '')
+        if ($ownerParts.Count -ne 9 -or
+            $pairParts.Count -ne 7 -or
+            $ownerParts[0] -ne (Get-FileTransferEventField -Event $Descriptor -Name 'session_id' -Default '') -or
+            $ownerParts[1] -ne (Get-FileTransferEventField -Event $Descriptor -Name 'transfer_id' -Default '') -or
+            $ownerParts[2] -ne 'post_tuna_fallback_v6' -or
+            $ownerParts[3] -ne '6' -or
+            $ownerParts[4] -ne (Get-FileTransferEventField -Event $predecessor -Name 'live_route_epoch' -Default '') -or
+            $ownerParts[5] -ne (Get-FileTransferEventField -Event $Descriptor -Name 'leg_generation' -Default '') -or
+            $ownerParts[6] -ne (Get-FileTransferEventField -Event $Descriptor -Name 'bridge_recovery_generation' -Default '') -or
+            $ownerParts[7] -ne ([string]$Entry.CurrentTransportEpoch) -or
+            (ConvertTo-FileTransferFallbackTailPairingValue $ownerParts[8]) -ne $targetCheckpoint -or
+            $pairParts[0] -ne $ownerParts[0] -or
+            $pairParts[1] -ne $ownerParts[1] -or
+            $pairParts[2] -ne $ownerParts[2] -or
+            $pairParts[3] -ne $ownerParts[3] -or
+            $pairParts[4] -ne $ownerParts[4] -or
+            $pairParts[5] -ne $ownerParts[7] -or
+            (ConvertTo-FileTransferFallbackTailPairingValue $pairParts[6]) -ne $targetCheckpoint -or
+            (Get-FileTransferEventInt64Field -Event $Descriptor -Name 'target_runtime_generation' -Default 0) -le 0 -or
+            (Get-FileTransferEventInt64Field -Event $Descriptor -Name 'terminal_generation' -Default -1) -lt 0 -or
+            (Get-FileTransferEventInt64Field -Event $Descriptor -Name 'leg_generation' -Default 0) -le 0 -or
+            (Get-FileTransferEventInt64Field -Event $Descriptor -Name 'bridge_recovery_generation' -Default -1) -lt 0 -or
+            (Get-FileTransferEventInt64Field -Event $Descriptor -Name 'bridge_decision_generation' -Default 0) -le 0 -or
+            (Get-FileTransferEventInt64Field -Event $Descriptor -Name 'route_publication_generation' -Default 0) -le 0 -or
+            (Get-FileTransferEventInt64Field -Event $Descriptor -Name 'data_session_generation' -Default 0) -le 0) {
+            return $false
+        }
+
+        return $true
+    }
+
+    function Test-FallbackTailTransportReauthorizationRecovered {
+        param(
+            [Parameter(Mandatory = $true)]$Entry
+        )
+
+        $anchor = $Entry.Event
+        $anchorSequence = [int64]$anchor.Sequence
+        $predecessorAuthorityId = [string]$Entry.PredecessorAuthorityId
+        $descriptorFields = @(
+            'authority_schema',
+            'direction',
+            'session_id',
+            'transfer_id',
+            'predecessor_authority_id',
+            'predecessor_yield_generation',
+            'reauthorization_generation',
+            'source_owner_key',
+            'source_pair_key',
+            'target_owner_key',
+            'target_pair_key',
+            'source_transport_epoch',
+            'target_transport_epoch',
+            'source_runtime_generation',
+            'target_runtime_generation',
+            'predecessor_route',
+            'predecessor_protocol_version',
+            'predecessor_live_route_epoch',
+            'predecessor_runtime_generation',
+            'predecessor_terminal_generation',
+            'predecessor_leg_generation',
+            'predecessor_bridge_recovery_generation',
+            'predecessor_checkpoint_request_id',
+            'terminal_generation',
+            'leg_generation',
+            'bridge_recovery_generation',
+            'bridge_decision_generation',
+            'route_publication_generation',
+            'route_commit_generation',
+            'checkpoint_request_id',
+            'data_session_generation')
+        [object[]]$staged = @($reauthorizationStagedEvents | Where-Object {
+            [int64]$_.Sequence -gt $anchorSequence -and
+            (Test-FallbackTailTransportReauthorizationDescriptor -Entry $Entry -Descriptor $_)
+        } | Sort-Object Sequence)
+        foreach ($stage in $staged) {
+            [object[]]$issuedEvents = @($reauthorizationSuccessorEvents | Where-Object {
+                $issued = $_
+                [int64]$_.Sequence -gt [int64]$stage.Sequence -and
+                (Test-FileTransferAuthorityFieldsEqual `
+                    -LeftLine ([string]$stage.RawLine) `
+                    -RightLine ([string]$_.RawLine) `
+                    -Fields $descriptorFields) -and
+                @($reauthorizationInvalidatedEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$stage.Sequence -and
+                    [int64]$_.Sequence -lt [int64]$issued.Sequence -and
+                    (Test-FileTransferAuthorityFieldsEqual `
+                        -LeftLine ([string]$stage.RawLine) `
+                        -RightLine ([string]$_.RawLine) `
+                        -Fields $descriptorFields)
+                } | Select-Object -First 1).Count -eq 0
+            } | Sort-Object Sequence)
+            foreach ($issued in $issuedEvents) {
+                $successorAuthorityId = ConvertTo-FileTransferFallbackTailPairingValue (
+                    Get-FileTransferEventField -Event $issued -Name 'successor_authority_id' -Default '')
+                $successorYieldGeneration = Get-FileTransferEventInt64Field `
+                    -Event $issued `
+                    -Name 'successor_yield_generation' `
+                    -Default 0
+                if ($successorAuthorityId -eq '(none)' -or
+                    $successorAuthorityId -eq $predecessorAuthorityId -or
+                    $successorYieldGeneration -ne
+                        ((Get-FileTransferEventInt64Field `
+                            -Event $issued `
+                            -Name 'predecessor_yield_generation' `
+                            -Default 0) + 1) -or
+                    -not (Test-FallbackTailTransportReauthorizationFieldMap `
+                        -Left $issued `
+                        -Right $issued `
+                        -FieldMap @{
+                            successor_owner_key = 'target_owner_key'
+                            successor_pair_key = 'target_pair_key'
+                            successor_runtime_generation = 'target_runtime_generation'
+                            successor_terminal_generation = 'terminal_generation'
+                            successor_leg_generation = 'leg_generation'
+                            successor_bridge_recovery_generation = 'bridge_recovery_generation'
+                            successor_checkpoint_request_id = 'checkpoint_request_id'
+                        })) {
+                    continue
+                }
+
+                $successorFieldMap = @{
+                    successor_authority_id = 'authority_id'
+                    predecessor_authority_id = 'predecessor_authority_id'
+                    successor_yield_generation = 'yield_generation'
+                    successor_owner_key = 'owner_key'
+                    successor_pair_key = 'pair_key'
+                    successor_protocol_version = 'protocol_version'
+                    successor_live_route_epoch = 'live_route_epoch'
+                    successor_runtime_generation = 'runtime_generation'
+                    successor_terminal_generation = 'terminal_generation'
+                    successor_leg_generation = 'leg_generation'
+                    target_transport_epoch = 'transport_epoch'
+                    successor_bridge_recovery_generation = 'bridge_recovery_generation'
+                    successor_checkpoint_request_id = 'checkpoint_request_id'
+                }
+                [object[]]$successorYields = @($yieldEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$issued.Sequence -and
+                    (Test-FallbackTailTransportReauthorizationScope -Anchor $issued -Candidate $_) -and
+                    (Test-FallbackTailTransportReauthorizationFieldMap `
+                        -Left $issued `
+                        -Right $_ `
+                        -FieldMap $successorFieldMap)
+                } | Sort-Object Sequence)
+                foreach ($successorYield in $successorYields) {
+                    $localAuthorityFields = @(
+                        'authority_id',
+                        'predecessor_authority_id',
+                        'transfer_id',
+                        'session_id',
+                        'direction',
+                        'route',
+                        'protocol_version',
+                        'live_route_epoch',
+                        'runtime_generation',
+                        'terminal_generation',
+                        'leg_generation',
+                        'transport_epoch',
+                        'bridge_recovery_generation',
+                        'checkpoint_request_id',
+                        'owner_key',
+                        'pair_key',
+                        'yield_generation')
+                    [object[]]$sent = @($proofSentEvents | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$successorYield.Sequence -and
+                        (Test-FileTransferAuthorityFieldsEqual `
+                            -LeftLine ([string]$successorYield.RawLine) `
+                            -RightLine ([string]$_.RawLine) `
+                            -Fields $localAuthorityFields)
+                    } | Sort-Object Sequence | Select-Object -First 1)
+                    if ($sent.Count -gt 0 -and
+                        @($pairedEvents | Where-Object {
+                            [int64]$_.Sequence -gt [int64]$sent[0].Sequence -and
+                            (Test-FileTransferAuthorityFieldsEqual `
+                                -LeftLine ([string]$successorYield.RawLine) `
+                                -RightLine ([string]$_.RawLine) `
+                                -Fields $localAuthorityFields)
+                        } | Select-Object -First 1).Count -gt 0) {
+                        return $true
+                    }
+                }
+
+                $terminalFieldMap = @{
+                    predecessor_authority_id = 'predecessor_authority_id'
+                    successor_authority_id = 'successor_authority_id'
+                    reauthorization_generation = 'reauthorization_generation'
+                    successor_protocol_version = 'protocol_version'
+                    successor_live_route_epoch = 'live_route_epoch'
+                    successor_runtime_generation = 'runtime_generation'
+                    successor_terminal_generation = 'terminal_generation'
+                    successor_leg_generation = 'leg_generation'
+                    target_transport_epoch = 'transport_epoch'
+                    successor_bridge_recovery_generation = 'bridge_recovery_generation'
+                    successor_checkpoint_request_id = 'checkpoint_request_id'
+                }
+                if (@($terminalProofEvents | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$issued.Sequence -and
+                        (Test-FallbackTailTransportReauthorizationScope -Anchor $issued -Candidate $_) -and
+                        (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq
+                            'post_tuna_fallback_v6' -and
+                        (ConvertTo-FileTransferFallbackTailPairingValue (
+                            Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '')) -eq
+                            $successorAuthorityId -and
+                        (Test-FallbackTailTransportReauthorizationFieldMap `
+                            -Left $issued `
+                            -Right $_ `
+                            -FieldMap $terminalFieldMap)
+                    } | Select-Object -First 1).Count -gt 0) {
+                    return $true
+                }
+            }
+        }
+
+        return @($tunaPublicationEvents | Where-Object {
+            [int64]$_.Sequence -gt $anchorSequence -and
+            (Test-FallbackTailTransportReauthorizationScope -Anchor $anchor -Candidate $_)
+        } | Select-Object -First 1).Count -gt 0
+    }
+
+    $qualifiedByIdentity = @{}
+    $corroboratingMismatchSequences = New-Object System.Collections.Generic.List[long]
+    $rawCount = 0
+    foreach ($suppressed in $suppressedEvents) {
+        if ((Get-FileTransferEventField -Event $suppressed -Name 'route' -Default '') -ne 'post_tuna_fallback_v6' -or
+            (Get-FileTransferEventInt64Field -Event $suppressed -Name 'protocol_version' -Default 0) -ne 6) {
+            continue
+        }
+
+        $currentEpoch = Get-FileTransferEventInt64Field -Event $suppressed -Name 'current_transport_epoch' -Default (
+            Get-FileTransferEventInt64Field -Event $suppressed -Name 'transport_epoch' -Default -1)
+        [object[]]$adoptions = @($adoptionEvents | Where-Object {
+            [int64]$_.Sequence -lt [int64]$suppressed.Sequence -and
+            (Test-FallbackTailTransportReauthorizationRuntimeScope `
+                -Anchor $suppressed `
+                -Candidate $_ `
+                -ExpectedTransportEpoch $currentEpoch `
+                -CandidateUsesCurrentCheckpoint)
+        } | Sort-Object Sequence -Descending | Select-Object -First 1)
+        if ($adoptions.Count -eq 0) {
+            continue
+        }
+
+        $previousEpoch = Get-FileTransferEventInt64Field `
+            -Event $adoptions[0] `
+            -Name 'previous_transport_epoch' `
+            -Default -1
+        if ($previousEpoch -le 0 -or $currentEpoch -le $previousEpoch) {
+            continue
+        }
+
+        [object[]]$predecessorYields = @($yieldEvents | Where-Object {
+            [int64]$_.Sequence -lt [int64]$adoptions[0].Sequence -and
+            (Test-FallbackTailTransportReauthorizationRuntimeScope `
+                -Anchor $suppressed `
+                -Candidate $_ `
+                -ExpectedTransportEpoch $previousEpoch)
+        } | Sort-Object Sequence -Descending | Select-Object -First 1)
+        if ($predecessorYields.Count -eq 0) {
+            continue
+        }
+
+        $predecessor = $predecessorYields[0]
+        $predecessorAuthorityId = ConvertTo-FileTransferFallbackTailPairingValue (
+            Get-FileTransferEventField -Event $predecessor -Name 'authority_id' -Default '')
+        $predecessorOwnerKey = ConvertTo-FileTransferFallbackTailPairingValue (
+            Get-FileTransferEventField -Event $predecessor -Name 'owner_key' -Default '')
+        $predecessorPairKey = ConvertTo-FileTransferFallbackTailPairingValue (
+            Get-FileTransferEventField -Event $predecessor -Name 'pair_key' -Default '')
+        $predecessorPredecessorAuthorityId = ConvertTo-FileTransferFallbackTailPairingValue (
+            Get-FileTransferEventField -Event $predecessor -Name 'predecessor_authority_id' -Default '')
+        $predecessorYieldGeneration = Get-FileTransferEventInt64Field `
+            -Event $predecessor `
+            -Name 'yield_generation' `
+            -Default 0
+        if ($predecessorAuthorityId -eq '(none)' -or
+            $predecessorOwnerKey -eq '(none)' -or
+            $predecessorPairKey -eq '(none)' -or
+            $predecessorYieldGeneration -le 0 -or
+            -not (Test-FileTransferFallbackTailOwnerKeyMatchesEvent `
+                -Event $predecessor `
+                -OwnerKeyField 'owner_key')) {
+            continue
+        }
+
+        $retired = @($retirementEvents | Where-Object {
+            [int64]$_.Sequence -lt [int64]$suppressed.Sequence -and
+            (Test-FallbackTailTransportReauthorizationScope -Anchor $suppressed -Candidate $_) -and
+            (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'protocol_version' -Default 0) -eq 6 -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'live_route_epoch' -Default 0) -eq
+                (Get-FileTransferEventInt64Field -Event $suppressed -Name 'live_route_epoch' -Default 0) -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'leg_generation' -Default 0) -eq
+                (Get-FileTransferEventInt64Field -Event $suppressed -Name 'leg_generation' -Default 0) -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'transport_epoch' -Default -1) -eq $previousEpoch
+        } | Sort-Object Sequence -Descending | Select-Object -First 1)
+        if ($retired.Count -eq 0) {
+            continue
+        }
+
+        $suppressionSchemaFields = @(
+            'current_transport_epoch',
+            'retired_transport_epoch',
+            'current_owner_key',
+            'retired_owner_key',
+            'scope_relation',
+            'decision_reason')
+        $suppressionSchemaValues = @{}
+        $hasPopulatedSuppressionSchema = $false
+        foreach ($fieldName in $suppressionSchemaFields) {
+            $fieldValue = Get-FileTransferEventField `
+                -Event $suppressed `
+                -Name $fieldName `
+                -Default '__missing__'
+            $suppressionSchemaValues[$fieldName] = $fieldValue
+            if ($fieldValue -ne '__missing__') {
+                $hasPopulatedSuppressionSchema = $true
+            }
+        }
+
+        if ($hasPopulatedSuppressionSchema) {
+            if (@($suppressionSchemaFields | Where-Object {
+                    $suppressionSchemaValues[$_] -eq '__missing__'
+                }).Count -gt 0 -or
+                $suppressionSchemaValues['scope_relation'] -ne 'cross_transport_epoch' -or
+                $suppressionSchemaValues['decision_reason'] -ne
+                    'retired_owner_cross_transport_epoch_suppression' -or
+                (Get-FileTransferEventInt64Field `
+                    -Event $suppressed `
+                    -Name 'current_transport_epoch' `
+                    -Default -1) -ne $currentEpoch -or
+                (Get-FileTransferEventInt64Field `
+                    -Event $suppressed `
+                    -Name 'retired_transport_epoch' `
+                    -Default -1) -ne $previousEpoch -or
+                (ConvertTo-FileTransferFallbackTailPairingValue (
+                    [string]$suppressionSchemaValues['current_owner_key'])) -ne
+                    (ConvertTo-FileTransferFallbackTailPairingValue (
+                        Get-FileTransferEventField -Event $suppressed -Name 'owner_key' -Default '')) -or
+                (ConvertTo-FileTransferFallbackTailPairingValue (
+                    [string]$suppressionSchemaValues['retired_owner_key'])) -ne $predecessorOwnerKey -or
+                -not (Test-FileTransferFallbackTailOwnerKeyMatchesEvent `
+                    -Event $suppressed `
+                    -OwnerKeyField 'current_owner_key')) {
+                continue
+            }
+
+            $ownerKeyRelation = Get-FileTransferEventField `
+                -Event $suppressed `
+                -Name 'owner_key_relation' `
+                -Default ''
+            if (-not [string]::IsNullOrWhiteSpace($ownerKeyRelation) -and
+                $ownerKeyRelation -ne 'different') {
+                continue
+            }
+        }
+
+        [object[]]$successorBeforeSuppression = @($yieldEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$adoptions[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$suppressed.Sequence -and
+            (Test-FallbackTailTransportReauthorizationRuntimeScope `
+                -Anchor $suppressed `
+                -Candidate $_ `
+                -ExpectedTransportEpoch $currentEpoch) -and
+            (ConvertTo-FileTransferFallbackTailPairingValue (
+                Get-FileTransferEventField -Event $_ -Name 'predecessor_authority_id' -Default '')) -eq
+                $predecessorAuthorityId
+        })
+        if ($successorBeforeSuppression.Count -gt 0) {
+            continue
+        }
+
+        $rawCount++
+        [object[]]$identityParts = @(
+            (Get-FileTransferEventField -Event $suppressed -Name 'session_id' -Default ''),
+            (Get-FileTransferEventField -Event $suppressed -Name 'transfer_id' -Default ''),
+            (Get-FileTransferEventField -Event $suppressed -Name 'direction' -Default ''),
+            (Get-FileTransferEventField -Event $suppressed -Name 'live_route_epoch' -Default ''),
+            (Get-FileTransferEventField -Event $suppressed -Name 'leg_generation' -Default ''),
+            (Get-FileTransferEventField -Event $suppressed -Name 'bridge_recovery_generation' -Default ''),
+            (ConvertTo-FileTransferFallbackTailPairingValue (
+                Get-FileTransferEventField -Event $suppressed -Name 'checkpoint_request_id' -Default '')),
+            $previousEpoch,
+            $currentEpoch,
+            $predecessorAuthorityId,
+            (ConvertTo-FileTransferFallbackTailPairingValue (
+                Get-FileTransferEventField -Event $predecessor -Name 'predecessor_authority_id' -Default '')),
+            (Get-FileTransferEventField -Event $predecessor -Name 'yield_generation' -Default ''),
+            $predecessorOwnerKey,
+            (ConvertTo-FileTransferFallbackTailPairingValue (
+                Get-FileTransferEventField -Event $predecessor -Name 'pair_key' -Default '')))
+        $identity = ConvertTo-Json -InputObject $identityParts -Compress -Depth 2
+        if (-not $qualifiedByIdentity.ContainsKey($identity)) {
+            $qualifiedByIdentity[$identity] = [pscustomobject]@{
+                Event = $suppressed
+                Adoption = $adoptions[0]
+                Predecessor = $predecessor
+                PredecessorAuthorityId = $predecessorAuthorityId
+                PreviousTransportEpoch = $previousEpoch
+                CurrentTransportEpoch = $currentEpoch
+            }
+        }
+
+        foreach ($mismatch in @($mismatchEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$suppressed.Sequence -and
+                (Test-FallbackTailTransportReauthorizationRuntimeScope `
+                    -Anchor $suppressed `
+                    -Candidate $_ `
+                    -ExpectedTransportEpoch $currentEpoch) -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'peer_transport_epoch' -Default -1) -eq $previousEpoch -and
+                (ConvertTo-FileTransferFallbackTailPairingValue (
+                    Get-FileTransferEventField -Event $_ -Name 'peer_owner_key' -Default '')) -eq
+                    $predecessorOwnerKey -and
+                (ConvertTo-FileTransferFallbackTailPairingValue (
+                    Get-FileTransferEventField -Event $_ -Name 'peer_pair_key' -Default '')) -eq
+                    $predecessorPairKey -and
+                (ConvertTo-FileTransferFallbackTailPairingValue (
+                    Get-FileTransferEventField -Event $_ -Name 'predecessor_authority_id' -Default '')) -eq
+                    $predecessorPredecessorAuthorityId -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'yield_generation' -Default 0) -eq
+                    $predecessorYieldGeneration -and
+                (Get-FileTransferEventField -Event $_ -Name 'mismatch_kind' -Default '') -eq 'pair_scope_mismatch' -and
+                (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq 'pair_scope_mismatch'
+            })) {
+            $corroboratingMismatchSequences.Add([int64]$mismatch.Sequence) | Out-Null
+        }
+    }
+
+    $unresolvedEvents = New-Object System.Collections.Generic.List[object]
+    $recoveredCount = 0
+    foreach ($identity in @($qualifiedByIdentity.Keys | Sort-Object)) {
+        $entry = $qualifiedByIdentity[$identity]
+        if (Test-FallbackTailTransportReauthorizationRecovered -Entry $entry) {
+            $recoveredCount++
+        }
+        else {
+            $unresolvedEvents.Add($entry.Event) | Out-Null
+        }
+    }
+
+    $verdict = if ($unresolvedEvents.Count -gt 0) {
+        'fail'
+    }
+    elseif ($qualifiedByIdentity.Count -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
+    }
+    return [pscustomobject]@{
+        Verdict = $verdict
+        RawCount = $rawCount
+        DistinctCount = $qualifiedByIdentity.Count
+        RecoveredCount = $recoveredCount
+        UnresolvedCount = $unresolvedEvents.Count
+        UnresolvedCandidateEvents = @($unresolvedEvents.ToArray() | Sort-Object Sequence, LineNumber)
+        CorroboratingMismatchSequences = @($corroboratingMismatchSequences.ToArray() | Select-Object -Unique)
+    }
+}
+
 function Get-FileTransferFallbackTailReconciliationProof {
     param(
         [Parameter(Mandatory = $true)]$Summary
@@ -3960,7 +4635,13 @@ function Get-FileTransferFallbackTailReconciliationProof {
     [object[]]$ownerGenerationMismatchEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_tail_owner_generation_mismatch' })
     $bridgeRecoveryGenerationPairingProof = Get-FileTransferFallbackTailBridgeRecoveryPairingProof -Events $events
     [object[]]$validTerminalProofConsumedEvents = @($bridgeRecoveryGenerationPairingProof.ValidTerminalProofEvents)
-    [object[]]$otherOwnerGenerationMismatchEvents = @($bridgeRecoveryGenerationPairingProof.OtherOwnerGenerationMismatchEvents)
+    $transportEpochReauthorizationProof =
+        Get-FileTransferFallbackTailTransportEpochReauthorizationProof -Events $events
+    [long[]]$transportEpochCorroboratingMismatchSequences = @(
+        $transportEpochReauthorizationProof.CorroboratingMismatchSequences)
+    [object[]]$otherOwnerGenerationMismatchEvents = @(
+        $bridgeRecoveryGenerationPairingProof.OtherOwnerGenerationMismatchEvents |
+            Where-Object { [int64]$_.Sequence -notin $transportEpochCorroboratingMismatchSequences })
     [object[]]$localYieldBlockedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_tail_local_yield_blocked' })
     [object[]]$proofReplayLocalYieldBlockedEvents = @(
         $localYieldBlockedEvents |
@@ -4488,6 +5169,12 @@ function Get-FileTransferFallbackTailReconciliationProof {
         BridgeRecoveryGenerationMismatchRecoveredCount = $bridgeRecoveryGenerationPairingProof.RecoveredCount
         BridgeRecoveryGenerationMismatchUnresolvedCount = $bridgeRecoveryGenerationPairingProof.UnresolvedCount
         BridgeRecoveryGenerationMismatchCandidateEvents = @($bridgeRecoveryGenerationPairingProof.CandidateEvents)
+        TransportEpochReauthorizationVerdict = $transportEpochReauthorizationProof.Verdict
+        TransportEpochReauthorizationRawCount = $transportEpochReauthorizationProof.RawCount
+        TransportEpochReauthorizationDistinctCount = $transportEpochReauthorizationProof.DistinctCount
+        TransportEpochReauthorizationRecoveredCount = $transportEpochReauthorizationProof.RecoveredCount
+        TransportEpochReauthorizationUnresolvedCount = $transportEpochReauthorizationProof.UnresolvedCount
+        TransportEpochReauthorizationCandidateEvents = @($transportEpochReauthorizationProof.UnresolvedCandidateEvents)
         OtherOwnerGenerationMismatchCount = $otherOwnerGenerationMismatchEvents.Count
         OtherOwnerGenerationMismatchEvents = $otherOwnerGenerationMismatchEvents
         LocalYieldBlockedCount = $localYieldBlockedEvents.Count
@@ -5819,6 +6506,81 @@ function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
         return $false
     }
 
+    $ignoredWindowAnchorSequence = $writerSequence
+    if ($Mismatch.EventName -eq 'filetransfer_data_path_receive_result') {
+        [object[]]$exactMismatchCompanions = @($Events | Where-Object {
+                $companion = $_
+                if ($companion.EventName -ne 'filetransfer_tuna_data_path_mismatch' -or
+                    (Get-FileTransferEventField -Event $companion -Name 'proof_direction' -Default '') -ne 'receive' -or
+                    (Get-FileTransferEventField -Event $companion -Name 'mismatch_reason' -Default '') -ne 'file_tuna_v4_resolved_to_regular_nkn' -or
+                    -not [string]::Equals(
+                        (Get-FileTransferEventField -Event $companion -Name 'log_writer_id' -Default ''),
+                        $writerId,
+                        [System.StringComparison]::OrdinalIgnoreCase) -or
+                    (Get-FileTransferEventInt64Field -Event $companion -Name 'log_writer_sequence' -Default 0) -le $writerSequence -or
+                    (Get-FileTransferEventInt64Field -Event $companion -Name 'log_writer_sequence' -Default 0) -gt ($writerSequence + 8) -or
+                    (Get-FileTransferEventField -Event $companion -Name 'actual_transport' -Default '') -ne 'regular_nkn' -or
+                    (Get-FileTransferEventField -Event $companion -Name 'delivery_transport' -Default '') -ne 'regular_nkn' -or
+                    (Get-FileTransferEventField -Event $companion -Name 'target_transport' -Default '') -ne 'tuna' -or
+                    (Get-FileTransferEventInt64Field -Event $companion -Name 'raw_payload_bytes' -Default 0) -ne
+                        (Get-FileTransferEventInt64Field -Event $Mismatch -Name 'raw_payload_bytes' -Default 0) -or
+                    (Get-FileTransferEventInt64Field -Event $companion -Name 'batch_chunk_count' -Default 0) -ne
+                        (Get-FileTransferEventInt64Field -Event $Mismatch -Name 'batch_chunk_count' -Default 0) -or
+                    -not (Test-FileTransferFileTunaV4DataPathRangeMatches -Intent $Mismatch -Actual $companion)) {
+                    return $false
+                }
+
+                foreach ($fieldName in @(
+                        'transfer_id',
+                        'session_id',
+                        'frame_type',
+                        'direction',
+                        'route',
+                        'protocol_version',
+                        'live_route_epoch',
+                        'runtime_generation',
+                        'terminal_generation',
+                        'leg_generation',
+                        'route_publication_generation',
+                        'route_commit_generation')) {
+                    $mismatchFieldValue = Get-FileTransferEventField `
+                        -Event $Mismatch `
+                        -Name $fieldName `
+                        -Default ''
+                    $companionFieldValue = Get-FileTransferEventField `
+                        -Event $companion `
+                        -Name $fieldName `
+                        -Default ''
+                    if ([string]::IsNullOrWhiteSpace($mismatchFieldValue) -or
+                        [string]::IsNullOrWhiteSpace($companionFieldValue)) {
+                        return $false
+                    }
+
+                    if (-not [string]::Equals(
+                            $mismatchFieldValue,
+                            $companionFieldValue,
+                            [System.StringComparison]::OrdinalIgnoreCase)) {
+                        return $false
+                    }
+                }
+
+                if (-not (Test-FileTransferFileTunaV4DataPathHasRange -Event $Mismatch) -or
+                    -not (Test-FileTransferFileTunaV4DataPathHasRange -Event $companion)) {
+                    return $false
+                }
+
+                return $true
+            })
+        if ($exactMismatchCompanions.Count -ne 1) {
+            return $false
+        }
+
+        $ignoredWindowAnchorSequence = Get-FileTransferEventInt64Field `
+            -Event $exactMismatchCompanions[0] `
+            -Name 'log_writer_sequence' `
+            -Default 0
+    }
+
     $mismatchSequence = if ($null -ne $Mismatch.PSObject.Properties['Sequence']) { [int64]$Mismatch.Sequence } else { 0L }
     [object[]]$ignoredEvents = @($Events | Where-Object {
                 $_.EventName -eq 'filetransfer_data_frame_ignored' -and
@@ -5828,8 +6590,8 @@ function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
         $ignoredWriterId = Get-FileTransferEventField -Event $ignored -Name 'log_writer_id' -Default ''
         $ignoredWriterSequence = Get-FileTransferEventInt64Field -Event $ignored -Name 'log_writer_sequence' -Default 0
         if (-not [string]::Equals($writerId, $ignoredWriterId, [System.StringComparison]::OrdinalIgnoreCase) -or
-            $ignoredWriterSequence -le $writerSequence -or
-            $ignoredWriterSequence -gt ($writerSequence + 8)) {
+            $ignoredWriterSequence -le $ignoredWindowAnchorSequence -or
+            $ignoredWriterSequence -gt ($ignoredWindowAnchorSequence + 8)) {
             continue
         }
 
@@ -6182,6 +6944,29 @@ function Test-FileTransferFileTunaV4DataPathSendShapeMatches {
     return Test-FileTransferFileTunaV4DataPathRangeMatches -Intent $Intent -Actual $Actual
 }
 
+function Get-FileTransferFileTunaV4DataPathMismatchProof {
+    param([object[]]$Events = @())
+
+    [object[]]$orderedEvents = @($Events | Sort-Object Sequence, LineNumber)
+    [object[]]$actualEvents = @($orderedEvents | Where-Object {
+            Test-FileTransferFileTunaV4DataPathActualEvent -Event $_
+        })
+    [object[]]$rawMismatchEvents = @($actualEvents | Where-Object {
+            $_.EventName -eq 'filetransfer_tuna_data_path_mismatch' -or
+            (Get-FileTransferEventField -Event $_ -Name 'actual_transport' -Default '') -eq 'regular_nkn' -or
+            (Get-FileTransferEventField -Event $_ -Name 'delivery_transport' -Default '') -eq 'regular_nkn'
+        })
+    [object[]]$effectiveMismatchEvents = @($rawMismatchEvents | Where-Object {
+            -not (Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed -Mismatch $_ -Events $orderedEvents)
+        })
+
+    return [pscustomobject]@{
+        RawCount = [int]$rawMismatchEvents.Count
+        EffectiveCount = [int]$effectiveMismatchEvents.Count
+        EffectiveEvents = $effectiveMismatchEvents
+    }
+}
+
 function Get-FileTransferFileTunaV4DataPathProof {
     param([Parameter(Mandatory = $true)]$Summary)
 
@@ -6201,14 +6986,8 @@ function Get-FileTransferFileTunaV4DataPathProof {
     $events = @($events | Sort-Object Sequence)
     [object[]]$intentEvents = @($events | Where-Object { Test-FileTransferFileTunaV4DataPathIntentEvent -Event $_ })
     [object[]]$actualEvents = @($events | Where-Object { Test-FileTransferFileTunaV4DataPathActualEvent -Event $_ })
-    [object[]]$rawMismatchEvents = @($actualEvents | Where-Object {
-            $_.EventName -eq 'filetransfer_tuna_data_path_mismatch' -or
-            (Get-FileTransferEventField -Event $_ -Name 'actual_transport' -Default '') -eq 'regular_nkn' -or
-            (Get-FileTransferEventField -Event $_ -Name 'delivery_transport' -Default '') -eq 'regular_nkn'
-        })
-    [object[]]$mismatchEvents = @($rawMismatchEvents | Where-Object {
-            -not (Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed -Mismatch $_ -Events $events)
-        })
+    $mismatchProof = Get-FileTransferFileTunaV4DataPathMismatchProof -Events $events
+    [object[]]$mismatchEvents = @($mismatchProof.EffectiveEvents)
     [object[]]$tunaActualEvents = @($actualEvents | Where-Object {
             (Get-FileTransferEventField -Event $_ -Name 'actual_transport' -Default '') -eq 'tuna' -or
             (Get-FileTransferEventField -Event $_ -Name 'delivery_transport' -Default '') -eq 'tuna'
@@ -7042,6 +7821,11 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("fallback_tail_bridge_recovery_generation_mismatch_distinct_count={0}" -f $fallbackTailProof.BridgeRecoveryGenerationMismatchDistinctCount)) | Out-Null
     $lines.Add(("fallback_tail_bridge_recovery_generation_mismatch_recovered_count={0}" -f $fallbackTailProof.BridgeRecoveryGenerationMismatchRecoveredCount)) | Out-Null
     $lines.Add(("fallback_tail_bridge_recovery_generation_mismatch_unresolved_count={0}" -f $fallbackTailProof.BridgeRecoveryGenerationMismatchUnresolvedCount)) | Out-Null
+    $lines.Add(("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_verdict={0}" -f $fallbackTailProof.TransportEpochReauthorizationVerdict)) | Out-Null
+    $lines.Add(("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_raw_count={0}" -f $fallbackTailProof.TransportEpochReauthorizationRawCount)) | Out-Null
+    $lines.Add(("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count={0}" -f $fallbackTailProof.TransportEpochReauthorizationDistinctCount)) | Out-Null
+    $lines.Add(("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count={0}" -f $fallbackTailProof.TransportEpochReauthorizationRecoveredCount)) | Out-Null
+    $lines.Add(("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count={0}" -f $fallbackTailProof.TransportEpochReauthorizationUnresolvedCount)) | Out-Null
     $lines.Add(("fallback_tail_local_yield_blocked_count={0}" -f $fallbackTailProof.LocalYieldBlockedCount)) | Out-Null
     $lines.Add(("fallback_tail_proof_replay_local_yield_blocked_count={0}" -f $fallbackTailProof.ProofReplayLocalYieldBlockedCount)) | Out-Null
     $lines.Add(("fallback_tail_stale_yield_proof_ignored_count={0}" -f $fallbackTailProof.StaleYieldProofIgnoredCount)) | Out-Null
@@ -9018,6 +9802,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("classification_fallback_tail_bridge_recovery_generation_mismatch_distinct_count={0}" -f $recoveryClassification.FallbackTailBridgeRecoveryGenerationMismatchDistinctCount),
         ("classification_fallback_tail_bridge_recovery_generation_mismatch_recovered_count={0}" -f $recoveryClassification.FallbackTailBridgeRecoveryGenerationMismatchRecoveredCount),
         ("classification_fallback_tail_bridge_recovery_generation_mismatch_unresolved_count={0}" -f $recoveryClassification.FallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount),
+        ("classification_post_tuna_fallback_paired_yield_transport_epoch_reauthorization_verdict={0}" -f $recoveryClassification.FallbackTailTransportEpochReauthorizationVerdict),
+        ("classification_post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_raw_count={0}" -f $recoveryClassification.FallbackTailTransportEpochReauthorizationRawCount),
+        ("classification_post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count={0}" -f $recoveryClassification.FallbackTailTransportEpochReauthorizationDistinctCount),
+        ("classification_post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count={0}" -f $recoveryClassification.FallbackTailTransportEpochReauthorizationRecoveredCount),
+        ("classification_post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count={0}" -f $recoveryClassification.FallbackTailTransportEpochReauthorizationUnresolvedCount),
         ("classification_fallback_tail_local_yield_blocked_count={0}" -f $recoveryClassification.FallbackTailLocalYieldBlockedCount),
         ("classification_fallback_tail_proof_replay_local_yield_blocked_count={0}" -f $recoveryClassification.FallbackTailProofReplayLocalYieldBlockedCount),
         ("classification_fallback_tail_stale_yield_proof_ignored_count={0}" -f $recoveryClassification.FallbackTailStaleYieldProofIgnoredCount),
@@ -9111,6 +9900,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("fallback_tail_bridge_recovery_generation_mismatch_distinct_count={0}" -f $fallbackTailProof.BridgeRecoveryGenerationMismatchDistinctCount),
         ("fallback_tail_bridge_recovery_generation_mismatch_recovered_count={0}" -f $fallbackTailProof.BridgeRecoveryGenerationMismatchRecoveredCount),
         ("fallback_tail_bridge_recovery_generation_mismatch_unresolved_count={0}" -f $fallbackTailProof.BridgeRecoveryGenerationMismatchUnresolvedCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_verdict={0}" -f $fallbackTailProof.TransportEpochReauthorizationVerdict),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_raw_count={0}" -f $fallbackTailProof.TransportEpochReauthorizationRawCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count={0}" -f $fallbackTailProof.TransportEpochReauthorizationDistinctCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count={0}" -f $fallbackTailProof.TransportEpochReauthorizationRecoveredCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count={0}" -f $fallbackTailProof.TransportEpochReauthorizationUnresolvedCount),
         ("fallback_tail_local_yield_blocked_count={0}" -f $fallbackTailProof.LocalYieldBlockedCount),
         ("fallback_tail_proof_replay_local_yield_blocked_count={0}" -f $fallbackTailProof.ProofReplayLocalYieldBlockedCount),
         ("fallback_tail_stale_yield_proof_ignored_count={0}" -f $fallbackTailProof.StaleYieldProofIgnoredCount),
@@ -16837,10 +17631,8 @@ function Test-FileTransferRuntimeUnlockRetryDispatchTupleMatch {
     return $true
 }
 
-function Get-FileTransferRuntimeUnlockRetryDispatchInstallProof {
-    param([object[]]$Events)
-
-    [string[]]$authorityTupleFields = @(
+function Get-FileTransferRuntimeUnlockRetryDispatchCompleteAuthorityTupleFields {
+    return [string[]]@(
         'authority_schema', 'authority_id', 'authority_generation', 'predecessor_authority_id',
         'session_id', 'transfer_id', 'direction', 'route', 'route_kind', 'protocol_version',
         'live_route_epoch', 'runtime_generation', 'terminal_generation', 'leg_generation',
@@ -16872,6 +17664,33 @@ function Get-FileTransferRuntimeUnlockRetryDispatchInstallProof {
         'source_publication_runtime_owner_terminal_generation',
         'source_publication_runtime_owner_family',
         'source_publication_runtime_owner_created_reason'
+    )
+}
+
+function Test-FileTransferRuntimeUnlockRetryDispatchCompleteAuthorityTupleMatch {
+    param(
+        [Parameter(Mandatory = $true)]$Left,
+        [Parameter(Mandatory = $true)]$Right
+    )
+
+    foreach ($field in @(Get-FileTransferRuntimeUnlockRetryDispatchCompleteAuthorityTupleFields)) {
+        $leftValue = Get-FileTransferEventField -Event $Left -Name $field -Default ''
+        $rightValue = Get-FileTransferEventField -Event $Right -Name $field -Default ''
+        if ([string]::IsNullOrWhiteSpace($leftValue) -or
+            [string]::IsNullOrWhiteSpace($rightValue) -or
+            -not [string]::Equals($leftValue, $rightValue, [System.StringComparison]::Ordinal)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Get-FileTransferRuntimeUnlockRetryDispatchInstallProof {
+    param([object[]]$Events)
+
+    [string[]]$authorityTupleFields = @(
+        Get-FileTransferRuntimeUnlockRetryDispatchCompleteAuthorityTupleFields
     )
     [string[]]$requestTupleFields = @(
         'request_regular_v4_liveness_generation',
@@ -17490,6 +18309,116 @@ function Get-FileTransferRuntimeUnlockRetryDispatchInstallProof {
     }
 }
 
+function Get-FileTransferRuntimeUnlockRetryDispatchAuthorityTupleMismatchCorrelation {
+    param(
+        [AllowEmptyCollection()][object[]]$Events = @(),
+        [AllowEmptyCollection()][object[]]$EffectiveGrantEvents = @(),
+        [AllowEmptyCollection()][object[]]$AdditionalDiagnosticEvents = @()
+    )
+
+    [object[]]$orderedEvents = @($Events | Where-Object { $null -ne $_ } | Sort-Object Sequence, LineNumber)
+    [object[]]$decisionTupleRejections = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_decision_tuple_rejected' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq
+            'runtime_unlock_retry_dispatch_authority_tuple_mismatch'
+    })
+    [object[]]$currentAuthorityRejections = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_current_authority_rejected' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq
+            'runtime_unlock_retry_dispatch_authority_tuple_mismatch'
+    })
+    [object[]]$dispatchObservedSettlements = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_contract_settled' -and
+        (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq 'DispatchObserved' -and
+        (Get-FileTransferEventField -Event $_ -Name 'dispatch_observed' -Default '') -eq '1'
+    })
+    [object[]]$dispatchObservedReports = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_settlement_reported' -and
+        (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq 'DispatchObserved' -and
+        -not [string]::IsNullOrWhiteSpace(
+            (Get-FileTransferEventField -Event $_ -Name 'settlement_reason' -Default ''))
+    })
+    [object[]]$acceptedSettlementDecisions = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_settlement_decided' -and
+        (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq 'DispatchObserved' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in @('Accepted', 'Idempotent')
+    })
+    [int64[]]$additionalDiagnosticSequences = @(
+        $AdditionalDiagnosticEvents |
+            Where-Object { $null -ne $_ } |
+            ForEach-Object { [int64]$_.Sequence }
+    )
+
+    $recoveredCurrentAuthorityRejections = New-Object System.Collections.Generic.List[object]
+    $unresolvedCurrentAuthorityRejections = New-Object System.Collections.Generic.List[object]
+    foreach ($rejection in $currentAuthorityRejections) {
+        if ([int64]$rejection.Sequence -in $additionalDiagnosticSequences) {
+            $recoveredCurrentAuthorityRejections.Add($rejection) | Out-Null
+            continue
+        }
+
+        [object[]]$matchingGrants = @($EffectiveGrantEvents | Where-Object {
+            [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
+            (Test-FileTransferRuntimeUnlockRetryDispatchCompleteAuthorityTupleMatch -Left $_ -Right $rejection)
+        } | Sort-Object Sequence, LineNumber -Descending)
+        $finalSettlementAccepted = $false
+        foreach ($grant in $matchingGrants) {
+            [object[]]$matchingSettlements = @($dispatchObservedSettlements | Where-Object {
+                [int64]$_.Sequence -gt [int64]$grant.Sequence -and
+                [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
+                (Test-FileTransferRuntimeUnlockRetryDispatchCompleteAuthorityTupleMatch -Left $_ -Right $rejection)
+            } | Sort-Object Sequence, LineNumber)
+            foreach ($settlement in $matchingSettlements) {
+                $settlementReason = Get-FileTransferEventField -Event $settlement -Name 'decision_reason' -Default ''
+                [object[]]$matchingReports = @($dispatchObservedReports | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$settlement.Sequence -and
+                    [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
+                    (Get-FileTransferEventField -Event $_ -Name 'settlement_reason' -Default '') -eq $settlementReason -and
+                    (Test-FileTransferRuntimeUnlockRetryDispatchCompleteAuthorityTupleMatch -Left $_ -Right $rejection)
+                } | Sort-Object Sequence, LineNumber)
+                foreach ($report in $matchingReports) {
+                    $reportReason = Get-FileTransferEventField -Event $report -Name 'settlement_reason' -Default ''
+                    $matchingDecision = @($acceptedSettlementDecisions | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$report.Sequence -and
+                        [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
+                        (Get-FileTransferEventField -Event $_ -Name 'settlement_reason' -Default '') -eq $reportReason -and
+                        (Test-FileTransferRuntimeUnlockRetryDispatchCompleteAuthorityTupleMatch -Left $_ -Right $rejection)
+                    } | Select-Object -First 1)
+                    if ($matchingDecision.Count -gt 0) {
+                        $finalSettlementAccepted = $true
+                        break
+                    }
+                }
+                if ($finalSettlementAccepted) {
+                    break
+                }
+            }
+            if ($finalSettlementAccepted) {
+                break
+            }
+        }
+
+        if ($finalSettlementAccepted) {
+            # The authority was installed, dispatched, and terminally accepted.
+            # A later current-binding check is stale diagnostic evidence, not a
+            # failure of the already completed authority tuple.
+            $recoveredCurrentAuthorityRejections.Add($rejection) | Out-Null
+        }
+        else {
+            $unresolvedCurrentAuthorityRejections.Add($rejection) | Out-Null
+        }
+    }
+
+    [object[]]$unresolved = @($decisionTupleRejections + $unresolvedCurrentAuthorityRejections.ToArray())
+    return [pscustomobject]@{
+        RawCount = $decisionTupleRejections.Count + $currentAuthorityRejections.Count
+        RecoveredCount = $recoveredCurrentAuthorityRejections.Count
+        UnresolvedCount = $unresolved.Count
+        RecoveredCandidateEvents = @($recoveredCurrentAuthorityRejections.ToArray())
+        UnresolvedCandidateEvents = $unresolved
+    }
+}
+
 function Get-FileTransferRecoveryFailureClassification {
     param(
         [Parameter(Mandatory = $true)]$Summary
@@ -17581,6 +18510,11 @@ function Get-FileTransferRecoveryFailureClassification {
         Get-FileTransferRuntimeUnlockRegularV4RecoveryClosureOfferTimeoutCorrelation `
             -Events $events `
             -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents
+    $runtimeUnlockRetryDispatchAuthorityTupleMismatchProof =
+        Get-FileTransferRuntimeUnlockRetryDispatchAuthorityTupleMismatchCorrelation `
+            -Events $events `
+            -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents `
+            -AdditionalDiagnosticEvents $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.CorrelatedStaleAuthorityEvents
     $runtimeUnlockRegularV4RecoverySettlementProof =
         Get-FileTransferRuntimeUnlockRegularV4RecoverySettlementCorrelation `
             -Events $events `
@@ -17643,14 +18577,8 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockRetryDispatchCurrentAuthorityRejectedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_retry_dispatch_current_authority_rejected'
     })
-    [int64[]]$runtimeUnlockClosureOfferTimeoutCorrelatedStaleSequences = @(
-        $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.CorrelatedStaleAuthorityEvents |
-            ForEach-Object { [int64]$_.Sequence }
-    )
-    $runtimeUnlockRetryDispatchCurrentAuthorityRejectedClassificationEvents = @(
-        $runtimeUnlockRetryDispatchCurrentAuthorityRejectedEvents | Where-Object {
-            [int64]$_.Sequence -notin $runtimeUnlockClosureOfferTimeoutCorrelatedStaleSequences
-        }
+    $runtimeUnlockRetryDispatchAuthorityTupleMismatchClassificationEvents = @(
+        $runtimeUnlockRetryDispatchAuthorityTupleMismatchProof.UnresolvedCandidateEvents
     )
     $runtimeUnlockRetrySourcePublicationMismatchEvents = @($runtimeUnlockRetryDispatchAuthorityRejectedEvents | Where-Object {
         (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq 'retry_dispatch_source_publication_mismatch'
@@ -20724,6 +21652,12 @@ function Get-FileTransferRecoveryFailureClassification {
         -UseDefaultReason
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
+        -Class 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing' `
+        -Events @($fallbackTailProof.TransportEpochReauthorizationCandidateEvents) `
+        -DefaultReason 'retired_owner_cross_transport_epoch_suppression' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_regular_v4_recovery_lease_not_issued' `
         -Events @($runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.UnresolvedCandidateEvents) `
         -DefaultReason 'coordinator_recovery_liveness_lease_missing' `
@@ -20777,7 +21711,7 @@ function Get-FileTransferRecoveryFailureClassification {
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_retry_dispatch_authority_tuple_mismatch' `
-        -Events @($runtimeUnlockRetryDispatchDecisionTupleRejectedEvents + $runtimeUnlockRetryDispatchCurrentAuthorityRejectedClassificationEvents)
+        -Events $runtimeUnlockRetryDispatchAuthorityTupleMismatchClassificationEvents
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_retry_dispatch_held_after_authority_granted' `
@@ -20932,7 +21866,12 @@ function Get-FileTransferRecoveryFailureClassification {
     # contains an actual fallback route or fallback-owner tuple. This prevents a
     # route-less downstream diagnostic from manufacturing fallback authority.
     if ($hasFallbackRouteOrOwnerEvidence) {
-        $fallbackFailureClass = if ($fallbackTailProof.YieldAuthorityRejectedCount -gt 0) {
+        $fallbackFailureClass = if ($fallbackTailProof.TransportEpochReauthorizationUnresolvedCount -gt 0) {
+            # The cross-epoch suppression is the precise authority edge. One-sided
+            # yield/quiescence symptoms in the retired scope are downstream.
+            ''
+        }
+        elseif ($fallbackTailProof.YieldAuthorityRejectedCount -gt 0) {
             'fallback_tail_yield_authority_invalid'
         }
         elseif ($fallbackTailProof.OtherOwnerGenerationMismatchCount -gt 0) {
@@ -21056,8 +21995,7 @@ function Get-FileTransferRecoveryFailureClassification {
     elseif ($regularV4FrontierRepairSuccessorPressureInstallProof.UnresolvedCount -gt 0) {
         $class = 'regular_v4_frontier_repair_successor_pressure_install_missing'
     }
-    elseif ($runtimeUnlockRetryDispatchDecisionTupleRejectedEvents.Count -gt 0 -or
-        $runtimeUnlockRetryDispatchCurrentAuthorityRejectedClassificationEvents.Count -gt 0) {
+    elseif ($runtimeUnlockRetryDispatchAuthorityTupleMismatchClassificationEvents.Count -gt 0) {
         $class = 'runtime_unlock_retry_dispatch_authority_tuple_mismatch'
     }
     elseif ($publicationAuthorityFieldCoverageProof.Verdict -eq 'fail') {
@@ -21754,6 +22692,11 @@ function Get-FileTransferRecoveryFailureClassification {
         FallbackTailBridgeRecoveryGenerationMismatchDistinctCount = $fallbackTailProof.BridgeRecoveryGenerationMismatchDistinctCount
         FallbackTailBridgeRecoveryGenerationMismatchRecoveredCount = $fallbackTailProof.BridgeRecoveryGenerationMismatchRecoveredCount
         FallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount = $fallbackTailProof.BridgeRecoveryGenerationMismatchUnresolvedCount
+        FallbackTailTransportEpochReauthorizationVerdict = $fallbackTailProof.TransportEpochReauthorizationVerdict
+        FallbackTailTransportEpochReauthorizationRawCount = $fallbackTailProof.TransportEpochReauthorizationRawCount
+        FallbackTailTransportEpochReauthorizationDistinctCount = $fallbackTailProof.TransportEpochReauthorizationDistinctCount
+        FallbackTailTransportEpochReauthorizationRecoveredCount = $fallbackTailProof.TransportEpochReauthorizationRecoveredCount
+        FallbackTailTransportEpochReauthorizationUnresolvedCount = $fallbackTailProof.TransportEpochReauthorizationUnresolvedCount
         FallbackTailLocalYieldBlockedCount = $fallbackTailProof.LocalYieldBlockedCount
         FallbackTailProofReplayLocalYieldBlockedCount = $fallbackTailProof.ProofReplayLocalYieldBlockedCount
         FallbackTailStaleYieldProofIgnoredCount = $fallbackTailProof.StaleYieldProofIgnoredCount
@@ -22072,6 +23015,11 @@ function New-FileTransferInvariantLedgerObject {
         fallback_tail_bridge_recovery_generation_mismatch_distinct_count = [string]$recoveryClassification.FallbackTailBridgeRecoveryGenerationMismatchDistinctCount
         fallback_tail_bridge_recovery_generation_mismatch_recovered_count = [string]$recoveryClassification.FallbackTailBridgeRecoveryGenerationMismatchRecoveredCount
         fallback_tail_bridge_recovery_generation_mismatch_unresolved_count = [string]$recoveryClassification.FallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount
+        post_tuna_fallback_paired_yield_transport_epoch_reauthorization_verdict = $recoveryClassification.FallbackTailTransportEpochReauthorizationVerdict
+        post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_raw_count = [string]$recoveryClassification.FallbackTailTransportEpochReauthorizationRawCount
+        post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count = [string]$recoveryClassification.FallbackTailTransportEpochReauthorizationDistinctCount
+        post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count = [string]$recoveryClassification.FallbackTailTransportEpochReauthorizationRecoveredCount
+        post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count = [string]$recoveryClassification.FallbackTailTransportEpochReauthorizationUnresolvedCount
         runtime_unlock_probe_recovery_trigger_count = [string]$recoveryClassification.RuntimeUnlockProbeRecoveryTriggerCount
         runtime_unlock_probe_recovery_authority_lost_raw_count = [string]$recoveryClassification.RuntimeUnlockProbeRecoveryAuthorityLostRawCount
         runtime_unlock_probe_recovery_authority_lost_distinct_count = [string]$recoveryClassification.RuntimeUnlockProbeRecoveryAuthorityLostDistinctCount
@@ -22375,7 +23323,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("gate_status={0}" -f $effectiveGateStatus),
         ("transfer_id={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.TransferId)) { '(none)' } else { $Summary.TransferId }))),
         ("next_artifact={0}" -f $effectiveNextArtifact),
-        ("acceptance_failure_class={0}" -f ($(if ($recoveryClassification.Class -in @('runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery')) { 'incomplete_proof' } elseif ($recoveryClassification.Class -in @('runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_repair_missing_range_not_preserved', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing')) { 'route_runtime' } elseif ($invariantMayOwnAcceptanceFailure) { $combinedInvariant.FailureClass } else { 'none' }))),
+        ("acceptance_failure_class={0}" -f ($(if ($recoveryClassification.Class -in @('runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery')) { 'incomplete_proof' } elseif ($recoveryClassification.Class -in @('runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_repair_missing_range_not_preserved', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing')) { 'route_runtime' } elseif ($invariantMayOwnAcceptanceFailure) { $combinedInvariant.FailureClass } else { 'none' }))),
         ("release_route_law_verdict={0}" -f $releaseRouteLaw.Verdict),
         ("terminal_lifecycle_invariant_verdict={0}" -f $terminalLifecycleInvariant.Verdict),
         ("control_priority_invariant_verdict={0}" -f $controlPriorityInvariant.Verdict),
@@ -22741,6 +23689,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("fallback_tail_bridge_recovery_generation_mismatch_distinct_count={0}" -f $fallbackTailProof.BridgeRecoveryGenerationMismatchDistinctCount),
         ("fallback_tail_bridge_recovery_generation_mismatch_recovered_count={0}" -f $fallbackTailProof.BridgeRecoveryGenerationMismatchRecoveredCount),
         ("fallback_tail_bridge_recovery_generation_mismatch_unresolved_count={0}" -f $fallbackTailProof.BridgeRecoveryGenerationMismatchUnresolvedCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_verdict={0}" -f $fallbackTailProof.TransportEpochReauthorizationVerdict),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_raw_count={0}" -f $fallbackTailProof.TransportEpochReauthorizationRawCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count={0}" -f $fallbackTailProof.TransportEpochReauthorizationDistinctCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count={0}" -f $fallbackTailProof.TransportEpochReauthorizationRecoveredCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count={0}" -f $fallbackTailProof.TransportEpochReauthorizationUnresolvedCount),
         ("fallback_tail_local_yield_blocked_count={0}" -f $fallbackTailProof.LocalYieldBlockedCount),
         ("fallback_tail_proof_replay_local_yield_blocked_count={0}" -f $fallbackTailProof.ProofReplayLocalYieldBlockedCount),
         ("fallback_tail_stale_yield_proof_ignored_count={0}" -f $fallbackTailProof.StaleYieldProofIgnoredCount),

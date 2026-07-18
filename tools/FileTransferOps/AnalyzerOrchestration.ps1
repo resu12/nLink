@@ -1091,6 +1091,19 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         Get-FileTransferRuntimeUnlockRegularV4RecoveryClosureOfferTimeoutCorrelation `
             -Events $runtimeUnlockRegularV4RecoveryLeaseEvents `
             -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents
+    [object[]]$runtimeUnlockRetryDispatchAuthorityTupleMismatchEvents = @(
+        $runtimeUnlockRetryDispatchInstallEvents +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_decision_tuple_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_current_authority_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_contract_settled') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_settlement_reported') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_settlement_decided')
+    )
+    $runtimeUnlockRetryDispatchAuthorityTupleMismatchProof =
+        Get-FileTransferRuntimeUnlockRetryDispatchAuthorityTupleMismatchCorrelation `
+            -Events $runtimeUnlockRetryDispatchAuthorityTupleMismatchEvents `
+            -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents `
+            -AdditionalDiagnosticEvents $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.CorrelatedStaleAuthorityEvents
     [object[]]$regularV4FrontierRepairProjectionEvents = @(
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_authority_granted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v4_repair_requested') +
@@ -1314,6 +1327,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_leg_authority_completed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_leg_authority_superseded_by_route_hint') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_leg_frozen') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_recovery_owner_retired_after_yield') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_retired_owner_update_suppressed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_transport_epoch_reauthorization_staged') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_transport_epoch_reauthorization_successor_issued') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_transport_epoch_reauthorization_invalidated') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_quiescent_yield_granted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_yield_proof_sent') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_yield_proof_received') +
@@ -1339,6 +1357,23 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         Get-FileTransferCompactIndexEventCount -Index $Index -Name 'filetransfer_fallback_tail_owner_generation_mismatch'
     $fallbackTailBridgeRecoveryPairingProof =
         Get-FileTransferFallbackTailBridgeRecoveryPairingProof -Events $fallbackTailPairingEvents
+    $fallbackTailTransportEpochReauthorizationProof =
+        Get-FileTransferFallbackTailTransportEpochReauthorizationProof -Events $fallbackTailPairingEvents
+    [object[]]$fileTunaV4DataPathEvents = @(
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_data_path_send_result') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_data_path_receive_result') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_tuna_data_path_peer_visible') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_tuna_data_path_mismatch') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_data_frame_ignored') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transitioned') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_outbound_terminal') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_inbound_terminal') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'transfer_terminal') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_terminalized') |
+            Sort-Object Sequence, LineNumber
+    )
+    $fileTunaV4DataPathMismatchProof =
+        Get-FileTransferFileTunaV4DataPathMismatchProof -Events $fileTunaV4DataPathEvents
     $validFallbackTerminalProofCount =
         @($fallbackTailBridgeRecoveryPairingProof.ValidTerminalProofEvents).Count
     $fallbackPairedYield = @($fallbackTailBridgeRecoveryPairingProof.LifecycleValidPairedEvents).Count -gt 0 -or
@@ -1346,8 +1381,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             $fallbackOwnerGenerationMismatchRawCount -eq 0 -and
             ($fallbackPairedYieldGrantedCount -gt 0 -or
                 ($fallbackOutboundYieldCount -gt 0 -and $fallbackInboundYieldCount -gt 0)))
-    $fallbackTailOwnerGenerationMismatchCount =
-        @($fallbackTailBridgeRecoveryPairingProof.OtherOwnerGenerationMismatchEvents).Count
+    [long[]]$fallbackTailTransportEpochCorroboratingMismatchSequences = @(
+        $fallbackTailTransportEpochReauthorizationProof.CorroboratingMismatchSequences)
+    $fallbackTailOwnerGenerationMismatchCount = @(
+        $fallbackTailBridgeRecoveryPairingProof.OtherOwnerGenerationMismatchEvents |
+            Where-Object {
+                [int64]$_.Sequence -notin $fallbackTailTransportEpochCorroboratingMismatchSequences
+            }).Count
     $compactProofChainCandidates = New-Object System.Collections.Generic.List[object]
     foreach ($candidateEvent in @($runtimeUnlockRetryDispatchInstallProof.GrantEvidenceUnresolvedCandidateEvents)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
@@ -1415,12 +1455,38 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Reason = 'retry_dispatch_successor_retired_offer_mismatch'
         }) | Out-Null
     }
+    foreach ($candidateEvent in @($runtimeUnlockRetryDispatchAuthorityTupleMismatchProof.UnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'runtime_unlock_retry_dispatch_authority_tuple_mismatch'
+            Event = $candidateEvent
+            Reason = Get-FileTransferEventField `
+                -Event $candidateEvent `
+                -Name 'decision_reason' `
+                -Default 'runtime_unlock_retry_dispatch_authority_tuple_mismatch'
+        }) | Out-Null
+    }
     foreach ($candidateEvent in @($fallbackTailBridgeRecoveryPairingProof.CandidateEvents)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'post_tuna_fallback_paired_yield_bridge_recovery_generation_mismatch'
             Event = $candidateEvent
             Reason = 'bridge_recovery_generation_mismatch'
         }) | Out-Null
+    }
+    foreach ($candidateEvent in @($fallbackTailTransportEpochReauthorizationProof.UnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing'
+            Event = $candidateEvent
+            Reason = 'retired_owner_cross_transport_epoch_suppression'
+        }) | Out-Null
+    }
+    if ($fileTunaV4DataPathMismatchProof.EffectiveCount -gt 0) {
+        foreach ($candidateEvent in @($fileTunaV4DataPathMismatchProof.EffectiveEvents)) {
+            $compactProofChainCandidates.Add([pscustomobject]@{
+                Class = 'file_tuna_data_path_mismatch'
+                Event = $candidateEvent
+                Reason = 'file_tuna_data_path_mismatch'
+            }) | Out-Null
+        }
     }
     foreach ($candidateEvent in @(
             $fallbackTailYieldAuthorityRejectedEvents +
@@ -1573,7 +1639,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRetryFallbackTailUnblockRecheckProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RecoverySettlementProof.HandoffBypassCount -gt 0 -or
-        $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.UnresolvedCount -gt 0) {
+        $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.UnresolvedCount -gt 0 -or
+        $fallbackTailTransportEpochReauthorizationProof.UnresolvedCount -gt 0) {
         $verdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
         $gateStatus = 'fail'
         $acceptanceFailureClass = 'route_runtime'
@@ -1608,11 +1675,17 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing',
                 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
                 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected',
+                'runtime_unlock_retry_dispatch_authority_tuple_mismatch',
                 'regular_v4_frontier_repair_missing_range_not_preserved',
                 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing')) {
             $verdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
             $gateStatus = 'fail'
             $acceptanceFailureClass = 'route_runtime'
+        }
+        elseif ($firstCompactClass -eq 'file_tuna_data_path_mismatch') {
+            $verdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
+            $gateStatus = 'fail'
+            $acceptanceFailureClass = 'file_tuna_data_path_mismatch'
         }
     }
 
@@ -1800,6 +1873,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("fallback_tail_bridge_recovery_generation_mismatch_distinct_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.DistinctCount),
         ("fallback_tail_bridge_recovery_generation_mismatch_recovered_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.RecoveredCount),
         ("fallback_tail_bridge_recovery_generation_mismatch_unresolved_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.UnresolvedCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_verdict={0}" -f $fallbackTailTransportEpochReauthorizationProof.Verdict),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_raw_count={0}" -f $fallbackTailTransportEpochReauthorizationProof.RawCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count={0}" -f $fallbackTailTransportEpochReauthorizationProof.DistinctCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count={0}" -f $fallbackTailTransportEpochReauthorizationProof.RecoveredCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count={0}" -f $fallbackTailTransportEpochReauthorizationProof.UnresolvedCount),
         ("runtime_unlock_precommit_probe_acked_count={0}" -f $probeAckCount),
         ("runtime_unlock_paired_commit_confirmed_count={0}" -f $pairedCommitCount),
         ("runtime_unlock_probe_commit_verdict={0}" -f $runtimeUnlockProbeCommitVerdict),
@@ -1940,6 +2018,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("fallback_tail_bridge_recovery_generation_mismatch_distinct_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.DistinctCount),
         ("fallback_tail_bridge_recovery_generation_mismatch_recovered_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.RecoveredCount),
         ("fallback_tail_bridge_recovery_generation_mismatch_unresolved_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.UnresolvedCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_verdict={0}" -f $fallbackTailTransportEpochReauthorizationProof.Verdict),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_raw_count={0}" -f $fallbackTailTransportEpochReauthorizationProof.RawCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count={0}" -f $fallbackTailTransportEpochReauthorizationProof.DistinctCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count={0}" -f $fallbackTailTransportEpochReauthorizationProof.RecoveredCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count={0}" -f $fallbackTailTransportEpochReauthorizationProof.UnresolvedCount),
         'fallback_leg_authority_proof_verdict=pass',
         'clean_fallback_leg_proof_verdict=pass',
         ("fallback_tail_quiescence_verdict={0}" -f $fallbackTailQuiescenceVerdict),
@@ -2072,6 +2155,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("fallback_tail_bridge_recovery_generation_mismatch_distinct_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.DistinctCount),
         ("fallback_tail_bridge_recovery_generation_mismatch_recovered_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.RecoveredCount),
         ("fallback_tail_bridge_recovery_generation_mismatch_unresolved_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.UnresolvedCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_verdict={0}" -f $fallbackTailTransportEpochReauthorizationProof.Verdict),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_raw_count={0}" -f $fallbackTailTransportEpochReauthorizationProof.RawCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count={0}" -f $fallbackTailTransportEpochReauthorizationProof.DistinctCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count={0}" -f $fallbackTailTransportEpochReauthorizationProof.RecoveredCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count={0}" -f $fallbackTailTransportEpochReauthorizationProof.UnresolvedCount),
         ("liveness_timeout_count={0}" -f $livenessTimeoutCount),
         ("liveness_timeout_before_terminal_count={0}" -f $preTerminalLivenessTimeoutCount),
         ("liveness_timeout_after_terminal_count={0}" -f $postTerminalLivenessTimeoutCount)
@@ -2187,6 +2275,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("fallback_tail_bridge_recovery_generation_mismatch_distinct_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.DistinctCount),
         ("fallback_tail_bridge_recovery_generation_mismatch_recovered_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.RecoveredCount),
         ("fallback_tail_bridge_recovery_generation_mismatch_unresolved_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.UnresolvedCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_verdict={0}" -f $fallbackTailTransportEpochReauthorizationProof.Verdict),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_raw_count={0}" -f $fallbackTailTransportEpochReauthorizationProof.RawCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count={0}" -f $fallbackTailTransportEpochReauthorizationProof.DistinctCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count={0}" -f $fallbackTailTransportEpochReauthorizationProof.RecoveredCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count={0}" -f $fallbackTailTransportEpochReauthorizationProof.UnresolvedCount),
         'late_frame_classification=none'
     )
     Set-Content -LiteralPath (Join-Path $ArtifactDir 'phase0-invariant-ledger.txt') -Value $invariantLines -Encoding UTF8
@@ -2318,6 +2411,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         fallback_tail_bridge_recovery_generation_mismatch_distinct_count = $fallbackTailBridgeRecoveryPairingProof.DistinctCount
         fallback_tail_bridge_recovery_generation_mismatch_recovered_count = $fallbackTailBridgeRecoveryPairingProof.RecoveredCount
         fallback_tail_bridge_recovery_generation_mismatch_unresolved_count = $fallbackTailBridgeRecoveryPairingProof.UnresolvedCount
+        post_tuna_fallback_paired_yield_transport_epoch_reauthorization_verdict = $fallbackTailTransportEpochReauthorizationProof.Verdict
+        post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_raw_count = $fallbackTailTransportEpochReauthorizationProof.RawCount
+        post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count = $fallbackTailTransportEpochReauthorizationProof.DistinctCount
+        post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count = $fallbackTailTransportEpochReauthorizationProof.RecoveredCount
+        post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count = $fallbackTailTransportEpochReauthorizationProof.UnresolvedCount
     }
     $compactDto | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-compact-summary.json') -Encoding UTF8
 

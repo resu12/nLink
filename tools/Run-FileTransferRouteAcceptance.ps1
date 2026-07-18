@@ -1078,6 +1078,11 @@ function New-RouteAcceptanceRunResult {
         fallbackTailBridgeRecoveryGenerationMismatchDistinctCount = 0
         fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount = 0
         fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount = 0
+        fallbackTailTransportEpochReauthorizationVerdict = 'none'
+        fallbackTailTransportEpochReauthorizationMissingRawCount = 0
+        fallbackTailTransportEpochReauthorizationMissingDistinctCount = 0
+        fallbackTailTransportEpochReauthorizationMissingRecoveredCount = 0
+        fallbackTailTransportEpochReauthorizationMissingUnresolvedCount = 0
         sessionLivenessTimeoutCount = 0
         bridgeLivenessStaleDeferralCount = 0
         bridgeLivenessTimeoutDuringValidRecoveryCount = 0
@@ -2247,6 +2252,11 @@ function Assert-Phase4RouteSummary {
     $Result.fallbackTailBridgeRecoveryGenerationMismatchDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'fallback_tail_bridge_recovery_generation_mismatch_distinct_count' -DefaultValue '0')
     $Result.fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'fallback_tail_bridge_recovery_generation_mismatch_recovered_count' -DefaultValue '0')
     $Result.fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'fallback_tail_bridge_recovery_generation_mismatch_unresolved_count' -DefaultValue '0')
+    $Result.fallbackTailTransportEpochReauthorizationVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_verdict' -DefaultValue 'none'
+    $Result.fallbackTailTransportEpochReauthorizationMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_raw_count' -DefaultValue '0')
+    $Result.fallbackTailTransportEpochReauthorizationMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count' -DefaultValue '0')
+    $Result.fallbackTailTransportEpochReauthorizationMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count' -DefaultValue '0')
+    $Result.fallbackTailTransportEpochReauthorizationMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count' -DefaultValue '0')
     $Result.bridgeLivenessStaleDeferralCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'bridge_liveness_stale_deferral_count' -DefaultValue '0')
     $Result.bridgeLivenessTimeoutDuringValidRecoveryCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'session_liveness_timeout_during_valid_recovery_count' -DefaultValue '0')
 
@@ -2445,6 +2455,11 @@ function Assert-Phase4OperatorVerdict {
     $Result.fallbackTailBridgeRecoveryGenerationMismatchDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'fallback_tail_bridge_recovery_generation_mismatch_distinct_count' -DefaultValue ([string]$Result.fallbackTailBridgeRecoveryGenerationMismatchDistinctCount))
     $Result.fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'fallback_tail_bridge_recovery_generation_mismatch_recovered_count' -DefaultValue ([string]$Result.fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount))
     $Result.fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'fallback_tail_bridge_recovery_generation_mismatch_unresolved_count' -DefaultValue ([string]$Result.fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount))
+    $Result.fallbackTailTransportEpochReauthorizationVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_verdict' -DefaultValue ([string]$Result.fallbackTailTransportEpochReauthorizationVerdict)
+    $Result.fallbackTailTransportEpochReauthorizationMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_raw_count' -DefaultValue ([string]$Result.fallbackTailTransportEpochReauthorizationMissingRawCount))
+    $Result.fallbackTailTransportEpochReauthorizationMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count' -DefaultValue ([string]$Result.fallbackTailTransportEpochReauthorizationMissingDistinctCount))
+    $Result.fallbackTailTransportEpochReauthorizationMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count' -DefaultValue ([string]$Result.fallbackTailTransportEpochReauthorizationMissingRecoveredCount))
+    $Result.fallbackTailTransportEpochReauthorizationMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count' -DefaultValue ([string]$Result.fallbackTailTransportEpochReauthorizationMissingUnresolvedCount))
     $Result.fallbackReceiverStateDeferredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'fallback_v6_receiver_state_deferred_count' -DefaultValue '0')
     $Result.fallbackReceiverStateCoalescedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'fallback_v6_receiver_state_coalesced_count' -DefaultValue '0')
     $firstProofClass = Get-RouteAcceptanceReportValue -Report $operator -Name 'first_proof_chain_failure_class' -DefaultValue '(none)'
@@ -6112,6 +6127,11 @@ function Write-Phase5PreflightFailureSummaryFiles {
         'fallback_tail_bridge_recovery_generation_mismatch_distinct_count=0',
         'fallback_tail_bridge_recovery_generation_mismatch_recovered_count=0',
         'fallback_tail_bridge_recovery_generation_mismatch_unresolved_count=0',
+        'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_verdict=none',
+        'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_raw_count=0',
+        'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count=0',
+        'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count=0',
+        'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count=0',
         ("baseline_manifest={0}" -f $BaselinePath),
         'correctness_gate_policy=strict_no_exceptions',
         'preflight_verdict=FAIL',
@@ -6181,6 +6201,11 @@ function Write-Phase5PreflightFailureSummaryFiles {
         fallbackTailBridgeRecoveryGenerationMismatchDistinctCount = 0
         fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount = 0
         fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount = 0
+        fallbackTailTransportEpochReauthorizationVerdict = 'none'
+        fallbackTailTransportEpochReauthorizationMissingRawCount = 0
+        fallbackTailTransportEpochReauthorizationMissingDistinctCount = 0
+        fallbackTailTransportEpochReauthorizationMissingRecoveredCount = 0
+        fallbackTailTransportEpochReauthorizationMissingUnresolvedCount = 0
         baselineManifest = $BaselinePath
         generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
         preflightVerdict = 'FAIL'
@@ -7697,6 +7722,11 @@ function New-RouteAcceptanceSummaryRunDto {
         fallbackTailBridgeRecoveryGenerationMismatchDistinctCount = [int]$Result.fallbackTailBridgeRecoveryGenerationMismatchDistinctCount
         fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount = [int]$Result.fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount
         fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount = [int]$Result.fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount
+        fallbackTailTransportEpochReauthorizationVerdict = [string]$Result.fallbackTailTransportEpochReauthorizationVerdict
+        fallbackTailTransportEpochReauthorizationMissingRawCount = [int]$Result.fallbackTailTransportEpochReauthorizationMissingRawCount
+        fallbackTailTransportEpochReauthorizationMissingDistinctCount = [int]$Result.fallbackTailTransportEpochReauthorizationMissingDistinctCount
+        fallbackTailTransportEpochReauthorizationMissingRecoveredCount = [int]$Result.fallbackTailTransportEpochReauthorizationMissingRecoveredCount
+        fallbackTailTransportEpochReauthorizationMissingUnresolvedCount = [int]$Result.fallbackTailTransportEpochReauthorizationMissingUnresolvedCount
         operatorVerdict = [string]$Result.operatorVerdict
         hardFailureCount = [int]$Result.hardFailureCount
         warningCount = [int]$Result.warningCount
@@ -7924,6 +7954,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $fallbackTailBridgeRecoveryGenerationMismatchDistinctCount = 0
     $fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount = 0
     $fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount = 0
+    $fallbackTailTransportEpochReauthorizationMissingRawCount = 0
+    $fallbackTailTransportEpochReauthorizationMissingDistinctCount = 0
+    $fallbackTailTransportEpochReauthorizationMissingRecoveredCount = 0
+    $fallbackTailTransportEpochReauthorizationMissingUnresolvedCount = 0
     $regularV4FrontierRepairMissingRangeNotPreservedRawCount = 0
     $regularV4FrontierRepairMissingRangeNotPreservedDistinctCount = 0
     $regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount = 0
@@ -8000,6 +8034,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $fallbackTailBridgeRecoveryGenerationMismatchDistinctCount += [int]$runDto.fallbackTailBridgeRecoveryGenerationMismatchDistinctCount
         $fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount += [int]$runDto.fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount
         $fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount += [int]$runDto.fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount
+        $fallbackTailTransportEpochReauthorizationMissingRawCount += [int]$runDto.fallbackTailTransportEpochReauthorizationMissingRawCount
+        $fallbackTailTransportEpochReauthorizationMissingDistinctCount += [int]$runDto.fallbackTailTransportEpochReauthorizationMissingDistinctCount
+        $fallbackTailTransportEpochReauthorizationMissingRecoveredCount += [int]$runDto.fallbackTailTransportEpochReauthorizationMissingRecoveredCount
+        $fallbackTailTransportEpochReauthorizationMissingUnresolvedCount += [int]$runDto.fallbackTailTransportEpochReauthorizationMissingUnresolvedCount
         $regularV4FrontierRepairMissingRangeNotPreservedRawCount += [int]$runDto.regularV4FrontierRepairMissingRangeNotPreservedRawCount
         $regularV4FrontierRepairMissingRangeNotPreservedDistinctCount += [int]$runDto.regularV4FrontierRepairMissingRangeNotPreservedDistinctCount
         $regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount += [int]$runDto.regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount
@@ -8217,6 +8255,19 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     else {
         'none'
     }
+    $fallbackTailTransportEpochReauthorizationVerdict = if (
+        $fallbackTailTransportEpochReauthorizationMissingUnresolvedCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.fallbackTailTransportEpochReauthorizationVerdict -eq 'fail' }).Count -gt 0) {
+        'fail'
+    }
+    elseif (
+        $fallbackTailTransportEpochReauthorizationMissingDistinctCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.fallbackTailTransportEpochReauthorizationVerdict -eq 'pass' }).Count -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
+    }
 
     $failureLines = @()
     foreach ($result in $runDtos) {
@@ -8373,6 +8424,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("fallback_tail_bridge_recovery_generation_mismatch_distinct_count={0}" -f $fallbackTailBridgeRecoveryGenerationMismatchDistinctCount),
         ("fallback_tail_bridge_recovery_generation_mismatch_recovered_count={0}" -f $fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount),
         ("fallback_tail_bridge_recovery_generation_mismatch_unresolved_count={0}" -f $fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_verdict={0}" -f $fallbackTailTransportEpochReauthorizationVerdict),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_raw_count={0}" -f $fallbackTailTransportEpochReauthorizationMissingRawCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count={0}" -f $fallbackTailTransportEpochReauthorizationMissingDistinctCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count={0}" -f $fallbackTailTransportEpochReauthorizationMissingRecoveredCount),
+        ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count={0}" -f $fallbackTailTransportEpochReauthorizationMissingUnresolvedCount),
         ("baseline_manifest={0}" -f $BaselinePath),
         ("goodput_regression_tolerance_percent={0:F1}" -f [double]$GoodputRegressionTolerancePercent),
         'correctness_gate_policy=strict_no_exceptions',
@@ -8410,6 +8466,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.fallback_tail_bridge_recovery_generation_mismatch_distinct_count={1}" -f $prefix, $result.fallbackTailBridgeRecoveryGenerationMismatchDistinctCount)
         $textLines += ("{0}.fallback_tail_bridge_recovery_generation_mismatch_recovered_count={1}" -f $prefix, $result.fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount)
         $textLines += ("{0}.fallback_tail_bridge_recovery_generation_mismatch_unresolved_count={1}" -f $prefix, $result.fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount)
+        $textLines += ("{0}.post_tuna_fallback_paired_yield_transport_epoch_reauthorization_verdict={1}" -f $prefix, $result.fallbackTailTransportEpochReauthorizationVerdict)
+        $textLines += ("{0}.post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_raw_count={1}" -f $prefix, $result.fallbackTailTransportEpochReauthorizationMissingRawCount)
+        $textLines += ("{0}.post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count={1}" -f $prefix, $result.fallbackTailTransportEpochReauthorizationMissingDistinctCount)
+        $textLines += ("{0}.post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count={1}" -f $prefix, $result.fallbackTailTransportEpochReauthorizationMissingRecoveredCount)
+        $textLines += ("{0}.post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count={1}" -f $prefix, $result.fallbackTailTransportEpochReauthorizationMissingUnresolvedCount)
         $textLines += ("{0}.operator_verdict={1}" -f $prefix, $result.operatorVerdict)
         $textLines += ("{0}.hard_failure_count={1}" -f $prefix, $result.hardFailureCount)
         $textLines += ("{0}.warning_count={1}" -f $prefix, $result.warningCount)
@@ -8724,6 +8785,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         fallbackTailBridgeRecoveryGenerationMismatchDistinctCount = $fallbackTailBridgeRecoveryGenerationMismatchDistinctCount
         fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount = $fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount
         fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount = $fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount
+        fallbackTailTransportEpochReauthorizationVerdict = $fallbackTailTransportEpochReauthorizationVerdict
+        fallbackTailTransportEpochReauthorizationMissingRawCount = $fallbackTailTransportEpochReauthorizationMissingRawCount
+        fallbackTailTransportEpochReauthorizationMissingDistinctCount = $fallbackTailTransportEpochReauthorizationMissingDistinctCount
+        fallbackTailTransportEpochReauthorizationMissingRecoveredCount = $fallbackTailTransportEpochReauthorizationMissingRecoveredCount
+        fallbackTailTransportEpochReauthorizationMissingUnresolvedCount = $fallbackTailTransportEpochReauthorizationMissingUnresolvedCount
         baselineManifest = $BaselinePath
         generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
         goodputRegressionTolerancePercent = $GoodputRegressionTolerancePercent

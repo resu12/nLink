@@ -5294,6 +5294,37 @@ public sealed partial class SessionFileTransferService
                 context.CurrentFallbackFrontierRepairContract,
                 fallbackFrontierContractHandoff) &&
             !fallbackFrontierContractHandoff.Lifecycle.IsSettled;
+        var fallbackTailYieldReauthorizationExpected =
+            context.RequiredFallbackTailYieldTransportEpochReauthorization is
+            {
+                TargetTransportEpoch: var requiredTransportEpoch,
+            } &&
+            requiredTransportEpoch == epoch!.EpochId;
+        var fallbackTailYieldReauthorizationRequired =
+            IsFallbackTailYieldTransportEpochReauthorizationRequiredLocked(
+                context,
+                epoch!.EpochId);
+        if (fallbackTailYieldReauthorizationExpected)
+        {
+            if (!fallbackTailYieldReauthorizationRequired ||
+                context.PendingFallbackTailYieldTransportEpochReauthorization is null ||
+                !TryMarkOutboundFallbackTailLocalYieldFromCurrentLegLocked(
+                    context,
+                    "transport_epoch_reauthorization",
+                    allowCurrentTransportEpochRecoveryHandoff: true))
+            {
+                return false;
+            }
+        }
+        else
+        {
+            AcceptOutboundFallbackCheckpointAtTransportEpochCompletionLocked(
+                context,
+                epoch,
+                observedHighestChunkIndex,
+                reason);
+        }
+
         if (!preserveFallbackFrontierContractForHandoff)
         {
             SettleAndClearFallbackFrontierRepairContractLocked(
@@ -5335,52 +5366,6 @@ public sealed partial class SessionFileTransferService
         ClearOutboundFallbackCheckpointDeliveryRecoveryPendingLocked(
             context,
             $"transport_epoch_completed_{reason}");
-        if (epoch.Kind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
-            epoch.TargetTransport == FileTransferTransportKind.RegularNkn &&
-            IsCurrentPostTunaFallbackLegCheckpointPending(context.CurrentTransferLeg))
-        {
-            var leg = context.CurrentTransferLeg!;
-            var checkpointRequestId = leg.CheckpointRequestId;
-            if (!string.IsNullOrWhiteSpace(checkpointRequestId))
-            {
-                RememberRetiredFallbackCheckpointRequest(
-                    context.RetiredFallbackCheckpointRequestKeys,
-                    leg,
-                    epoch.EpochId,
-                    checkpointRequestId);
-            }
-
-            var acceptedReason = $"transport_epoch_completed_{reason}";
-            if (TryAcceptOutboundFallbackCheckpointWithCoordinatorLocked(
-                    context,
-                    leg,
-                    epoch.EpochId,
-                    Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, Math.Max(0, context.ChunkCount)),
-                    observedHighestChunkIndex,
-                    checkpointRequestId,
-                    acceptedReason))
-            {
-                ClearOutboundFallbackCheckpointRetryStateLocked(
-                    context,
-                    checkpointRequestId,
-                    acceptedReason);
-                LogFileTransferFallbackCheckpointAccepted(
-                    FileTransferDirection.Outbound,
-                    context.TransferId,
-                    context.SessionId,
-                    leg,
-                    checkpointRequestId ?? "(none)",
-                    acceptedReason);
-                LogFileTransferFallbackLegAuthorityCheckpointAccepted(
-                    FileTransferDirection.Outbound,
-                    context.TransferId,
-                    context.SessionId,
-                    leg,
-                    checkpointRequestId,
-                    acceptedReason);
-            }
-        }
-
         context.PullTransportRebindGeneration = 0;
         context.PullTransportLastSafetyReplayGeneration = 0;
         context.PullTransportLastSafetyReplayFrontierChunkIndex = -1;
@@ -5453,6 +5438,36 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        var fallbackTailYieldReauthorizationExpected =
+            context.RequiredFallbackTailYieldTransportEpochReauthorization is
+            {
+                TargetTransportEpoch: var requiredTransportEpoch,
+            } &&
+            requiredTransportEpoch == epoch!.EpochId;
+        var fallbackTailYieldReauthorizationRequired =
+            IsFallbackTailYieldTransportEpochReauthorizationRequiredLocked(
+                context,
+                epoch!.EpochId);
+        if (fallbackTailYieldReauthorizationExpected)
+        {
+            if (!fallbackTailYieldReauthorizationRequired ||
+                context.PendingFallbackTailYieldTransportEpochReauthorization is null ||
+                !TryMarkInboundFallbackTailLocalYieldFromCurrentLegLocked(
+                    context,
+                    "transport_epoch_reauthorization",
+                    allowCurrentTransportEpochRecoveryHandoff: true))
+            {
+                return false;
+            }
+        }
+        else
+        {
+            AcceptInboundFallbackCheckpointAtTransportEpochCompletionLocked(
+                context,
+                epoch,
+                reason);
+        }
+
         SettleAndClearFallbackFrontierRepairContractLocked(
             context,
             FallbackFrontierRepairSettlementOutcome.StaleRejected,
@@ -5486,48 +5501,6 @@ public sealed partial class SessionFileTransferService
             reason,
             context.NextChunkIndex,
             context.PullHighestReceivedChunkIndex);
-        if (epoch.Kind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
-            epoch.TargetTransport == FileTransferTransportKind.RegularNkn &&
-            IsCurrentPostTunaFallbackLegCheckpointPending(context.CurrentTransferLeg))
-        {
-            var leg = context.CurrentTransferLeg!;
-            var checkpointRequestId = leg.CheckpointRequestId;
-            if (!string.IsNullOrWhiteSpace(checkpointRequestId))
-            {
-                RememberRetiredFallbackCheckpointRequest(
-                    context.RetiredFallbackCheckpointRequestKeys,
-                    leg,
-                    epoch.EpochId,
-                    checkpointRequestId);
-            }
-
-            var acceptedReason = $"transport_epoch_completed_{reason}";
-            if (TryAcceptInboundFallbackCheckpointWithCoordinatorLocked(
-                    context,
-                    leg,
-                    epoch.EpochId,
-                    Math.Clamp(context.NextChunkIndex, 0, Math.Max(0, context.ChunkCount)),
-                    context.PullHighestReceivedChunkIndex,
-                    checkpointRequestId,
-                    acceptedReason))
-            {
-                LogFileTransferFallbackCheckpointAccepted(
-                    FileTransferDirection.Inbound,
-                    context.TransferId,
-                    context.SessionId,
-                    leg,
-                    checkpointRequestId ?? "(none)",
-                    acceptedReason);
-                LogFileTransferFallbackLegAuthorityCheckpointAccepted(
-                    FileTransferDirection.Inbound,
-                    context.TransferId,
-                    context.SessionId,
-                    leg,
-                    checkpointRequestId,
-                    acceptedReason);
-            }
-        }
-
         context.PullTransportRebindGeneration = 0;
         context.StatusMessage = GetInboundResumeStatusMessage(context.State);
         if ((epoch.Kind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
@@ -5558,6 +5531,115 @@ public sealed partial class SessionFileTransferService
         }
 
         return true;
+    }
+
+    private static void AcceptOutboundFallbackCheckpointAtTransportEpochCompletionLocked(
+        OutboundTransferContext context,
+        V6TransportEpoch epoch,
+        int observedHighestChunkIndex,
+        string reason)
+    {
+        if (epoch.Kind != FileTransferTransportHandoffKind.TunaToNormalFallback ||
+            epoch.TargetTransport != FileTransferTransportKind.RegularNkn ||
+            !IsCurrentPostTunaFallbackLegCheckpointPending(context.CurrentTransferLeg))
+        {
+            return;
+        }
+
+        var leg = context.CurrentTransferLeg!;
+        var checkpointRequestId = leg.CheckpointRequestId;
+        if (!string.IsNullOrWhiteSpace(checkpointRequestId))
+        {
+            RememberRetiredFallbackCheckpointRequest(
+                context.RetiredFallbackCheckpointRequestKeys,
+                leg,
+                epoch.EpochId,
+                checkpointRequestId);
+        }
+
+        var acceptedReason = $"transport_epoch_completed_{reason}";
+        if (!TryAcceptOutboundFallbackCheckpointWithCoordinatorLocked(
+                context,
+                leg,
+                epoch.EpochId,
+                Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, Math.Max(0, context.ChunkCount)),
+                observedHighestChunkIndex,
+                checkpointRequestId,
+                acceptedReason))
+        {
+            return;
+        }
+
+        ClearOutboundFallbackCheckpointRetryStateLocked(
+            context,
+            checkpointRequestId,
+            acceptedReason);
+        LogFileTransferFallbackCheckpointAccepted(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            leg,
+            checkpointRequestId ?? "(none)",
+            acceptedReason);
+        LogFileTransferFallbackLegAuthorityCheckpointAccepted(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            leg,
+            checkpointRequestId,
+            acceptedReason);
+    }
+
+    private static void AcceptInboundFallbackCheckpointAtTransportEpochCompletionLocked(
+        InboundTransferContext context,
+        V6TransportEpoch epoch,
+        string reason)
+    {
+        if (epoch.Kind != FileTransferTransportHandoffKind.TunaToNormalFallback ||
+            epoch.TargetTransport != FileTransferTransportKind.RegularNkn ||
+            !IsCurrentPostTunaFallbackLegCheckpointPending(context.CurrentTransferLeg))
+        {
+            return;
+        }
+
+        var leg = context.CurrentTransferLeg!;
+        var checkpointRequestId = leg.CheckpointRequestId;
+        if (!string.IsNullOrWhiteSpace(checkpointRequestId))
+        {
+            RememberRetiredFallbackCheckpointRequest(
+                context.RetiredFallbackCheckpointRequestKeys,
+                leg,
+                epoch.EpochId,
+                checkpointRequestId);
+        }
+
+        var acceptedReason = $"transport_epoch_completed_{reason}";
+        if (!TryAcceptInboundFallbackCheckpointWithCoordinatorLocked(
+                context,
+                leg,
+                epoch.EpochId,
+                Math.Clamp(context.NextChunkIndex, 0, Math.Max(0, context.ChunkCount)),
+                context.PullHighestReceivedChunkIndex,
+                checkpointRequestId,
+                acceptedReason))
+        {
+            return;
+        }
+
+        LogFileTransferFallbackCheckpointAccepted(
+            FileTransferDirection.Inbound,
+            context.TransferId,
+            context.SessionId,
+            leg,
+            checkpointRequestId ?? "(none)",
+            acceptedReason);
+        LogFileTransferFallbackLegAuthorityCheckpointAccepted(
+            FileTransferDirection.Inbound,
+            context.TransferId,
+            context.SessionId,
+            leg,
+            checkpointRequestId,
+            acceptedReason);
     }
 
     private static bool TryRetireOutboundV6TransportHandoffAfterEpochRecoveryLocked(
