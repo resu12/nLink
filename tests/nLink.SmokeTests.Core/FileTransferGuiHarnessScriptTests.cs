@@ -9,6 +9,7 @@ namespace NLink.SmokeTests;
 
 [Trait("Area", "Core")]
 [Trait("OpsSuite", "GuiHarness")]
+[Trait("FileTransferEvidenceSuite", "OperationalLogIntegrity")]
 [Collection(FakeNknNetworkCollection.Name)]
 public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTestBase
 {
@@ -728,7 +729,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                         [IO.File]::AppendAllText($currentError, 'event=operational_log_write_failed; log_writer_id=writer-current; log_writer_sequence=4; failure_code=mutex_timeout' + $nl, $utf8)
                     }
                 $ledger = Get-Content -LiteralPath (Join-Path $artifactDir 'filetransfer-gui-log-ledger.json') -Raw | ConvertFrom-Json
-                if ($ledger.writerEvidenceVersion -ne 1 -or
+                if ($ledger.writerEvidenceVersion -ne 2 -or
                     $ledger.writerWriteFailureCount -ne 1 -or
                     $ledger.writerIntegrityVerdict -ne 'fail' -or
                     $ledger.cursorIntegrityVerdict -ne 'fail') {
@@ -771,6 +772,41 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     $missingLedger.cursorIntegrityVerdict -ne 'fail' -or
                     @($missingLedger.writerIntegrityReasons | Where-Object { $_ -like 'writer_output_registered_file_missing:*' }).Count -ne 1) {
                     throw 'one missing registered output file did not fail otherwise-valid writer evidence'
+                }
+
+                $recoveredArtifactDir = Join-Path $tempRoot 'current-recovered'
+                $recoveredOutputRoot = Join-Path $recoveredArtifactDir 'process-output'
+                [void][IO.Directory]::CreateDirectory($recoveredOutputRoot)
+                $script:testLogPath = Join-Path $tempRoot 'recovered-nlink.log'
+                $recoveredStart = '[app] event=operational_log_writer_started; acceptance_run_id=run-current; scenario_run_id=run-current:scenario:1; log_writer_id=writer-current; log_writer_sequence=1; log_writer_batch_generation=1; log_writer_batch_first_sequence=1; log_writer_batch_last_sequence=1; log_writer_attempt_utc_ticks=100'
+                [IO.File]::WriteAllText($script:testLogPath, $recoveredStart + $nl, $utf8)
+                $script:GuiSmokeAppLogLedger = New-GuiSmokeLogLedgerState
+                Sync-GuiSmokeAppLogLedger
+                $recoveredBookmark = Get-GuiSmokeLogLedgerBookmark -State $script:GuiSmokeAppLogLedger
+                $recoveredInitial = Get-GuiSmokeLogLedgerSnapshot -State $script:GuiSmokeAppLogLedger -Bookmark $recoveredBookmark
+                Set-GuiSmokeLogLedgerWriterEvidenceBookmark -State $script:GuiSmokeAppLogLedger -Bookmark $recoveredBookmark
+                $recoveredPayload = '[app] event=after; log_writer_id=writer-current; log_writer_sequence=2; log_writer_batch_generation=2; log_writer_batch_first_sequence=2; log_writer_batch_last_sequence=2; log_writer_attempt_utc_ticks=200'
+                $recoveredDrain = '[app] event=operational_log_writer_drained; acceptance_run_id=run-current; scenario_run_id=run-current:scenario:1; last_payload_sequence=2; log_writer_id=writer-current; log_writer_sequence=3; log_writer_batch_generation=3; log_writer_batch_first_sequence=3; log_writer_batch_last_sequence=3; log_writer_attempt_utc_ticks=300'
+                [IO.File]::AppendAllText($script:testLogPath, $recoveredPayload + $nl + $recoveredDrain + $nl, $utf8)
+                $payloadHash = Get-GuiSmokeLogLedgerHash -Value $recoveredPayload
+                $recoveredError = Join-Path $recoveredOutputRoot 'helper.stderr.log'
+                $deferred = 'event=operational_log_write_deferred; acceptance_run_id=run-current; scenario_run_id=run-current:scenario:1; log_writer_id=writer-current; batch_generation=2; first_sequence=2; last_sequence=2; line_count=1; payload_sha256=' + $payloadHash + '; attempt_utc_ticks=200; attempt_count=1; failure_code=mutex_timeout'
+                $recovered = 'event=operational_log_write_recovered; acceptance_run_id=run-current; scenario_run_id=run-current:scenario:1; log_writer_id=writer-current; batch_generation=2; first_sequence=2; last_sequence=2; line_count=1; payload_sha256=' + $payloadHash + '; attempt_utc_ticks=200; attempt_count=2; failure_code=none'
+                [IO.File]::WriteAllText($recoveredError, $deferred + $nl + $recovered + $nl, $utf8)
+                $script:GuiSmokeProcessOutputFiles = [Collections.Generic.List[string]]::new()
+                $script:GuiSmokeProcessOutputFiles.Add($recoveredError)
+                Write-FileTransferGuiLogLedgerEvidence `
+                    -ArtifactDir $recoveredArtifactDir `
+                    -Bookmark $recoveredBookmark `
+                    -InitialSnapshot $recoveredInitial
+                $recoveredLedger = Get-Content -LiteralPath (Join-Path $recoveredArtifactDir 'filetransfer-gui-log-ledger.json') -Raw | ConvertFrom-Json
+                if ($recoveredLedger.writerDeferredBatchCount -ne 1 -or
+                    $recoveredLedger.writerRecoveredBatchCount -ne 1 -or
+                    $recoveredLedger.writerUnresolvedDeferredBatchCount -ne 0 -or
+                    $recoveredLedger.writerDrainMissingCount -ne 0 -or
+                    $recoveredLedger.writerRecoveryVerdict -ne 'pass' -or
+                    $recoveredLedger.writerIntegrityVerdict -ne 'pass') {
+                    throw 'exact recovered writer batch and final drain did not pass v2 writer evidence'
                 }
                 Write-Output 'gui-log-ledger-marker-ok'
             }

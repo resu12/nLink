@@ -11,6 +11,7 @@ namespace NLink.SmokeTests;
 [Trait("Area", "Core")]
 [Trait("OpsSuite", "AcceptancePhase5Fast")]
 [Trait("AcceptancePhase5Suite", "SummaryWriter")]
+[Trait("FileTransferEvidenceSuite", "OperationalLogIntegrity")]
 [Collection(FakeNknNetworkCollection.Name)]
 public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptancePhase5TestBase
 {
@@ -1066,7 +1067,7 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.True(root.GetProperty("harness").GetProperty("hashStable").GetBoolean());
             Assert.True(root.GetProperty("bridge").GetProperty("hashStable").GetBoolean());
             var ledgerEvidence = root.GetProperty("scenarioAttempts")[0].GetProperty("logLedger");
-            Assert.Equal(1, ledgerEvidence.GetProperty("writerEvidenceVersion").GetInt64());
+            Assert.Equal(2, ledgerEvidence.GetProperty("writerEvidenceVersion").GetInt64());
             Assert.Equal("PASS", ledgerEvidence.GetProperty("writerIntegrityVerdict").GetString());
             Assert.Equal("pass", ledgerEvidence.GetProperty("producerWriterIntegrityVerdict").GetString());
 

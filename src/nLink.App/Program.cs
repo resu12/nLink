@@ -3,6 +3,7 @@ using System.Linq;
 using System.Threading;
 using Avalonia;
 using NLink.App.Configuration;
+using NLink.Core.Logging;
 
 namespace NLink.App;
 
@@ -10,6 +11,18 @@ sealed class Program
 {
     [STAThread]
     public static void Main(string[] args)
+    {
+        try
+        {
+            MainCore(args);
+        }
+        finally
+        {
+            _ = LocalOperationalLog.CompleteAndFlush(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    private static void MainCore(string[] args)
     {
         AppStartupTelemetry.Mark("app_startup_program_main_entered");
 

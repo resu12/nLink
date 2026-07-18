@@ -3,6 +3,7 @@ namespace NLink.SmokeTests;
 [Trait("Area", "Core")]
 [Trait("OpsSuite", "AcceptancePhase5Fast")]
 [Trait("AcceptancePhase5Suite", "Provenance")]
+[Trait("FileTransferEvidenceSuite", "OperationalLogIntegrity")]
 [Collection(FakeNknNetworkCollection.Name)]
 public sealed class FileTransferPhase5ProvenanceTests : FileTransferOpsScriptsTestBase
 {
@@ -341,7 +342,7 @@ $fixture = New-EvidenceFixture -Name 'cursor'
 $valid = Get-RouteAcceptanceCursorEvidence -LogLedger $fixture.LedgerPath -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
 Assert-Equal $valid.verdict 'PASS' 'valid rotated cursor verdict'
 Assert-Equal $valid.rotationCount 2 'rotation count'
-Assert-Equal $valid.writerEvidenceVersion 1 'writer evidence version'
+Assert-Equal $valid.writerEvidenceVersion 2 'writer evidence version'
 Assert-Equal $valid.writerIntegrityVerdict 'PASS' 'writer integrity verdict'
 
 $ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
@@ -363,6 +364,24 @@ $ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
 $ledger.writerIdentityMismatchCount = 1
 $writerMismatch = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
 Assert-Contains $writerMismatch.reasons 'cursor_writer_identity_mismatch' 'writer identity mismatch reason'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.writerDeferredBatchCount = 1
+$ledger.writerDeferredLineCount = 2
+$ledger.writerUnresolvedDeferredBatchCount = 1
+$ledger.writerUnresolvedDeferredLineCount = 2
+$writerDeferred = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $writerDeferred.reasons 'cursor_writer_deferred_unresolved' 'unresolved deferred writer batch reason'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.writerChronologyInversionCount = 1
+$writerChronology = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $writerChronology.reasons 'cursor_writer_chronology_inversion' 'writer chronology inversion reason'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.writerDrainMissingCount = 1
+$writerDrain = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $writerDrain.reasons 'cursor_writer_drain_missing' 'writer drain missing reason'
 
 $ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
 $ledger.final.writers[0].acceptanceRunId = 'wrong-run'
@@ -638,11 +657,24 @@ function New-EvidenceFixture {
         transientRescanCount = 0
         gapCount = 0
         duplicateIndexCount = 0
-        writerEvidenceVersion = 1
+        writerEvidenceVersion = 2
         writerGapCount = 0
         writerDuplicateCount = 0
         writerIdentityMismatchCount = 0
         writerWriteFailureCount = 0
+        writerDeferredBatchCount = 0
+        writerDeferredLineCount = 0
+        writerRecoveredBatchCount = 0
+        writerRecoveredLineCount = 0
+        writerUnresolvedDeferredBatchCount = 0
+        writerUnresolvedDeferredLineCount = 0
+        writerTerminalFailureCount = 0
+        writerRecoveryMismatchCount = 0
+        writerChronologyInversionCount = 0
+        writerChronologyCollisionCount = 0
+        writerDrainMissingCount = 0
+        writerRecoveryVerdict = 'PASS'
+        writerChronologyVerdict = 'PASS'
         writerIntegrityVerdict = 'PASS'
         writerIntegrityReasons = @()
         writerFailureMarkerFiles = @([ordered]@{
@@ -650,6 +682,25 @@ function New-EvidenceFixture {
             sha256 = Get-RouteAcceptanceEvidenceSha256 -Path $writerFailureMarkerPath
             markerCount = 0
         })
+        writerMarkerFiles = @([ordered]@{
+            path = $writerFailureMarkerPath
+            sha256 = Get-RouteAcceptanceEvidenceSha256 -Path $writerFailureMarkerPath
+            deferredMarkerCount = 0
+            recoveredMarkerCount = 0
+            terminalFailureMarkerCount = 0
+        })
+        writerDeferredBatches = @()
+        writerDrains = @([ordered]@{
+            writerId = $writer.writerId
+            drainSequence = $writer.lastSequence
+            lastPayloadSequence = ($writer.lastSequence - 1)
+            valid = $true
+        })
+        writerEvidenceSlice = [ordered]@{
+            path = $slicePath
+            sha256 = $sliceHash
+            lineCount = 2
+        }
         consumedIndexCount = 2
         consumedIndexSha256 = Get-RouteAcceptanceEvidenceTextSha256 -Value ((@("gen-1`n0", "gen-2`n0") | Sort-Object) -join [char]31)
         consumedIndexRanges = @(

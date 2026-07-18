@@ -68,6 +68,11 @@ public sealed class RollingFileLogger
         {
             lock (gate)
             {
+                if (crossProcessMutex is null)
+                {
+                    return RollingFileWriteResult.Failed("mutex_unavailable");
+                }
+
                 if (!TryAcquireCrossProcessMutex(out var mutexHeld))
                 {
                     return RollingFileWriteResult.Failed("mutex_timeout");

@@ -1,4 +1,6 @@
 using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
 using NLink.Core.SessionConnect;
 
 namespace NLink.Core.Logging;
@@ -8,10 +10,14 @@ public static class LocalOperationalLog
     private const int RecentEntryCapacity = 512;
     private static readonly object Gate = new();
     private static readonly RollingFileLogger Logger = new(GetDefaultLogPath());
+    private static readonly OrderedOperationalLogWritePump WritePump = new(Logger, WriteMarkerToStandardError);
     private static readonly Queue<string> RecentEntries = new();
     private static readonly string WriterId = CreateWriterId();
     private static long writerSequence;
+    private static long writerBatchGeneration;
+    private static long lastAttemptUtcTicks;
     private static bool writerStartAttempted;
+    private static bool writerCompletionAttempted;
 
     public static string LogsDirectoryPath => Logger.LogsDirectoryPath;
 
@@ -76,6 +82,16 @@ public static class LocalOperationalLog
     }
 
     private static void TryWritePersistedEntryLocked(string line)
+        => _ = TryWritePersistedEntryLocked(line, isDrain: false);
+
+    private static OperationalLogWriteBatch TryWritePersistedEntryLocked(string line, bool isDrain)
+    {
+        var batch = CreatePersistedEntryBatchLocked(line, isDrain);
+        _ = WritePump.Submit(batch);
+        return batch;
+    }
+
+    private static OperationalLogWriteBatch CreatePersistedEntryBatchLocked(string line, bool isDrain)
     {
         var physicalLines = line
             .Replace("\r\n", "\n", StringComparison.Ordinal)
@@ -83,30 +99,42 @@ public static class LocalOperationalLog
             .Split('\n');
         var lastSequence = Interlocked.Add(ref writerSequence, physicalLines.Length);
         var firstSequence = lastSequence - physicalLines.Length + 1;
+        var batchGeneration = Interlocked.Increment(ref writerBatchGeneration);
+        var utcTicks = DateTimeOffset.UtcNow.UtcTicks;
+        var attemptUtcTicks = Math.Max(utcTicks, lastAttemptUtcTicks + 1L);
+        lastAttemptUtcTicks = attemptUtcTicks;
         var persistedLines = new string[physicalLines.Length];
         for (var index = 0; index < physicalLines.Length; index++)
         {
             persistedLines[index] =
-                $"{physicalLines[index]}; log_writer_id={WriterId}; log_writer_sequence={firstSequence + index}";
+                $"{physicalLines[index]}; log_writer_id={WriterId}; log_writer_sequence={firstSequence + index}" +
+                $"; log_writer_batch_generation={batchGeneration}" +
+                $"; log_writer_batch_first_sequence={firstSequence}" +
+                $"; log_writer_batch_last_sequence={lastSequence}" +
+                $"; log_writer_attempt_utc_ticks={attemptUtcTicks}";
         }
 
-        var result = Logger.TryWriteLine(string.Join(Environment.NewLine, persistedLines));
-        if (result.Success)
-        {
-            return;
-        }
-
-        for (var sequence = firstSequence; sequence <= lastSequence; sequence++)
-        {
-            TryWriteFailureMarkerToStandardError(sequence, result.FailureCode);
-        }
+        var persistedText = string.Join(Environment.NewLine, persistedLines);
+        var canonicalText = string.Join("\n", persistedLines);
+        return new OperationalLogWriteBatch(
+            GetEnvironmentEvidenceValue("NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID"),
+            GetEnvironmentEvidenceValue("NLINK_FILETRANSFER_SCENARIO_RUN_ID"),
+            WriterId,
+            batchGeneration,
+            firstSequence,
+            lastSequence,
+            attemptUtcTicks,
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonicalText))).ToLowerInvariant(),
+            persistedText,
+            Encoding.UTF8.GetByteCount(persistedText),
+            isDrain);
     }
 
-    private static void TryWriteFailureMarkerToStandardError(long sequence, string failureCode)
+    private static void WriteMarkerToStandardError(OperationalLogWriteMarker marker)
     {
         try
         {
-            Console.Error.WriteLine(FormatWriteFailureMarker(WriterId, sequence, failureCode));
+            Console.Error.WriteLine(FormatWriteMarker(marker));
         }
         catch
         {
@@ -120,9 +148,55 @@ public static class LocalOperationalLog
            $"; log_writer_sequence={sequence}" +
            $"; failure_code={failureCode}";
 
+    internal static string FormatWriteMarker(OperationalLogWriteMarker marker)
+    {
+        var eventName = marker.Kind switch
+        {
+            OperationalLogWriteMarkerKind.Deferred => "operational_log_write_deferred",
+            OperationalLogWriteMarkerKind.Recovered => "operational_log_write_recovered",
+            _ => "operational_log_write_failed",
+        };
+        var batch = marker.Batch;
+        return $"event={eventName}" +
+               $"; acceptance_run_id={batch.AcceptanceRunId}" +
+               $"; scenario_run_id={batch.ScenarioRunId}" +
+               $"; log_writer_id={batch.WriterId}" +
+               $"; batch_generation={batch.BatchGeneration}" +
+               $"; first_sequence={batch.FirstSequence}" +
+               $"; last_sequence={batch.LastSequence}" +
+               $"; line_count={batch.LastSequence - batch.FirstSequence + 1L}" +
+               $"; payload_sha256={batch.PayloadSha256}" +
+               $"; attempt_utc_ticks={batch.AttemptUtcTicks}" +
+               $"; attempt_count={marker.AttemptCount}" +
+               $"; failure_code={marker.FailureCode}";
+    }
+
     internal static string WriterIdForTests => WriterId;
 
     internal static long WriterSequenceForTests => Volatile.Read(ref writerSequence);
+
+    internal static bool CompleteAndFlush(TimeSpan timeout)
+    {
+        lock (Gate)
+        {
+            if (writerCompletionAttempted)
+            {
+                return WritePump.FlushThroughSequence(writerSequence, timeout);
+            }
+
+            writerCompletionAttempted = true;
+            EnsureWriterStartAttemptedLocked();
+            var lastPayloadSequence = writerSequence;
+            var message =
+                "event=operational_log_writer_drained" +
+                $"; acceptance_run_id={GetEnvironmentEvidenceValue("NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID")}" +
+                $"; scenario_run_id={GetEnvironmentEvidenceValue("NLINK_FILETRANSFER_SCENARIO_RUN_ID")}" +
+                $"; last_payload_sequence={lastPayloadSequence}";
+            var line = $"[{DateTimeOffset.UtcNow:yyyy-MM-dd HH:mm:ss'Z'}] [INFO] [OperationalLog] {message}";
+            var drainBatch = CreatePersistedEntryBatchLocked(line, isDrain: true);
+            return WritePump.CompleteAndFlush(drainBatch, timeout);
+        }
+    }
 
     public static string GetRecentLogText()
     {
@@ -134,18 +208,34 @@ public static class LocalOperationalLog
 
     internal static bool TryReadRetainedSlice(string startToken, string endToken, out string slice)
     {
+        long targetSequence;
         lock (Gate)
         {
-            return Logger.TryReadRetainedSlice(startToken, endToken, out slice);
+            targetSequence = writerSequence;
         }
+        if (!WritePump.FlushThroughSequence(targetSequence, TimeSpan.FromSeconds(5)))
+        {
+            slice = string.Empty;
+            return false;
+        }
+
+        return Logger.TryReadRetainedSlice(startToken, endToken, out slice);
     }
 
     internal static bool TryReadRetainedTail(string startToken, out string tail)
     {
+        long targetSequence;
         lock (Gate)
         {
-            return Logger.TryReadRetainedTail(startToken, out tail);
+            targetSequence = writerSequence;
         }
+        if (!WritePump.FlushThroughSequence(targetSequence, TimeSpan.FromSeconds(5)))
+        {
+            tail = string.Empty;
+            return false;
+        }
+
+        return Logger.TryReadRetainedTail(startToken, out tail);
     }
 
     private static string GetDefaultLogPath()

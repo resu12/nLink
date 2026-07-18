@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.RegularExpressions;
 using NLink.Core.Logging;
@@ -5,9 +6,11 @@ using NLink.Core.Logging;
 namespace NLink.SmokeTests;
 
 [Trait("Area", "Core")]
+[Collection(FakeNknNetworkCollection.Name)]
 public sealed class RollingFileLoggerIntegrityTests
 {
     [Fact]
+    [Trait("FileTransferEvidenceSuite", "OperationalLogIntegrity")]
     public async Task RollingFileLogger_IndependentInstancesSerializeRotationAndAppend()
     {
         var directory = CreateTemporaryDirectory("concurrent");
@@ -49,6 +52,7 @@ public sealed class RollingFileLoggerIntegrityTests
     }
 
     [Fact]
+    [Trait("FileTransferEvidenceSuite", "OperationalLogIntegrity")]
     public void RollingFileLogger_NormalizedEquivalentPathsShareOneMutexIdentity()
     {
         var directory = CreateTemporaryDirectory("mutex-identity");
@@ -69,6 +73,7 @@ public sealed class RollingFileLoggerIntegrityTests
     }
 
     [Fact]
+    [Trait("FileTransferEvidenceSuite", "OperationalLogIntegrity")]
     public void RollingFileLogger_TryWriteLineReturnsMutexTimeoutWithoutThrowing()
     {
         var directory = CreateTemporaryDirectory("mutex-timeout");
@@ -102,6 +107,119 @@ public sealed class RollingFileLoggerIntegrityTests
     }
 
     [Fact]
+    [Trait("FileTransferEvidenceSuite", "OperationalLogIntegrity")]
+    public void OrderedOperationalLogWritePump_RecoversTimeoutInFifoOrderAndDrainsLast()
+    {
+        var directory = CreateTemporaryDirectory("ordered-recovery");
+        var logPath = Path.Combine(directory, "nlink.log");
+        var logger = new RollingFileLogger(logPath);
+        var markers = new ConcurrentQueue<OperationalLogWriteMarker>();
+        var pump = new OrderedOperationalLogWritePump(logger, markers.Enqueue);
+        using var mutexHeld = new ManualResetEventSlim(initialState: false);
+        using var releaseMutex = new ManualResetEventSlim(initialState: false);
+        var mutexOwner = new Thread(() =>
+        {
+            using var externalMutex = new Mutex(
+                initiallyOwned: false,
+                logger.CrossProcessMutexNameForTests);
+            Assert.True(externalMutex.WaitOne(TimeSpan.FromSeconds(1)));
+            mutexHeld.Set();
+            Assert.True(releaseMutex.Wait(TimeSpan.FromSeconds(5)));
+            externalMutex.ReleaseMutex();
+        });
+
+        try
+        {
+            mutexOwner.Start();
+            Assert.True(mutexHeld.Wait(TimeSpan.FromSeconds(2)));
+
+            Assert.True(pump.Submit(CreateBatch(1, "event=first")));
+            Assert.True(pump.Submit(CreateBatch(2, "event=second")));
+            Assert.False(File.Exists(logPath));
+
+            releaseMutex.Set();
+            Assert.True(pump.CompleteAndFlush(CreateBatch(3, "event=drained", isDrain: true), TimeSpan.FromSeconds(5)));
+            Assert.True(mutexOwner.Join(TimeSpan.FromSeconds(2)));
+
+            Assert.Equal(
+                ["event=first", "event=second", "event=drained"],
+                File.ReadAllLines(logPath));
+            Assert.Contains(
+                markers,
+                marker => marker.Kind == OperationalLogWriteMarkerKind.Deferred &&
+                    marker.Batch.FirstSequence == 1 &&
+                    marker.FailureCode == "mutex_timeout");
+            Assert.Contains(
+                markers,
+                marker => marker.Kind == OperationalLogWriteMarkerKind.Recovered &&
+                    marker.Batch.FirstSequence == 1);
+            Assert.Contains(
+                markers,
+                marker => marker.Kind == OperationalLogWriteMarkerKind.Recovered &&
+                    marker.Batch.FirstSequence == 2);
+            Assert.DoesNotContain(markers, marker => marker.Kind == OperationalLogWriteMarkerKind.Failed);
+        }
+        finally
+        {
+            releaseMutex.Set();
+            _ = mutexOwner.Join(TimeSpan.FromSeconds(2));
+            TryDeleteDirectory(directory);
+        }
+    }
+
+    [Fact]
+    [Trait("FileTransferEvidenceSuite", "OperationalLogIntegrity")]
+    public void OrderedOperationalLogWritePump_QueueCapacityFailureIsTerminalAndDoesNotOvertake()
+    {
+        var directory = CreateTemporaryDirectory("ordered-capacity");
+        var logPath = Path.Combine(directory, "nlink.log");
+        var logger = new RollingFileLogger(logPath);
+        var markers = new ConcurrentQueue<OperationalLogWriteMarker>();
+        var pump = new OrderedOperationalLogWritePump(
+            logger,
+            markers.Enqueue,
+            maximumQueuedBatches: 1,
+            maximumQueuedBytes: 1024);
+        using var mutexHeld = new ManualResetEventSlim(initialState: false);
+        using var releaseMutex = new ManualResetEventSlim(initialState: false);
+        var mutexOwner = new Thread(() =>
+        {
+            using var externalMutex = new Mutex(
+                initiallyOwned: false,
+                logger.CrossProcessMutexNameForTests);
+            Assert.True(externalMutex.WaitOne(TimeSpan.FromSeconds(1)));
+            mutexHeld.Set();
+            Assert.True(releaseMutex.Wait(TimeSpan.FromSeconds(5)));
+            externalMutex.ReleaseMutex();
+        });
+
+        try
+        {
+            mutexOwner.Start();
+            Assert.True(mutexHeld.Wait(TimeSpan.FromSeconds(2)));
+
+            Assert.True(pump.Submit(CreateBatch(1, "event=first")));
+            Assert.False(pump.Submit(CreateBatch(2, "event=capacity-rejected")));
+            Assert.Contains(
+                markers,
+                marker => marker.Kind == OperationalLogWriteMarkerKind.Failed &&
+                    marker.Batch.FirstSequence == 2 &&
+                    marker.FailureCode == "queue_capacity_exhausted");
+
+            releaseMutex.Set();
+            Assert.True(pump.CompleteAndFlush(CreateBatch(3, "event=drained", isDrain: true), TimeSpan.FromSeconds(5)));
+            Assert.Equal(["event=first", "event=drained"], File.ReadAllLines(logPath));
+        }
+        finally
+        {
+            releaseMutex.Set();
+            _ = mutexOwner.Join(TimeSpan.FromSeconds(2));
+            TryDeleteDirectory(directory);
+        }
+    }
+
+    [Fact]
+    [Trait("FileTransferEvidenceSuite", "OperationalLogIntegrity")]
     public void RollingFileLogger_AbandonedMutexOwnershipIsAccepted()
     {
         var directory = CreateTemporaryDirectory("mutex-abandoned");
@@ -167,6 +285,7 @@ public sealed class RollingFileLoggerIntegrityTests
     }
 
     [Fact]
+    [Trait("FileTransferEvidenceSuite", "OperationalLogIntegrity")]
     public async Task RollingFileLogger_RetainedSnapshotSurvivesIndependentRotationAfterHandlesOpen()
     {
         var directory = CreateTemporaryDirectory("retained-snapshot");
@@ -253,6 +372,7 @@ public sealed class RollingFileLoggerIntegrityTests
     }
 
     [Fact]
+    [Trait("FileTransferEvidenceSuite", "OperationalLogIntegrity")]
     public void LocalOperationalLog_WriteFailureMarkerCarriesExactAttemptIdentity()
     {
         var marker = LocalOperationalLog.FormatWriteFailureMarker(
@@ -275,6 +395,22 @@ public sealed class RollingFileLoggerIntegrityTests
             Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         return directory;
+    }
+
+    private static OperationalLogWriteBatch CreateBatch(long sequence, string text, bool isDrain = false)
+    {
+        return new OperationalLogWriteBatch(
+            "acceptance-run",
+            "scenario-run",
+            "writer-test",
+            sequence,
+            sequence,
+            sequence,
+            DateTime.UtcNow.Ticks,
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(text))).ToLowerInvariant(),
+            text,
+            Encoding.UTF8.GetByteCount(text),
+            isDrain);
     }
 
     private static void TryDeleteDirectory(string directory)

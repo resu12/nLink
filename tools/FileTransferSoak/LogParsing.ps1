@@ -282,7 +282,16 @@ function New-FileTransferRetainedEventIndex {
                     $fieldSum[$fieldName] = 0L
                 }
 
-                $fieldSum[$fieldName] = [long]$fieldSum[$fieldName] + $numericValue
+                $currentSum = [long]$fieldSum[$fieldName]
+                if ($numericValue -gt 0 -and $currentSum -gt ([long]::MaxValue - $numericValue)) {
+                    $fieldSum[$fieldName] = [long]::MaxValue
+                }
+                elseif ($numericValue -lt 0 -and $currentSum -lt ([long]::MinValue - $numericValue)) {
+                    $fieldSum[$fieldName] = [long]::MinValue
+                }
+                else {
+                    $fieldSum[$fieldName] = $currentSum + $numericValue
+                }
             }
         }
 

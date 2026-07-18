@@ -238,13 +238,20 @@ function Write-RouteAcceptanceFakeCursorEvidence {
     $consumedIndexSha256 = Get-RouteAcceptanceEvidenceTextSha256 -Value ($consumedIdentities -join [char]31)
     $writerFailureMarkerPath = Join-Path $artifactDir 'filetransfer-gui-log-writer-failure-markers.log'
     [System.IO.File]::WriteAllText($writerFailureMarkerPath, '', [System.Text.UTF8Encoding]::new($false))
+    $writerEvidenceSlicePath = Join-Path $artifactDir 'filetransfer-gui-log-writer-evidence-slice.log'
+    $attemptTicks = [DateTimeOffset]::UtcNow.UtcTicks
+    $writerEvidenceLines = @(
+        "[2000-01-01 00:00:00Z] [INFO] [OperationalLog] event=operational_log_writer_started; acceptance_run_id=$($script:RouteAcceptanceRunId); scenario_run_id=$([string]$Attempt.ScenarioRunId); log_writer_id=fake-writer; log_writer_sequence=1; log_writer_batch_generation=1; log_writer_batch_first_sequence=1; log_writer_batch_last_sequence=1; log_writer_attempt_utc_ticks=$attemptTicks",
+        "[2000-01-01 00:00:00Z] [INFO] [OperationalLog] event=operational_log_writer_drained; acceptance_run_id=$($script:RouteAcceptanceRunId); scenario_run_id=$([string]$Attempt.ScenarioRunId); last_payload_sequence=1; log_writer_id=fake-writer; log_writer_sequence=2; log_writer_batch_generation=2; log_writer_batch_first_sequence=2; log_writer_batch_last_sequence=2; log_writer_attempt_utc_ticks=$($attemptTicks + 1L)"
+    )
+    [System.IO.File]::WriteAllText($writerEvidenceSlicePath, ($writerEvidenceLines -join [Environment]::NewLine), [System.Text.UTF8Encoding]::new($false))
     $fakeWriter = [ordered]@{
         writerId = 'fake-writer'
         acceptanceRunId = $script:RouteAcceptanceRunId
         scenarioRunId = [string]$Attempt.ScenarioRunId
         firstSequence = 1
-        lastSequence = 1
-        observedCount = 1
+        lastSequence = 2
+        observedCount = 2
     }
     $ledger = [ordered]@{
         schemaVersion = 1
@@ -272,18 +279,51 @@ function Write-RouteAcceptanceFakeCursorEvidence {
         transientRescanCount = 0
         gapCount = 0
         duplicateIndexCount = 0
-        writerEvidenceVersion = 1
+        writerEvidenceVersion = 2
         writerGapCount = 0
         writerDuplicateCount = 0
         writerIdentityMismatchCount = 0
         writerWriteFailureCount = 0
+        writerDeferredBatchCount = 0
+        writerDeferredLineCount = 0
+        writerRecoveredBatchCount = 0
+        writerRecoveredLineCount = 0
+        writerUnresolvedDeferredBatchCount = 0
+        writerUnresolvedDeferredLineCount = 0
+        writerTerminalFailureCount = 0
+        writerRecoveryMismatchCount = 0
+        writerChronologyInversionCount = 0
+        writerChronologyCollisionCount = 0
+        writerDrainMissingCount = 0
+        writerRecoveryVerdict = 'pass'
+        writerRecoveryReasons = @()
+        writerChronologyVerdict = 'pass'
+        writerChronologyReasons = @()
         writerIntegrityVerdict = 'pass'
         writerIntegrityReasons = @()
         writerFailureMarkerFiles = @([ordered]@{
             path = [System.IO.Path]::GetFullPath($writerFailureMarkerPath)
             sha256 = Get-RouteAcceptanceEvidenceSha256 -Path $writerFailureMarkerPath
             markerCount = 0
+            deferredMarkerCount = 0
+            recoveredMarkerCount = 0
+            terminalFailureMarkerCount = 0
         })
+        writerMarkerFiles = @([ordered]@{
+            path = [System.IO.Path]::GetFullPath($writerFailureMarkerPath)
+            sha256 = Get-RouteAcceptanceEvidenceSha256 -Path $writerFailureMarkerPath
+            markerCount = 0
+            deferredMarkerCount = 0
+            recoveredMarkerCount = 0
+            terminalFailureMarkerCount = 0
+        })
+        writerDeferredBatches = @()
+        writerDrains = @([ordered]@{ writerId = 'fake-writer'; drainSequence = 2; finalSequence = 2; valid = $true })
+        writerEvidenceSlice = [ordered]@{
+            path = [System.IO.Path]::GetFullPath($writerEvidenceSlicePath)
+            sha256 = Get-RouteAcceptanceEvidenceSha256 -Path $writerEvidenceSlicePath
+            lineCount = 2
+        }
         consumedIndexCount = $lineCount
         consumedIndexSha256 = $consumedIndexSha256
         consumedIndexRanges = @([ordered]@{
@@ -362,6 +402,16 @@ function Set-RouteAcceptanceResultEvidence {
         $Result.writerDuplicateCount = [long]$selectedAttempt[0].logLedger.writerDuplicateCount
         $Result.writerIdentityMismatchCount = [long]$selectedAttempt[0].logLedger.writerIdentityMismatchCount
         $Result.writerWriteFailureCount = [long]$selectedAttempt[0].logLedger.writerWriteFailureCount
+        $Result.writerDeferredBatchCount = [long]$selectedAttempt[0].logLedger.writerDeferredBatchCount
+        $Result.writerRecoveredBatchCount = [long]$selectedAttempt[0].logLedger.writerRecoveredBatchCount
+        $Result.writerUnresolvedDeferredBatchCount = [long]$selectedAttempt[0].logLedger.writerUnresolvedDeferredBatchCount
+        $Result.writerTerminalFailureCount = [long]$selectedAttempt[0].logLedger.writerTerminalFailureCount
+        $Result.writerRecoveryMismatchCount = [long]$selectedAttempt[0].logLedger.writerRecoveryMismatchCount
+        $Result.writerChronologyInversionCount = [long]$selectedAttempt[0].logLedger.writerChronologyInversionCount
+        $Result.writerChronologyCollisionCount = [long]$selectedAttempt[0].logLedger.writerChronologyCollisionCount
+        $Result.writerDrainMissingCount = [long]$selectedAttempt[0].logLedger.writerDrainMissingCount
+        $Result.writerRecoveryVerdict = ([string]$selectedAttempt[0].logLedger.writerRecoveryVerdict).ToLowerInvariant()
+        $Result.writerChronologyVerdict = ([string]$selectedAttempt[0].logLedger.writerChronologyVerdict).ToLowerInvariant()
         $cursorReasons = @($selectedAttempt[0].logLedger.cursorIntegrityReasons | ForEach-Object { [string]$_ })
     }
     else {
@@ -371,6 +421,16 @@ function Set-RouteAcceptanceResultEvidence {
         $Result.writerDuplicateCount = 0L
         $Result.writerIdentityMismatchCount = 0L
         $Result.writerWriteFailureCount = 0L
+        $Result.writerDeferredBatchCount = 0L
+        $Result.writerRecoveredBatchCount = 0L
+        $Result.writerUnresolvedDeferredBatchCount = 0L
+        $Result.writerTerminalFailureCount = 0L
+        $Result.writerRecoveryMismatchCount = 0L
+        $Result.writerChronologyInversionCount = 0L
+        $Result.writerChronologyCollisionCount = 0L
+        $Result.writerDrainMissingCount = 0L
+        $Result.writerRecoveryVerdict = 'missing'
+        $Result.writerChronologyVerdict = 'missing'
         $cursorReasons = @('cursor_evidence_missing')
     }
 
@@ -969,6 +1029,16 @@ function New-RouteAcceptanceRunResult {
         writerDuplicateCount = 0L
         writerIdentityMismatchCount = 0L
         writerWriteFailureCount = 0L
+        writerDeferredBatchCount = 0L
+        writerRecoveredBatchCount = 0L
+        writerUnresolvedDeferredBatchCount = 0L
+        writerTerminalFailureCount = 0L
+        writerRecoveryMismatchCount = 0L
+        writerChronologyInversionCount = 0L
+        writerChronologyCollisionCount = 0L
+        writerDrainMissingCount = 0L
+        writerRecoveryVerdict = 'missing'
+        writerChronologyVerdict = 'missing'
         currentRuntimeProof = $false
         currentRuntimeProofReasons = @('manifest_missing')
         transferEvidenceStatus = 'not_started'
@@ -6250,6 +6320,16 @@ function Write-Phase5PreflightFailureSummaryFiles {
         writerDuplicateCount = 0
         writerIdentityMismatchCount = 0
         writerWriteFailureCount = 0
+        writerDeferredBatchCount = 0
+        writerRecoveredBatchCount = 0
+        writerUnresolvedDeferredBatchCount = 0
+        writerTerminalFailureCount = 0
+        writerRecoveryMismatchCount = 0
+        writerChronologyInversionCount = 0
+        writerChronologyCollisionCount = 0
+        writerDrainMissingCount = 0
+        writerRecoveryVerdict = 'missing'
+        writerChronologyVerdict = 'missing'
         currentRuntimeProof = $false
         currentRuntimeProofReasons = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $preflightProofReasons -Limit 32)
         transferEvidenceStatus = 'not_started'
@@ -7814,6 +7894,16 @@ function New-RouteAcceptanceSummaryRunDto {
         writerDuplicateCount = [long]$Result.writerDuplicateCount
         writerIdentityMismatchCount = [long]$Result.writerIdentityMismatchCount
         writerWriteFailureCount = [long]$Result.writerWriteFailureCount
+        writerDeferredBatchCount = [long]$Result.writerDeferredBatchCount
+        writerRecoveredBatchCount = [long]$Result.writerRecoveredBatchCount
+        writerUnresolvedDeferredBatchCount = [long]$Result.writerUnresolvedDeferredBatchCount
+        writerTerminalFailureCount = [long]$Result.writerTerminalFailureCount
+        writerRecoveryMismatchCount = [long]$Result.writerRecoveryMismatchCount
+        writerChronologyInversionCount = [long]$Result.writerChronologyInversionCount
+        writerChronologyCollisionCount = [long]$Result.writerChronologyCollisionCount
+        writerDrainMissingCount = [long]$Result.writerDrainMissingCount
+        writerRecoveryVerdict = [string]$Result.writerRecoveryVerdict
+        writerChronologyVerdict = [string]$Result.writerChronologyVerdict
         currentRuntimeProof = [bool]$Result.currentRuntimeProof
         currentRuntimeProofReasons = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $Result.currentRuntimeProofReasons -Limit 32)
         transferEvidenceStatus = [string]$Result.transferEvidenceStatus
@@ -8006,6 +8096,16 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $writerDuplicateCount = [long](($runDtos | Measure-Object -Property writerDuplicateCount -Sum).Sum)
     $writerIdentityMismatchCount = [long](($runDtos | Measure-Object -Property writerIdentityMismatchCount -Sum).Sum)
     $writerWriteFailureCount = [long](($runDtos | Measure-Object -Property writerWriteFailureCount -Sum).Sum)
+    $writerDeferredBatchCount = [long](($runDtos | Measure-Object -Property writerDeferredBatchCount -Sum).Sum)
+    $writerRecoveredBatchCount = [long](($runDtos | Measure-Object -Property writerRecoveredBatchCount -Sum).Sum)
+    $writerUnresolvedDeferredBatchCount = [long](($runDtos | Measure-Object -Property writerUnresolvedDeferredBatchCount -Sum).Sum)
+    $writerTerminalFailureCount = [long](($runDtos | Measure-Object -Property writerTerminalFailureCount -Sum).Sum)
+    $writerRecoveryMismatchCount = [long](($runDtos | Measure-Object -Property writerRecoveryMismatchCount -Sum).Sum)
+    $writerChronologyInversionCount = [long](($runDtos | Measure-Object -Property writerChronologyInversionCount -Sum).Sum)
+    $writerChronologyCollisionCount = [long](($runDtos | Measure-Object -Property writerChronologyCollisionCount -Sum).Sum)
+    $writerDrainMissingCount = [long](($runDtos | Measure-Object -Property writerDrainMissingCount -Sum).Sum)
+    $writerRecoveryVerdict = if ($runDtos.Count -eq 0) { 'missing' } elseif (@($runDtos | Where-Object { $_.writerRecoveryVerdict -ne 'pass' }).Count -gt 0) { 'fail' } else { 'pass' }
+    $writerChronologyVerdict = if ($runDtos.Count -eq 0) { 'missing' } elseif (@($runDtos | Where-Object { $_.writerChronologyVerdict -ne 'pass' }).Count -gt 0) { 'fail' } else { 'pass' }
     $runtimeCandidateDtos = @($runDtos | Where-Object {
         -not [string]::IsNullOrWhiteSpace([string]$_.runtimeFailureCandidate) -and
         [string]$_.runtimeFailureCandidate -notin @('(none)', 'none')
@@ -8433,6 +8533,16 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("writer_duplicate_count={0}" -f $writerDuplicateCount),
         ("writer_identity_mismatch_count={0}" -f $writerIdentityMismatchCount),
         ("writer_write_failure_count={0}" -f $writerWriteFailureCount),
+        ("writer_deferred_batch_count={0}" -f $writerDeferredBatchCount),
+        ("writer_recovered_batch_count={0}" -f $writerRecoveredBatchCount),
+        ("writer_unresolved_deferred_batch_count={0}" -f $writerUnresolvedDeferredBatchCount),
+        ("writer_terminal_failure_count={0}" -f $writerTerminalFailureCount),
+        ("writer_recovery_mismatch_count={0}" -f $writerRecoveryMismatchCount),
+        ("writer_chronology_inversion_count={0}" -f $writerChronologyInversionCount),
+        ("writer_chronology_collision_count={0}" -f $writerChronologyCollisionCount),
+        ("writer_drain_missing_count={0}" -f $writerDrainMissingCount),
+        ("writer_recovery_verdict={0}" -f $writerRecoveryVerdict),
+        ("writer_chronology_verdict={0}" -f $writerChronologyVerdict),
         ("transfer_evidence_status={0}" -f $transferEvidenceStatus),
         ("runtime_correctness_verdict={0}" -f $runtimeCorrectnessVerdict),
         ("runtime_failure_candidate={0}" -f $runtimeFailureCandidate),
@@ -8594,6 +8704,16 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.writer_duplicate_count={1}" -f $prefix, $result.writerDuplicateCount)
         $textLines += ("{0}.writer_identity_mismatch_count={1}" -f $prefix, $result.writerIdentityMismatchCount)
         $textLines += ("{0}.writer_write_failure_count={1}" -f $prefix, $result.writerWriteFailureCount)
+        $textLines += ("{0}.writer_deferred_batch_count={1}" -f $prefix, $result.writerDeferredBatchCount)
+        $textLines += ("{0}.writer_recovered_batch_count={1}" -f $prefix, $result.writerRecoveredBatchCount)
+        $textLines += ("{0}.writer_unresolved_deferred_batch_count={1}" -f $prefix, $result.writerUnresolvedDeferredBatchCount)
+        $textLines += ("{0}.writer_terminal_failure_count={1}" -f $prefix, $result.writerTerminalFailureCount)
+        $textLines += ("{0}.writer_recovery_mismatch_count={1}" -f $prefix, $result.writerRecoveryMismatchCount)
+        $textLines += ("{0}.writer_chronology_inversion_count={1}" -f $prefix, $result.writerChronologyInversionCount)
+        $textLines += ("{0}.writer_chronology_collision_count={1}" -f $prefix, $result.writerChronologyCollisionCount)
+        $textLines += ("{0}.writer_drain_missing_count={1}" -f $prefix, $result.writerDrainMissingCount)
+        $textLines += ("{0}.writer_recovery_verdict={1}" -f $prefix, $result.writerRecoveryVerdict)
+        $textLines += ("{0}.writer_chronology_verdict={1}" -f $prefix, $result.writerChronologyVerdict)
         $textLines += ("{0}.current_runtime_proof={1}" -f $prefix, ($(if ($result.currentRuntimeProof) { 1 } else { 0 })))
         $textLines += ("{0}.current_runtime_proof_reasons={1}" -f $prefix, (Join-RouteAcceptanceTokenList -Values $result.currentRuntimeProofReasons))
         $textLines += ("{0}.transfer_evidence_status={1}" -f $prefix, $result.transferEvidenceStatus)
@@ -8809,6 +8929,16 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         writerDuplicateCount = $writerDuplicateCount
         writerIdentityMismatchCount = $writerIdentityMismatchCount
         writerWriteFailureCount = $writerWriteFailureCount
+        writerDeferredBatchCount = $writerDeferredBatchCount
+        writerRecoveredBatchCount = $writerRecoveredBatchCount
+        writerUnresolvedDeferredBatchCount = $writerUnresolvedDeferredBatchCount
+        writerTerminalFailureCount = $writerTerminalFailureCount
+        writerRecoveryMismatchCount = $writerRecoveryMismatchCount
+        writerChronologyInversionCount = $writerChronologyInversionCount
+        writerChronologyCollisionCount = $writerChronologyCollisionCount
+        writerDrainMissingCount = $writerDrainMissingCount
+        writerRecoveryVerdict = $writerRecoveryVerdict
+        writerChronologyVerdict = $writerChronologyVerdict
         transferEvidenceStatus = $transferEvidenceStatus
         runtimeCorrectnessVerdict = $runtimeCorrectnessVerdict
         runtimeFailureCandidate = $runtimeFailureCandidate
