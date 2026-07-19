@@ -2102,9 +2102,26 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             "if ($script:RouteAcceptanceExecutionMode -eq 'live')",
             script,
             StringComparison.Ordinal);
-        Assert.DoesNotContain(
+        Assert.Contains(
+            "$oldRetainedAnalysisCompact = $env:NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
             "$env:NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT = '1'",
             script,
             StringComparison.Ordinal);
+        Assert.Contains(
+            "Remove-Item Env:NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT -ErrorAction SilentlyContinue",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$env:NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT = $oldRetainedAnalysisCompact",
+            script,
+            StringComparison.Ordinal);
+
+        var childScopeAssignments = script.Split(
+            "$env:NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT = '1'",
+            StringSplitOptions.None).Length - 1;
+        Assert.Equal(2, childScopeAssignments);
     }
 }

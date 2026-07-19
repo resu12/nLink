@@ -5465,9 +5465,26 @@ function Invoke-RouteAcceptanceChildScript {
         [Parameter(Mandatory = $true)][string]$Description
     )
 
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Description failed with exit code $LASTEXITCODE."
+    $oldRetainedAnalysisCompact = $env:NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT
+    try {
+        if ($script:RouteAcceptanceExecutionMode -eq 'live') {
+            $env:NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT = '1'
+        }
+
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath @Arguments
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        if ($null -eq $oldRetainedAnalysisCompact) {
+            Remove-Item Env:NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT = $oldRetainedAnalysisCompact
+        }
+    }
+
+    if ($exitCode -ne 0) {
+        throw "$Description failed with exit code $exitCode."
     }
 }
 
@@ -5478,7 +5495,12 @@ function Invoke-RouteAcceptanceChildScriptNoThrow {
     )
 
     $previousErrorActionPreference = $ErrorActionPreference
+    $oldRetainedAnalysisCompact = $env:NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT
     try {
+        if ($script:RouteAcceptanceExecutionMode -eq 'live') {
+            $env:NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT = '1'
+        }
+
         $ErrorActionPreference = 'Continue'
         $childOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath @Arguments 2>&1
         $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
@@ -5489,6 +5511,12 @@ function Invoke-RouteAcceptanceChildScriptNoThrow {
     }
     finally {
         $ErrorActionPreference = $previousErrorActionPreference
+        if ($null -eq $oldRetainedAnalysisCompact) {
+            Remove-Item Env:NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT = $oldRetainedAnalysisCompact
+        }
     }
 
     foreach ($line in $childOutput) {
