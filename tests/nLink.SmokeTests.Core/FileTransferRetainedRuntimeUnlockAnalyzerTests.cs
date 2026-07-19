@@ -13,6 +13,102 @@ namespace NLink.SmokeTests;
 [Collection(FakeNknNetworkCollection.Name)]
 public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransferOpsScriptsTestBase
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_UncommittedTunaFallbackAvailabilitySuppression_IsFirstProofEdge(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string sessionId = "sess_uncommitted_fallback";
+        const string transferId = "transfer_uncommitted_fallback";
+        const string writerId = "writer_uncommitted_fallback";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; session_id={sessionId}; transfer_id={transferId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; selection_reason=regular_nkn_default_v4"),
+            LogLine($"event=filetransfer_post_tuna_fallback_nkn_proved; session_id={sessionId}; reason=header_switch_off; proof=file_transfer_v6_state_frame_received; lanes=file; log_writer_id={writerId}; log_writer_sequence=1077"),
+            LogLine($"event=filetransfer_data_session_availability_broadcast; session_count=1; stale_session_count=0; subscriber_count=1; is_available=1; reason=transport_recovered; requires_resume_request=1; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; log_writer_id={writerId}; log_writer_sequence=1078"),
+            LogLine($"event=filetransfer_post_tuna_fallback_route_hint_suppressed_uncommitted_runtime_unlock; session_id={sessionId}; transfer_id={transferId}; source=availability_broadcast; reason=transport_recovered; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; current_route=regular_nkn_v4_fast; current_protocol_version=4; route_hint_source=service_initial_route_publication; pending_cleared=0; log_writer_id={writerId}; log_writer_sequence=1079"),
+            LogLine($"event=filetransfer_data_frame_ignored; session_id={sessionId}; transfer_id={transferId}; frame_type=filetransfer.receiver_state.v6; reason=protocol_not_v4; log_writer_id={writerId}; log_writer_sequence=1082"),
+            LogLine($"event=file_transfer_inbound_terminal; direction=inbound; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=timeout"),
+            LogLine($"event=file_transfer_outbound_terminal; direction=outbound; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=timeout")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("incomplete_proof", verdict["acceptance_failure_class"]);
+        Assert.Equal("runtime_unlock_precommit_fallback_recovery_handoff_suppressed", verdict["recovery_failure_class"]);
+        Assert.Equal("filetransfer_post_tuna_fallback_route_hint_suppressed_uncommitted_runtime_unlock", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("transport_recovered_availability_suppressed_with_uncommitted_runtime_unlock", verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("1079", verdict["first_proof_chain_failure_writer_sequence"]);
+        Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+        Assert.Equal("1", verdict["runtime_unlock_precommit_fallback_recovery_handoff_suppressed_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_precommit_fallback_recovery_handoff_suppressed_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_precommit_fallback_recovery_handoff_suppressed_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_precommit_fallback_recovery_handoff_suppressed_unresolved_count"]);
+        Assert.Equal("fail", verdict["runtime_unlock_precommit_fallback_recovery_handoff_suppression_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_UncommittedTunaFallbackRetainedAndDecided_RecoversSuppression(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string sessionId = "sess_uncommitted_fallback_recovered";
+        const string transferId = "transfer_uncommitted_fallback_recovered";
+        const string writerId = "writer_uncommitted_fallback_recovered";
+        const string intentTuple = "direction=outbound; handoff_generation=7; handoff_kind=tuna_to_normal_fallback; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_post_tuna_fallback_nkn_proved; session_id={sessionId}; reason=header_switch_off; proof=file_transfer_v6_state_frame_received; lanes=file; log_writer_id={writerId}; log_writer_sequence=40"),
+            LogLine($"event=filetransfer_data_session_availability_broadcast; is_available=1; reason=transport_recovered; requires_resume_request=1; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; log_writer_id={writerId}; log_writer_sequence=41"),
+            LogLine($"event=filetransfer_post_tuna_fallback_route_hint_suppressed_uncommitted_runtime_unlock; session_id={sessionId}; transfer_id={transferId}; source=availability_broadcast; reason=transport_recovered; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; current_route=regular_nkn_v4_fast; current_protocol_version=4; log_writer_id={writerId}; log_writer_sequence=42"),
+            LogLine($"event=runtime_unlock_uncommitted_tuna_fallback_handoff_retained; session_id={sessionId}; transfer_id={transferId}; {intentTuple}"),
+            LogLine($"event=runtime_unlock_uncommitted_tuna_fallback_handoff_decided; session_id={sessionId}; transfer_id={transferId}; {intentTuple}; decision_status=Accepted; decision_reason=handoff_current"),
+            LogLine($"event=file_transfer_inbound_terminal; direction=inbound; session_id={sessionId}; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1"),
+            LogLine($"event=file_transfer_outbound_terminal; direction=outbound; session_id={sessionId}; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.NotEqual("runtime_unlock_precommit_fallback_recovery_handoff_suppressed", verdict["recovery_failure_class"]);
+        Assert.Equal("1", verdict["runtime_unlock_precommit_fallback_recovery_handoff_suppressed_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_precommit_fallback_recovery_handoff_suppressed_distinct_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_precommit_fallback_recovery_handoff_suppressed_recovered_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_precommit_fallback_recovery_handoff_suppressed_unresolved_count"]);
+        Assert.Equal("pass", verdict["runtime_unlock_precommit_fallback_recovery_handoff_suppression_verdict"]);
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RuntimeUnlockProbeDuringFallbackWithoutAuthority_FailsSeparationProof()

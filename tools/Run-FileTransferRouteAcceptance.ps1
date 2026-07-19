@@ -374,7 +374,8 @@ function Test-RouteAcceptanceIncompleteProofRuntimeCandidate {
         'regular_v4_frontier_repair_pressure_recovery_handoff_missing',
         'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery',
         'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete',
-        'runtime_unlock_precommit_probe_start_handoff_missing')
+        'runtime_unlock_precommit_probe_start_handoff_missing',
+        'runtime_unlock_precommit_fallback_recovery_handoff_suppressed')
 }
 
 function Set-RouteAcceptanceResultEvidence {
@@ -1075,6 +1076,11 @@ function New-RouteAcceptanceRunResult {
         runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRecoveredCount = 0
         runtimeUnlockPostTunaFallbackTransportProofHandoffMissingUnresolvedCount = 0
         runtimeUnlockPostTunaFallbackTransportProofHandoffVerdict = 'none'
+        runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRawCount = 0
+        runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedDistinctCount = 0
+        runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRecoveredCount = 0
+        runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedUnresolvedCount = 0
+        runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressionVerdict = 'none'
         regularV4FrontierRepairMissingRangeNotPreservedRawCount = 0
         regularV4FrontierRepairMissingRangeNotPreservedDistinctCount = 0
         regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount = 0
@@ -2607,6 +2613,11 @@ function Assert-Phase4OperatorVerdict {
     $Result.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_recovered_count' -DefaultValue '0')
     $Result.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_unresolved_count' -DefaultValue '0')
     $Result.runtimeUnlockPostTunaFallbackTransportProofHandoffVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_verdict' -DefaultValue 'none'
+    $Result.runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed_raw_count' -DefaultValue '0')
+    $Result.runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed_distinct_count' -DefaultValue '0')
+    $Result.runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed_recovered_count' -DefaultValue '0')
+    $Result.runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed_unresolved_count' -DefaultValue '0')
+    $Result.runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressionVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_precommit_fallback_recovery_handoff_suppression_verdict' -DefaultValue 'none'
     $Result.regularV4FrontierRepairMissingRangeNotPreservedRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_missing_range_not_preserved_raw_count' -DefaultValue '0')
     $Result.regularV4FrontierRepairMissingRangeNotPreservedDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_missing_range_not_preserved_distinct_count' -DefaultValue '0')
     $Result.regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_missing_range_not_preserved_recovered_count' -DefaultValue '0')
@@ -4843,6 +4854,7 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
         }) -join ' '
     $startInfo.WorkingDirectory = (Get-Location).Path
     $startInfo.UseShellExecute = $false
+    $startInfo.Environment['NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT'] = '1'
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
 
@@ -8089,6 +8101,11 @@ function New-RouteAcceptanceSummaryRunDto {
         runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRecoveredCount = [int]$Result.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRecoveredCount
         runtimeUnlockPostTunaFallbackTransportProofHandoffMissingUnresolvedCount = [int]$Result.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingUnresolvedCount
         runtimeUnlockPostTunaFallbackTransportProofHandoffVerdict = [string]$Result.runtimeUnlockPostTunaFallbackTransportProofHandoffVerdict
+        runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRawCount = [int]$Result.runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRawCount
+        runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedDistinctCount = [int]$Result.runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedDistinctCount
+        runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRecoveredCount = [int]$Result.runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRecoveredCount
+        runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedUnresolvedCount = [int]$Result.runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedUnresolvedCount
+        runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressionVerdict = [string]$Result.runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressionVerdict
         regularV4FrontierRepairMissingRangeNotPreservedRawCount = [int]$Result.regularV4FrontierRepairMissingRangeNotPreservedRawCount
         regularV4FrontierRepairMissingRangeNotPreservedDistinctCount = [int]$Result.regularV4FrontierRepairMissingRangeNotPreservedDistinctCount
         regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount = [int]$Result.regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount
@@ -8372,6 +8389,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingDistinctCount = 0
     $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRecoveredCount = 0
     $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingUnresolvedCount = 0
+    $runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRawCount = 0
+    $runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedDistinctCount = 0
+    $runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRecoveredCount = 0
+    $runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedUnresolvedCount = 0
     $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount = 0
     $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount = 0
     $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRawCount = 0
@@ -8406,6 +8427,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingDistinctCount += [int]$runDto.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingDistinctCount
         $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRecoveredCount += [int]$runDto.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRecoveredCount
         $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingUnresolvedCount += [int]$runDto.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingUnresolvedCount
+        $runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRawCount += [int]$runDto.runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRawCount
+        $runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedDistinctCount += [int]$runDto.runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedDistinctCount
+        $runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRecoveredCount += [int]$runDto.runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRecoveredCount
+        $runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedUnresolvedCount += [int]$runDto.runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedUnresolvedCount
         $fallbackTailBridgeRecoveryGenerationMismatchRawCount += [int]$runDto.fallbackTailBridgeRecoveryGenerationMismatchRawCount
         $fallbackTailBridgeRecoveryGenerationMismatchDistinctCount += [int]$runDto.fallbackTailBridgeRecoveryGenerationMismatchDistinctCount
         $fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount += [int]$runDto.fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount
@@ -8642,6 +8667,18 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     else {
         'none'
     }
+    $runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressionVerdict = if (
+        $runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedUnresolvedCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressionVerdict -eq 'fail' }).Count -gt 0) {
+        'fail'
+    }
+    elseif ($runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedDistinctCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressionVerdict -eq 'pass' }).Count -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
+    }
     $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict = if (
         $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount -gt 0 -or
         @($runDtos | Where-Object { [string]$_.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict -eq 'fail' }).Count -gt 0) {
@@ -8806,6 +8843,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_recovered_count={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRecoveredCount),
         ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_unresolved_count={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingUnresolvedCount),
         ("runtime_unlock_post_tuna_fallback_transport_proof_handoff_verdict={0}" -f $runtimeUnlockPostTunaFallbackTransportProofHandoffVerdict),
+        ("runtime_unlock_precommit_fallback_recovery_handoff_suppressed_raw_count={0}" -f $runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRawCount),
+        ("runtime_unlock_precommit_fallback_recovery_handoff_suppressed_distinct_count={0}" -f $runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedDistinctCount),
+        ("runtime_unlock_precommit_fallback_recovery_handoff_suppressed_recovered_count={0}" -f $runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRecoveredCount),
+        ("runtime_unlock_precommit_fallback_recovery_handoff_suppressed_unresolved_count={0}" -f $runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedUnresolvedCount),
+        ("runtime_unlock_precommit_fallback_recovery_handoff_suppression_verdict={0}" -f $runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressionVerdict),
         ("first_proof_chain_failure_class={0}" -f $firstProofChainFailureClass),
         ("first_proof_chain_failure_event={0}" -f $firstProofChainFailureEvent),
         ("first_proof_chain_failure_reason={0}" -f $firstProofChainFailureReason),
@@ -9000,6 +9042,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRecoveredCount)
         $textLines += ("{0}.runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_unresolved_count={1}" -f $prefix, $result.runtimeUnlockPostTunaFallbackTransportProofHandoffMissingUnresolvedCount)
         $textLines += ("{0}.runtime_unlock_post_tuna_fallback_transport_proof_handoff_verdict={1}" -f $prefix, $result.runtimeUnlockPostTunaFallbackTransportProofHandoffVerdict)
+        $textLines += ("{0}.runtime_unlock_precommit_fallback_recovery_handoff_suppressed_raw_count={1}" -f $prefix, $result.runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRawCount)
+        $textLines += ("{0}.runtime_unlock_precommit_fallback_recovery_handoff_suppressed_distinct_count={1}" -f $prefix, $result.runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedDistinctCount)
+        $textLines += ("{0}.runtime_unlock_precommit_fallback_recovery_handoff_suppressed_recovered_count={1}" -f $prefix, $result.runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRecoveredCount)
+        $textLines += ("{0}.runtime_unlock_precommit_fallback_recovery_handoff_suppressed_unresolved_count={1}" -f $prefix, $result.runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedUnresolvedCount)
+        $textLines += ("{0}.runtime_unlock_precommit_fallback_recovery_handoff_suppression_verdict={1}" -f $prefix, $result.runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressionVerdict)
         $textLines += ("{0}.regular_v4_frontier_repair_missing_range_not_preserved_raw_count={1}" -f $prefix, $result.regularV4FrontierRepairMissingRangeNotPreservedRawCount)
         $textLines += ("{0}.regular_v4_frontier_repair_missing_range_not_preserved_distinct_count={1}" -f $prefix, $result.regularV4FrontierRepairMissingRangeNotPreservedDistinctCount)
         $textLines += ("{0}.regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={1}" -f $prefix, $result.regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount)
@@ -9243,6 +9290,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRecoveredCount = $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRecoveredCount
         runtimeUnlockPostTunaFallbackTransportProofHandoffMissingUnresolvedCount = $runtimeUnlockPostTunaFallbackTransportProofHandoffMissingUnresolvedCount
         runtimeUnlockPostTunaFallbackTransportProofHandoffVerdict = $runtimeUnlockPostTunaFallbackTransportProofHandoffVerdict
+        runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRawCount = $runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRawCount
+        runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedDistinctCount = $runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedDistinctCount
+        runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRecoveredCount = $runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRecoveredCount
+        runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedUnresolvedCount = $runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedUnresolvedCount
+        runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressionVerdict = $runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressionVerdict
         firstProofChainFailureClass = $firstProofChainFailureClass
         firstProofChainFailureEvent = $firstProofChainFailureEvent
         firstProofChainFailureReason = $firstProofChainFailureReason
