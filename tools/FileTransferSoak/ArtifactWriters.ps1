@@ -10508,6 +10508,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_retry_dispatch_orphaned_supersession_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchOrphanedSupersessionCount),
         ("runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchCount),
         ("runtime_unlock_retry_dispatch_post_grant_hold_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldRawCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldDistinctCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldRecoveredCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_verdict={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldVerdict),
         ("runtime_unlock_retry_dispatch_missing_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchMissingCount),
         ("runtime_unlock_retry_dispatch_missing_after_authority_granted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount),
         ("runtime_unlock_retry_missing_authority_after_release_count={0}" -f $recoveryClassification.RuntimeUnlockRetryMissingAuthorityAfterReleaseCount),
@@ -10556,6 +10561,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_precommit_probe_ack_authority_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckAuthorityRejectedCount),
         ("runtime_unlock_precommit_probe_failed_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeFailedCount),
         ("runtime_unlock_precommit_probe_protocol_mismatch_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeProtocolMismatchCount),
+        ("runtime_unlock_precommit_probe_start_handoff_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffMissingRawCount),
+        ("runtime_unlock_precommit_probe_start_handoff_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffMissingDistinctCount),
+        ("runtime_unlock_precommit_probe_start_handoff_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffMissingRecoveredCount),
+        ("runtime_unlock_precommit_probe_start_handoff_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffMissingUnresolvedCount),
+        ("runtime_unlock_precommit_probe_start_handoff_verdict={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffVerdict),
         ("runtime_unlock_precommit_probe_delivery_result_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeDeliveryResultCount),
         ("runtime_unlock_tuna_probe_sent_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSentCount),
         ("runtime_unlock_tuna_probe_received_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeReceivedCount),
@@ -20363,6 +20373,318 @@ function Get-FileTransferRuntimeUnlockRetryDispatchInstallProof {
     }
 }
 
+function Get-FileTransferRuntimeUnlockRetryDispatchPostGrantHoldCorrelation {
+    param(
+        [AllowEmptyCollection()][object[]]$Events = @(),
+        [AllowEmptyCollection()][object[]]$EffectiveGrantEvents = @()
+    )
+
+    [object[]]$orderedEvents = @($Events | Where-Object { $null -ne $_ } | Sort-Object Sequence, LineNumber)
+    [object[]]$heldEvents = @($orderedEvents | Where-Object {
+        $_.EventName -like 'runtime_unlock_retry_dispatch_held_*'
+    })
+    [object[]]$dispatchObservedEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_observed'
+    })
+    [object[]]$settledEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_contract_settled'
+    })
+    [object[]]$settlementDecisions = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_settlement_decided'
+    })
+
+    function Test-PostGrantExactMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Left,
+            [Parameter(Mandatory = $true)]$Right
+        )
+
+        if (-not (Test-FileTransferRuntimeUnlockRetryDispatchCompleteAuthorityTupleMatch `
+                -Left $Left `
+                -Right $Right)) {
+            return $false
+        }
+
+        $leftInstallGeneration = Get-FileTransferEventField -Event $Left -Name 'install_generation' -Default ''
+        $rightInstallGeneration = Get-FileTransferEventField -Event $Right -Name 'install_generation' -Default ''
+        [int64]$rightPositiveGeneration = 0
+        if ([int64]::TryParse($rightInstallGeneration, [ref]$rightPositiveGeneration) -and
+            $rightPositiveGeneration -gt 0) {
+            return -not [string]::IsNullOrWhiteSpace($leftInstallGeneration) -and
+                [string]::Equals($leftInstallGeneration, $rightInstallGeneration, [System.StringComparison]::Ordinal)
+        }
+
+        return $true
+    }
+
+    function Get-PostGrantHoldKey {
+        param([Parameter(Mandatory = $true)]$Event)
+
+        $parts = @(Get-FileTransferRuntimeUnlockRetryDispatchCompleteAuthorityTupleFields | ForEach-Object {
+            Get-FileTransferEventField -Event $Event -Name $_ -Default '(missing)'
+        })
+        $parts += Get-FileTransferEventField -Event $Event -Name 'install_generation' -Default '(legacy)'
+        return $parts -join '|'
+    }
+
+    $rawCandidates = New-Object System.Collections.Generic.List[object]
+    $distinctRecords = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    foreach ($grant in @($EffectiveGrantEvents | Sort-Object Sequence, LineNumber)) {
+        if ((Get-FileTransferAuthoritySchema -Line ([string]$grant.RawLine)) -lt 2) {
+            continue
+        }
+
+        [object[]]$matchingSettlements = @($settledEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$grant.Sequence -and
+            (Test-PostGrantExactMatch -Left $grant -Right $_)
+        } | Sort-Object Sequence, LineNumber)
+        $settlementBoundary = if ($matchingSettlements.Count -gt 0) {
+            [int64]$matchingSettlements[0].Sequence
+        }
+        else {
+            [int64]::MaxValue
+        }
+
+        foreach ($held in @($heldEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$grant.Sequence -and
+            [int64]$_.Sequence -lt $settlementBoundary -and
+            (Get-FileTransferAuthoritySchema -Line ([string]$_.RawLine)) -ge 2 -and
+            (Test-PostGrantExactMatch -Left $grant -Right $_)
+        } | Sort-Object Sequence, LineNumber)) {
+            $rawCandidates.Add($held) | Out-Null
+            $key = Get-PostGrantHoldKey -Event $grant
+            if ($seen.ContainsKey($key)) {
+                continue
+            }
+            $seen[$key] = $true
+
+            $recovered = $false
+            if ($held.EventName -eq 'runtime_unlock_retry_dispatch_held_by_active_negotiation') {
+                [object[]]$observed = @($dispatchObservedEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$held.Sequence -and
+                    (Test-PostGrantExactMatch -Left $grant -Right $_)
+                } | Sort-Object Sequence, LineNumber)
+                [object[]]$dispatchSettlements = @($matchingSettlements | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$held.Sequence -and
+                    (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq 'DispatchObserved' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'dispatch_observed' -Default '0') -eq '1'
+                } | Sort-Object Sequence, LineNumber)
+                if ($observed.Count -gt 0 -and $dispatchSettlements.Count -gt 0) {
+                    $settlement = $dispatchSettlements[0]
+                    $recovered = @($settlementDecisions | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$settlement.Sequence -and
+                        (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq 'DispatchObserved' -and
+                        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in @('Accepted', 'Idempotent') -and
+                        (Test-PostGrantExactMatch -Left $grant -Right $_)
+                    }).Count -gt 0
+                }
+            }
+
+            $distinctRecords.Add([pscustomobject]@{
+                Event = $held
+                Recovered = $recovered
+            }) | Out-Null
+        }
+    }
+
+    [object[]]$distinct = @($distinctRecords.ToArray() | ForEach-Object { $_.Event })
+    [object[]]$recovered = @($distinctRecords.ToArray() | Where-Object { $_.Recovered } | ForEach-Object { $_.Event })
+    [object[]]$unresolved = @($distinctRecords.ToArray() | Where-Object { -not $_.Recovered } | ForEach-Object { $_.Event })
+    return [pscustomobject]@{
+        RawCount = $rawCandidates.Count
+        DistinctCount = $distinct.Count
+        RecoveredCount = $recovered.Count
+        UnresolvedCount = $unresolved.Count
+        Verdict = if ($unresolved.Count -gt 0) { 'fail' } elseif ($distinct.Count -gt 0) { 'pass' } else { 'none' }
+        RawCandidateEvents = @($rawCandidates.ToArray())
+        DistinctCandidateEvents = $distinct
+        RecoveredCandidateEvents = $recovered
+        UnresolvedCandidateEvents = $unresolved
+    }
+}
+
+function Get-FileTransferRuntimeUnlockPreCommitProbeStartHandoffCorrelation {
+    param([AllowEmptyCollection()][object[]]$Events = @())
+
+    [object[]]$orderedEvents = @($Events | Where-Object { $null -ne $_ } | Sort-Object Sequence, LineNumber)
+    [object[]]$launchRequests = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_precommit_probe_launch_requested' -and
+        (Get-FileTransferEventField -Event $_ -Name 'duplicate' -Default '0') -eq '0' -and
+        (Get-FileTransferEventField -Event $_ -Name 'responder_waiting_for_peer_probe' -Default '0') -eq '0'
+    })
+    [object[]]$timeouts = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_precommit_probe_start_timeout' -and
+        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default (
+            Get-FileTransferEventField -Event $_ -Name 'failure_reason' -Default '')) -eq
+            'runtime_unlock_probe_start_timeout'
+    })
+    [object[]]$startedEvents = @($orderedEvents | Where-Object {
+        $_.EventName -in @(
+            'runtime_unlock_precommit_probe_started',
+            'runtime_unlock_precommit_probe_launch_started')
+    })
+    [object[]]$dispositionEvents = @($orderedEvents | Where-Object {
+        ($_.EventName -eq 'filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided' -and
+            (Get-FileTransferEventField -Event $_ -Name 'status' -Default (
+                Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '')) -in
+                @('Accepted', 'Idempotent', 'Held', 'Rejected', 'Invalidated')) -or
+        $_.EventName -in @(
+            'runtime_unlock_precommit_probe_launch_held_by_coordinator_denial',
+            'runtime_unlock_precommit_probe_start_timeout_suppressed_by_coordinator_denial',
+            'filetransfer_runtime_unlock_precommit_probe_pending_held',
+            'filetransfer_runtime_unlock_precommit_probe_pending_rejected')
+    })
+
+    function Get-ProbeField {
+        param($Event, [string[]]$Names)
+        foreach ($name in $Names) {
+            $value = Get-FileTransferEventField -Event $Event -Name $name -Default ''
+            if (-not [string]::IsNullOrWhiteSpace($value) -and $value -notin @('(none)', 'none')) {
+                return $value
+            }
+        }
+        return ''
+    }
+
+    function Test-ProbeCoreMatch {
+        param($Launch, $Candidate)
+        foreach ($aliases in @(
+                @('session_id'),
+                @('transaction_generation'),
+                @('offer_generation'))) {
+            $left = Get-ProbeField -Event $Launch -Names $aliases
+            $right = Get-ProbeField -Event $Candidate -Names $aliases
+            if ([string]::IsNullOrWhiteSpace($left) -or
+                [string]::IsNullOrWhiteSpace($right) -or
+                -not [string]::Equals($left, $right, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        foreach ($aliases in @(
+                @('direction'),
+                @('transfer_id'),
+                @('tuna_path_lease_generation', 'path_lease_generation'),
+                @('launch_generation'))) {
+            $left = Get-ProbeField -Event $Launch -Names $aliases
+            $right = Get-ProbeField -Event $Candidate -Names $aliases
+            if (-not [string]::IsNullOrWhiteSpace($right) -and
+                ([string]::IsNullOrWhiteSpace($left) -or
+                    -not [string]::Equals($left, $right, [System.StringComparison]::OrdinalIgnoreCase))) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    function Test-ProbeExactMatch {
+        param($Launch, $Candidate)
+        if (-not (Test-ProbeCoreMatch -Launch $Launch -Candidate $Candidate)) {
+            return $false
+        }
+        foreach ($aliases in @(
+                @('transfer_id'),
+                @('tuna_path_lease_generation', 'path_lease_generation'),
+                @('launch_generation'))) {
+            $left = Get-ProbeField -Event $Launch -Names $aliases
+            $right = Get-ProbeField -Event $Candidate -Names $aliases
+            if ([string]::IsNullOrWhiteSpace($left) -or
+                [string]::IsNullOrWhiteSpace($right) -or
+                -not [string]::Equals($left, $right, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    function Test-ProbeCandidateHasExactTuple {
+        param($Event)
+        return -not [string]::IsNullOrWhiteSpace((Get-ProbeField -Event $Event -Names @('transfer_id'))) -and
+            -not [string]::IsNullOrWhiteSpace((Get-ProbeField -Event $Event -Names @('tuna_path_lease_generation', 'path_lease_generation'))) -and
+            -not [string]::IsNullOrWhiteSpace((Get-ProbeField -Event $Event -Names @('launch_generation')))
+    }
+
+    function Get-ProbeKey {
+        param($Launch)
+        return (@(
+            (Get-ProbeField -Event $Launch -Names @('session_id')),
+            (Get-ProbeField -Event $Launch -Names @('direction')),
+            (Get-ProbeField -Event $Launch -Names @('transfer_id')),
+            (Get-ProbeField -Event $Launch -Names @('transaction_generation')),
+            (Get-ProbeField -Event $Launch -Names @('offer_generation')),
+            (Get-ProbeField -Event $Launch -Names @('tuna_path_lease_generation', 'path_lease_generation')),
+            (Get-ProbeField -Event $Launch -Names @('launch_generation'))
+        )) -join '|'
+    }
+
+    $rawCandidates = New-Object System.Collections.Generic.List[object]
+    $distinctRecords = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    $matchedLaunchSequences = New-Object System.Collections.Generic.HashSet[long]
+    foreach ($timeout in $timeouts) {
+        [object[]]$possible = @($launchRequests | Where-Object {
+            [int64]$_.Sequence -lt [int64]$timeout.Sequence -and
+            (Test-ProbeCoreMatch -Launch $_ -Candidate $timeout)
+        } | Sort-Object Sequence, LineNumber -Descending)
+        if (Test-ProbeCandidateHasExactTuple -Event $timeout) {
+            $possible = @($possible | Where-Object {
+                Test-ProbeExactMatch -Launch $_ -Candidate $timeout
+            })
+        }
+        else {
+            $possible = @($possible | Where-Object {
+                -not $matchedLaunchSequences.Contains([int64]$_.Sequence)
+            })
+            if ($possible.Count -ne 1) {
+                continue
+            }
+        }
+        if ($possible.Count -ne 1) {
+            continue
+        }
+
+        $launch = $possible[0]
+        $matchedLaunchSequences.Add([int64]$launch.Sequence) | Out-Null
+        $rawCandidates.Add($timeout) | Out-Null
+        $key = Get-ProbeKey -Launch $launch
+        if ($seen.ContainsKey($key)) {
+            continue
+        }
+        $seen[$key] = $true
+
+        [object[]]$resolutions = @($startedEvents + $dispositionEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$launch.Sequence -and
+            [int64]$_.Sequence -lt [int64]$timeout.Sequence -and
+            $(if (Test-ProbeCandidateHasExactTuple -Event $_) {
+                Test-ProbeExactMatch -Launch $launch -Candidate $_
+            }
+            else {
+                Test-ProbeCoreMatch -Launch $launch -Candidate $_
+            })
+        })
+        $distinctRecords.Add([pscustomobject]@{
+            Event = $timeout
+            Recovered = $resolutions.Count -gt 0
+        }) | Out-Null
+    }
+
+    [object[]]$distinct = @($distinctRecords.ToArray() | ForEach-Object { $_.Event })
+    [object[]]$recovered = @($distinctRecords.ToArray() | Where-Object { $_.Recovered } | ForEach-Object { $_.Event })
+    [object[]]$unresolved = @($distinctRecords.ToArray() | Where-Object { -not $_.Recovered } | ForEach-Object { $_.Event })
+    return [pscustomobject]@{
+        RawCount = $rawCandidates.Count
+        DistinctCount = $distinct.Count
+        RecoveredCount = $recovered.Count
+        UnresolvedCount = $unresolved.Count
+        Verdict = if ($unresolved.Count -gt 0) { 'fail' } elseif ($distinct.Count -gt 0) { 'pass' } else { 'none' }
+        RawCandidateEvents = @($rawCandidates.ToArray())
+        DistinctCandidateEvents = $distinct
+        RecoveredCandidateEvents = $recovered
+        UnresolvedCandidateEvents = $unresolved
+    }
+}
+
 function Get-FileTransferRuntimeUnlockRetryDispatchAuthorityTupleMismatchCorrelation {
     param(
         [AllowEmptyCollection()][object[]]$Events = @(),
@@ -20556,6 +20878,12 @@ function Get-FileTransferRecoveryFailureClassification {
     [object[]]$runtimeUnlockRetryDispatchEffectiveGrantEvents = @(
         $runtimeUnlockRetryDispatchInstallProof.EffectiveGrantEvents
     )
+    $runtimeUnlockRetryDispatchPostGrantHoldProof =
+        Get-FileTransferRuntimeUnlockRetryDispatchPostGrantHoldCorrelation `
+            -Events $events `
+            -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents
+    $runtimeUnlockPreCommitProbeStartHandoffProof =
+        Get-FileTransferRuntimeUnlockPreCommitProbeStartHandoffCorrelation -Events $events
     $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof =
         Get-FileTransferRuntimeUnlockRegularV4RecoveryLeaseCorrelation `
             -Events $events `
@@ -22248,33 +22576,11 @@ function Get-FileTransferRecoveryFailureClassification {
         }
     }
     $runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchCount = $runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchEvents.Count
-    $runtimeUnlockRetryDispatchPostGrantHoldEvents = New-Object System.Collections.Generic.List[object]
-    foreach ($grant in $runtimeUnlockRetryDispatchAuthorityGrantedEvents) {
-        if ((Get-FileTransferAuthoritySchema -Line ([string]$grant.RawLine)) -lt 2) {
-            continue
-        }
-
-        $grantSequence = [int64]$grant.Sequence
-        $matchingSettlement = @($runtimeUnlockRetryDispatchContractSettledEvents | Where-Object {
-            [int64]$_.Sequence -gt $grantSequence -and
-            (Test-RuntimeUnlockRetryDispatchMatch -Release $grant -Candidate $_)
-        } | Sort-Object Sequence | Select-Object -First 1)
-        $settlementSequence = if ($matchingSettlement.Count -gt 0) {
-            [int64]$matchingSettlement[0].Sequence
-        } else {
-            [int64]::MaxValue
-        }
-
-        foreach ($heldEvent in @($runtimeUnlockRetryDispatchHeldEvents | Where-Object {
-            [int64]$_.Sequence -gt $grantSequence -and
-            [int64]$_.Sequence -lt $settlementSequence -and
-            (Get-FileTransferAuthoritySchema -Line ([string]$_.RawLine)) -ge 2 -and
-            (Test-RuntimeUnlockRetryDispatchMatch -Release $grant -Candidate $_)
-        })) {
-            $runtimeUnlockRetryDispatchPostGrantHoldEvents.Add($heldEvent) | Out-Null
-        }
-    }
-    $runtimeUnlockRetryDispatchPostGrantHoldCount = $runtimeUnlockRetryDispatchPostGrantHoldEvents.Count
+    [object[]]$runtimeUnlockRetryDispatchPostGrantHoldEvents = @(
+        $runtimeUnlockRetryDispatchPostGrantHoldProof.UnresolvedCandidateEvents
+    )
+    $runtimeUnlockRetryDispatchPostGrantHoldCount =
+        $runtimeUnlockRetryDispatchPostGrantHoldProof.RawCount
     foreach ($release in $runtimeUnlockRetryReleasedEvents) {
         $releaseSequence = [int64]$release.Sequence
         $matchingGrant = @($runtimeUnlockRetryDispatchAuthorityGrantedEvents | Where-Object {
@@ -22446,10 +22752,11 @@ function Get-FileTransferRecoveryFailureClassification {
         $runtimeUnlockRetryDispatchDuplicateObservedCount -gt 0 -or
         $runtimeUnlockRetryDispatchDuplicateSettlementCount -gt 0 -or
         $runtimeUnlockRetryDispatchOrphanedSupersessionCount -gt 0 -or
-        $runtimeUnlockRetryDispatchPostGrantHoldCount -gt 0 -or
+        $runtimeUnlockRetryDispatchPostGrantHoldProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRetryDispatchChainClosureProofVerdict -eq 'fail') {
         'fail'
-    } elseif ($runtimeUnlockRetryDispatchReleaseCount -gt 0) {
+    } elseif ($runtimeUnlockRetryDispatchReleaseCount -gt 0 -or
+        $runtimeUnlockRetryDispatchPostGrantHoldProof.RecoveredCount -gt 0) {
         'pass'
     } else {
         'none'
@@ -23678,8 +23985,14 @@ function Get-FileTransferRecoveryFailureClassification {
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_retry_dispatch_held_after_authority_granted' `
-        -Events @($runtimeUnlockRetryDispatchPostGrantHoldEvents.ToArray()) `
+        -Events @($runtimeUnlockRetryDispatchPostGrantHoldEvents) `
         -DefaultReason 'retry_dispatch_held_after_authority_granted' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_precommit_probe_start_handoff_missing' `
+        -Events @($runtimeUnlockPreCommitProbeStartHandoffProof.UnresolvedCandidateEvents) `
+        -DefaultReason 'runtime_unlock_probe_start_timeout' `
         -UseDefaultReason
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
@@ -23995,8 +24308,11 @@ function Get-FileTransferRecoveryFailureClassification {
     elseif ($fileTunaV4DataPathProof.Verdict -eq 'fail') {
         $class = 'file_tuna_data_path_mismatch'
     }
-    elseif ($runtimeUnlockRetryDispatchPostGrantHoldCount -gt 0) {
+    elseif ($runtimeUnlockRetryDispatchPostGrantHoldProof.UnresolvedCount -gt 0) {
         $class = 'runtime_unlock_retry_dispatch_held_after_authority_granted'
+    }
+    elseif ($runtimeUnlockPreCommitProbeStartHandoffProof.UnresolvedCount -gt 0) {
+        $class = 'runtime_unlock_precommit_probe_start_handoff_missing'
     }
     elseif ($runtimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount -gt 0) {
         $class = 'runtime_unlock_retry_dispatch_missing_after_authority_granted'
@@ -24373,6 +24689,7 @@ function Get-FileTransferRecoveryFailureClassification {
         } else { 0L }
         SemanticFailureDomain = if ($class -in @(
                 'runtime_unlock_regular_v4_route_commit_send_drain_missing',
+                'runtime_unlock_precommit_probe_start_handoff_missing',
                 'regular_v4_frontier_repair_pressure_authority_lifecycle_split',
                 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
             'route_runtime'
@@ -24430,6 +24747,11 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockRetryDispatchOrphanedSupersessionCount = $runtimeUnlockRetryDispatchOrphanedSupersessionCount
         RuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchCount = $runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchCount
         RuntimeUnlockRetryDispatchPostGrantHoldCount = $runtimeUnlockRetryDispatchPostGrantHoldCount
+        RuntimeUnlockRetryDispatchPostGrantHoldRawCount = $runtimeUnlockRetryDispatchPostGrantHoldProof.RawCount
+        RuntimeUnlockRetryDispatchPostGrantHoldDistinctCount = $runtimeUnlockRetryDispatchPostGrantHoldProof.DistinctCount
+        RuntimeUnlockRetryDispatchPostGrantHoldRecoveredCount = $runtimeUnlockRetryDispatchPostGrantHoldProof.RecoveredCount
+        RuntimeUnlockRetryDispatchPostGrantHoldUnresolvedCount = $runtimeUnlockRetryDispatchPostGrantHoldProof.UnresolvedCount
+        RuntimeUnlockRetryDispatchPostGrantHoldVerdict = $runtimeUnlockRetryDispatchPostGrantHoldProof.Verdict
         RuntimeUnlockRetryDispatchMissingCount = $runtimeUnlockRetryDispatchMissingCount
         RuntimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount = $runtimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount
         RuntimeUnlockRetryMissingAuthorityAfterReleaseCount = $runtimeUnlockRetryMissingAuthorityAfterReleaseCount
@@ -24524,6 +24846,11 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockPreCommitProbeAckAuthorityRejectedCount = $runtimeUnlockPreCommitProbeAckAuthorityRejectedEvents.Count
         RuntimeUnlockPreCommitProbeFailedCount = $runtimeUnlockPreCommitProbeFailedEvents.Count
         RuntimeUnlockPreCommitProbeProtocolMismatchCount = $runtimeUnlockPreCommitProbeProtocolMismatchEvents.Count
+        RuntimeUnlockPreCommitProbeStartHandoffMissingRawCount = $runtimeUnlockPreCommitProbeStartHandoffProof.RawCount
+        RuntimeUnlockPreCommitProbeStartHandoffMissingDistinctCount = $runtimeUnlockPreCommitProbeStartHandoffProof.DistinctCount
+        RuntimeUnlockPreCommitProbeStartHandoffMissingRecoveredCount = $runtimeUnlockPreCommitProbeStartHandoffProof.RecoveredCount
+        RuntimeUnlockPreCommitProbeStartHandoffMissingUnresolvedCount = $runtimeUnlockPreCommitProbeStartHandoffProof.UnresolvedCount
+        RuntimeUnlockPreCommitProbeStartHandoffVerdict = $runtimeUnlockPreCommitProbeStartHandoffProof.Verdict
         RuntimeUnlockTunaProbeSentCount = $runtimeUnlockTunaProbeSentEvents.Count
         RuntimeUnlockTunaProbeReceivedCount = $runtimeUnlockTunaProbeReceivedEvents.Count
         RuntimeUnlockTunaProbeAckSentCount = $runtimeUnlockTunaProbeAckSentEvents.Count
@@ -25080,6 +25407,16 @@ function New-FileTransferInvariantLedgerObject {
         first_proof_chain_failure_writer_sequence = [string]$recoveryClassification.FirstProofChainFailureWriterSequence
         semantic_failure_domain = $recoveryClassification.SemanticFailureDomain
         runtime_unlock_retry_dispatch_proof_verdict = $recoveryClassification.RuntimeUnlockRetryDispatchProofVerdict
+        runtime_unlock_retry_dispatch_post_grant_hold_raw_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldRawCount
+        runtime_unlock_retry_dispatch_post_grant_hold_distinct_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldDistinctCount
+        runtime_unlock_retry_dispatch_post_grant_hold_recovered_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldRecoveredCount
+        runtime_unlock_retry_dispatch_post_grant_hold_unresolved_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldUnresolvedCount
+        runtime_unlock_retry_dispatch_post_grant_hold_verdict = $recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldVerdict
+        runtime_unlock_precommit_probe_start_handoff_missing_raw_count = [string]$recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffMissingRawCount
+        runtime_unlock_precommit_probe_start_handoff_missing_distinct_count = [string]$recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffMissingDistinctCount
+        runtime_unlock_precommit_probe_start_handoff_missing_recovered_count = [string]$recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffMissingRecoveredCount
+        runtime_unlock_precommit_probe_start_handoff_missing_unresolved_count = [string]$recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffMissingUnresolvedCount
+        runtime_unlock_precommit_probe_start_handoff_verdict = $recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffVerdict
         runtime_unlock_retry_dispatch_chain_closure_proof_verdict = $recoveryClassification.RuntimeUnlockRetryDispatchChainClosureProofVerdict
         runtime_unlock_retry_dispatch_settlement_reported_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchSettlementReportedCount
         runtime_unlock_retry_dispatch_settlement_accepted_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchSettlementAcceptedCount
@@ -25224,6 +25561,7 @@ function Write-FileTransferDiagnosticsArtifacts {
             'runtime_unlock_retry_dispatch_grant_bypassed_by_retry_budget',
             'runtime_unlock_retry_dispatch_contract_unsettled',
             'runtime_unlock_retry_dispatch_held_after_authority_granted',
+            'runtime_unlock_precommit_probe_start_handoff_missing',
             'runtime_unlock_tuna_probe_recovery_authority_lost',
             'runtime_unlock_regular_v4_recovery_lease_not_issued',
             'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted',
@@ -25337,6 +25675,7 @@ function Write-FileTransferDiagnosticsArtifacts {
     }
 
     if ($recoveryClassification.Class -in @(
+            'runtime_unlock_precommit_probe_start_handoff_missing',
             'regular_v4_frontier_repair_initial_pressure_install_missing',
             'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
         $effectiveVerdict = 'INCONCLUSIVE'
@@ -25345,6 +25684,16 @@ function Write-FileTransferDiagnosticsArtifacts {
     }
 
     $verdictLines = @(
+        ("runtime_unlock_retry_dispatch_post_grant_hold_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldRawCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldDistinctCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldRecoveredCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_verdict={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldVerdict),
+        ("runtime_unlock_precommit_probe_start_handoff_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffMissingRawCount),
+        ("runtime_unlock_precommit_probe_start_handoff_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffMissingDistinctCount),
+        ("runtime_unlock_precommit_probe_start_handoff_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffMissingRecoveredCount),
+        ("runtime_unlock_precommit_probe_start_handoff_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffMissingUnresolvedCount),
+        ("runtime_unlock_precommit_probe_start_handoff_verdict={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffVerdict),
         ("runtime_unlock_regular_v4_recovery_lease_closure_retained_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureRetainedCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_adopted_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureAdoptedCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureRejectedCount),
@@ -25393,7 +25742,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("gate_status={0}" -f $effectiveGateStatus),
         ("transfer_id={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.TransferId)) { '(none)' } else { $Summary.TransferId }))),
         ("next_artifact={0}" -f $effectiveNextArtifact),
-        ("acceptance_failure_class={0}" -f ($(if ($recoveryClassification.Class -in @('runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_initial_pressure_install_missing', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery', 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) { 'incomplete_proof' } elseif ($recoveryClassification.Class -in @('runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'runtime_unlock_regular_v4_route_commit_send_drain_missing')) { 'route_runtime' } elseif ($invariantMayOwnAcceptanceFailure) { $combinedInvariant.FailureClass } else { 'none' }))),
+        ("acceptance_failure_class={0}" -f ($(if ($recoveryClassification.Class -in @('runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'runtime_unlock_precommit_probe_start_handoff_missing', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_initial_pressure_install_missing', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery', 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) { 'incomplete_proof' } elseif ($recoveryClassification.Class -in @('runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'runtime_unlock_regular_v4_route_commit_send_drain_missing')) { 'route_runtime' } elseif ($invariantMayOwnAcceptanceFailure) { $combinedInvariant.FailureClass } else { 'none' }))),
         ("release_route_law_verdict={0}" -f $releaseRouteLaw.Verdict),
         ("terminal_lifecycle_invariant_verdict={0}" -f $terminalLifecycleInvariant.Verdict),
         ("control_priority_invariant_verdict={0}" -f $controlPriorityInvariant.Verdict),

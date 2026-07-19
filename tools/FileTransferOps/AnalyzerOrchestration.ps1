@@ -1031,6 +1031,33 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             -Index $Index `
             -Name 'runtime_unlock_retry_dispatch_observed'
     )
+    [object[]]$runtimeUnlockRetryDispatchPostGrantHoldEvents = @(
+        $runtimeUnlockRetryDispatchInstallEvents +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_held_by_active_negotiation') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_held_by_regular_v4_receive_recovery') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_held_for_missing_dispatch_successor') +
+        $runtimeUnlockRetryDispatchObservedEvents +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_contract_settled') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_settlement_decided')
+    )
+    $runtimeUnlockRetryDispatchPostGrantHoldProof =
+        Get-FileTransferRuntimeUnlockRetryDispatchPostGrantHoldCorrelation `
+            -Events $runtimeUnlockRetryDispatchPostGrantHoldEvents `
+            -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents
+    [object[]]$runtimeUnlockPreCommitProbeStartHandoffEvents = @(
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_launch_requested') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_launch_held_by_coordinator_denial') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_start_timeout_suppressed_by_coordinator_denial') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_unlock_precommit_probe_pending_held') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_unlock_precommit_probe_pending_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_launch_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_start_timeout')
+    )
+    $runtimeUnlockPreCommitProbeStartHandoffProof =
+        Get-FileTransferRuntimeUnlockPreCommitProbeStartHandoffCorrelation `
+            -Events $runtimeUnlockPreCommitProbeStartHandoffEvents
     $runtimeUnlockRetryDispatchObservedCount = $runtimeUnlockRetryDispatchObservedEvents.Count
     [object[]]$runtimeUnlockRetryDispatchUnobservedGrantEvents = @(
         $runtimeUnlockRetryDispatchEffectiveGrantEvents | Where-Object {
@@ -1045,10 +1072,12 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     )
     $runtimeUnlockRetryDispatchProofVerdict = if (
         $runtimeUnlockRetryDispatchEffectiveGrantEvents.Count -gt 0 -and
-        $runtimeUnlockRetryDispatchUnobservedGrantEvents.Count -eq 0) {
+        $runtimeUnlockRetryDispatchUnobservedGrantEvents.Count -eq 0 -and
+        $runtimeUnlockRetryDispatchPostGrantHoldProof.UnresolvedCount -eq 0) {
         'pass'
     }
-    elseif ($runtimeUnlockRetryDispatchEffectiveGrantEvents.Count -gt 0) {
+    elseif ($runtimeUnlockRetryDispatchEffectiveGrantEvents.Count -gt 0 -or
+        $runtimeUnlockRetryDispatchPostGrantHoldProof.UnresolvedCount -gt 0) {
         'fail'
     }
     else {
@@ -1654,6 +1683,20 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Reason = 'regular_v4_frontier_repair_pressure_missing'
         }) | Out-Null
     }
+    foreach ($candidateEvent in @($runtimeUnlockRetryDispatchPostGrantHoldProof.UnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'runtime_unlock_retry_dispatch_held_after_authority_granted'
+            Event = $candidateEvent
+            Reason = 'retry_dispatch_held_after_authority_granted'
+        }) | Out-Null
+    }
+    foreach ($candidateEvent in @($runtimeUnlockPreCommitProbeStartHandoffProof.UnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'runtime_unlock_precommit_probe_start_handoff_missing'
+            Event = $candidateEvent
+            Reason = 'runtime_unlock_probe_start_timeout'
+        }) | Out-Null
+    }
     $firstCompactProofChainFailure = @(
         $compactProofChainCandidates.ToArray() |
             Sort-Object @{ Expression = { [int64]$_.Event.Sequence } }, @{ Expression = { [int]$_.Event.LineNumber } }, Class |
@@ -1748,6 +1791,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete',
                 'runtime_unlock_retry_regular_v4_recovery_settlement_missing',
                 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved',
+                'runtime_unlock_precommit_probe_start_handoff_missing',
                 'regular_v4_frontier_repair_settlement_disposition_unverifiable',
                 'regular_v4_frontier_repair_initial_pressure_install_missing',
                 'regular_v4_frontier_repair_successor_pressure_install_missing',
@@ -1825,6 +1869,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     }
     $semanticFailureDomain = if ($firstProofChainFailureClass -in @(
             'runtime_unlock_regular_v4_route_commit_send_drain_missing',
+            'runtime_unlock_precommit_probe_start_handoff_missing',
             'regular_v4_frontier_repair_pressure_authority_lifecycle_split',
             'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
         'route_runtime'
@@ -1898,6 +1943,17 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteUnresolvedCount),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_verdict={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceVerdict),
         ("runtime_unlock_retry_dispatch_proof_verdict={0}" -f $runtimeUnlockRetryDispatchProofVerdict),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_count={0}" -f $runtimeUnlockRetryDispatchPostGrantHoldProof.RawCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_raw_count={0}" -f $runtimeUnlockRetryDispatchPostGrantHoldProof.RawCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_distinct_count={0}" -f $runtimeUnlockRetryDispatchPostGrantHoldProof.DistinctCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_recovered_count={0}" -f $runtimeUnlockRetryDispatchPostGrantHoldProof.RecoveredCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_unresolved_count={0}" -f $runtimeUnlockRetryDispatchPostGrantHoldProof.UnresolvedCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_verdict={0}" -f $runtimeUnlockRetryDispatchPostGrantHoldProof.Verdict),
+        ("runtime_unlock_precommit_probe_start_handoff_missing_raw_count={0}" -f $runtimeUnlockPreCommitProbeStartHandoffProof.RawCount),
+        ("runtime_unlock_precommit_probe_start_handoff_missing_distinct_count={0}" -f $runtimeUnlockPreCommitProbeStartHandoffProof.DistinctCount),
+        ("runtime_unlock_precommit_probe_start_handoff_missing_recovered_count={0}" -f $runtimeUnlockPreCommitProbeStartHandoffProof.RecoveredCount),
+        ("runtime_unlock_precommit_probe_start_handoff_missing_unresolved_count={0}" -f $runtimeUnlockPreCommitProbeStartHandoffProof.UnresolvedCount),
+        ("runtime_unlock_precommit_probe_start_handoff_verdict={0}" -f $runtimeUnlockPreCommitProbeStartHandoffProof.Verdict),
         ("regular_v4_frontier_repair_missing_range_not_preserved_raw_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.RawCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_distinct_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.DistinctCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.RecoveredCount),
@@ -2380,6 +2436,17 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteUnresolvedCount),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_verdict={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceVerdict),
         ("runtime_unlock_retry_dispatch_proof_verdict={0}" -f $runtimeUnlockRetryDispatchProofVerdict),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_count={0}" -f $runtimeUnlockRetryDispatchPostGrantHoldProof.RawCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_raw_count={0}" -f $runtimeUnlockRetryDispatchPostGrantHoldProof.RawCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_distinct_count={0}" -f $runtimeUnlockRetryDispatchPostGrantHoldProof.DistinctCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_recovered_count={0}" -f $runtimeUnlockRetryDispatchPostGrantHoldProof.RecoveredCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_unresolved_count={0}" -f $runtimeUnlockRetryDispatchPostGrantHoldProof.UnresolvedCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_verdict={0}" -f $runtimeUnlockRetryDispatchPostGrantHoldProof.Verdict),
+        ("runtime_unlock_precommit_probe_start_handoff_missing_raw_count={0}" -f $runtimeUnlockPreCommitProbeStartHandoffProof.RawCount),
+        ("runtime_unlock_precommit_probe_start_handoff_missing_distinct_count={0}" -f $runtimeUnlockPreCommitProbeStartHandoffProof.DistinctCount),
+        ("runtime_unlock_precommit_probe_start_handoff_missing_recovered_count={0}" -f $runtimeUnlockPreCommitProbeStartHandoffProof.RecoveredCount),
+        ("runtime_unlock_precommit_probe_start_handoff_missing_unresolved_count={0}" -f $runtimeUnlockPreCommitProbeStartHandoffProof.UnresolvedCount),
+        ("runtime_unlock_precommit_probe_start_handoff_verdict={0}" -f $runtimeUnlockPreCommitProbeStartHandoffProof.Verdict),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_raw_count={0}" -f $regularV4PeerSilenceReplayMissingDispatchRangeProof.RawCount),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_distinct_count={0}" -f $regularV4PeerSilenceReplayMissingDispatchRangeProof.DistinctCount),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count={0}" -f $regularV4PeerSilenceReplayMissingDispatchRangeProof.RecoveredCount),
@@ -2528,6 +2595,17 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count = $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteUnresolvedCount
         runtime_unlock_retry_dispatch_install_grant_evidence_verdict = $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceVerdict
         runtime_unlock_retry_dispatch_proof_verdict = $runtimeUnlockRetryDispatchProofVerdict
+        runtime_unlock_retry_dispatch_post_grant_hold_count = $runtimeUnlockRetryDispatchPostGrantHoldProof.RawCount
+        runtime_unlock_retry_dispatch_post_grant_hold_raw_count = $runtimeUnlockRetryDispatchPostGrantHoldProof.RawCount
+        runtime_unlock_retry_dispatch_post_grant_hold_distinct_count = $runtimeUnlockRetryDispatchPostGrantHoldProof.DistinctCount
+        runtime_unlock_retry_dispatch_post_grant_hold_recovered_count = $runtimeUnlockRetryDispatchPostGrantHoldProof.RecoveredCount
+        runtime_unlock_retry_dispatch_post_grant_hold_unresolved_count = $runtimeUnlockRetryDispatchPostGrantHoldProof.UnresolvedCount
+        runtime_unlock_retry_dispatch_post_grant_hold_verdict = $runtimeUnlockRetryDispatchPostGrantHoldProof.Verdict
+        runtime_unlock_precommit_probe_start_handoff_missing_raw_count = $runtimeUnlockPreCommitProbeStartHandoffProof.RawCount
+        runtime_unlock_precommit_probe_start_handoff_missing_distinct_count = $runtimeUnlockPreCommitProbeStartHandoffProof.DistinctCount
+        runtime_unlock_precommit_probe_start_handoff_missing_recovered_count = $runtimeUnlockPreCommitProbeStartHandoffProof.RecoveredCount
+        runtime_unlock_precommit_probe_start_handoff_missing_unresolved_count = $runtimeUnlockPreCommitProbeStartHandoffProof.UnresolvedCount
+        runtime_unlock_precommit_probe_start_handoff_verdict = $runtimeUnlockPreCommitProbeStartHandoffProof.Verdict
         regular_v4_frontier_repair_missing_range_not_preserved_raw_count = $regularV4FrontierRepairMissingRangePreservationProof.RawCount
         regular_v4_frontier_repair_missing_range_not_preserved_distinct_count = $regularV4FrontierRepairMissingRangePreservationProof.DistinctCount
         regular_v4_frontier_repair_missing_range_not_preserved_recovered_count = $regularV4FrontierRepairMissingRangePreservationProof.RecoveredCount

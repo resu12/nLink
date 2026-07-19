@@ -727,6 +727,103 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
     }
 
     [Fact]
+    public async Task RunFileTransferRouteAcceptance_PreCommitProbeStartHandoffCountsReachScenarioAndRootSummaries()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string scenario = "regular-v4-live-activation-off-on-off-256mb";
+        const string candidate = "runtime_unlock_precommit_probe_start_handoff_missing";
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-precommit-probe-start-handoff-summary-propagation");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-precommit-probe-start-handoff-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_PRECOMMIT_PROBE_START_HANDOFF_SUMMARY_FIXTURE"] = "1";
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ScenarioName", scenario,
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Expected fake precommit-probe summary propagation run to pass.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal(candidate, summary["runtime_failure_candidate"]);
+            Assert.Equal("PASS", summary["correctness_verdict"]);
+            Assert.Equal("incomplete_proof", summary["runtime_correctness_verdict"]);
+            Assert.Equal("runtime_unlock_precommit_probe_start_timeout", summary["first_proof_chain_failure_event"]);
+            Assert.Equal("10960", summary["first_proof_chain_failure_sequence"]);
+            Assert.Equal("2647", summary["first_proof_chain_failure_writer_sequence"]);
+            Assert.Equal("route_runtime", summary["semantic_failure_domain"]);
+            Assert.Equal("1", summary["runtime_unlock_retry_dispatch_post_grant_hold_count"]);
+            Assert.Equal("1", summary["runtime_unlock_retry_dispatch_post_grant_hold_raw_count"]);
+            Assert.Equal("1", summary["runtime_unlock_retry_dispatch_post_grant_hold_distinct_count"]);
+            Assert.Equal("1", summary["runtime_unlock_retry_dispatch_post_grant_hold_recovered_count"]);
+            Assert.Equal("0", summary["runtime_unlock_retry_dispatch_post_grant_hold_unresolved_count"]);
+            Assert.Equal("pass", summary["runtime_unlock_retry_dispatch_post_grant_hold_verdict"]);
+            Assert.Equal("1", summary["runtime_unlock_precommit_probe_start_handoff_missing_raw_count"]);
+            Assert.Equal("1", summary["runtime_unlock_precommit_probe_start_handoff_missing_distinct_count"]);
+            Assert.Equal("0", summary["runtime_unlock_precommit_probe_start_handoff_missing_recovered_count"]);
+            Assert.Equal("1", summary["runtime_unlock_precommit_probe_start_handoff_missing_unresolved_count"]);
+            Assert.Equal("fail", summary["runtime_unlock_precommit_probe_start_handoff_verdict"]);
+            Assert.Equal("1", summary[$"{scenario}.runtime_unlock_retry_dispatch_post_grant_hold_recovered_count"]);
+            Assert.Equal("0", summary[$"{scenario}.runtime_unlock_retry_dispatch_post_grant_hold_unresolved_count"]);
+            Assert.Equal("pass", summary[$"{scenario}.runtime_unlock_retry_dispatch_post_grant_hold_verdict"]);
+            Assert.Equal("1", summary[$"{scenario}.runtime_unlock_precommit_probe_start_handoff_missing_unresolved_count"]);
+            Assert.Equal("fail", summary[$"{scenario}.runtime_unlock_precommit_probe_start_handoff_verdict"]);
+
+            using var summaryJson = JsonDocument.Parse(
+                await File.ReadAllTextAsync(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.json")));
+            var root = summaryJson.RootElement;
+            Assert.Equal(candidate, root.GetProperty("runtimeFailureCandidate").GetString());
+            Assert.Equal("PASS", root.GetProperty("correctnessVerdict").GetString());
+            Assert.Equal("incomplete_proof", root.GetProperty("runtimeCorrectnessVerdict").GetString());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockRetryDispatchPostGrantHoldCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockRetryDispatchPostGrantHoldRawCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockRetryDispatchPostGrantHoldDistinctCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockRetryDispatchPostGrantHoldRecoveredCount").GetInt32());
+            Assert.Equal(0, root.GetProperty("runtimeUnlockRetryDispatchPostGrantHoldUnresolvedCount").GetInt32());
+            Assert.Equal("pass", root.GetProperty("runtimeUnlockRetryDispatchPostGrantHoldVerdict").GetString());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockPreCommitProbeStartHandoffMissingRawCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockPreCommitProbeStartHandoffMissingDistinctCount").GetInt32());
+            Assert.Equal(0, root.GetProperty("runtimeUnlockPreCommitProbeStartHandoffMissingRecoveredCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockPreCommitProbeStartHandoffMissingUnresolvedCount").GetInt32());
+            Assert.Equal("fail", root.GetProperty("runtimeUnlockPreCommitProbeStartHandoffVerdict").GetString());
+
+            var run = Assert.Single(root.GetProperty("runs").EnumerateArray());
+            Assert.Equal(candidate, run.GetProperty("runtimeFailureCandidate").GetString());
+            Assert.Equal("incomplete_proof", run.GetProperty("acceptanceFailureClass").GetString());
+            Assert.Equal(1, run.GetProperty("runtimeUnlockRetryDispatchPostGrantHoldCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("runtimeUnlockRetryDispatchPostGrantHoldRecoveredCount").GetInt32());
+            Assert.Equal(0, run.GetProperty("runtimeUnlockRetryDispatchPostGrantHoldUnresolvedCount").GetInt32());
+            Assert.Equal("pass", run.GetProperty("runtimeUnlockRetryDispatchPostGrantHoldVerdict").GetString());
+            Assert.Equal(1, run.GetProperty("runtimeUnlockPreCommitProbeStartHandoffMissingRawCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("runtimeUnlockPreCommitProbeStartHandoffMissingDistinctCount").GetInt32());
+            Assert.Equal(0, run.GetProperty("runtimeUnlockPreCommitProbeStartHandoffMissingRecoveredCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("runtimeUnlockPreCommitProbeStartHandoffMissingUnresolvedCount").GetInt32());
+            Assert.Equal("fail", run.GetProperty("runtimeUnlockPreCommitProbeStartHandoffVerdict").GetString());
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
     public async Task RunFileTransferRouteAcceptance_SettlementDispositionFailureIsIncompleteProofInScenarioAndRootSummaries()
     {
         if (!OperatingSystem.IsWindows())

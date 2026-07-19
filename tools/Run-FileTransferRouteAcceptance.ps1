@@ -373,7 +373,8 @@ function Test-RouteAcceptanceIncompleteProofRuntimeCandidate {
         'regular_v4_frontier_repair_pressure_authority_lifecycle_split',
         'regular_v4_frontier_repair_pressure_recovery_handoff_missing',
         'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery',
-        'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete')
+        'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete',
+        'runtime_unlock_precommit_probe_start_handoff_missing')
 }
 
 function Set-RouteAcceptanceResultEvidence {
@@ -1048,6 +1049,17 @@ function New-RouteAcceptanceRunResult {
         runtimeFailureCandidate = '(none)'
         runtimeUnlockRetryDispatchAuthorityGrantedRawCount = 0
         runtimeUnlockRetryDispatchAuthorityGrantedCount = 0
+        runtimeUnlockRetryDispatchPostGrantHoldCount = 0
+        runtimeUnlockRetryDispatchPostGrantHoldRawCount = 0
+        runtimeUnlockRetryDispatchPostGrantHoldDistinctCount = 0
+        runtimeUnlockRetryDispatchPostGrantHoldRecoveredCount = 0
+        runtimeUnlockRetryDispatchPostGrantHoldUnresolvedCount = 0
+        runtimeUnlockRetryDispatchPostGrantHoldVerdict = 'none'
+        runtimeUnlockPreCommitProbeStartHandoffMissingRawCount = 0
+        runtimeUnlockPreCommitProbeStartHandoffMissingDistinctCount = 0
+        runtimeUnlockPreCommitProbeStartHandoffMissingRecoveredCount = 0
+        runtimeUnlockPreCommitProbeStartHandoffMissingUnresolvedCount = 0
+        runtimeUnlockPreCommitProbeStartHandoffVerdict = 'none'
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount = 0
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount = 0
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount = 0
@@ -2569,6 +2581,17 @@ function Assert-Phase4OperatorVerdict {
     $Result.firstProofChainFailureClass = $firstProofClass
     $Result.runtimeUnlockRetryDispatchAuthorityGrantedRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_authority_granted_raw_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchAuthorityGrantedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_authority_granted_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchPostGrantHoldCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_post_grant_hold_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchPostGrantHoldRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_post_grant_hold_raw_count' -DefaultValue ([string]$Result.runtimeUnlockRetryDispatchPostGrantHoldCount))
+    $Result.runtimeUnlockRetryDispatchPostGrantHoldDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_post_grant_hold_distinct_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchPostGrantHoldRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_post_grant_hold_recovered_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchPostGrantHoldUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_post_grant_hold_unresolved_count' -DefaultValue ([string]$Result.runtimeUnlockRetryDispatchPostGrantHoldCount))
+    $Result.runtimeUnlockRetryDispatchPostGrantHoldVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_post_grant_hold_verdict' -DefaultValue 'none'
+    $Result.runtimeUnlockPreCommitProbeStartHandoffMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_precommit_probe_start_handoff_missing_raw_count' -DefaultValue '0')
+    $Result.runtimeUnlockPreCommitProbeStartHandoffMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_precommit_probe_start_handoff_missing_distinct_count' -DefaultValue '0')
+    $Result.runtimeUnlockPreCommitProbeStartHandoffMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_precommit_probe_start_handoff_missing_recovered_count' -DefaultValue '0')
+    $Result.runtimeUnlockPreCommitProbeStartHandoffMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_precommit_probe_start_handoff_missing_unresolved_count' -DefaultValue '0')
+    $Result.runtimeUnlockPreCommitProbeStartHandoffVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_precommit_probe_start_handoff_verdict' -DefaultValue 'none'
     $Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_distinct_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count' -DefaultValue '0')
@@ -4411,6 +4434,46 @@ function Write-RouteAcceptanceFakePhase4Run {
             $reportPath = Join-Path $ArtifactDir $reportName
             $reportText = Get-Content -LiteralPath $reportPath -Raw
             foreach ($fixtureLine in $grantEvidenceFixtureLines) {
+                $separatorIndex = $fixtureLine.IndexOf('=')
+                $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
+                $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
+                if ([regex]::IsMatch($reportText, $fixturePattern)) {
+                    $reportText = [regex]::Replace($reportText, $fixturePattern, $fixtureLine)
+                }
+                else {
+                    $reportText = $reportText.TrimEnd("`r", "`n") + [Environment]::NewLine + $fixtureLine + [Environment]::NewLine
+                }
+            }
+            Set-Content -LiteralPath $reportPath -Value $reportText -Encoding UTF8
+        }
+    }
+
+    if (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'PRECOMMIT_PROBE_START_HANDOFF_SUMMARY_FIXTURE') {
+        $preCommitProbeStartHandoffFixtureLines = @(
+            'runtime_unlock_retry_dispatch_post_grant_hold_count=1',
+            'runtime_unlock_retry_dispatch_post_grant_hold_raw_count=1',
+            'runtime_unlock_retry_dispatch_post_grant_hold_distinct_count=1',
+            'runtime_unlock_retry_dispatch_post_grant_hold_recovered_count=1',
+            'runtime_unlock_retry_dispatch_post_grant_hold_unresolved_count=0',
+            'runtime_unlock_retry_dispatch_post_grant_hold_verdict=pass',
+            'runtime_unlock_precommit_probe_start_handoff_missing_raw_count=1',
+            'runtime_unlock_precommit_probe_start_handoff_missing_distinct_count=1',
+            'runtime_unlock_precommit_probe_start_handoff_missing_recovered_count=0',
+            'runtime_unlock_precommit_probe_start_handoff_missing_unresolved_count=1',
+            'runtime_unlock_precommit_probe_start_handoff_verdict=fail',
+            'first_proof_chain_failure_class=runtime_unlock_precommit_probe_start_handoff_missing',
+            'first_proof_chain_failure_event=runtime_unlock_precommit_probe_start_timeout',
+            'first_proof_chain_failure_reason=runtime_unlock_probe_start_timeout',
+            'first_proof_chain_failure_sequence=10960',
+            'first_proof_chain_failure_source_path=filetransfer-retained-log-slice.log',
+            'first_proof_chain_failure_line_number=10960',
+            'first_proof_chain_failure_writer_sequence=2647',
+            'semantic_failure_domain=route_runtime'
+        )
+        foreach ($reportName in @('filetransfer-route-consistency-summary.txt', 'filetransfer-operator-verdict.txt')) {
+            $reportPath = Join-Path $ArtifactDir $reportName
+            $reportText = Get-Content -LiteralPath $reportPath -Raw
+            foreach ($fixtureLine in $preCommitProbeStartHandoffFixtureLines) {
                 $separatorIndex = $fixtureLine.IndexOf('=')
                 $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
                 $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
@@ -8000,6 +8063,17 @@ function New-RouteAcceptanceSummaryRunDto {
         runtimeFailureCandidate = [string]$Result.runtimeFailureCandidate
         runtimeUnlockRetryDispatchAuthorityGrantedRawCount = [int]$Result.runtimeUnlockRetryDispatchAuthorityGrantedRawCount
         runtimeUnlockRetryDispatchAuthorityGrantedCount = [int]$Result.runtimeUnlockRetryDispatchAuthorityGrantedCount
+        runtimeUnlockRetryDispatchPostGrantHoldCount = [int]$Result.runtimeUnlockRetryDispatchPostGrantHoldCount
+        runtimeUnlockRetryDispatchPostGrantHoldRawCount = [int]$Result.runtimeUnlockRetryDispatchPostGrantHoldRawCount
+        runtimeUnlockRetryDispatchPostGrantHoldDistinctCount = [int]$Result.runtimeUnlockRetryDispatchPostGrantHoldDistinctCount
+        runtimeUnlockRetryDispatchPostGrantHoldRecoveredCount = [int]$Result.runtimeUnlockRetryDispatchPostGrantHoldRecoveredCount
+        runtimeUnlockRetryDispatchPostGrantHoldUnresolvedCount = [int]$Result.runtimeUnlockRetryDispatchPostGrantHoldUnresolvedCount
+        runtimeUnlockRetryDispatchPostGrantHoldVerdict = [string]$Result.runtimeUnlockRetryDispatchPostGrantHoldVerdict
+        runtimeUnlockPreCommitProbeStartHandoffMissingRawCount = [int]$Result.runtimeUnlockPreCommitProbeStartHandoffMissingRawCount
+        runtimeUnlockPreCommitProbeStartHandoffMissingDistinctCount = [int]$Result.runtimeUnlockPreCommitProbeStartHandoffMissingDistinctCount
+        runtimeUnlockPreCommitProbeStartHandoffMissingRecoveredCount = [int]$Result.runtimeUnlockPreCommitProbeStartHandoffMissingRecoveredCount
+        runtimeUnlockPreCommitProbeStartHandoffMissingUnresolvedCount = [int]$Result.runtimeUnlockPreCommitProbeStartHandoffMissingUnresolvedCount
+        runtimeUnlockPreCommitProbeStartHandoffVerdict = [string]$Result.runtimeUnlockPreCommitProbeStartHandoffVerdict
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount = [int]$Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount = [int]$Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount = [int]$Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount
@@ -8277,6 +8351,15 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount = 0
     $runtimeUnlockRetryDispatchAuthorityGrantedRawCount = 0
     $runtimeUnlockRetryDispatchAuthorityGrantedCount = 0
+    $runtimeUnlockRetryDispatchPostGrantHoldCount = 0
+    $runtimeUnlockRetryDispatchPostGrantHoldRawCount = 0
+    $runtimeUnlockRetryDispatchPostGrantHoldDistinctCount = 0
+    $runtimeUnlockRetryDispatchPostGrantHoldRecoveredCount = 0
+    $runtimeUnlockRetryDispatchPostGrantHoldUnresolvedCount = 0
+    $runtimeUnlockPreCommitProbeStartHandoffMissingRawCount = 0
+    $runtimeUnlockPreCommitProbeStartHandoffMissingDistinctCount = 0
+    $runtimeUnlockPreCommitProbeStartHandoffMissingRecoveredCount = 0
+    $runtimeUnlockPreCommitProbeStartHandoffMissingUnresolvedCount = 0
     $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount = 0
     $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount = 0
     $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount = 0
@@ -8302,6 +8385,15 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     foreach ($runDto in $runDtos) {
         $runtimeUnlockRetryDispatchAuthorityGrantedRawCount += [int]$runDto.runtimeUnlockRetryDispatchAuthorityGrantedRawCount
         $runtimeUnlockRetryDispatchAuthorityGrantedCount += [int]$runDto.runtimeUnlockRetryDispatchAuthorityGrantedCount
+        $runtimeUnlockRetryDispatchPostGrantHoldCount += [int]$runDto.runtimeUnlockRetryDispatchPostGrantHoldCount
+        $runtimeUnlockRetryDispatchPostGrantHoldRawCount += [int]$runDto.runtimeUnlockRetryDispatchPostGrantHoldRawCount
+        $runtimeUnlockRetryDispatchPostGrantHoldDistinctCount += [int]$runDto.runtimeUnlockRetryDispatchPostGrantHoldDistinctCount
+        $runtimeUnlockRetryDispatchPostGrantHoldRecoveredCount += [int]$runDto.runtimeUnlockRetryDispatchPostGrantHoldRecoveredCount
+        $runtimeUnlockRetryDispatchPostGrantHoldUnresolvedCount += [int]$runDto.runtimeUnlockRetryDispatchPostGrantHoldUnresolvedCount
+        $runtimeUnlockPreCommitProbeStartHandoffMissingRawCount += [int]$runDto.runtimeUnlockPreCommitProbeStartHandoffMissingRawCount
+        $runtimeUnlockPreCommitProbeStartHandoffMissingDistinctCount += [int]$runDto.runtimeUnlockPreCommitProbeStartHandoffMissingDistinctCount
+        $runtimeUnlockPreCommitProbeStartHandoffMissingRecoveredCount += [int]$runDto.runtimeUnlockPreCommitProbeStartHandoffMissingRecoveredCount
+        $runtimeUnlockPreCommitProbeStartHandoffMissingUnresolvedCount += [int]$runDto.runtimeUnlockPreCommitProbeStartHandoffMissingUnresolvedCount
         $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount += [int]$runDto.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount
         $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount += [int]$runDto.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount
         $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount += [int]$runDto.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount
@@ -8486,6 +8578,30 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     else {
         'none'
     }
+    $runtimeUnlockRetryDispatchPostGrantHoldVerdict = if (
+        $runtimeUnlockRetryDispatchPostGrantHoldUnresolvedCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.runtimeUnlockRetryDispatchPostGrantHoldVerdict -eq 'fail' }).Count -gt 0) {
+        'fail'
+    }
+    elseif ($runtimeUnlockRetryDispatchPostGrantHoldDistinctCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.runtimeUnlockRetryDispatchPostGrantHoldVerdict -eq 'pass' }).Count -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
+    }
+    $runtimeUnlockPreCommitProbeStartHandoffVerdict = if (
+        $runtimeUnlockPreCommitProbeStartHandoffMissingUnresolvedCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.runtimeUnlockPreCommitProbeStartHandoffVerdict -eq 'fail' }).Count -gt 0) {
+        'fail'
+    }
+    elseif ($runtimeUnlockPreCommitProbeStartHandoffMissingDistinctCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.runtimeUnlockPreCommitProbeStartHandoffVerdict -eq 'pass' }).Count -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
+    }
     $runtimeUnlockRetryDispatchInstallGrantEvidenceVerdict = if (
         $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount -gt 0 -or
         @($runDtos | Where-Object { [string]$_.runtimeUnlockRetryDispatchInstallGrantEvidenceVerdict -eq 'fail' }).Count -gt 0) {
@@ -8663,6 +8779,17 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("runtime_failure_candidate={0}" -f $runtimeFailureCandidate),
         ("runtime_unlock_retry_dispatch_authority_granted_raw_count={0}" -f $runtimeUnlockRetryDispatchAuthorityGrantedRawCount),
         ("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $runtimeUnlockRetryDispatchAuthorityGrantedCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_count={0}" -f $runtimeUnlockRetryDispatchPostGrantHoldCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_raw_count={0}" -f $runtimeUnlockRetryDispatchPostGrantHoldRawCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_distinct_count={0}" -f $runtimeUnlockRetryDispatchPostGrantHoldDistinctCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_recovered_count={0}" -f $runtimeUnlockRetryDispatchPostGrantHoldRecoveredCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_unresolved_count={0}" -f $runtimeUnlockRetryDispatchPostGrantHoldUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_verdict={0}" -f $runtimeUnlockRetryDispatchPostGrantHoldVerdict),
+        ("runtime_unlock_precommit_probe_start_handoff_missing_raw_count={0}" -f $runtimeUnlockPreCommitProbeStartHandoffMissingRawCount),
+        ("runtime_unlock_precommit_probe_start_handoff_missing_distinct_count={0}" -f $runtimeUnlockPreCommitProbeStartHandoffMissingDistinctCount),
+        ("runtime_unlock_precommit_probe_start_handoff_missing_recovered_count={0}" -f $runtimeUnlockPreCommitProbeStartHandoffMissingRecoveredCount),
+        ("runtime_unlock_precommit_probe_start_handoff_missing_unresolved_count={0}" -f $runtimeUnlockPreCommitProbeStartHandoffMissingUnresolvedCount),
+        ("runtime_unlock_precommit_probe_start_handoff_verdict={0}" -f $runtimeUnlockPreCommitProbeStartHandoffVerdict),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_distinct_count={0}" -f $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count={0}" -f $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount),
@@ -8846,6 +8973,17 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.runtime_failure_candidate={1}" -f $prefix, $result.runtimeFailureCandidate)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_authority_granted_raw_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchAuthorityGrantedRawCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_authority_granted_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchAuthorityGrantedCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_post_grant_hold_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchPostGrantHoldCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_post_grant_hold_raw_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchPostGrantHoldRawCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_post_grant_hold_distinct_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchPostGrantHoldDistinctCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_post_grant_hold_recovered_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchPostGrantHoldRecoveredCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_post_grant_hold_unresolved_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchPostGrantHoldUnresolvedCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_post_grant_hold_verdict={1}" -f $prefix, $result.runtimeUnlockRetryDispatchPostGrantHoldVerdict)
+        $textLines += ("{0}.runtime_unlock_precommit_probe_start_handoff_missing_raw_count={1}" -f $prefix, $result.runtimeUnlockPreCommitProbeStartHandoffMissingRawCount)
+        $textLines += ("{0}.runtime_unlock_precommit_probe_start_handoff_missing_distinct_count={1}" -f $prefix, $result.runtimeUnlockPreCommitProbeStartHandoffMissingDistinctCount)
+        $textLines += ("{0}.runtime_unlock_precommit_probe_start_handoff_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockPreCommitProbeStartHandoffMissingRecoveredCount)
+        $textLines += ("{0}.runtime_unlock_precommit_probe_start_handoff_missing_unresolved_count={1}" -f $prefix, $result.runtimeUnlockPreCommitProbeStartHandoffMissingUnresolvedCount)
+        $textLines += ("{0}.runtime_unlock_precommit_probe_start_handoff_verdict={1}" -f $prefix, $result.runtimeUnlockPreCommitProbeStartHandoffVerdict)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_distinct_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount)
@@ -9079,6 +9217,17 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         runtimeFailureCandidate = $runtimeFailureCandidate
         runtimeUnlockRetryDispatchAuthorityGrantedRawCount = $runtimeUnlockRetryDispatchAuthorityGrantedRawCount
         runtimeUnlockRetryDispatchAuthorityGrantedCount = $runtimeUnlockRetryDispatchAuthorityGrantedCount
+        runtimeUnlockRetryDispatchPostGrantHoldCount = $runtimeUnlockRetryDispatchPostGrantHoldCount
+        runtimeUnlockRetryDispatchPostGrantHoldRawCount = $runtimeUnlockRetryDispatchPostGrantHoldRawCount
+        runtimeUnlockRetryDispatchPostGrantHoldDistinctCount = $runtimeUnlockRetryDispatchPostGrantHoldDistinctCount
+        runtimeUnlockRetryDispatchPostGrantHoldRecoveredCount = $runtimeUnlockRetryDispatchPostGrantHoldRecoveredCount
+        runtimeUnlockRetryDispatchPostGrantHoldUnresolvedCount = $runtimeUnlockRetryDispatchPostGrantHoldUnresolvedCount
+        runtimeUnlockRetryDispatchPostGrantHoldVerdict = $runtimeUnlockRetryDispatchPostGrantHoldVerdict
+        runtimeUnlockPreCommitProbeStartHandoffMissingRawCount = $runtimeUnlockPreCommitProbeStartHandoffMissingRawCount
+        runtimeUnlockPreCommitProbeStartHandoffMissingDistinctCount = $runtimeUnlockPreCommitProbeStartHandoffMissingDistinctCount
+        runtimeUnlockPreCommitProbeStartHandoffMissingRecoveredCount = $runtimeUnlockPreCommitProbeStartHandoffMissingRecoveredCount
+        runtimeUnlockPreCommitProbeStartHandoffMissingUnresolvedCount = $runtimeUnlockPreCommitProbeStartHandoffMissingUnresolvedCount
+        runtimeUnlockPreCommitProbeStartHandoffVerdict = $runtimeUnlockPreCommitProbeStartHandoffVerdict
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount = $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount = $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount = $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount
