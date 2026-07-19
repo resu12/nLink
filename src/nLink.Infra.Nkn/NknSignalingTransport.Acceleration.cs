@@ -3353,6 +3353,7 @@ public sealed partial class NknSignalingTransport
     private void ClearFileTransferFallbackProofAuthorityUnsafe()
     {
         fileTransferFallbackProofTransferId = null;
+        fileTransferFallbackProofDirection = null;
         fileTransferFallbackProofRouteToken = null;
         fileTransferFallbackProofProtocolVersion = 0;
         fileTransferFallbackProofLiveRouteEpoch = 0;
@@ -11526,7 +11527,7 @@ public sealed partial class NknSignalingTransport
         RecordPostTunaFallbackReceiverFrontierProofHint(frame, "received", sessionId);
         if (TryMapFileTransferFallbackNknProofKind(frame, out var proofKind))
         {
-            _ = CompleteFileTransferFallbackNknProofIfPending(proofKind, sessionId);
+            _ = CompleteFileTransferFallbackNknProofIfPending(proofKind, sessionId, frame);
         }
     }
 
@@ -11793,6 +11794,7 @@ public sealed partial class NknSignalingTransport
             fileTransferFallbackBulkProofObserved = false;
             fileTransferFallbackControlProofObserved = false;
             fileTransferFallbackProofTransferId = authorityRequest?.TransferId;
+            fileTransferFallbackProofDirection = authorityRequest?.Direction;
             fileTransferFallbackProofRouteToken = authorityRequest?.RouteToken;
             fileTransferFallbackProofProtocolVersion = authorityRequest?.ProtocolVersion ?? 0;
             fileTransferFallbackProofLiveRouteEpoch = authorityRequest?.LiveRouteEpoch ?? 0;
@@ -11851,7 +11853,10 @@ public sealed partial class NknSignalingTransport
         }
     }
 
-    private bool CompleteFileTransferFallbackNknProofIfPending(string proofKind, string? sessionId)
+    private bool CompleteFileTransferFallbackNknProofIfPending(
+        string proofKind,
+        string? sessionId,
+        FileTransferDataFrame? proofFrame = null)
     {
         string reason;
         string? pendingSessionId;
@@ -11862,6 +11867,8 @@ public sealed partial class NknSignalingTransport
         bool requiresV6EpochRecovery = false;
         bool completed = false;
         string? authorityTransferId = null;
+        FileTransferDirection? authorityDirection = null;
+        long authorityProofGeneration = 0;
         string? authorityRouteToken = null;
         int authorityProtocolVersion = 0;
         int authorityLiveRouteEpoch = 0;
@@ -11872,6 +11879,14 @@ public sealed partial class NknSignalingTransport
         string? authorityReason = null;
         var normalizedProofKind = SanitizeLogToken(proofKind);
         var authoritativeProof = IsAuthoritativeFileTransferFallbackNknProof(normalizedProofKind);
+        PostTunaFallbackPeerProofFrameIdentity? proofFrameIdentity = null;
+        if (IsPostTunaFileTransferFallbackNknProof(normalizedProofKind) &&
+            proofFrame is not null &&
+            !PostTunaFallbackPeerProofFrameIdentity.TryCreate(proofFrame, out proofFrameIdentity))
+        {
+            return false;
+        }
+
         lock (fileTransferFallbackProofGate)
         {
             if (!fileTransferFallbackProofPending)
@@ -11883,6 +11898,19 @@ public sealed partial class NknSignalingTransport
             if (!string.IsNullOrWhiteSpace(fileTransferFallbackProofSessionId) &&
                 !string.IsNullOrWhiteSpace(normalizedSessionId) &&
                 !string.Equals(fileTransferFallbackProofSessionId, normalizedSessionId, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var requiresSessionBoundProofFrame =
+                !string.IsNullOrWhiteSpace(fileTransferFallbackProofTransferId) &&
+                fileTransferFallbackProofDirection == FileTransferDirection.Outbound &&
+                fileTransferFallbackProofGeneration > 0 &&
+                fileTransferFallbackProofTransportEpoch > 0;
+            if (IsPostTunaFileTransferFallbackNknProof(normalizedProofKind) &&
+                requiresSessionBoundProofFrame &&
+                (proofFrameIdentity is null ||
+                 !IsExactPendingPostTunaFallbackProofFrameUnsafe(proofFrame, normalizedSessionId)))
             {
                 return false;
             }
@@ -11915,6 +11943,8 @@ public sealed partial class NknSignalingTransport
                 else
                 {
                     authorityTransferId = fileTransferFallbackProofTransferId;
+                    authorityDirection = fileTransferFallbackProofDirection;
+                    authorityProofGeneration = fileTransferFallbackProofGeneration;
                     authorityRouteToken = fileTransferFallbackProofRouteToken;
                     authorityProtocolVersion = fileTransferFallbackProofProtocolVersion;
                     authorityLiveRouteEpoch = fileTransferFallbackProofLiveRouteEpoch;
@@ -11983,11 +12013,44 @@ public sealed partial class NknSignalingTransport
 
         if ((lanes & NknAccelerationLaneKind.File) == NknAccelerationLaneKind.File)
         {
+            PostTunaFallbackHandoffEvidence? postTunaFallbackHandoffEvidence = null;
             if (IsPostTunaFileTransferFallbackNknProof(normalizedProofKind))
             {
                 LocalOperationalLog.Info(
                     "NKN.Tuna",
                     $"event=filetransfer_post_tuna_fallback_nkn_proved; session_id={SanitizeLogToken(pendingSessionId ?? "none")}; reason={reason}; proof={normalizedProofKind}; lanes={FormatAccelerationLanesForLog(lanes)}");
+                if (!string.IsNullOrWhiteSpace(pendingSessionId) &&
+                    !string.IsNullOrWhiteSpace(authorityTransferId) &&
+                    authorityDirection == FileTransferDirection.Outbound &&
+                    authorityProofGeneration > 0 &&
+                    string.Equals(
+                        authorityRouteToken!,
+                        FileTransferRouteResolver.PostTunaFallbackV6Token,
+                        StringComparison.Ordinal) &&
+                    authorityProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+                    authorityLiveRouteEpoch > 0 &&
+                    authorityLegGeneration > 0 &&
+                    authorityBridgeRecoveryGeneration > 0 &&
+                    authorityTransportEpoch > 0 &&
+                    !string.IsNullOrWhiteSpace(authorityCheckpointRequestId) &&
+                    !string.IsNullOrWhiteSpace(authorityReason))
+                {
+                    postTunaFallbackHandoffEvidence = new PostTunaFallbackHandoffEvidence(
+                        pendingSessionId.Trim(),
+                        authorityTransferId.Trim(),
+                        authorityDirection.Value,
+                        authorityProofGeneration,
+                        authorityRouteToken!,
+                        authorityProtocolVersion,
+                        authorityLiveRouteEpoch,
+                        authorityLegGeneration,
+                        authorityBridgeRecoveryGeneration,
+                        authorityTransportEpoch,
+                        authorityCheckpointRequestId!,
+                        normalizedProofKind,
+                        authorityReason!,
+                        proofFrameIdentity);
+                }
             }
 
             MarkTunaFallbackLaneState(
@@ -12000,7 +12063,8 @@ public sealed partial class NknSignalingTransport
                 reason: "transport_recovered",
                 requiresResumeRequest: true,
                 handoffKind: FileTransferTransportHandoffKind.TunaToNormalFallback,
-                targetTransport: FileTransferTransportKind.RegularNkn);
+                targetTransport: FileTransferTransportKind.RegularNkn,
+                postTunaFallbackHandoffEvidence);
             if (IsPostTunaFileTransferFallbackNknProof(normalizedProofKind))
             {
                 LocalOperationalLog.Info(
@@ -12024,7 +12088,10 @@ public sealed partial class NknSignalingTransport
         var bulkProofObserved = false;
         var controlProofObserved = true;
         var completedPendingProof = false;
+        var awaitingExactPeerFrame = false;
         string? authorityTransferId = null;
+        FileTransferDirection? authorityDirection = null;
+        long authorityProofGeneration = 0;
         string? authorityRouteToken = null;
         int authorityProtocolVersion = 0;
         int authorityLiveRouteEpoch = 0;
@@ -12045,33 +12112,76 @@ public sealed partial class NknSignalingTransport
                     return false;
                 }
 
-                reason = fileTransferFallbackProofReason;
-                pendingSessionId = fileTransferFallbackProofSessionId ?? normalizedSessionId;
-                lanes = fileTransferFallbackProofLanes;
-                bulkProofObserved = fileTransferFallbackBulkProofObserved;
-                authorityTransferId = fileTransferFallbackProofTransferId;
-                authorityRouteToken = fileTransferFallbackProofRouteToken;
-                authorityProtocolVersion = fileTransferFallbackProofProtocolVersion;
-                authorityLiveRouteEpoch = fileTransferFallbackProofLiveRouteEpoch;
-                authorityLegGeneration = fileTransferFallbackProofLegGeneration;
-                authorityBridgeRecoveryGeneration = fileTransferFallbackProofBridgeRecoveryGeneration;
-                authorityTransportEpoch = fileTransferFallbackProofTransportEpoch;
-                authorityCheckpointRequestId = fileTransferFallbackProofCheckpointRequestId;
-                authorityReason = fileTransferFallbackProofAuthorityReason;
-                completedPendingProof = true;
-                fileTransferFallbackProofPending = false;
-                fileTransferFallbackProofReason = "none";
-                fileTransferFallbackProofSessionId = null;
-                fileTransferFallbackProofLanes = NknAccelerationLaneKind.None;
-                fileTransferFallbackProofGeneration++;
-                fileTransferFallbackProofProbeScheduled = false;
-                fileTransferFallbackBulkProofObserved = false;
-                fileTransferFallbackControlProofObserved = false;
-                ClearFileTransferFallbackProofAuthorityUnsafe();
+                var hasBoundFallbackAuthority =
+                    !string.IsNullOrWhiteSpace(fileTransferFallbackProofTransferId) ||
+                    fileTransferFallbackProofDirection is not null ||
+                    fileTransferFallbackProofTransportEpoch > 0;
+                if (hasBoundFallbackAuthority &&
+                    (!string.Equals(
+                         fileTransferFallbackProofTransferId,
+                         snapshot.TransferId,
+                         StringComparison.Ordinal) ||
+                     fileTransferFallbackProofDirection != snapshot.Direction ||
+                     snapshot.HandoffKind != FileTransferTransportHandoffKind.TunaToNormalFallback ||
+                     snapshot.SourceTransport != FileTransferTransportKind.Tuna ||
+                     snapshot.TargetTransport != FileTransferTransportKind.RegularNkn ||
+                     snapshot.TransportEpoch != fileTransferFallbackProofTransportEpoch))
+                {
+                    return false;
+                }
+
+                var requiresExactPeerFrame =
+                    !string.IsNullOrWhiteSpace(fileTransferFallbackProofTransferId) &&
+                    fileTransferFallbackProofDirection == FileTransferDirection.Outbound &&
+                    fileTransferFallbackProofGeneration > 0 &&
+                    fileTransferFallbackProofTransportEpoch > 0;
+                if (requiresExactPeerFrame)
+                {
+                    // The recovered epoch is a scope boundary, not the exact peer frame
+                    // that authorizes the uncommitted-Tuna fallback adoption. Preserve the
+                    // pending proof until the matching state/frontier frame binds it.
+                    awaitingExactPeerFrame = true;
+                }
+                else
+                {
+                    reason = fileTransferFallbackProofReason;
+                    pendingSessionId = fileTransferFallbackProofSessionId ?? normalizedSessionId;
+                    lanes = fileTransferFallbackProofLanes;
+                    bulkProofObserved = fileTransferFallbackBulkProofObserved;
+                    authorityTransferId = fileTransferFallbackProofTransferId;
+                    authorityDirection = fileTransferFallbackProofDirection;
+                    authorityProofGeneration = fileTransferFallbackProofGeneration;
+                    authorityRouteToken = fileTransferFallbackProofRouteToken;
+                    authorityProtocolVersion = fileTransferFallbackProofProtocolVersion;
+                    authorityLiveRouteEpoch = fileTransferFallbackProofLiveRouteEpoch;
+                    authorityLegGeneration = fileTransferFallbackProofLegGeneration;
+                    authorityBridgeRecoveryGeneration = fileTransferFallbackProofBridgeRecoveryGeneration;
+                    authorityTransportEpoch = fileTransferFallbackProofTransportEpoch;
+                    authorityCheckpointRequestId = fileTransferFallbackProofCheckpointRequestId;
+                    authorityReason = fileTransferFallbackProofAuthorityReason;
+                    completedPendingProof = true;
+                    fileTransferFallbackProofPending = false;
+                    fileTransferFallbackProofReason = "none";
+                    fileTransferFallbackProofSessionId = null;
+                    fileTransferFallbackProofLanes = NknAccelerationLaneKind.None;
+                    fileTransferFallbackProofGeneration++;
+                    fileTransferFallbackProofProbeScheduled = false;
+                    fileTransferFallbackBulkProofObserved = false;
+                    fileTransferFallbackControlProofObserved = false;
+                    ClearFileTransferFallbackProofAuthorityUnsafe();
+                }
             }
         }
 
+        if (awaitingExactPeerFrame)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=filetransfer_fallback_nkn_proof_waiting_for_exact_peer_frame; session_id={SanitizeLogToken(snapshot.SessionId)}; transfer_id={SanitizeLogToken(snapshot.TransferId)}; direction={snapshot.Direction.ToString().ToLowerInvariant()}; transport_epoch={snapshot.TransportEpoch}; reason={reason}");
+        }
+
         const string proofKind = "filetransfer_v6_epoch_recovered";
+        PostTunaFallbackHandoffEvidence? postTunaFallbackHandoffEvidence = null;
         if (completedPendingProof)
         {
             LocalOperationalLog.Info(
@@ -12098,6 +12208,38 @@ public sealed partial class NknSignalingTransport
                     authorityReason,
                     proofKind);
             }
+
+            if (!string.IsNullOrWhiteSpace(pendingSessionId) &&
+                !string.IsNullOrWhiteSpace(authorityTransferId) &&
+                authorityDirection == FileTransferDirection.Outbound &&
+                authorityProofGeneration > 0 &&
+                string.Equals(
+                    authorityRouteToken!,
+                    FileTransferRouteResolver.PostTunaFallbackV6Token,
+                    StringComparison.Ordinal) &&
+                authorityProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+                authorityLiveRouteEpoch > 0 &&
+                authorityLegGeneration > 0 &&
+                authorityBridgeRecoveryGeneration > 0 &&
+                authorityTransportEpoch > 0 &&
+                !string.IsNullOrWhiteSpace(authorityCheckpointRequestId) &&
+                !string.IsNullOrWhiteSpace(authorityReason))
+            {
+                postTunaFallbackHandoffEvidence = new PostTunaFallbackHandoffEvidence(
+                    pendingSessionId.Trim(),
+                    authorityTransferId.Trim(),
+                    authorityDirection.Value,
+                    authorityProofGeneration,
+                    authorityRouteToken!,
+                    authorityProtocolVersion,
+                    authorityLiveRouteEpoch,
+                    authorityLegGeneration,
+                    authorityBridgeRecoveryGeneration,
+                    authorityTransportEpoch,
+                    authorityCheckpointRequestId!,
+                    proofKind,
+                    authorityReason!);
+            }
         }
 
         EnsureFileTransferFallbackRecoveredStateFromV6Epoch(snapshot, reason);
@@ -12111,7 +12253,8 @@ public sealed partial class NknSignalingTransport
             reason: "transport_recovered",
             requiresResumeRequest: false,
             handoffKind: snapshot.HandoffKind,
-            targetTransport: FileTransferTransportKind.RegularNkn);
+            targetTransport: FileTransferTransportKind.RegularNkn,
+            postTunaFallbackHandoffEvidence);
         _ = QueueCurrentRuntimeUnlockPostTunaFallbackActivationRecheck(
             "fallback_v6_epoch_recovered",
             TimeSpan.Zero);
@@ -12480,6 +12623,7 @@ public sealed partial class NknSignalingTransport
                 rejectionReason = "retry_request_predecessor_replaced";
                 return false;
             }
+
         }
         else if (request.PredecessorAuthorityId != successorIntent.PredecessorAuthorityId ||
                  request.RequestActivePredecessorSupersession !=
@@ -12494,6 +12638,43 @@ public sealed partial class NknSignalingTransport
         }
 
         return true;
+    }
+
+    private bool IsExactPendingPostTunaFallbackProofFrameUnsafe(
+        FileTransferDataFrame? frame,
+        string? observedSessionId)
+    {
+        if (frame is null ||
+            string.IsNullOrWhiteSpace(fileTransferFallbackProofSessionId) ||
+            string.IsNullOrWhiteSpace(fileTransferFallbackProofTransferId) ||
+            fileTransferFallbackProofDirection != FileTransferDirection.Outbound ||
+            fileTransferFallbackProofTransportEpoch <= 0 ||
+            !string.Equals(
+                frame.SessionId,
+                fileTransferFallbackProofSessionId,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                frame.TransferId,
+                fileTransferFallbackProofTransferId,
+                StringComparison.Ordinal) ||
+            (!string.IsNullOrWhiteSpace(observedSessionId) &&
+             !string.Equals(
+                 observedSessionId,
+                 fileTransferFallbackProofSessionId,
+                 StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
+        var transportEpoch = frame switch
+        {
+            IFileTransferTransportMetadataFrame metadata => metadata.TransportEpoch,
+            FileTransferTransportEpochFrameV6 transportEpochFrame => transportEpochFrame.TransportEpoch,
+            FileTransferFrontierRequestFrameV6 frontier => frontier.TransportEpoch,
+            FileTransferRepairProofFrameV6 repairProof => repairProof.TransportEpoch,
+            _ => 0,
+        };
+        return transportEpoch == fileTransferFallbackProofTransportEpoch;
     }
 
     private void PublishRuntimeUnlockRetryFallbackTailUnblockRecheck(

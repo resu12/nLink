@@ -2157,6 +2157,252 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    [Trait("FileTransferCoordinatorSuite", "UncommittedTunaFallback")]
+    public void UncommittedTunaFallback_NoPressureCommitsOwnerLegAndPublicationAtomically()
+    {
+        var setup = CreateUncommittedTunaFallbackHandoffState(withPressure: false);
+
+        var prepared = FileTransferCoordinator.PrepareRuntimeUnlockUncommittedTunaFallbackHandoff(
+            setup.State,
+            setup.CoordinatorEvent);
+
+        Assert.Equal(
+            RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus.Prepared,
+            prepared.Status);
+        Assert.Same(setup.State, prepared.State);
+        var transition = Assert.IsType<RuntimeUnlockUncommittedTunaFallbackHandoffTransition>(
+            prepared.Transition);
+        Assert.Null(transition.PressureBinding);
+        Assert.Null(transition.PressureSettlement);
+        Assert.Null(transition.PressureSettlementCommand);
+        var preparedRoute = Assert.IsType<FileTransferCoordinatorDecision>(prepared.RouteDecision);
+        Assert.Equal(FileTransferLegState.CheckpointPending, preparedRoute.State.CurrentLeg!.State);
+        Assert.False(preparedRoute.State.CurrentLeg.CanSendData);
+        var adoption = CreateUncommittedTunaFallbackAdoptionReceipts(
+            setup,
+            preparedRoute,
+            transition,
+            pressureReceipt: null);
+
+        var committed = FileTransferCoordinator.CommitRuntimeUnlockUncommittedTunaFallbackHandoff(
+            setup.State,
+            transition,
+            setup.Handoff,
+            adoption.StageReceipt,
+            adoption.PreparationReceipt);
+
+        Assert.Equal(
+            RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus.Committed,
+            committed.Status);
+        Assert.NotNull(committed.RouteDecision);
+        Assert.NotNull(committed.RouteDecision!.StartedLeg);
+        Assert.NotNull(committed.RouteDecision.StartedLiveRouteEpoch);
+        Assert.Equal(FileTransferRoute.PostTunaFallbackV6, committed.State.RouteSelection.Route);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV6, committed.State.RouteSelection.ProtocolVersion);
+        Assert.Equal(FileTransferRoute.PostTunaFallbackV6, committed.State.CurrentRuntimeOwner!.Value.Route);
+        Assert.Null(committed.State.CurrentRouteCommit);
+        Assert.Equal(FileTransferLegState.CheckpointPending, committed.State.CurrentLeg!.State);
+        Assert.False(committed.State.CurrentLeg.CanSendData);
+        var publication = Assert.IsType<RoutePublicationToken>(committed.State.CurrentRoutePublicationToken);
+        Assert.Equal(FileTransferRoute.PostTunaFallbackV6, publication.Route);
+        Assert.Equal(FileTransferRoute.PostTunaFallbackV6, publication.TargetRoute);
+        Assert.Equal(FileTransferTransportKind.RegularNkn, publication.TargetTransport);
+        Assert.Equal(transition, committed.State.LastRuntimeUnlockUncommittedTunaFallbackHandoff);
+
+        var duplicate = FileTransferCoordinator.CommitRuntimeUnlockUncommittedTunaFallbackHandoff(
+            committed.State,
+            transition,
+            setup.Handoff,
+            adoption.StageReceipt with
+            {
+                Status = RuntimeUnlockUncommittedTunaFallbackAdoptionStageStatus.Idempotent,
+            },
+            adoption.PreparationReceipt with
+            {
+                Status = RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationStatus.Idempotent,
+            });
+        Assert.Equal(
+            RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus.Idempotent,
+            duplicate.Status);
+        Assert.Same(committed.State, duplicate.State);
+        Assert.Null(duplicate.RouteDecision);
+        Assert.Equal(
+            committed.State.LastRuntimeOwnerGeneration,
+            duplicate.State.LastRuntimeOwnerGeneration);
+        Assert.Equal(
+            committed.State.LastRoutePublicationGeneration,
+            duplicate.State.LastRoutePublicationGeneration);
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "UncommittedTunaFallback")]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4FrontierRepairPressure")]
+    public void UncommittedTunaFallback_ExactPressureReceiptRetiresBindingInsideRouteCommit()
+    {
+        var setup = CreateUncommittedTunaFallbackHandoffState(withPressure: true);
+        var installed = Assert.IsType<RegularV4FrontierRepairPressureBinding>(
+            setup.State.InstalledRegularV4FrontierRepairPressureBinding);
+        var prepared = FileTransferCoordinator.PrepareRuntimeUnlockUncommittedTunaFallbackHandoff(
+            setup.State,
+            setup.CoordinatorEvent);
+        var transition = Assert.IsType<RuntimeUnlockUncommittedTunaFallbackHandoffTransition>(
+            prepared.Transition);
+        var command = Assert.IsType<FileTransferRegularV4FrontierRepairPressureSettlementCommand>(
+            transition.PressureSettlementCommand);
+
+        Assert.Same(setup.State, prepared.State);
+        Assert.Equal(installed, transition.PressureBinding);
+        Assert.Equal(installed.Authority.AuthorityId, transition.PressureSettlement!.AuthorityId);
+        Assert.Equal(
+            FileTransferRegularV4FrontierRepairSettlementOutcome.StaleRejected,
+            transition.PressureSettlement.Outcome);
+        Assert.Equal(
+            "uncommitted_tuna_fallback_pressure_handoff",
+            transition.PressureSettlement.DecisionReason);
+
+        var receipt = new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+            command,
+            FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+            "current_authority_cleared",
+            CurrentAuthorityCleared: true,
+            RetainedPredecessorCleared: false);
+        var preparedRoute = Assert.IsType<FileTransferCoordinatorDecision>(prepared.RouteDecision);
+        Assert.Equal(FileTransferLegState.CheckpointPending, preparedRoute.State.CurrentLeg!.State);
+        Assert.False(preparedRoute.State.CurrentLeg.CanSendData);
+        var adoption = CreateUncommittedTunaFallbackAdoptionReceipts(
+            setup,
+            preparedRoute,
+            transition,
+            receipt);
+        var committed = FileTransferCoordinator.CommitRuntimeUnlockUncommittedTunaFallbackHandoff(
+            setup.State,
+            transition,
+            setup.Handoff,
+            adoption.StageReceipt,
+            adoption.PreparationReceipt);
+
+        Assert.Equal(
+            RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus.Committed,
+            committed.Status);
+        Assert.Null(committed.State.PendingRegularV4FrontierRepairPressureBinding);
+        Assert.Null(committed.State.InstalledRegularV4FrontierRepairPressureBinding);
+        Assert.Null(committed.State.RetainedRegularV4FrontierRepairPressurePredecessor);
+        Assert.Null(committed.State.CurrentRepairReplayDecision);
+        Assert.Equal(transition.PressureSettlement, committed.State.LastRegularV4FrontierRepairPressureSettlement);
+        Assert.Equal(receipt, committed.State.LastRegularV4FrontierRepairPressureSettlementApplyReceipt);
+        Assert.Equal(FileTransferRoute.PostTunaFallbackV6, committed.State.CurrentRuntimeOwner!.Value.Route);
+        Assert.NotNull(committed.State.CurrentRoutePublicationToken);
+
+        var duplicate = FileTransferCoordinator.CommitRuntimeUnlockUncommittedTunaFallbackHandoff(
+            committed.State,
+            transition,
+            setup.Handoff,
+            adoption.StageReceipt with
+            {
+                Status = RuntimeUnlockUncommittedTunaFallbackAdoptionStageStatus.Idempotent,
+            },
+            adoption.PreparationReceipt with
+            {
+                Status = RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationStatus.Idempotent,
+                PressureSettlementReceipt = receipt with
+                {
+                    Status = FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent,
+                    Reason = "settlement_already_applied",
+                },
+            });
+        Assert.Equal(
+            RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus.Idempotent,
+            duplicate.Status);
+        Assert.Same(committed.State, duplicate.State);
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "UncommittedTunaFallback")]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4FrontierRepairPressure")]
+    public void UncommittedTunaFallback_RejectedOrMismatchedPressureReceiptLeavesSourceStateUnchanged()
+    {
+        var setup = CreateUncommittedTunaFallbackHandoffState(withPressure: true);
+        var prepared = FileTransferCoordinator.PrepareRuntimeUnlockUncommittedTunaFallbackHandoff(
+            setup.State,
+            setup.CoordinatorEvent);
+        var transition = Assert.IsType<RuntimeUnlockUncommittedTunaFallbackHandoffTransition>(
+            prepared.Transition);
+        var command = Assert.IsType<FileTransferRegularV4FrontierRepairPressureSettlementCommand>(
+            transition.PressureSettlementCommand);
+        var rejectedReceipt = new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+            command,
+            FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+            "pressure_apply_rejected",
+            CurrentAuthorityCleared: false,
+            RetainedPredecessorCleared: false);
+        var preparedRoute = Assert.IsType<FileTransferCoordinatorDecision>(prepared.RouteDecision);
+
+        foreach (var receipt in new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?[]
+                 {
+                     null,
+                     rejectedReceipt,
+                     rejectedReceipt with
+                     {
+                         Command = command with { InstallGeneration = command.InstallGeneration + 1 },
+                         Status = FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+                         CurrentAuthorityCleared = true,
+                     },
+                 })
+        {
+            var adoption = CreateUncommittedTunaFallbackAdoptionReceipts(
+                setup,
+                preparedRoute,
+                transition,
+                receipt);
+            var rejected = FileTransferCoordinator.CommitRuntimeUnlockUncommittedTunaFallbackHandoff(
+                setup.State,
+                transition,
+                setup.Handoff,
+                adoption.StageReceipt,
+                adoption.PreparationReceipt);
+
+            Assert.Equal(
+                RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus.Rejected,
+                rejected.Status);
+            Assert.Same(setup.State, rejected.State);
+            Assert.Equal(
+                setup.State.InstalledRegularV4FrontierRepairPressureBinding,
+                rejected.State.InstalledRegularV4FrontierRepairPressureBinding);
+            Assert.Equal(FileTransferRoute.RegularNknV4Fast, rejected.State.RouteSelection.Route);
+            Assert.Equal(setup.State.CurrentRuntimeOwner, rejected.State.CurrentRuntimeOwner);
+            Assert.Equal(setup.State.CurrentRoutePublicationToken, rejected.State.CurrentRoutePublicationToken);
+            Assert.Equal(setup.State.CurrentRouteCommit, rejected.State.CurrentRouteCommit);
+            Assert.Null(rejected.State.LastRegularV4FrontierRepairPressureSettlement);
+            Assert.Null(rejected.State.LastRuntimeUnlockUncommittedTunaFallbackHandoff);
+        }
+
+        var mismatchedHandoff = setup.Handoff with
+        {
+            SourceDataSessionGeneration = setup.Handoff.SourceDataSessionGeneration + 1,
+        };
+        var mismatchedPressureReceipt = rejectedReceipt with
+        {
+            Status = FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+            CurrentAuthorityCleared = true,
+        };
+        var mismatchedAdoption = CreateUncommittedTunaFallbackAdoptionReceipts(
+            setup,
+            preparedRoute,
+            transition,
+            mismatchedPressureReceipt);
+        var mismatched = FileTransferCoordinator.CommitRuntimeUnlockUncommittedTunaFallbackHandoff(
+            setup.State,
+            transition,
+            mismatchedHandoff,
+            mismatchedAdoption.StageReceipt,
+            mismatchedAdoption.PreparationReceipt);
+        Assert.Equal(
+            RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus.Rejected,
+            mismatched.Status);
+        Assert.Same(setup.State, mismatched.State);
+    }
+
+    [Fact]
     public void FallbackFrontierRepairAuthority_ForwardsCoordinatorIdentityAndFullTuple()
     {
         var predecessorAuthorityId = new FileTransferAuthorityId("fta2-fallback-frontier-predecessor");
@@ -8033,6 +8279,270 @@ public sealed class FileTransferCoordinatorTests
             SuccessorAuthorityId = successorAuthorityId,
         };
 
+    private static (
+        FileTransferCoordinatorState State,
+        FileTransferCoordinatorEvent CoordinatorEvent,
+        RuntimeUnlockUncommittedTunaFallbackHandoff Handoff)
+        CreateUncommittedTunaFallbackHandoffState(bool withPressure)
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        var state = withPressure
+            ? StateWithInstalledRegularV4FrontierRepairPressure()
+            : StartRegular(regular).State;
+        if (state.CurrentRoutePublicationToken is null)
+        {
+            var owner = state.CurrentRuntimeOwner!.Value;
+            var leg = state.CurrentLeg!;
+            var publication = FileTransferCoordinator.AuthorizeAction(
+                state,
+                new FileTransferCoordinatorActionRequest(
+                    FileTransferCoordinatorActionKind.RoutePublication,
+                    Source: "test",
+                    Reason: "regular_v4_source_publication",
+                    RuntimeOwner: owner,
+                    Route: regular.Route,
+                    ProtocolVersion: regular.ProtocolVersion,
+                    LiveRouteEpoch: leg.LiveRouteEpochId,
+                    LegGeneration: leg.Generation,
+                    RuntimeGeneration: owner.RuntimeGeneration,
+                    TerminalGeneration: state.TerminalGeneration,
+                    TargetRoute: regular.Route,
+                    TargetProtocolVersion: regular.ProtocolVersion,
+                    TargetTransport: FileTransferTransportKind.RegularNkn));
+            Assert.True(publication.Accepted);
+            state = publication.State;
+        }
+
+        var sourceOwner = state.CurrentRuntimeOwner!.Value;
+        var sourcePublication = state.CurrentRoutePublicationToken!.Value;
+        var sourceLeg = state.CurrentLeg!;
+        var admission = new RuntimeUnlockAdmissionToken(
+            state.SessionId,
+            state.TransferId,
+            state.Direction,
+            sourceOwner,
+            regular.Route,
+            regular.TelemetryToken,
+            regular.ProtocolVersion,
+            sourceLeg.LiveRouteEpochId,
+            sourceOwner.RuntimeGeneration,
+            state.TerminalGeneration,
+            sourceLeg.Generation,
+            AdmissionGeneration: 7,
+            Reason: "uncommitted_tuna_fallback_test",
+            RuntimeUnlockFallbackSurvivalState.Empty);
+        var snapshot = new RuntimeUnlockRouteCommitSnapshot(
+            state.SessionId,
+            state.TransferId,
+            TransactionGeneration: 11,
+            OfferGeneration: 13,
+            PeerVisibleProof: true,
+            PeerReceived: true,
+            AnswerReceived: true,
+            FileTransferRoute.FileTunaV4,
+            FileTransferProtocol.ProtocolVersionV4,
+            FileTransferTransportHandoffKind.NormalToTunaActivation,
+            FileTransferTransportKind.Tuna,
+            TransactionState: "PathProbeAcked",
+            Reason: "uncommitted_tuna_fallback_test",
+            PathProbeId: "probe-uncommitted-fallback",
+            PathProbeState: "Acked",
+            PathProbeTransport: FileTransferTransportKind.Tuna,
+            PathProbeAckedUtcMs: 101,
+            TunaPathLeaseRequired: true,
+            TunaPathLeaseGeneration: 17,
+            TunaPathLeaseState: "ListenerReady",
+            TunaPathLeaseListenerRunId: "listener-uncommitted-fallback",
+            TunaPathLeaseCurrent: true,
+            LaunchGeneration: 19);
+        var routeCommit = new RouteCommitToken(
+            state.SessionId,
+            state.TransferId,
+            state.Direction,
+            sourceOwner,
+            admission,
+            regular.Route,
+            regular.TelemetryToken,
+            regular.ProtocolVersion,
+            sourceLeg.LiveRouteEpochId,
+            sourceOwner.RuntimeGeneration,
+            state.TerminalGeneration,
+            sourceLeg.Generation,
+            snapshot.TransactionGeneration,
+            snapshot.OfferGeneration,
+            snapshot.TunaPathLeaseGeneration,
+            snapshot.TunaPathLeaseListenerRunId,
+            snapshot.PathProbeId!,
+            snapshot.TargetRoute,
+            snapshot.ProtocolVersion,
+            snapshot.TargetTransport,
+            CommitGeneration: Math.Max(1, state.LastRouteCommitGeneration + 1),
+            Reason: "uncommitted_tuna_fallback_test");
+        state = state with
+        {
+            CurrentRouteCommit = routeCommit,
+            LastRouteCommitGeneration = routeCommit.CommitGeneration,
+        };
+        const long proofTransportEpoch = 2;
+        var proofFrame = new FileTransferReceiverStateFrameV6
+        {
+            SessionId = state.SessionId,
+            TransferId = state.TransferId,
+            Epoch = 1,
+            ContiguousCommittedChunkIndex = 0,
+            DurableReceivedHighestChunkIndex = 0,
+            CreditUntilChunkIndexExclusive = 1,
+            MissingRanges = [],
+            BytesCommitted = 0,
+            TransportEpoch = proofTransportEpoch,
+            RepairRequestId = "uncommitted_tuna_fallback_coordinator_proof",
+            Priority = "control",
+            RecoveryMode = "post_tuna_fallback",
+        };
+        var proof = new PostTunaFallbackHandoffEvidence(
+            state.SessionId,
+            state.TransferId,
+            FileTransferDirection.Outbound,
+            1,
+            FileTransferRouteResolver.PostTunaFallbackV6Token,
+            FileTransferProtocol.ProtocolVersionV6,
+            SourceLiveRouteEpoch: sourceLeg.LiveRouteEpochId + 1,
+            SourceLegGeneration: sourceLeg.Generation + 1,
+            SourceBridgeRecoveryGeneration: Math.Max(1, sourceLeg.BridgeRecoveryGeneration + 1),
+            SourceTransportEpoch: proofTransportEpoch,
+            CheckpointRequestId: "(none)",
+            ProofKind: "regular_nkn_state_refresh",
+            Reason: "transport_recovered",
+            FrameIdentity: PostTunaFallbackPeerProofFrameIdentity.Create(proofFrame));
+        var handoff = new RuntimeUnlockUncommittedTunaFallbackHandoff(
+            sourceOwner,
+            sourcePublication,
+            routeCommit,
+            snapshot,
+            state.TerminalGeneration,
+            sourceLeg.Generation,
+            sourceLeg.TransportEpochId,
+            sourceLeg.BridgeRecoveryGeneration,
+            SourceDataSessionGeneration: 23,
+            DrainGeneration: 29,
+            CompletedDrainGeneration: 29,
+            proof,
+            proofTransportEpoch,
+            HandoffGeneration: 31,
+            Reason: "uncommitted_tuna_fallback_handoff");
+        var coordinatorEvent = CoordinatorEvent(
+            FileTransferCoordinatorEventKind.TunaLost,
+            fallback,
+            FileTransferTransportHandoffKind.TunaToNormalFallback,
+            FileTransferTransportKind.RegularNkn,
+            "uncommitted_tuna_fallback_handoff",
+            FileTransferLegState.CheckpointPending,
+            canSendData: false,
+            committedChunk: 12,
+            highestObservedChunk: 18,
+            transportEpoch: proofTransportEpoch,
+            bridgeRecoveryGeneration: proof.SourceBridgeRecoveryGeneration,
+            runtimeUnlockUncommittedTunaFallbackHandoff: handoff);
+        return (state, coordinatorEvent, handoff);
+    }
+
+    private static (
+        RuntimeUnlockUncommittedTunaFallbackAdoptionStageReceipt StageReceipt,
+        RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationReceipt PreparationReceipt)
+        CreateUncommittedTunaFallbackAdoptionReceipts(
+            (FileTransferCoordinatorState State,
+             FileTransferCoordinatorEvent CoordinatorEvent,
+             RuntimeUnlockUncommittedTunaFallbackHandoff Handoff) setup,
+            FileTransferCoordinatorDecision preparedRoute,
+            RuntimeUnlockUncommittedTunaFallbackHandoffTransition transition,
+            FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt? pressureReceipt)
+    {
+        var targetOwner = Assert.IsType<RuntimeOwnerToken>(preparedRoute.State.CurrentRuntimeOwner);
+        var targetPublication = Assert.IsType<RoutePublicationToken>(
+            preparedRoute.State.CurrentRoutePublicationToken);
+        var adoptionStage = new RuntimeUnlockUncommittedTunaFallbackAdoptionStage(
+            new CoordinatorTestDataSession(setup.State.SessionId, setup.State.TransferId),
+            setup.Handoff.SourceDataSessionGeneration,
+            setup.Handoff.SourceRuntimeOwner,
+            setup.Handoff.SourceRoutePublication,
+            setup.Handoff.PendingTunaRouteCommit,
+            setup.Handoff.PreCommitSnapshot,
+            setup.Handoff.SourceLegGeneration,
+            setup.Handoff.SourceTransportEpoch,
+            setup.Handoff.SourceBridgeRecoveryGeneration,
+            setup.Handoff.HandoffGeneration,
+            setup.Handoff.DrainGeneration,
+            setup.Handoff.CompletedDrainGeneration,
+            setup.Handoff.ProofTransportEpoch,
+            setup.Handoff.PeerProofEvidence.SourceBridgeRecoveryGeneration,
+            setup.Handoff.PeerProofEvidence,
+            transition.PressureSettlementCommand,
+            targetOwner,
+            targetPublication);
+        var stageReceipt = new RuntimeUnlockUncommittedTunaFallbackAdoptionStageReceipt(
+            adoptionStage,
+            RuntimeUnlockUncommittedTunaFallbackAdoptionStageStatus.Staged,
+            "uncommitted_tuna_fallback_adoption_staged",
+            StageGeneration: 1,
+            AvailabilityGeneration: 1,
+            ActivationPaused: true,
+            AvailabilityReason: "normal_to_tuna_activation");
+        var adoptionCommand = new RuntimeUnlockUncommittedTunaFallbackAdoptionCommand(
+            adoptionStage.DataSession,
+            adoptionStage.DataSessionGeneration,
+            stageReceipt.StageGeneration,
+            adoptionStage.TargetRuntimeOwner,
+            adoptionStage.TargetRoutePublication,
+            adoptionStage.TargetTransportEpoch,
+            adoptionStage.TargetBridgeRecoveryGeneration,
+            adoptionStage.HandoffGeneration,
+            adoptionStage.DrainGeneration,
+            adoptionStage.PeerProofEvidence,
+            adoptionStage.PressureSettlementCommand,
+            stageReceipt.AvailabilityGeneration,
+            stageReceipt.ActivationPaused,
+            stageReceipt.AvailabilityReason);
+        var adoptionReceipt = new RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationReceipt(
+            adoptionCommand,
+            RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationStatus.Prepared,
+            "uncommitted_tuna_fallback_adoption_prepared",
+            pressureReceipt);
+        return (stageReceipt, adoptionReceipt);
+    }
+
+    private sealed class CoordinatorTestDataSession(
+        string sessionId,
+        string transferId) : IFileTransferDataSession
+    {
+        public string SessionId { get; } = sessionId;
+
+        public string TransferId { get; } = transferId;
+
+        public bool IsAvailable => true;
+
+        public event EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>?
+            AvailabilityChanged
+        {
+            add { }
+            remove { }
+        }
+
+        public ValueTask<FileTransferDataFrame> ReceiveAsync(CancellationToken ct) =>
+            ValueTask.FromException<FileTransferDataFrame>(new NotSupportedException());
+
+        public ValueTask<FileTransferReceivedDataFrame> ReceiveWithMetadataAsync(
+            CancellationToken ct) =>
+            ValueTask.FromException<FileTransferReceivedDataFrame>(new NotSupportedException());
+
+        public Task SendAsync(FileTransferDataFrame frame, CancellationToken ct) =>
+            Task.CompletedTask;
+
+        public void Dispose()
+        {
+        }
+    }
+
     private static FileTransferCoordinatorState StateWithInstalledRegularV4FrontierRepairPressure()
     {
         var (state, decision) = AuthorizeRegularV4FrontierRepair();
@@ -8438,7 +8948,9 @@ public sealed class FileTransferCoordinatorTests
         FallbackTailYieldTransportEpochReauthorizationRequest?
             fallbackTailYieldTransportEpochReauthorizationRequest = null,
         FallbackTailYieldTransportEpochReauthorization?
-            fallbackTailYieldTransportEpochReauthorization = null)
+            fallbackTailYieldTransportEpochReauthorization = null,
+        RuntimeUnlockUncommittedTunaFallbackHandoff?
+            runtimeUnlockUncommittedTunaFallbackHandoff = null)
         => new(
             kind,
             routeSelection,
@@ -8471,5 +8983,7 @@ public sealed class FileTransferCoordinatorTests
             FallbackTailYieldTransportEpochReauthorizationRequest:
                 fallbackTailYieldTransportEpochReauthorizationRequest,
             FallbackTailYieldTransportEpochReauthorization:
-                fallbackTailYieldTransportEpochReauthorization);
+                fallbackTailYieldTransportEpochReauthorization,
+            RuntimeUnlockUncommittedTunaFallbackHandoff:
+                runtimeUnlockUncommittedTunaFallbackHandoff);
 }

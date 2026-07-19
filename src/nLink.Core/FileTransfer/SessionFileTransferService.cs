@@ -3219,6 +3219,39 @@ public sealed partial class SessionFileTransferService : IDisposable
         IFileTransferDataSession dataSession,
         FileTransferDataSessionAvailabilityChangedEventArgs availability)
     {
+        if (availability.PostTunaFallbackHandoffEvidence is { } fallbackEvidence)
+        {
+            SessionFileTransferSnapshot? fallbackSnapshot = null;
+            var fallbackHandled = false;
+            lock (gate)
+            {
+                if (ReferenceEquals(outboundTransfer?.DataSession, dataSession) &&
+                    outboundTransfer is { IsTerminal: false } outbound)
+                {
+                    fallbackHandled = TryRetainRuntimeUnlockUncommittedTunaFallbackHandoffLocked(
+                        outbound,
+                        dataSession,
+                        fallbackEvidence,
+                        availability.Reason,
+                        out fallbackSnapshot);
+                }
+            }
+
+            if (fallbackSnapshot is not null)
+            {
+                RaiseTransferChanged(fallbackSnapshot);
+            }
+
+            if (!fallbackHandled)
+            {
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=runtime_unlock_uncommitted_tuna_fallback_handoff_decided; direction=outbound; session_id={FormatProtocolLogValue(fallbackEvidence.SessionId)}; transfer_id={FormatProtocolLogValue(fallbackEvidence.TransferId)}; route={FormatProtocolLogValue(fallbackEvidence.SourceRouteToken)}; protocol_version={fallbackEvidence.SourceProtocolVersion}; live_route_epoch={fallbackEvidence.SourceLiveRouteEpoch}; leg_generation={fallbackEvidence.SourceLegGeneration}; transport_epoch={fallbackEvidence.SourceTransportEpoch}; bridge_recovery_generation={fallbackEvidence.SourceBridgeRecoveryGeneration}; checkpoint_request_id={FormatProtocolLogValue(fallbackEvidence.CheckpointRequestId)}; decision_status=Rejected; decision_reason=proof_scoped_availability_not_current");
+            }
+
+            return;
+        }
+
         if (dataSession.IsAvailable != availability.IsAvailable)
         {
             if (availability.RuntimeUnlockPreCommitProbeSnapshot is
@@ -5748,11 +5781,13 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.LastRegularV4FrontierRepairPressureSettlement,
             context.LastRegularV4FrontierRepairPressureInstallGeneration,
             context.LastRegularV4FrontierRepairPressureSettlementApplyReceipt,
-            context.LastRegularV4FrontierRepairPressureRecoveryHandoff);
+            context.LastRegularV4FrontierRepairPressureRecoveryHandoff,
+            context.LastRuntimeUnlockUncommittedTunaFallbackHandoff);
 
     private static void ApplyCoordinatorDecisionToContextLocked(
         OutboundTransferContext context,
-        FileTransferCoordinatorDecision decision)
+        FileTransferCoordinatorDecision decision,
+        bool forwardRoutePublication = true)
     {
         var previousRoutePublicationToken = context.CurrentRoutePublicationToken;
         context.CurrentRuntimeUnlockRetryDispatchContract =
@@ -5807,6 +5842,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.CurrentRepairReplayDecision = decision.State.CurrentRepairReplayDecision;
         context.LastRepairReplayGeneration = decision.State.LastRepairReplayGeneration;
         ApplyRegularV4FrontierRepairPressureBindingStateLocked(context, decision.State);
+        context.LastRuntimeUnlockUncommittedTunaFallbackHandoff =
+            decision.State.LastRuntimeUnlockUncommittedTunaFallbackHandoff;
         context.CurrentTransportEpochDecision = decision.State.CurrentTransportEpochDecision;
         context.LastTransportEpochDecisionGeneration = decision.State.LastTransportEpochDecisionGeneration;
         context.CurrentBridgeRecoveryDecision = decision.State.CurrentBridgeRecoveryDecision;
@@ -5864,7 +5901,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             }
         }
 
-        if (context.CurrentRoutePublicationToken is { IsDefault: false } currentToken &&
+        if (forwardRoutePublication &&
+            context.CurrentRoutePublicationToken is { IsDefault: false } currentToken &&
             previousRoutePublicationToken?.PublicationGeneration != currentToken.PublicationGeneration)
         {
             context.RoutePublicationAuthorityForwarder?.Invoke(currentToken, decision.Reason);
@@ -7354,6 +7392,48 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.RouteSelection.Route == FileTransferRoute.FileTunaV4
                 ? context.LastCompletedRuntimeUnlockRegularV4RouteCommitDrainGeneration
                 : 0);
+        return true;
+    }
+
+    private bool TryPublishRouteTransitionedWithExistingAuthorityLocked(
+        OutboundTransferContext context,
+        FileTransferRouteSelection previousRouteSelection,
+        string source,
+        string reason,
+        RoutePublicationToken routePublicationToken,
+        long completedSendDrainGeneration)
+    {
+        if (!TryValidateRoutePublicationForEmissionLocked(
+                context,
+                source,
+                reason,
+                routeCommitToken: null,
+                routePublicationToken,
+                out var token,
+                out var rejectionReason))
+        {
+            return false;
+        }
+
+        if (context.V6TransportEpoch is { } epoch)
+        {
+            epoch.RoutePublicationToken ??= token;
+        }
+        if (context.CurrentLiveRouteEpoch is { } liveRouteEpoch)
+        {
+            liveRouteEpoch.RoutePublicationToken ??= token;
+        }
+
+        LogFileTransferRouteTransitioned(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            previousRouteSelection,
+            context.RouteSelection,
+            reason,
+            token,
+            rejectionReason,
+            completedSendDrainGeneration);
         return true;
     }
 
@@ -20128,6 +20208,44 @@ public sealed partial class SessionFileTransferService : IDisposable
         RuntimeUnlockRouteCommitSnapshot RouteCommitSnapshot,
         string Reason);
 
+    private sealed record RuntimeUnlockUncommittedTunaFallbackHandoffIntent(
+        int HandoffGeneration,
+        RuntimeOwnerToken SourceRuntimeOwner,
+        RoutePublicationToken SourceRoutePublication,
+        RouteCommitToken PendingTunaRouteCommit,
+        RuntimeUnlockRegularV4RouteCommitDrain RouteCommitDrain,
+        IFileTransferDataSession SourceDataSession,
+        long SourceDataSessionGeneration,
+        PostTunaFallbackHandoffEvidence? AvailabilityEvidence,
+        FileTransferDataFrame? PeerProofFrame,
+        long ProofTransportEpoch,
+        string Reason);
+
+    private sealed record RuntimeUnlockUncommittedTunaFallbackRetainedPeerProof(
+        int HandoffGeneration,
+        FileTransferDataFrame Frame,
+        PostTunaFallbackPeerProofFrameIdentity FrameIdentity,
+        long ProofTransportEpoch,
+        IFileTransferDataSession DataSession,
+        long DataSessionGeneration,
+        RuntimeOwnerToken RuntimeOwner,
+        RoutePublicationToken RoutePublication);
+
+    private sealed record RuntimeUnlockUncommittedTunaFallbackAdoptionContinuation(
+        RuntimeUnlockUncommittedTunaFallbackHandoffIntent Intent,
+        RuntimeUnlockUncommittedTunaFallbackHandoffTransition Transition,
+        FileTransferCoordinatorDecision CoordinatorDecision,
+        FileTransferRouteSelection PreviousRouteSelection,
+        FileTransferRouteSelection RouteSelection,
+        FileTransferRouteResolverInput RouteInput,
+        RuntimeOwnerToken RuntimeOwner,
+        RoutePublicationToken RoutePublication,
+        FileTransferLeg Leg,
+        RuntimeUnlockUncommittedTunaFallbackAdoptionStageReceipt StageReceipt,
+        RuntimeUnlockUncommittedTunaFallbackAdoptionCommand AdoptionCommand,
+        RegularV4FrontierRepairContract? PressureContract,
+        IRuntimeUnlockUncommittedTunaFallbackAdoptionBridge AdoptionBridge);
+
     private sealed record RuntimeUnlockPreCommitProbeLaunchDisposition(
         long LaunchGeneration,
         RuntimeUnlockRouteCommitSnapshot Snapshot,
@@ -20303,6 +20421,29 @@ public sealed partial class SessionFileTransferService : IDisposable
             PendingRuntimeUnlockRegularV4RouteCommitDrain { get; set; }
 
         public bool RuntimeUnlockRegularV4RouteCommitDrainRecheckQueued { get; set; }
+
+        public int LastRuntimeUnlockUncommittedTunaFallbackHandoffGeneration { get; set; }
+
+        public RuntimeUnlockUncommittedTunaFallbackHandoffIntent?
+            PendingRuntimeUnlockUncommittedTunaFallbackHandoff { get; set; }
+
+        public RuntimeUnlockUncommittedTunaFallbackHandoffTransition?
+            LastRuntimeUnlockUncommittedTunaFallbackHandoff { get; set; }
+
+        public RuntimeUnlockUncommittedTunaFallbackRetainedPeerProof?
+            PendingRuntimeUnlockUncommittedTunaFallbackRetainedPeerProof { get; set; }
+
+        public RuntimeUnlockUncommittedTunaFallbackRetainedPeerProof?
+            LastRuntimeUnlockUncommittedTunaFallbackRetainedPeerProof { get; set; }
+
+        public RuntimeUnlockUncommittedTunaFallbackAdoptionContinuation?
+            PendingRuntimeUnlockUncommittedTunaFallbackAdoptionContinuation { get; set; }
+
+        public int LastRuntimeUnlockUncommittedTunaFallbackRetainedPeerProofDispatchGeneration { get; set; }
+
+        public int RuntimeUnlockUncommittedTunaFallbackRetainedPeerProofApplyInFlightGeneration { get; set; }
+
+        public int LastRuntimeUnlockUncommittedTunaFallbackRetainedPeerProofAppliedGeneration { get; set; }
 
         public RuntimeUnlockPreCommitProbeLaunchDisposition?
             LastRuntimeUnlockPreCommitProbeLaunchDisposition { get; set; }

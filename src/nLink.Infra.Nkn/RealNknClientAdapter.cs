@@ -1158,7 +1158,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
     internal FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt
         ApplyRegularV4FrontierRepairPressureSettlement(
-            FileTransferRegularV4FrontierRepairPressureSettlementCommand command)
+            FileTransferRegularV4FrontierRepairPressureSettlementCommand command,
+            bool emitTelemetry = true)
     {
         var settlement = command.Settlement;
         var status = FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected;
@@ -1227,7 +1228,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             {
                 var previousCurrent = current;
                 var previousPredecessor = retainedPredecessor;
-                if (ReportRegularV4FrontierRepairSettlement(settlement))
+                if (ReportRegularV4FrontierRepairSettlement(settlement, emitTelemetry))
                 {
                     currentAuthorityCleared =
                         previousCurrent is not null &&
@@ -1251,10 +1252,161 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             reason,
             currentAuthorityCleared,
             retainedPredecessorCleared);
-        Log(
-            "event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided; source=nkn_bridge_pressure; stage=settlement_apply; " +
-            $"session_id={SanitizeLogToken(settlement.SessionId)}; transfer_id={SanitizeLogToken(settlement.TransferId)}; direction={settlement.Direction.ToString().ToLowerInvariant()}; authority_id={SanitizeLogToken(settlement.AuthorityId.ToString())}; successor_authority_id={SanitizeLogToken(settlement.SuccessorAuthorityId?.ToString() ?? "(none)")}; current_authority_id={SanitizeLogToken(command.CurrentAuthorityId.ToString())}; retained_predecessor_authority_id={SanitizeLogToken(command.RetainedPredecessorAuthorityId?.ToString() ?? "(none)")}; install_generation={command.InstallGeneration}; settlement_outcome={FormatRegularV4FrontierRepairSettlementOutcomeForLog(settlement.Outcome)}; apply_status={status.ToString().ToLowerInvariant()}; current_authority_cleared={(currentAuthorityCleared ? 1 : 0)}; retained_predecessor_cleared={(retainedPredecessorCleared ? 1 : 0)}; decision_reason={SanitizeLogToken(reason)}");
+        if (emitTelemetry)
+        {
+            Log(
+                "event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided; source=nkn_bridge_pressure; stage=settlement_apply; " +
+                $"session_id={SanitizeLogToken(settlement.SessionId)}; transfer_id={SanitizeLogToken(settlement.TransferId)}; direction={settlement.Direction.ToString().ToLowerInvariant()}; authority_id={SanitizeLogToken(settlement.AuthorityId.ToString())}; successor_authority_id={SanitizeLogToken(settlement.SuccessorAuthorityId?.ToString() ?? "(none)")}; current_authority_id={SanitizeLogToken(command.CurrentAuthorityId.ToString())}; retained_predecessor_authority_id={SanitizeLogToken(command.RetainedPredecessorAuthorityId?.ToString() ?? "(none)")}; install_generation={command.InstallGeneration}; settlement_outcome={FormatRegularV4FrontierRepairSettlementOutcomeForLog(settlement.Outcome)}; apply_status={status.ToString().ToLowerInvariant()}; current_authority_cleared={(currentAuthorityCleared ? 1 : 0)}; retained_predecessor_cleared={(retainedPredecessorCleared ? 1 : 0)}; decision_reason={SanitizeLogToken(reason)}");
+        }
         return receipt;
+    }
+
+    internal FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt
+        PrepareRuntimeUnlockUncommittedTunaFallbackPressureSettlement(
+            FileTransferRegularV4FrontierRepairPressureSettlementCommand command)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        lock (gate)
+        {
+            var previousPressure = regularV4FrontierRepairPressure;
+            var previousLastAuthority = lastRegularV4FrontierRepairAuthority;
+            var previousPredecessor = retainedRegularV4FrontierRepairPredecessor;
+            var previousPredecessorSettlement = lastRegularV4FrontierRepairPredecessorSettlement;
+            var previousFinalSettlement = lastRegularV4FrontierRepairFinalSettlement;
+            var previousDispositionReason = lastRegularV4FrontierRepairBindingDispositionReason;
+            var previousExpiresTick = Interlocked.Read(
+                ref regularV4ControlFeedbackPressureExpiresTick);
+            try
+            {
+                return ApplyRegularV4FrontierRepairPressureSettlement(
+                    command,
+                    emitTelemetry: false);
+            }
+            finally
+            {
+                regularV4FrontierRepairPressure = previousPressure;
+                lastRegularV4FrontierRepairAuthority = previousLastAuthority;
+                retainedRegularV4FrontierRepairPredecessor = previousPredecessor;
+                lastRegularV4FrontierRepairPredecessorSettlement = previousPredecessorSettlement;
+                lastRegularV4FrontierRepairFinalSettlement = previousFinalSettlement;
+                lastRegularV4FrontierRepairBindingDispositionReason = previousDispositionReason;
+                Interlocked.Exchange(
+                    ref regularV4ControlFeedbackPressureExpiresTick,
+                    previousExpiresTick);
+            }
+        }
+    }
+
+    internal RuntimeUnlockUncommittedTunaFallbackAdoptionReceipt
+        CommitRuntimeUnlockUncommittedTunaFallbackAdoptionAtomically(
+            RuntimeUnlockUncommittedTunaFallbackAdoptionCommand command,
+            RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationReceipt preparationReceipt,
+            Func<RuntimeUnlockUncommittedTunaFallbackAdoptionReceipt> commitAdoption)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        ArgumentNullException.ThrowIfNull(preparationReceipt);
+        ArgumentNullException.ThrowIfNull(commitAdoption);
+        if (command.PressureSettlementCommand is not { } pressureCommand)
+        {
+            return commitAdoption();
+        }
+
+        lock (gate)
+        {
+            var previousPressure = regularV4FrontierRepairPressure;
+            var previousLastAuthority = lastRegularV4FrontierRepairAuthority;
+            var previousPredecessor = retainedRegularV4FrontierRepairPredecessor;
+            var previousPredecessorSettlement = lastRegularV4FrontierRepairPredecessorSettlement;
+            var previousFinalSettlement = lastRegularV4FrontierRepairFinalSettlement;
+            var previousDispositionReason = lastRegularV4FrontierRepairBindingDispositionReason;
+            var previousExpiresTick = Interlocked.Read(
+                ref regularV4ControlFeedbackPressureExpiresTick);
+
+            var pressureReceipt = ApplyRegularV4FrontierRepairPressureSettlement(
+                pressureCommand,
+                emitTelemetry: false);
+            if (pressureReceipt.Status is not (
+                    FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied or
+                    FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent) ||
+                pressureReceipt != preparationReceipt.PressureSettlementReceipt)
+            {
+                var rejectionReason = pressureReceipt.Status is (
+                        FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied or
+                        FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent)
+                    ? "uncommitted_tuna_fallback_pressure_preparation_receipt_mismatch"
+                    : string.IsNullOrWhiteSpace(pressureReceipt.Reason)
+                        ? "uncommitted_tuna_fallback_pressure_apply_rejected"
+                        : pressureReceipt.Reason;
+                RestoreRegularV4FrontierRepairPressureAfterRejectedAdoptionUnsafe();
+                var rejectedPressureReceipt =
+                    new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                        pressureCommand,
+                        FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+                        rejectionReason,
+                        CurrentAuthorityCleared: false,
+                        RetainedPredecessorCleared: false);
+                var settlement = pressureCommand.Settlement;
+                Log(
+                    "event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided; source=nkn_bridge_pressure; stage=settlement_apply; " +
+                    $"session_id={SanitizeLogToken(settlement.SessionId)}; transfer_id={SanitizeLogToken(settlement.TransferId)}; direction={settlement.Direction.ToString().ToLowerInvariant()}; authority_id={SanitizeLogToken(settlement.AuthorityId.ToString())}; successor_authority_id={SanitizeLogToken(settlement.SuccessorAuthorityId?.ToString() ?? "(none)")}; current_authority_id={SanitizeLogToken(pressureCommand.CurrentAuthorityId.ToString())}; retained_predecessor_authority_id={SanitizeLogToken(pressureCommand.RetainedPredecessorAuthorityId?.ToString() ?? "(none)")}; install_generation={pressureCommand.InstallGeneration}; settlement_outcome={FormatRegularV4FrontierRepairSettlementOutcomeForLog(settlement.Outcome)}; apply_status=rejected; current_authority_cleared=0; retained_predecessor_cleared=0; decision_reason={SanitizeLogToken(rejectionReason)}");
+                return new RuntimeUnlockUncommittedTunaFallbackAdoptionReceipt(
+                    command,
+                    RuntimeUnlockUncommittedTunaFallbackAdoptionStatus.Rejected,
+                    rejectionReason,
+                    rejectedPressureReceipt);
+            }
+
+            RuntimeUnlockUncommittedTunaFallbackAdoptionReceipt adoptionReceipt;
+            try
+            {
+                adoptionReceipt = commitAdoption();
+            }
+            catch
+            {
+                RestoreRegularV4FrontierRepairPressureAfterRejectedAdoptionUnsafe();
+                throw;
+            }
+
+            if (adoptionReceipt.Status is not (
+                    RuntimeUnlockUncommittedTunaFallbackAdoptionStatus.Applied or
+                    RuntimeUnlockUncommittedTunaFallbackAdoptionStatus.Idempotent))
+            {
+                RestoreRegularV4FrontierRepairPressureAfterRejectedAdoptionUnsafe();
+                return adoptionReceipt with
+                {
+                    PressureSettlementReceipt = new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                        pressureCommand,
+                        FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+                        "uncommitted_tuna_fallback_pressure_apply_compensated",
+                        CurrentAuthorityCleared: false,
+                        RetainedPredecessorCleared: false),
+                };
+            }
+
+            _ = ApplyRegularV4FrontierRepairPressureSettlement(
+                pressureCommand,
+                emitTelemetry: true);
+            return adoptionReceipt with
+            {
+                PressureSettlementReceipt = pressureReceipt,
+            };
+
+            void RestoreRegularV4FrontierRepairPressureAfterRejectedAdoptionUnsafe()
+            {
+                regularV4FrontierRepairPressure = previousPressure;
+                lastRegularV4FrontierRepairAuthority = previousLastAuthority;
+                retainedRegularV4FrontierRepairPredecessor = previousPredecessor;
+                lastRegularV4FrontierRepairPredecessorSettlement = previousPredecessorSettlement;
+                lastRegularV4FrontierRepairFinalSettlement = previousFinalSettlement;
+                lastRegularV4FrontierRepairBindingDispositionReason = previousDispositionReason;
+                Interlocked.Exchange(
+                    ref regularV4ControlFeedbackPressureExpiresTick,
+                    previousExpiresTick);
+                Log(
+                    "event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_compensated; " +
+                    $"session_id={SanitizeLogToken(pressureCommand.Settlement.SessionId)}; transfer_id={SanitizeLogToken(pressureCommand.Settlement.TransferId)}; authority_id={SanitizeLogToken(pressureCommand.Settlement.AuthorityId.ToString())}; install_generation={pressureCommand.InstallGeneration}; decision_reason=uncommitted_tuna_fallback_transport_adoption_rejected");
+            }
+        }
     }
 
     internal bool IsRegularV4FrontierRepairSettlementApplied(
@@ -1273,7 +1425,9 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         }
     }
 
-    internal bool ReportRegularV4FrontierRepairSettlement(FileTransferRegularV4FrontierRepairSettlement settlement)
+    internal bool ReportRegularV4FrontierRepairSettlement(
+        FileTransferRegularV4FrontierRepairSettlement settlement,
+        bool emitTelemetry = true)
     {
         var normalizedSessionId = string.IsNullOrWhiteSpace(settlement.SessionId) ? "none" : settlement.SessionId.Trim();
         var normalizedTransferId = string.IsNullOrWhiteSpace(settlement.TransferId) ? "(unknown)" : settlement.TransferId.Trim();
@@ -1498,16 +1652,19 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                     ? "regular_v4_frontier_repair_predecessor_supersession_idempotent"
                     : "regular_v4_frontier_repair_settlement_idempotent"
                 : rejectionReason;
-        Log(
-            $"event={eventName}; source=nkn_bridge_pressure; stage=settlement; " +
-            $"session_id={SanitizeLogToken(normalizedSessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; direction={settlement.Direction.ToString().ToLowerInvariant()}; route={SanitizeLogToken(normalizedRoute)}; protocol_version={settlement.ProtocolVersion}; live_route_epoch={settlement.LiveRouteEpoch}; runtime_generation={settlement.RuntimeGeneration}; terminal_generation={settlement.TerminalGeneration}; leg_generation={settlement.LegGeneration}; transport_epoch={settlement.TransportEpoch}; bridge_recovery_generation={settlement.BridgeRecoveryGeneration}; bridge_decision_generation={settlement.BridgeDecisionGeneration}; route_publication_generation={settlement.RoutePublicationGeneration}; route_commit_generation={settlement.RouteCommitGeneration ?? 0}; target_transport={FormatFileTransferTransportKindForLog(settlementTargetTransport)}; repair_request_key={SanitizeLogToken(normalizedRepairKey)}; frontier_chunk_index={settlement.FrontierChunkIndex}; durable_received_highest_chunk_index={settlement.DurableReceivedHighestChunkIndex}; requested_chunk_count={Math.Max(0, settlement.RequestedChunkCount)}; decision_generation={settlement.DecisionGeneration}; authority_id={settlement.AuthorityId}; successor_authority_id={settlement.SuccessorAuthorityId?.ToString() ?? "(none)"}; retained_predecessor_authority_id={retainedPredecessorAuthorityId?.ToString() ?? "(none)"}; current_successor_authority_id={currentSuccessorAuthorityId?.ToString() ?? "(none)"}; successor_install_generation={successorInstallGeneration}; outcome={FormatRegularV4FrontierRepairSettlementOutcomeForLog(settlement.Outcome)}; settlement_reason={SanitizeLogToken(normalizedDecisionReason)}; settlement_disposition={settlementDisposition}; pressure_pending_repair_count={pressure?.PendingRepairCount ?? 0}; pressure_reason={SanitizeLogToken(pressure is null ? pressureReasonForLog : pressure.PressureReason)}; cleared_predecessor={(predecessorCleared ? 1 : 0)}; cleared_pressure={(pressureCleared ? 1 : 0)}; ttl_refreshed=0; rejection_reason={SanitizeLogToken(accepted || idempotent ? "none" : rejectionReason)}; decision_reason={SanitizeLogToken(effectiveDecisionReason)}");
-        if (predecessorCleared && pressure is not null)
+        if (emitTelemetry)
         {
-            LogRegularV4FrontierRepairPredecessorPressureRetired(
-                pressure,
-                settlement,
-                currentSuccessorAuthorityId,
-                successorInstallGeneration);
+            Log(
+                $"event={eventName}; source=nkn_bridge_pressure; stage=settlement; " +
+                $"session_id={SanitizeLogToken(normalizedSessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; direction={settlement.Direction.ToString().ToLowerInvariant()}; route={SanitizeLogToken(normalizedRoute)}; protocol_version={settlement.ProtocolVersion}; live_route_epoch={settlement.LiveRouteEpoch}; runtime_generation={settlement.RuntimeGeneration}; terminal_generation={settlement.TerminalGeneration}; leg_generation={settlement.LegGeneration}; transport_epoch={settlement.TransportEpoch}; bridge_recovery_generation={settlement.BridgeRecoveryGeneration}; bridge_decision_generation={settlement.BridgeDecisionGeneration}; route_publication_generation={settlement.RoutePublicationGeneration}; route_commit_generation={settlement.RouteCommitGeneration ?? 0}; target_transport={FormatFileTransferTransportKindForLog(settlementTargetTransport)}; repair_request_key={SanitizeLogToken(normalizedRepairKey)}; frontier_chunk_index={settlement.FrontierChunkIndex}; durable_received_highest_chunk_index={settlement.DurableReceivedHighestChunkIndex}; requested_chunk_count={Math.Max(0, settlement.RequestedChunkCount)}; decision_generation={settlement.DecisionGeneration}; authority_id={settlement.AuthorityId}; successor_authority_id={settlement.SuccessorAuthorityId?.ToString() ?? "(none)"}; retained_predecessor_authority_id={retainedPredecessorAuthorityId?.ToString() ?? "(none)"}; current_successor_authority_id={currentSuccessorAuthorityId?.ToString() ?? "(none)"}; successor_install_generation={successorInstallGeneration}; outcome={FormatRegularV4FrontierRepairSettlementOutcomeForLog(settlement.Outcome)}; settlement_reason={SanitizeLogToken(normalizedDecisionReason)}; settlement_disposition={settlementDisposition}; pressure_pending_repair_count={pressure?.PendingRepairCount ?? 0}; pressure_reason={SanitizeLogToken(pressure is null ? pressureReasonForLog : pressure.PressureReason)}; cleared_predecessor={(predecessorCleared ? 1 : 0)}; cleared_pressure={(pressureCleared ? 1 : 0)}; ttl_refreshed=0; rejection_reason={SanitizeLogToken(accepted || idempotent ? "none" : rejectionReason)}; decision_reason={SanitizeLogToken(effectiveDecisionReason)}");
+            if (predecessorCleared && pressure is not null)
+            {
+                LogRegularV4FrontierRepairPredecessorPressureRetired(
+                    pressure,
+                    settlement,
+                    currentSuccessorAuthorityId,
+                    successorInstallGeneration);
+            }
         }
         return accepted || idempotent;
     }

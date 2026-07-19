@@ -1187,7 +1187,7 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             .Single(candidate =>
                 candidate.Name == "ApplyCoordinatorDecisionToContextLocked" &&
                 candidate.GetParameters()[0].ParameterType == context.GetType());
-        method.Invoke(null, [context, decision]);
+        method.Invoke(null, [context, decision, true]);
     }
 
     private static void ApplyCoordinatorActionDecision(

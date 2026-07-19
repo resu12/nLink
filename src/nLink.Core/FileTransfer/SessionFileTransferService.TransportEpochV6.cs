@@ -3898,7 +3898,11 @@ public sealed partial class SessionFileTransferService
             TerminalizeV6TransportEpochLocked(FileTransferDirection.Outbound, context.TransferId, context.SessionId, current, "superseded");
         }
 
-        var epochId = Math.Max(context.LastRecoveredV6TransportEpoch + 1, Math.Max(1, context.PullTransportRebindGeneration));
+        var epochId = coordinatorAuthorized && context.CurrentTransferLeg is { TransportEpochId: > 0 } authorizedLeg
+            ? authorizedLeg.TransportEpochId
+            : Math.Max(
+                context.LastRecoveredV6TransportEpoch + 1,
+                Math.Max(1, context.PullTransportRebindGeneration));
         var senderLocalAvailabilityUntilExclusive = ResolveOutboundSenderLocalAvailabilityUntilExclusiveLocked(context);
         var epoch = new V6TransportEpoch
         {

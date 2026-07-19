@@ -216,6 +216,10 @@ function Invoke-TestLane {
                 -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
                 -Filter "FileTransferInfraSuite=RegularV4FrontierRepairPressure" `
                 -ResultSuffix "infra-regular-v4-frontier-repair-pressure"
+            Invoke-DotnetTest `
+                -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
+                -Filter "FileTransferInfraSuite=UncommittedTunaFallback" `
+                -ResultSuffix "infra-uncommitted-tuna-fallback"
         }
         "FileTransferNknTransportContract" {
             Invoke-DotnetTest `

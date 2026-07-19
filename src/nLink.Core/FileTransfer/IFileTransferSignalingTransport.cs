@@ -533,6 +533,217 @@ internal sealed record RuntimeUnlockRouteCommitSnapshot(
     string? TunaPathLeaseFailureReason = null,
     long LaunchGeneration = 0);
 
+internal sealed record PostTunaFallbackHandoffEvidence(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    long ProofGeneration,
+    string SourceRouteToken,
+    int SourceProtocolVersion,
+    int SourceLiveRouteEpoch,
+    int SourceLegGeneration,
+    int SourceBridgeRecoveryGeneration,
+    long SourceTransportEpoch,
+    string CheckpointRequestId,
+    string ProofKind,
+    string Reason,
+    PostTunaFallbackPeerProofFrameIdentity? FrameIdentity = null)
+{
+    public bool IsComplete =>
+        !string.IsNullOrWhiteSpace(SessionId) &&
+        !string.IsNullOrWhiteSpace(TransferId) &&
+        Direction == FileTransferDirection.Outbound &&
+        ProofGeneration > 0 &&
+        string.Equals(
+            SourceRouteToken,
+            FileTransferRouteResolver.PostTunaFallbackV6Token,
+            StringComparison.Ordinal) &&
+        SourceProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+        SourceLiveRouteEpoch > 0 &&
+        SourceLegGeneration > 0 &&
+        SourceBridgeRecoveryGeneration > 0 &&
+        SourceTransportEpoch > 0 &&
+        !string.IsNullOrWhiteSpace(CheckpointRequestId) &&
+        !string.IsNullOrWhiteSpace(ProofKind) &&
+        !string.IsNullOrWhiteSpace(Reason);
+
+    public bool IsExactFrameBound =>
+        FrameIdentity is { IsComplete: true } identity &&
+        identity.TransportEpoch == SourceTransportEpoch;
+
+    public bool CanBeReplacedBy(PostTunaFallbackHandoffEvidence candidate)
+        => candidate.IsComplete &&
+           candidate.ProofGeneration > ProofGeneration &&
+           string.Equals(candidate.SessionId, SessionId, StringComparison.Ordinal) &&
+           string.Equals(candidate.TransferId, TransferId, StringComparison.Ordinal) &&
+           candidate.Direction == Direction &&
+           string.Equals(candidate.SourceRouteToken, SourceRouteToken, StringComparison.Ordinal) &&
+           candidate.SourceProtocolVersion == SourceProtocolVersion &&
+           candidate.SourceLiveRouteEpoch == SourceLiveRouteEpoch &&
+           candidate.SourceLegGeneration == SourceLegGeneration &&
+           candidate.SourceBridgeRecoveryGeneration >= SourceBridgeRecoveryGeneration &&
+           candidate.SourceTransportEpoch >= SourceTransportEpoch &&
+           string.Equals(
+               candidate.CheckpointRequestId,
+               CheckpointRequestId,
+               StringComparison.Ordinal) &&
+           string.Equals(candidate.ProofKind, ProofKind, StringComparison.Ordinal);
+}
+
+internal sealed record PostTunaFallbackPeerProofFrameIdentity(
+    string FrameType,
+    long TransportEpoch,
+    string Sha256)
+{
+    public bool IsComplete =>
+        !string.IsNullOrWhiteSpace(FrameType) &&
+        TransportEpoch > 0 &&
+        Sha256.Length == 64;
+
+    public bool Matches(FileTransferDataFrame frame)
+        => TryCreate(frame, out var candidate) && candidate == this;
+
+    public static PostTunaFallbackPeerProofFrameIdentity Create(FileTransferDataFrame frame)
+        => TryCreate(frame, out var identity)
+            ? identity
+            : throw new ArgumentException("The frame is not a canonical post-Tuna fallback peer proof.", nameof(frame));
+
+    public static bool TryCreate(
+        FileTransferDataFrame? frame,
+        out PostTunaFallbackPeerProofFrameIdentity identity)
+    {
+        identity = null!;
+        var transportEpoch = frame switch
+        {
+            FileTransferReceiverStateFrameV6 state => state.TransportEpoch,
+            FileTransferFrontierRequestFrameV6 request => request.TransportEpoch,
+            _ => 0,
+        };
+        if (frame is null ||
+            transportEpoch <= 0 ||
+            string.IsNullOrWhiteSpace(frame.Type))
+        {
+            return false;
+        }
+
+        try
+        {
+            var payload = FileTransferDataFrameCodec.Serialize(frame);
+            var hash = System.Security.Cryptography.SHA256.HashData(payload);
+            identity = new PostTunaFallbackPeerProofFrameIdentity(
+                frame.Type,
+                transportEpoch,
+                Convert.ToHexString(hash).ToLowerInvariant());
+            return identity.IsComplete;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or OverflowException)
+        {
+            return false;
+        }
+    }
+}
+
+internal enum RuntimeUnlockUncommittedTunaFallbackAdoptionStageStatus
+{
+    Staged,
+    Idempotent,
+    Rejected,
+}
+
+internal sealed record RuntimeUnlockUncommittedTunaFallbackAdoptionStage(
+    IFileTransferDataSession DataSession,
+    long DataSessionGeneration,
+    RuntimeOwnerToken SourceRuntimeOwner,
+    RoutePublicationToken SourceRoutePublication,
+    RouteCommitToken PendingTunaRouteCommit,
+    RuntimeUnlockRouteCommitSnapshot PreCommitSnapshot,
+    long SourceLegGeneration,
+    long SourceTransportEpoch,
+    int SourceBridgeRecoveryGeneration,
+    int HandoffGeneration,
+    long DrainGeneration,
+    long CompletedDrainGeneration,
+    long TargetTransportEpoch,
+    int TargetBridgeRecoveryGeneration,
+    PostTunaFallbackHandoffEvidence PeerProofEvidence,
+    FileTransferRegularV4FrontierRepairPressureSettlementCommand?
+        PressureSettlementCommand = null,
+    RuntimeOwnerToken TargetRuntimeOwner = default,
+    RoutePublicationToken TargetRoutePublication = default);
+
+internal sealed record RuntimeUnlockUncommittedTunaFallbackAdoptionStageReceipt(
+    RuntimeUnlockUncommittedTunaFallbackAdoptionStage Stage,
+    RuntimeUnlockUncommittedTunaFallbackAdoptionStageStatus Status,
+    string Reason,
+    long StageGeneration,
+    long AvailabilityGeneration = 0,
+    bool ActivationPaused = false,
+    string AvailabilityReason = "");
+
+internal enum RuntimeUnlockUncommittedTunaFallbackAdoptionStatus
+{
+    Applied,
+    Idempotent,
+    Rejected,
+}
+
+internal enum RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationStatus
+{
+    Prepared,
+    Idempotent,
+    Rejected,
+}
+
+internal sealed record RuntimeUnlockUncommittedTunaFallbackAdoptionCommand(
+    IFileTransferDataSession DataSession,
+    long DataSessionGeneration,
+    long StageGeneration,
+    RuntimeOwnerToken RuntimeOwner,
+    RoutePublicationToken RoutePublication,
+    long TransportEpoch,
+    int BridgeRecoveryGeneration,
+    int HandoffGeneration,
+    long DrainGeneration,
+    PostTunaFallbackHandoffEvidence PeerProofEvidence,
+    FileTransferRegularV4FrontierRepairPressureSettlementCommand?
+        PressureSettlementCommand = null,
+    long SourceAvailabilityGeneration = 0,
+    bool SourceActivationPaused = false,
+    string SourceAvailabilityReason = "");
+
+internal sealed record RuntimeUnlockUncommittedTunaFallbackAdoptionReceipt(
+    RuntimeUnlockUncommittedTunaFallbackAdoptionCommand Command,
+    RuntimeUnlockUncommittedTunaFallbackAdoptionStatus Status,
+    string Reason,
+    FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
+        PressureSettlementReceipt = null);
+
+internal sealed record RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationReceipt(
+    RuntimeUnlockUncommittedTunaFallbackAdoptionCommand Command,
+    RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationStatus Status,
+    string Reason,
+    FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
+        PressureSettlementReceipt = null);
+
+internal interface IRuntimeUnlockUncommittedTunaFallbackAdoptionBridge
+{
+    RuntimeUnlockUncommittedTunaFallbackAdoptionStageReceipt
+        StageRuntimeUnlockUncommittedTunaFallbackAdoption(
+            RuntimeUnlockUncommittedTunaFallbackAdoptionStage stage);
+
+    RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationReceipt
+        PrepareRuntimeUnlockUncommittedTunaFallbackAdoption(
+            RuntimeUnlockUncommittedTunaFallbackAdoptionCommand command);
+
+    RuntimeUnlockUncommittedTunaFallbackAdoptionReceipt
+        CommitRuntimeUnlockUncommittedTunaFallbackAdoption(
+            RuntimeUnlockUncommittedTunaFallbackAdoptionCommand command);
+
+    bool DiscardRuntimeUnlockUncommittedTunaFallbackAdoption(
+        RuntimeUnlockUncommittedTunaFallbackAdoptionStage stage,
+        string reason);
+}
+
 internal interface IRuntimeUnlockRouteCommitProofProvider
 {
     void NotifyRuntimeUnlockPathProbeStarted(
@@ -1450,7 +1661,8 @@ public sealed class FileTransferDataSessionAvailabilityChangedEventArgs : EventA
         bool requiresResumeRequest,
         FileTransferTransportHandoffKind handoffKind,
         FileTransferTransportKind targetTransport,
-        RuntimeUnlockRouteCommitSnapshot? runtimeUnlockPreCommitProbeSnapshot)
+        RuntimeUnlockRouteCommitSnapshot? runtimeUnlockPreCommitProbeSnapshot,
+        PostTunaFallbackHandoffEvidence? postTunaFallbackHandoffEvidence = null)
     {
         IsAvailable = isAvailable;
         Reason = string.IsNullOrWhiteSpace(reason) ? "transport_state_changed" : reason.Trim();
@@ -1458,6 +1670,7 @@ public sealed class FileTransferDataSessionAvailabilityChangedEventArgs : EventA
         HandoffKind = handoffKind;
         TargetTransport = targetTransport;
         RuntimeUnlockPreCommitProbeSnapshot = runtimeUnlockPreCommitProbeSnapshot;
+        PostTunaFallbackHandoffEvidence = postTunaFallbackHandoffEvidence;
     }
 
     public bool IsAvailable { get; }
@@ -1471,6 +1684,8 @@ public sealed class FileTransferDataSessionAvailabilityChangedEventArgs : EventA
     public FileTransferTransportKind TargetTransport { get; }
 
     internal RuntimeUnlockRouteCommitSnapshot? RuntimeUnlockPreCommitProbeSnapshot { get; }
+
+    internal PostTunaFallbackHandoffEvidence? PostTunaFallbackHandoffEvidence { get; }
 }
 
 public sealed class FileTransferOfferReceivedEventArgs : EventArgs

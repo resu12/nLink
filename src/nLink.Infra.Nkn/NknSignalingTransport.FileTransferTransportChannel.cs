@@ -495,6 +495,7 @@ public sealed partial class NknSignalingTransport
                 fileTransferDataSessions.Remove(normalizedTransferId);
                 RemoveFileTransferRouteHintsForTransferUnsafe(normalizedTransferId, normalizedSessionId);
                 fileTransferPostTunaFallbackRepairProofHints.Remove(normalizedTransferId);
+                fileTransferPostTunaFallbackHandoffEvidence.Remove(normalizedTransferId);
                 LocalOperationalLog.Warn(
                     "SessionSecurity",
                     $"event=filetransfer_data_session_recreated; transport=nkn; transfer_id={normalizedTransferId}; session_id={normalizedSessionId}; reason=disposed_existing_session_on_open");
@@ -1593,12 +1594,593 @@ public sealed partial class NknSignalingTransport
         }
     }
 
+    RuntimeUnlockUncommittedTunaFallbackAdoptionStageReceipt
+        IRuntimeUnlockUncommittedTunaFallbackAdoptionBridge.StageRuntimeUnlockUncommittedTunaFallbackAdoption(
+            RuntimeUnlockUncommittedTunaFallbackAdoptionStage stage)
+    {
+        ArgumentNullException.ThrowIfNull(stage);
+
+        RuntimeUnlockUncommittedTunaFallbackAdoptionStageReceipt receipt;
+        lock (gate)
+        {
+            if (!TryValidateRuntimeUnlockUncommittedTunaFallbackAdoptionStageLocked(
+                    stage,
+                    out var session,
+                    out var rejectionReason))
+            {
+                receipt = new RuntimeUnlockUncommittedTunaFallbackAdoptionStageReceipt(
+                    stage,
+                    RuntimeUnlockUncommittedTunaFallbackAdoptionStageStatus.Rejected,
+                    rejectionReason,
+                    StageGeneration: 0);
+            }
+            else
+            {
+                receipt = session!.StageRuntimeUnlockUncommittedTunaFallbackAdoption(stage);
+            }
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_uncommitted_tuna_fallback_transport_adoption_staged; session_id={SanitizeLogToken(stage.SourceRuntimeOwner.SessionId)}; transfer_id={SanitizeLogToken(stage.SourceRuntimeOwner.TransferId)}; direction={FormatFileTransferDirection(stage.SourceRuntimeOwner.Direction)}; source_route={SanitizeLogToken(stage.SourceRuntimeOwner.RouteToken)}; source_protocol_version={stage.SourceRuntimeOwner.ProtocolVersion}; source_live_route_epoch={stage.SourceRuntimeOwner.LiveRouteEpoch}; source_runtime_generation={stage.SourceRuntimeOwner.RuntimeGeneration}; source_terminal_generation={stage.SourceRuntimeOwner.TerminalGeneration}; source_leg_generation={stage.SourceRoutePublication.LegGeneration}; proof_generation={stage.PeerProofEvidence.ProofGeneration}; proof_transport_epoch={stage.PeerProofEvidence.SourceTransportEpoch}; proof_live_route_epoch={stage.PeerProofEvidence.SourceLiveRouteEpoch}; proof_leg_generation={stage.PeerProofEvidence.SourceLegGeneration}; proof_bridge_recovery_generation={stage.PeerProofEvidence.SourceBridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(stage.PeerProofEvidence.CheckpointRequestId)}; proof_kind={SanitizeLogToken(stage.PeerProofEvidence.ProofKind)}; proof_reason={SanitizeLogToken(stage.PeerProofEvidence.Reason)}; data_session_generation={stage.DataSessionGeneration}; handoff_generation={stage.HandoffGeneration}; drain_generation={stage.DrainGeneration}; stage_status={receipt.Status}; decision_reason={SanitizeLogToken(receipt.Reason)}");
+        return receipt;
+    }
+
+    RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationReceipt
+        IRuntimeUnlockUncommittedTunaFallbackAdoptionBridge.PrepareRuntimeUnlockUncommittedTunaFallbackAdoption(
+            RuntimeUnlockUncommittedTunaFallbackAdoptionCommand command)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+
+        RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationReceipt receipt;
+        lock (gate)
+        {
+            if (fileTransferDataSessions.TryGetValue(
+                    command.RuntimeOwner.TransferId,
+                    out var duplicateSession) &&
+                ReferenceEquals(duplicateSession, command.DataSession) &&
+                duplicateSession.TryGetCommittedRuntimeUnlockUncommittedTunaFallbackAdoption(
+                    command,
+                    out var committedReceipt))
+            {
+                receipt = new RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationReceipt(
+                    command,
+                    RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationStatus.Idempotent,
+                    "uncommitted_tuna_fallback_adoption_already_applied",
+                    committedReceipt.PressureSettlementReceipt);
+            }
+            else if (!TryValidateRuntimeUnlockUncommittedTunaFallbackAdoptionLocked(
+                         command,
+                         out var session,
+                         out var rejectionReason))
+            {
+                receipt = new RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationReceipt(
+                    command,
+                    RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationStatus.Rejected,
+                    rejectionReason);
+            }
+            else if (command.PressureSettlementCommand is { } pressureCommand)
+            {
+                if (client is not RealNknClientAdapter realClient)
+                {
+                    receipt = new RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationReceipt(
+                        command,
+                        RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationStatus.Rejected,
+                        "uncommitted_tuna_fallback_pressure_bridge_unsupported");
+                }
+                else
+                {
+                    var pressureReceipt =
+                        realClient.PrepareRuntimeUnlockUncommittedTunaFallbackPressureSettlement(
+                            pressureCommand);
+                    receipt = pressureReceipt.Status is (
+                            FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied or
+                            FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent)
+                        ? new RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationReceipt(
+                            command,
+                            RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationStatus.Prepared,
+                            "uncommitted_tuna_fallback_adoption_prepared",
+                            pressureReceipt)
+                        : new RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationReceipt(
+                            command,
+                            RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationStatus.Rejected,
+                            $"uncommitted_tuna_fallback_pressure_{pressureReceipt.Reason}",
+                            pressureReceipt);
+                }
+
+                if (receipt.Status == RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationStatus.Prepared)
+                {
+                    session!.RecordPreparedRuntimeUnlockUncommittedTunaFallbackAdoption(receipt);
+                }
+            }
+            else
+            {
+                receipt = new RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationReceipt(
+                    command,
+                    RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationStatus.Prepared,
+                    "uncommitted_tuna_fallback_adoption_prepared");
+                session!.RecordPreparedRuntimeUnlockUncommittedTunaFallbackAdoption(receipt);
+            }
+        }
+
+        return receipt;
+    }
+
+    RuntimeUnlockUncommittedTunaFallbackAdoptionReceipt
+        IRuntimeUnlockUncommittedTunaFallbackAdoptionBridge.CommitRuntimeUnlockUncommittedTunaFallbackAdoption(
+            RuntimeUnlockUncommittedTunaFallbackAdoptionCommand command)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+
+        RuntimeUnlockUncommittedTunaFallbackAdoptionReceipt receipt;
+        lock (gate)
+        {
+            if (fileTransferDataSessions.TryGetValue(
+                    command.RuntimeOwner.TransferId,
+                    out var duplicateSession) &&
+                ReferenceEquals(duplicateSession, command.DataSession) &&
+                duplicateSession.TryGetCommittedRuntimeUnlockUncommittedTunaFallbackAdoption(
+                    command,
+                    out receipt))
+            {
+                // Exact late duplicates are evidence only.  In particular, do not
+                // overwrite a newer route publication with the historical fallback
+                // publication carried by this command.
+            }
+            else if (!TryValidateRuntimeUnlockUncommittedTunaFallbackAdoptionLocked(
+                     command,
+                     out var session,
+                     out var rejectionReason) ||
+                     !session!.TryGetPreparedRuntimeUnlockUncommittedTunaFallbackAdoption(
+                         command,
+                         out var preparationReceipt))
+            {
+                receipt = new RuntimeUnlockUncommittedTunaFallbackAdoptionReceipt(
+                    command,
+                    RuntimeUnlockUncommittedTunaFallbackAdoptionStatus.Rejected,
+                    string.IsNullOrWhiteSpace(rejectionReason)
+                        ? "uncommitted_tuna_fallback_adoption_preparation_missing"
+                        : rejectionReason);
+            }
+            else
+            {
+                RuntimeUnlockUncommittedTunaFallbackAdoptionReceipt ApplyAdoption()
+                    => ApplyRuntimeUnlockUncommittedTunaFallbackAdoptionLocked(
+                        command,
+                        session!);
+
+                receipt = command.PressureSettlementCommand is not null
+                    ? client is RealNknClientAdapter realClient
+                        ? realClient.CommitRuntimeUnlockUncommittedTunaFallbackAdoptionAtomically(
+                            command,
+                            preparationReceipt,
+                            ApplyAdoption)
+                        : new RuntimeUnlockUncommittedTunaFallbackAdoptionReceipt(
+                            command,
+                            RuntimeUnlockUncommittedTunaFallbackAdoptionStatus.Rejected,
+                            "uncommitted_tuna_fallback_pressure_bridge_unsupported")
+                    : ApplyAdoption();
+                if (receipt.Status is (
+                        RuntimeUnlockUncommittedTunaFallbackAdoptionStatus.Applied or
+                        RuntimeUnlockUncommittedTunaFallbackAdoptionStatus.Idempotent))
+                {
+                    session!.RecordCommittedRuntimeUnlockUncommittedTunaFallbackAdoption(
+                        receipt);
+                }
+            }
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_uncommitted_tuna_fallback_transport_adoption_decided; session_id={SanitizeLogToken(command.RuntimeOwner.SessionId)}; transfer_id={SanitizeLogToken(command.RuntimeOwner.TransferId)}; direction={FormatFileTransferDirection(command.RuntimeOwner.Direction)}; route={SanitizeLogToken(command.RuntimeOwner.RouteToken)}; protocol_version={command.RuntimeOwner.ProtocolVersion}; live_route_epoch={command.RuntimeOwner.LiveRouteEpoch}; runtime_generation={command.RuntimeOwner.RuntimeGeneration}; terminal_generation={command.RuntimeOwner.TerminalGeneration}; leg_generation={command.RoutePublication.LegGeneration}; transport_epoch={command.TransportEpoch}; bridge_recovery_generation={command.BridgeRecoveryGeneration}; data_session_generation={command.DataSessionGeneration}; stage_generation={command.StageGeneration}; handoff_generation={command.HandoffGeneration}; drain_generation={command.DrainGeneration}; route_publication_generation={command.RoutePublication.PublicationGeneration}; adoption_status={receipt.Status}; decision_reason={SanitizeLogToken(receipt.Reason)}");
+        return receipt;
+    }
+
+    private RuntimeUnlockUncommittedTunaFallbackAdoptionReceipt
+        ApplyRuntimeUnlockUncommittedTunaFallbackAdoptionLocked(
+            RuntimeUnlockUncommittedTunaFallbackAdoptionCommand command,
+            TransportFileTransferDataSession session)
+    {
+        var key = CreateFileTransferRouteHintKey(
+            command.RuntimeOwner.SessionId,
+            command.RuntimeOwner.TransferId,
+            command.RuntimeOwner.Direction);
+        var hadPreviousHint = fileTransferRouteHints.TryGetValue(key, out var previousHint);
+        var hadPreviousAuthority = fileTransferRoutePublicationAuthorities.TryGetValue(
+            key,
+            out var previousAuthority);
+        var hadPreviousRequirement = fileTransferRuntimeUnlockAuthorityRequirements.TryGetValue(
+            command.RuntimeOwner.SessionId,
+            out var previousRequirement);
+        var authority = FileTransferCoordinator.CreateRoutePublicationAuthority(
+            command.RoutePublication,
+            "coordinator_post_tuna_fallback_v6_committed")!;
+        fileTransferRouteHints[key] = new FileTransferRouteHint(
+            FileTransferRoute.PostTunaFallbackV6,
+            FileTransferRouteResolver.PostTunaFallbackV6Token,
+            FileTransferProtocol.ProtocolVersionV6,
+            command.RuntimeOwner.SessionId,
+            command.RuntimeOwner.Direction,
+            command.RuntimeOwner.LiveRouteEpoch,
+            "coordinator_uncommitted_tuna_fallback_adoption",
+            RuntimeUnlockAdmissionGranted: false,
+            RuntimeUnlockAdmissionReason: "not_applicable",
+            FallbackLegState: "checkpoint_pending",
+            FallbackLegCanSendData: false,
+            FallbackLegGeneration: command.RoutePublication.LegGeneration,
+            FallbackCheckpointRequestId: command.PeerProofEvidence.CheckpointRequestId,
+            FallbackTransportEpoch: command.TransportEpoch,
+            FallbackBridgeRecoveryGeneration: command.BridgeRecoveryGeneration,
+            RoutePublicationGeneration: command.RoutePublication.PublicationGeneration,
+            RuntimeGeneration: command.RuntimeOwner.RuntimeGeneration,
+            TerminalGeneration: command.RuntimeOwner.TerminalGeneration,
+            PublicationLegGeneration: command.RoutePublication.LegGeneration,
+            RouteCommitGeneration: command.RoutePublication.RouteCommitGeneration,
+            TargetRouteToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+            TargetProtocolVersion: FileTransferProtocol.ProtocolVersionV6,
+            TargetTransport: FileTransferTransportKind.RegularNkn,
+            RoutePublicationActionKind: FileTransferCoordinatorActionKind.RoutePublication.ToString(),
+            CoordinatorDecisionReason: "coordinator_post_tuna_fallback_v6_committed",
+            RecordedUtc: DateTimeOffset.UtcNow);
+        fileTransferRoutePublicationAuthorities[key] = authority;
+        fileTransferRuntimeUnlockAuthorityRequirements[command.RuntimeOwner.SessionId] =
+            new FileTransferRuntimeUnlockAuthorityRequirement(
+                command.RuntimeOwner.TransferId,
+                command.RuntimeOwner.Direction,
+                command.RoutePublication.PublicationGeneration);
+
+        var receipt = session.CommitRuntimeUnlockUncommittedTunaFallbackAdoption(command);
+        if (receipt.Status != RuntimeUnlockUncommittedTunaFallbackAdoptionStatus.Rejected)
+        {
+            return receipt;
+        }
+
+        if (hadPreviousHint)
+        {
+            fileTransferRouteHints[key] = previousHint;
+        }
+        else
+        {
+            fileTransferRouteHints.Remove(key);
+        }
+
+        if (hadPreviousAuthority)
+        {
+            fileTransferRoutePublicationAuthorities[key] = previousAuthority!;
+        }
+        else
+        {
+            fileTransferRoutePublicationAuthorities.Remove(key);
+        }
+
+        if (hadPreviousRequirement)
+        {
+            fileTransferRuntimeUnlockAuthorityRequirements[command.RuntimeOwner.SessionId] =
+                previousRequirement!;
+        }
+        else
+        {
+            fileTransferRuntimeUnlockAuthorityRequirements.Remove(
+                command.RuntimeOwner.SessionId);
+        }
+
+        return receipt;
+    }
+
+    bool IRuntimeUnlockUncommittedTunaFallbackAdoptionBridge
+        .DiscardRuntimeUnlockUncommittedTunaFallbackAdoption(
+            RuntimeUnlockUncommittedTunaFallbackAdoptionStage stage,
+            string reason)
+    {
+        ArgumentNullException.ThrowIfNull(stage);
+        lock (gate)
+        {
+            return fileTransferDataSessions.TryGetValue(stage.SourceRuntimeOwner.TransferId, out var session) &&
+                   ReferenceEquals(session, stage.DataSession) &&
+                   session.DiscardRuntimeUnlockUncommittedTunaFallbackAdoption(stage, reason);
+        }
+    }
+
+    private bool TryValidateRuntimeUnlockUncommittedTunaFallbackAdoptionStageLocked(
+        RuntimeUnlockUncommittedTunaFallbackAdoptionStage stage,
+        out TransportFileTransferDataSession? session,
+        out string rejectionReason)
+    {
+        session = null;
+        if (stage.DataSession is null ||
+            stage.DataSessionGeneration <= 0 ||
+            stage.SourceLegGeneration <= 0 ||
+            stage.SourceTransportEpoch < 0 ||
+            stage.SourceBridgeRecoveryGeneration < 0 ||
+            stage.HandoffGeneration <= 0 ||
+            stage.DrainGeneration <= 0 ||
+            stage.CompletedDrainGeneration != stage.DrainGeneration ||
+            stage.TargetTransportEpoch <= 0 ||
+            stage.TargetBridgeRecoveryGeneration <= 0 ||
+            stage.SourceRuntimeOwner.IsDefault ||
+            stage.SourceRoutePublication.IsDefault ||
+            stage.PendingTunaRouteCommit.IsDefault ||
+            stage.TargetRuntimeOwner.IsDefault ||
+            stage.TargetRoutePublication.IsDefault ||
+            stage.PeerProofEvidence is not { IsComplete: true })
+        {
+            rejectionReason = "uncommitted_tuna_fallback_adoption_stage_incomplete";
+            return false;
+        }
+
+        var owner = stage.SourceRuntimeOwner;
+        var publication = stage.SourceRoutePublication;
+        var commit = stage.PendingTunaRouteCommit;
+        var targetOwner = stage.TargetRuntimeOwner;
+        var targetPublication = stage.TargetRoutePublication;
+        if (owner.Direction != FileTransferDirection.Outbound ||
+            owner.Route != FileTransferRoute.RegularNknV4Fast ||
+            owner.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            publication.RuntimeOwner != owner ||
+            !IsRuntimeUnlockUncommittedTunaFallbackPublicationTupleConsistent(publication, owner) ||
+            publication.LegGeneration != stage.SourceLegGeneration ||
+            commit.RuntimeOwner != owner ||
+            !string.Equals(commit.SessionId, owner.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(commit.TransferId, owner.TransferId, StringComparison.Ordinal) ||
+            commit.Direction != owner.Direction ||
+            commit.TargetRoute != FileTransferRoute.FileTunaV4 ||
+            commit.TargetProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            commit.TargetTransport != FileTransferTransportKind.Tuna ||
+            !string.Equals(stage.PreCommitSnapshot.SessionId, owner.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(stage.PreCommitSnapshot.TransferId, owner.TransferId, StringComparison.Ordinal) ||
+            stage.PreCommitSnapshot.TransactionGeneration != commit.TransactionGeneration ||
+            stage.PreCommitSnapshot.OfferGeneration != commit.OfferGeneration ||
+            stage.PreCommitSnapshot.TunaPathLeaseGeneration != commit.TunaPathLeaseGeneration ||
+            !string.Equals(
+                stage.PreCommitSnapshot.TunaPathLeaseListenerRunId,
+                commit.TunaPathLeaseListenerRunId,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                stage.PreCommitSnapshot.PathProbeId,
+                commit.SamePathTunaProbeAckId,
+                StringComparison.Ordinal) ||
+            !stage.PreCommitSnapshot.PeerVisibleProof ||
+            !stage.PreCommitSnapshot.PeerReceived ||
+            !stage.PreCommitSnapshot.AnswerReceived ||
+            !stage.PreCommitSnapshot.TunaPathLeaseCurrent ||
+            !string.Equals(stage.PreCommitSnapshot.PathProbeState, "Acked", StringComparison.OrdinalIgnoreCase) ||
+            targetOwner.Direction != owner.Direction ||
+            targetOwner.Route != FileTransferRoute.PostTunaFallbackV6 ||
+            !string.Equals(
+                targetOwner.RouteToken,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                StringComparison.Ordinal) ||
+            targetOwner.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+            !string.Equals(targetOwner.SessionId, owner.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(targetOwner.TransferId, owner.TransferId, StringComparison.Ordinal) ||
+            targetPublication.RuntimeOwner != targetOwner ||
+            !IsRuntimeUnlockUncommittedTunaFallbackPublicationTupleConsistent(
+                targetPublication,
+                targetOwner) ||
+            targetPublication.LegGeneration != stage.PeerProofEvidence.SourceLegGeneration ||
+            targetOwner.LiveRouteEpoch != stage.PeerProofEvidence.SourceLiveRouteEpoch ||
+            targetPublication.TargetRoute != FileTransferRoute.PostTunaFallbackV6 ||
+            targetPublication.TargetProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+            targetPublication.TargetTransport != FileTransferTransportKind.RegularNkn ||
+            targetPublication.RouteCommitGeneration is not null)
+        {
+            rejectionReason = "uncommitted_tuna_fallback_adoption_stage_authority_mismatch";
+            return false;
+        }
+
+        var evidence = stage.PeerProofEvidence;
+        if (!evidence.IsExactFrameBound ||
+            evidence.Direction != owner.Direction ||
+            !string.Equals(evidence.SessionId, owner.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(evidence.TransferId, owner.TransferId, StringComparison.Ordinal) ||
+            !fileTransferPostTunaFallbackHandoffEvidence.TryGetValue(owner.TransferId, out var retained) ||
+            retained != evidence ||
+            evidence.SourceTransportEpoch != stage.TargetTransportEpoch ||
+            evidence.SourceBridgeRecoveryGeneration != stage.TargetBridgeRecoveryGeneration)
+        {
+            rejectionReason = "uncommitted_tuna_fallback_adoption_stage_peer_proof_stale";
+            return false;
+        }
+
+        if (!fileTransferDataSessions.TryGetValue(owner.TransferId, out session) ||
+            session.IsDisposed ||
+            !ReferenceEquals(session, stage.DataSession) ||
+            !string.Equals(session.SessionId, owner.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(session.TransferId, owner.TransferId, StringComparison.Ordinal))
+        {
+            rejectionReason = "uncommitted_tuna_fallback_adoption_stage_data_session_mismatch";
+            return false;
+        }
+
+        var key = CreateFileTransferRouteHintKey(owner.SessionId, owner.TransferId, owner.Direction);
+        if (!fileTransferRoutePublicationAuthorities.TryGetValue(key, out var authority) ||
+            !fileTransferRouteHints.TryGetValue(key, out var hint) ||
+            !IsRuntimeUnlockUncommittedTunaFallbackPublicationCurrent(
+                publication,
+                authority,
+                hint,
+                hint.FallbackTransportEpoch,
+                hint.FallbackBridgeRecoveryGeneration) ||
+            hint.PublicationLegGeneration != stage.SourceLegGeneration ||
+            hint.FallbackTransportEpoch != stage.SourceTransportEpoch ||
+            hint.FallbackBridgeRecoveryGeneration != stage.SourceBridgeRecoveryGeneration)
+        {
+            session = null;
+            rejectionReason = "uncommitted_tuna_fallback_adoption_stage_source_not_current";
+            return false;
+        }
+
+        rejectionReason = "uncommitted_tuna_fallback_adoption_staged";
+        return true;
+    }
+
+    private bool TryValidateRuntimeUnlockUncommittedTunaFallbackAdoptionLocked(
+        RuntimeUnlockUncommittedTunaFallbackAdoptionCommand command,
+        out TransportFileTransferDataSession? session,
+        out string rejectionReason)
+    {
+        session = null;
+        if (command.DataSession is null ||
+            command.DataSessionGeneration <= 0 ||
+            command.StageGeneration <= 0 ||
+            command.TransportEpoch <= 0 ||
+            command.BridgeRecoveryGeneration <= 0 ||
+            command.HandoffGeneration <= 0 ||
+            command.DrainGeneration <= 0 ||
+            command.RuntimeOwner.IsDefault ||
+            command.RoutePublication.IsDefault ||
+            command.PeerProofEvidence is not { IsComplete: true })
+        {
+            rejectionReason = "uncommitted_tuna_fallback_adoption_incomplete";
+            return false;
+        }
+
+        var owner = command.RuntimeOwner;
+        var publication = command.RoutePublication;
+        if (owner.Direction != FileTransferDirection.Outbound ||
+            owner.Route != FileTransferRoute.PostTunaFallbackV6 ||
+            !string.Equals(
+                owner.RouteToken,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                StringComparison.Ordinal) ||
+            owner.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+            publication.RuntimeOwner != owner ||
+            !string.Equals(publication.SessionId, owner.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(publication.TransferId, owner.TransferId, StringComparison.Ordinal) ||
+            publication.Direction != owner.Direction ||
+            publication.Route != owner.Route ||
+            !string.Equals(publication.RouteToken, owner.RouteToken, StringComparison.Ordinal) ||
+            publication.ProtocolVersion != owner.ProtocolVersion ||
+            publication.LiveRouteEpoch != owner.LiveRouteEpoch ||
+            publication.RuntimeGeneration != owner.RuntimeGeneration ||
+            publication.TerminalGeneration != owner.TerminalGeneration ||
+            publication.TargetRoute != FileTransferRoute.PostTunaFallbackV6 ||
+            publication.TargetProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+            publication.TargetTransport != FileTransferTransportKind.RegularNkn ||
+            publication.ActionKind != FileTransferCoordinatorActionKind.RoutePublication ||
+            publication.RouteCommitGeneration is not null)
+        {
+            rejectionReason = "uncommitted_tuna_fallback_adoption_authority_mismatch";
+            return false;
+        }
+
+        var evidence = command.PeerProofEvidence;
+        if (!evidence.IsExactFrameBound ||
+            evidence.Direction != owner.Direction ||
+            !string.Equals(evidence.SessionId, owner.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(evidence.TransferId, owner.TransferId, StringComparison.Ordinal) ||
+            !string.Equals(
+                evidence.SourceRouteToken,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                StringComparison.Ordinal) ||
+            evidence.SourceProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+            evidence.SourceLiveRouteEpoch != owner.LiveRouteEpoch ||
+            evidence.SourceLegGeneration != publication.LegGeneration ||
+            evidence.SourceBridgeRecoveryGeneration != command.BridgeRecoveryGeneration ||
+            evidence.SourceTransportEpoch != command.TransportEpoch ||
+            !fileTransferPostTunaFallbackHandoffEvidence.TryGetValue(owner.TransferId, out var retained) ||
+            retained != evidence)
+        {
+            rejectionReason = "uncommitted_tuna_fallback_adoption_peer_proof_mismatch";
+            return false;
+        }
+
+        if (!fileTransferDataSessions.TryGetValue(owner.TransferId, out session) ||
+            session.IsDisposed ||
+            !ReferenceEquals(session, command.DataSession) ||
+            !string.Equals(session.SessionId, owner.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(session.TransferId, owner.TransferId, StringComparison.Ordinal) ||
+            !session.CanCommitRuntimeUnlockUncommittedTunaFallbackAdoption(command) ||
+            !session.TryGetPendingRuntimeUnlockUncommittedTunaFallbackAdoption(
+                command,
+                out var pendingStage))
+        {
+            rejectionReason = "uncommitted_tuna_fallback_adoption_data_session_mismatch";
+            return false;
+        }
+
+        var sourceOwner = pendingStage.SourceRuntimeOwner;
+        var sourcePublication = pendingStage.SourceRoutePublication;
+        var sourceKey = CreateFileTransferRouteHintKey(
+            sourceOwner.SessionId,
+            sourceOwner.TransferId,
+            sourceOwner.Direction);
+        if (!fileTransferRoutePublicationAuthorities.TryGetValue(
+                sourceKey,
+                out var sourceAuthority) ||
+            !fileTransferRouteHints.TryGetValue(sourceKey, out var sourceHint) ||
+            !IsRuntimeUnlockUncommittedTunaFallbackPublicationCurrent(
+                sourcePublication,
+                sourceAuthority,
+                sourceHint,
+                pendingStage.SourceTransportEpoch,
+                pendingStage.SourceBridgeRecoveryGeneration) ||
+            sourceHint.PublicationLegGeneration != pendingStage.SourceLegGeneration)
+        {
+            session = null;
+            rejectionReason = "uncommitted_tuna_fallback_adoption_source_replaced";
+            return false;
+        }
+
+        var key = CreateFileTransferRouteHintKey(owner.SessionId, owner.TransferId, owner.Direction);
+        if (fileTransferRoutePublicationAuthorities.TryGetValue(key, out var authority) &&
+            !FileTransferCoordinator.MatchesRoutePublicationAuthority(authority, publication) &&
+            authority.RoutePublicationGeneration >= publication.PublicationGeneration)
+        {
+            session = null;
+            rejectionReason = "uncommitted_tuna_fallback_adoption_publication_replaced";
+            return false;
+        }
+
+        rejectionReason = "coordinator_post_tuna_fallback_v6_committed";
+        return true;
+    }
+
+    private static bool IsRuntimeUnlockUncommittedTunaFallbackPublicationCurrent(
+        RoutePublicationToken publication,
+        FileTransferRoutePublicationAuthority authority,
+        FileTransferRouteHint hint,
+        long transportEpoch,
+        int bridgeRecoveryGeneration)
+        => IsRuntimeUnlockUncommittedTunaFallbackPublicationTupleConsistent(
+               publication,
+               publication.RuntimeOwner) &&
+           FileTransferCoordinator.MatchesRoutePublicationAuthority(authority, publication) &&
+           hint.Route == publication.Route &&
+           string.Equals(hint.Token, publication.RouteToken, StringComparison.Ordinal) &&
+           hint.ProtocolVersion == publication.ProtocolVersion &&
+           string.Equals(hint.SessionId, publication.SessionId, StringComparison.Ordinal) &&
+           hint.Direction == publication.Direction &&
+           hint.LiveRouteEpoch == publication.LiveRouteEpoch &&
+           hint.RoutePublicationGeneration == publication.PublicationGeneration &&
+           hint.RuntimeGeneration == publication.RuntimeGeneration &&
+           hint.TerminalGeneration == publication.TerminalGeneration &&
+           hint.PublicationLegGeneration == publication.LegGeneration &&
+           hint.RouteCommitGeneration == publication.RouteCommitGeneration &&
+           hint.FallbackTransportEpoch == transportEpoch &&
+           hint.FallbackBridgeRecoveryGeneration == bridgeRecoveryGeneration;
+
+    private static bool IsRuntimeUnlockUncommittedTunaFallbackPublicationTupleConsistent(
+        RoutePublicationToken publication,
+        RuntimeOwnerToken owner)
+        => publication.RuntimeOwner == owner &&
+           string.Equals(publication.SessionId, owner.SessionId, StringComparison.Ordinal) &&
+           string.Equals(publication.TransferId, owner.TransferId, StringComparison.Ordinal) &&
+           publication.Direction == owner.Direction &&
+           publication.Route == owner.Route &&
+           string.Equals(publication.RouteToken, owner.RouteToken, StringComparison.Ordinal) &&
+           publication.ProtocolVersion == owner.ProtocolVersion &&
+           publication.LiveRouteEpoch == owner.LiveRouteEpoch &&
+           publication.RuntimeGeneration == owner.RuntimeGeneration &&
+           publication.TerminalGeneration == owner.TerminalGeneration;
+
     private void SetFileTransferDataSessionsAvailability(
         bool isAvailable,
         string reason,
         bool requiresResumeRequest,
         FileTransferTransportHandoffKind handoffKind = FileTransferTransportHandoffKind.None,
-        FileTransferTransportKind targetTransport = FileTransferTransportKind.Unknown)
+        FileTransferTransportKind targetTransport = FileTransferTransportKind.Unknown,
+        PostTunaFallbackHandoffEvidence? postTunaFallbackHandoffEvidence = null)
     {
         var effectiveHandoffKind = ResolveFileTransferDataSessionAvailabilityHandoffKind(
             reason,
@@ -1606,6 +2188,9 @@ public sealed partial class NknSignalingTransport
             targetTransport);
         TransportFileTransferDataSession[] sessions;
         int staleSessionCount;
+        var adoptionStageInvalidatedByProofReplacement = false;
+        var proofReplacementRejected = false;
+        PostTunaFallbackHandoffEvidence? rejectedReplacementEvidence = null;
         var explicitHandoff = requiresResumeRequest &&
                               effectiveHandoffKind != FileTransferTransportHandoffKind.None;
         lock (gate)
@@ -1619,6 +2204,54 @@ public sealed partial class NknSignalingTransport
                 fileTransferDataSessions.Remove(staleTransferId);
                 RemoveFileTransferRouteHintsForTransferUnsafe(staleTransferId);
                 fileTransferPostTunaFallbackRepairProofHints.Remove(staleTransferId);
+                fileTransferPostTunaFallbackHandoffEvidence.Remove(staleTransferId);
+            }
+
+            if (postTunaFallbackHandoffEvidence is { IsComplete: true } retainedEvidence)
+            {
+                if (!fileTransferDataSessions.TryGetValue(
+                        retainedEvidence.TransferId,
+                        out var evidenceSession) ||
+                    evidenceSession.IsDisposed ||
+                    !string.Equals(
+                        evidenceSession.SessionId,
+                        retainedEvidence.SessionId,
+                        StringComparison.Ordinal))
+                {
+                    proofReplacementRejected = true;
+                    rejectedReplacementEvidence = retainedEvidence;
+                    postTunaFallbackHandoffEvidence = null;
+                }
+
+                var hasCurrentEvidence =
+                    fileTransferPostTunaFallbackHandoffEvidence.TryGetValue(
+                        retainedEvidence.TransferId,
+                        out var currentEvidence);
+                if (!proofReplacementRejected &&
+                    hasCurrentEvidence &&
+                    currentEvidence != retainedEvidence &&
+                    !currentEvidence!.CanBeReplacedBy(retainedEvidence))
+                {
+                    proofReplacementRejected = true;
+                    rejectedReplacementEvidence = retainedEvidence;
+                    postTunaFallbackHandoffEvidence = null;
+                }
+                else if (!proofReplacementRejected &&
+                         (!hasCurrentEvidence || currentEvidence != retainedEvidence))
+                {
+                    if (fileTransferDataSessions.TryGetValue(
+                            retainedEvidence.TransferId,
+                            out var retainedSession) &&
+                        retainedSession.HasPendingRuntimeUnlockUncommittedTunaFallbackAdoption &&
+                        retainedSession.TryInvalidateRuntimeUnlockUncommittedTunaFallbackAdoptionForProofReplacement(
+                            retainedEvidence))
+                    {
+                        adoptionStageInvalidatedByProofReplacement = true;
+                    }
+
+                    fileTransferPostTunaFallbackHandoffEvidence[retainedEvidence.TransferId] =
+                        retainedEvidence;
+                }
             }
 
             staleSessionCount = staleTransferIds.Length;
@@ -1660,9 +2293,24 @@ public sealed partial class NknSignalingTransport
                 $"event=filetransfer_data_session_availability_broadcast; session_count={sessions.Length}; stale_session_count={staleSessionCount}; subscriber_count={sessions.Sum(static session => session.AvailabilitySubscriberCount)}; is_available={(isAvailable ? 1 : 0)}; reason={SanitizeLogToken(reason)}; requires_resume_request={(requiresResumeRequest ? 1 : 0)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(effectiveHandoffKind)}; target_transport={FormatFileTransferTransportKindForLog(targetTransport)}");
         }
 
+        if (adoptionStageInvalidatedByProofReplacement &&
+            postTunaFallbackHandoffEvidence is { } replacementEvidence)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=runtime_unlock_uncommitted_tuna_fallback_transport_adoption_stage_invalidated; session_id={SanitizeLogToken(replacementEvidence.SessionId)}; transfer_id={SanitizeLogToken(replacementEvidence.TransferId)}; direction={FormatFileTransferDirection(replacementEvidence.Direction)}; proof_generation={replacementEvidence.ProofGeneration}; proof_transport_epoch={replacementEvidence.SourceTransportEpoch}; proof_live_route_epoch={replacementEvidence.SourceLiveRouteEpoch}; proof_leg_generation={replacementEvidence.SourceLegGeneration}; proof_bridge_recovery_generation={replacementEvidence.SourceBridgeRecoveryGeneration}; decision_reason=peer_proof_replaced");
+        }
+
+        if (proofReplacementRejected)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=runtime_unlock_uncommitted_tuna_fallback_transport_adoption_stage_invalidated; session_id={SanitizeLogToken(rejectedReplacementEvidence?.SessionId ?? "(none)")}; transfer_id={SanitizeLogToken(rejectedReplacementEvidence?.TransferId ?? "(none)")}; direction={FormatFileTransferDirection(rejectedReplacementEvidence?.Direction ?? FileTransferDirection.Outbound)}; proof_generation={rejectedReplacementEvidence?.ProofGeneration ?? 0}; proof_transport_epoch={rejectedReplacementEvidence?.SourceTransportEpoch ?? 0}; proof_live_route_epoch={rejectedReplacementEvidence?.SourceLiveRouteEpoch ?? 0}; proof_leg_generation={rejectedReplacementEvidence?.SourceLegGeneration ?? 0}; proof_bridge_recovery_generation={rejectedReplacementEvidence?.SourceBridgeRecoveryGeneration ?? 0}; decision_reason=peer_proof_replacement_stale");
+        }
+
         foreach (var session in sessions)
         {
-            if (ShouldSuppressUncommittedPostTunaFallbackHandoff(
+            var uncommittedFallbackSuppressed = ShouldSuppressUncommittedPostTunaFallbackHandoff(
                     session.TransferId,
                     session.SessionId,
                     routeHint: null,
@@ -1670,7 +2318,22 @@ public sealed partial class NknSignalingTransport
                     targetTransport,
                     "availability_broadcast",
                     reason,
-                    clearPending: false))
+                    clearPending: false);
+            var proofScopedFallbackBoundary =
+                uncommittedFallbackSuppressed &&
+                postTunaFallbackHandoffEvidence is { IsComplete: true } evidence &&
+                string.Equals(evidence.SessionId, session.SessionId, StringComparison.Ordinal) &&
+                string.Equals(evidence.TransferId, session.TransferId, StringComparison.Ordinal);
+            var stagedFallbackBoundary =
+                effectiveHandoffKind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
+                targetTransport == FileTransferTransportKind.RegularNkn &&
+                session.HasPendingRuntimeUnlockUncommittedTunaFallbackAdoption;
+            if (uncommittedFallbackSuppressed && !proofScopedFallbackBoundary)
+            {
+                continue;
+            }
+
+            if (stagedFallbackBoundary && !proofScopedFallbackBoundary)
             {
                 continue;
             }
@@ -1684,14 +2347,23 @@ public sealed partial class NknSignalingTransport
                 continue;
             }
 
-            TrackFileTransferRouteHintForHandoff(
-                session.TransferId,
+            if (!uncommittedFallbackSuppressed)
+            {
+                TrackFileTransferRouteHintForHandoff(
+                    session.TransferId,
+                    effectiveHandoffKind,
+                    targetTransport,
+                    "availability_broadcast",
+                    reason);
+            }
+
+            session.SetAvailability(
+                isAvailable,
+                reason,
+                requiresResumeRequest,
                 effectiveHandoffKind,
                 targetTransport,
-                "availability_broadcast",
-                reason);
-
-            session.SetAvailability(isAvailable, reason, requiresResumeRequest, effectiveHandoffKind, targetTransport);
+                proofScopedFallbackBoundary ? postTunaFallbackHandoffEvidence : null);
         }
     }
 
@@ -3346,7 +4018,7 @@ public sealed partial class NknSignalingTransport
             }
         }
 
-        if (!currentRouteHint.HasValue ||
+        if (currentRouteHint.HasValue &&
             currentRouteHint.Value.Route is FileTransferRoute.FileTunaV4 or FileTransferRoute.PostTunaFallbackV6)
         {
             return false;
@@ -7778,6 +8450,7 @@ public sealed partial class NknSignalingTransport
                 fileTransferDataSessions.Remove(session.TransferId);
                 RemoveFileTransferRouteHintsForTransferUnsafe(session.TransferId, session.SessionId);
                 fileTransferPostTunaFallbackRepairProofHints.Remove(session.TransferId);
+                fileTransferPostTunaFallbackHandoffEvidence.Remove(session.TransferId);
                 removed = true;
                 LocalOperationalLog.Info(
                     "SessionSecurity",
@@ -7865,6 +8538,18 @@ public sealed partial class NknSignalingTransport
         private string? lastTunaActivationPauseReason;
         private long lastTunaActivationPauseRecoveredUtcTicks;
         private RuntimeUnlockPreCommitAckSendAuthority? preCommitAckSendAuthority;
+        private readonly object uncommittedTunaFallbackAdoptionGate = new();
+        private RuntimeUnlockUncommittedTunaFallbackAdoptionStage?
+            pendingRuntimeUnlockUncommittedTunaFallbackAdoption;
+        private long lastRuntimeUnlockUncommittedTunaFallbackAdoptionStageGeneration;
+        private long pendingRuntimeUnlockUncommittedTunaFallbackAvailabilityGeneration;
+        private bool pendingRuntimeUnlockUncommittedTunaFallbackActivationPaused;
+        private string pendingRuntimeUnlockUncommittedTunaFallbackAvailabilityReason = string.Empty;
+        private long availabilityGeneration = 1;
+        private RuntimeUnlockUncommittedTunaFallbackAdoptionReceipt?
+            lastRuntimeUnlockUncommittedTunaFallbackAdoption;
+        private RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationReceipt?
+            pendingRuntimeUnlockUncommittedTunaFallbackAdoptionPreparation;
         private EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? availabilityChanged;
         private EventHandler<FileTransferRuntimeUnlockAuthorityFrameReceivedEventArgs>? runtimeUnlockAuthorityFrameReceived;
 
@@ -7895,6 +8580,353 @@ public sealed partial class NknSignalingTransport
 
         public int AvailabilitySubscriberCount
             => availabilityChanged?.GetInvocationList().Length ?? 0;
+
+        public bool HasPendingRuntimeUnlockUncommittedTunaFallbackAdoption
+        {
+            get
+            {
+                lock (uncommittedTunaFallbackAdoptionGate)
+                {
+                    return pendingRuntimeUnlockUncommittedTunaFallbackAdoption is not null;
+                }
+            }
+        }
+
+        public bool TryInvalidateRuntimeUnlockUncommittedTunaFallbackAdoptionForProofReplacement(
+            PostTunaFallbackHandoffEvidence evidence)
+        {
+            lock (uncommittedTunaFallbackAdoptionGate)
+            {
+                if (pendingRuntimeUnlockUncommittedTunaFallbackAdoption is not { } pending ||
+                    pending.PeerProofEvidence == evidence ||
+                    !pending.PeerProofEvidence.CanBeReplacedBy(evidence))
+                {
+                    return false;
+                }
+
+                pendingRuntimeUnlockUncommittedTunaFallbackAdoption = null;
+                pendingRuntimeUnlockUncommittedTunaFallbackAdoptionPreparation = null;
+                return true;
+            }
+        }
+
+        public bool CanCommitRuntimeUnlockUncommittedTunaFallbackAdoption(
+            RuntimeUnlockUncommittedTunaFallbackAdoptionCommand command)
+        {
+            lock (uncommittedTunaFallbackAdoptionGate)
+            {
+                return lastRuntimeUnlockUncommittedTunaFallbackAdoption?.Command == command ||
+                       (pendingRuntimeUnlockUncommittedTunaFallbackAdoption is { } pending &&
+                        command.StageGeneration ==
+                            lastRuntimeUnlockUncommittedTunaFallbackAdoptionStageGeneration &&
+                        command.SourceAvailabilityGeneration ==
+                            pendingRuntimeUnlockUncommittedTunaFallbackAvailabilityGeneration &&
+                        command.SourceActivationPaused ==
+                            pendingRuntimeUnlockUncommittedTunaFallbackActivationPaused &&
+                        string.Equals(
+                            command.SourceAvailabilityReason,
+                            pendingRuntimeUnlockUncommittedTunaFallbackAvailabilityReason,
+                            StringComparison.Ordinal) &&
+                        availabilityGeneration == command.SourceAvailabilityGeneration &&
+                        Volatile.Read(ref available) == 0 &&
+                        IsTunaActivationNegotiationAvailabilityReason(
+                            Volatile.Read(ref availabilityReason)) &&
+                        IsRuntimeUnlockUncommittedTunaFallbackAdoptionCommitForStage(
+                            command,
+                            pending));
+            }
+        }
+
+        public bool TryGetPendingRuntimeUnlockUncommittedTunaFallbackAdoption(
+            RuntimeUnlockUncommittedTunaFallbackAdoptionCommand command,
+            out RuntimeUnlockUncommittedTunaFallbackAdoptionStage stage)
+        {
+            lock (uncommittedTunaFallbackAdoptionGate)
+            {
+                if (pendingRuntimeUnlockUncommittedTunaFallbackAdoption is not { } pending ||
+                    !IsRuntimeUnlockUncommittedTunaFallbackAdoptionCommitForStage(command, pending))
+                {
+                    stage = null!;
+                    return false;
+                }
+
+                stage = pending;
+                return true;
+            }
+        }
+
+        public bool TryGetCommittedRuntimeUnlockUncommittedTunaFallbackAdoption(
+            RuntimeUnlockUncommittedTunaFallbackAdoptionCommand command,
+            out RuntimeUnlockUncommittedTunaFallbackAdoptionReceipt receipt)
+        {
+            lock (uncommittedTunaFallbackAdoptionGate)
+            {
+                if (lastRuntimeUnlockUncommittedTunaFallbackAdoption is not { } committed ||
+                    committed.Command != command)
+                {
+                    receipt = null!;
+                    return false;
+                }
+
+                receipt = committed with
+                {
+                    Status = RuntimeUnlockUncommittedTunaFallbackAdoptionStatus.Idempotent,
+                    Reason = "uncommitted_tuna_fallback_adoption_already_applied",
+                };
+                return true;
+            }
+        }
+
+        public void RecordCommittedRuntimeUnlockUncommittedTunaFallbackAdoption(
+            RuntimeUnlockUncommittedTunaFallbackAdoptionReceipt receipt)
+        {
+            lock (uncommittedTunaFallbackAdoptionGate)
+            {
+                if (receipt.Status is (
+                        RuntimeUnlockUncommittedTunaFallbackAdoptionStatus.Applied or
+                        RuntimeUnlockUncommittedTunaFallbackAdoptionStatus.Idempotent) &&
+                    lastRuntimeUnlockUncommittedTunaFallbackAdoption?.Command == receipt.Command)
+                {
+                    lastRuntimeUnlockUncommittedTunaFallbackAdoption = receipt;
+                }
+            }
+        }
+
+        public void RecordPreparedRuntimeUnlockUncommittedTunaFallbackAdoption(
+            RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationReceipt receipt)
+        {
+            lock (uncommittedTunaFallbackAdoptionGate)
+            {
+                if (receipt.Status == RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationStatus.Prepared &&
+                    pendingRuntimeUnlockUncommittedTunaFallbackAdoption is { } pending &&
+                    IsRuntimeUnlockUncommittedTunaFallbackAdoptionCommitForStage(
+                        receipt.Command,
+                        pending))
+                {
+                    pendingRuntimeUnlockUncommittedTunaFallbackAdoptionPreparation = receipt;
+                }
+            }
+        }
+
+        public bool TryGetPreparedRuntimeUnlockUncommittedTunaFallbackAdoption(
+            RuntimeUnlockUncommittedTunaFallbackAdoptionCommand command,
+            out RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationReceipt receipt)
+        {
+            lock (uncommittedTunaFallbackAdoptionGate)
+            {
+                if (pendingRuntimeUnlockUncommittedTunaFallbackAdoptionPreparation is not { } prepared ||
+                    prepared.Command != command ||
+                    prepared.Status != RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationStatus.Prepared)
+                {
+                    receipt = null!;
+                    return false;
+                }
+
+                receipt = prepared;
+                return true;
+            }
+        }
+
+        public RuntimeUnlockUncommittedTunaFallbackAdoptionStageReceipt
+            StageRuntimeUnlockUncommittedTunaFallbackAdoption(
+                RuntimeUnlockUncommittedTunaFallbackAdoptionStage stage)
+        {
+            lock (uncommittedTunaFallbackAdoptionGate)
+            {
+                if (disposed != 0)
+                {
+                    return new RuntimeUnlockUncommittedTunaFallbackAdoptionStageReceipt(
+                        stage,
+                        RuntimeUnlockUncommittedTunaFallbackAdoptionStageStatus.Rejected,
+                        "uncommitted_tuna_fallback_adoption_data_session_disposed",
+                        lastRuntimeUnlockUncommittedTunaFallbackAdoptionStageGeneration);
+                }
+
+                if (pendingRuntimeUnlockUncommittedTunaFallbackAdoption is { } pending)
+                {
+                    if (pending == stage)
+                    {
+                        return new RuntimeUnlockUncommittedTunaFallbackAdoptionStageReceipt(
+                            stage,
+                            RuntimeUnlockUncommittedTunaFallbackAdoptionStageStatus.Idempotent,
+                            "uncommitted_tuna_fallback_adoption_stage_already_current",
+                            lastRuntimeUnlockUncommittedTunaFallbackAdoptionStageGeneration,
+                            pendingRuntimeUnlockUncommittedTunaFallbackAvailabilityGeneration,
+                            pendingRuntimeUnlockUncommittedTunaFallbackActivationPaused,
+                            pendingRuntimeUnlockUncommittedTunaFallbackAvailabilityReason);
+                    }
+
+                    return new RuntimeUnlockUncommittedTunaFallbackAdoptionStageReceipt(
+                        stage,
+                        RuntimeUnlockUncommittedTunaFallbackAdoptionStageStatus.Rejected,
+                        stage.HandoffGeneration == pending.HandoffGeneration
+                            ? "uncommitted_tuna_fallback_adoption_stage_tuple_mutation"
+                            : "uncommitted_tuna_fallback_adoption_stage_replacement_pending",
+                        lastRuntimeUnlockUncommittedTunaFallbackAdoptionStageGeneration);
+                }
+
+                if (lastRuntimeUnlockUncommittedTunaFallbackAdoption is { } committed &&
+                    stage.HandoffGeneration <= committed.Command.HandoffGeneration)
+                {
+                    return new RuntimeUnlockUncommittedTunaFallbackAdoptionStageReceipt(
+                        stage,
+                        RuntimeUnlockUncommittedTunaFallbackAdoptionStageStatus.Rejected,
+                        "uncommitted_tuna_fallback_adoption_stage_stale",
+                        lastRuntimeUnlockUncommittedTunaFallbackAdoptionStageGeneration);
+                }
+
+                lastRuntimeUnlockUncommittedTunaFallbackAdoptionStageGeneration = Math.Max(
+                    1,
+                    lastRuntimeUnlockUncommittedTunaFallbackAdoptionStageGeneration + 1);
+                var sourceAvailabilityGeneration = availabilityGeneration;
+                var sourceAvailabilityReason = Volatile.Read(ref availabilityReason);
+                var sourceActivationPaused =
+                    Volatile.Read(ref available) == 0 &&
+                    IsTunaActivationNegotiationAvailabilityReason(sourceAvailabilityReason);
+                if (!sourceActivationPaused)
+                {
+                    return new RuntimeUnlockUncommittedTunaFallbackAdoptionStageReceipt(
+                        stage,
+                        RuntimeUnlockUncommittedTunaFallbackAdoptionStageStatus.Rejected,
+                        "uncommitted_tuna_fallback_adoption_activation_pause_missing",
+                        lastRuntimeUnlockUncommittedTunaFallbackAdoptionStageGeneration,
+                        sourceAvailabilityGeneration,
+                        ActivationPaused: false,
+                        AvailabilityReason: sourceAvailabilityReason);
+                }
+
+                pendingRuntimeUnlockUncommittedTunaFallbackAdoption = stage;
+                pendingRuntimeUnlockUncommittedTunaFallbackAdoptionPreparation = null;
+                pendingRuntimeUnlockUncommittedTunaFallbackAvailabilityGeneration =
+                    sourceAvailabilityGeneration;
+                pendingRuntimeUnlockUncommittedTunaFallbackActivationPaused = true;
+                pendingRuntimeUnlockUncommittedTunaFallbackAvailabilityReason =
+                    sourceAvailabilityReason;
+                return new RuntimeUnlockUncommittedTunaFallbackAdoptionStageReceipt(
+                    stage,
+                    RuntimeUnlockUncommittedTunaFallbackAdoptionStageStatus.Staged,
+                    "uncommitted_tuna_fallback_adoption_staged",
+                    lastRuntimeUnlockUncommittedTunaFallbackAdoptionStageGeneration,
+                    sourceAvailabilityGeneration,
+                    ActivationPaused: true,
+                    AvailabilityReason: sourceAvailabilityReason);
+            }
+        }
+
+        public RuntimeUnlockUncommittedTunaFallbackAdoptionReceipt
+            CommitRuntimeUnlockUncommittedTunaFallbackAdoption(
+                RuntimeUnlockUncommittedTunaFallbackAdoptionCommand command)
+        {
+            lock (uncommittedTunaFallbackAdoptionGate)
+            {
+                if (disposed != 0)
+                {
+                    return new RuntimeUnlockUncommittedTunaFallbackAdoptionReceipt(
+                        command,
+                        RuntimeUnlockUncommittedTunaFallbackAdoptionStatus.Rejected,
+                        "uncommitted_tuna_fallback_adoption_data_session_disposed");
+                }
+
+                if (lastRuntimeUnlockUncommittedTunaFallbackAdoption is { } previousReceipt)
+                {
+                    var previous = previousReceipt.Command;
+                    if (previous == command)
+                    {
+                        return previousReceipt with
+                        {
+                            Status = RuntimeUnlockUncommittedTunaFallbackAdoptionStatus.Idempotent,
+                            Reason = "uncommitted_tuna_fallback_adoption_already_applied",
+                        };
+                    }
+
+                    if (command.HandoffGeneration <= previous.HandoffGeneration)
+                    {
+                        return new RuntimeUnlockUncommittedTunaFallbackAdoptionReceipt(
+                            command,
+                            RuntimeUnlockUncommittedTunaFallbackAdoptionStatus.Rejected,
+                            previous.HandoffGeneration == command.HandoffGeneration
+                                ? "uncommitted_tuna_fallback_adoption_tuple_mutation"
+                                : "uncommitted_tuna_fallback_adoption_stale");
+                    }
+                }
+
+                if (pendingRuntimeUnlockUncommittedTunaFallbackAdoption is not { } pending ||
+                    command.StageGeneration !=
+                        lastRuntimeUnlockUncommittedTunaFallbackAdoptionStageGeneration ||
+                    command.SourceAvailabilityGeneration !=
+                        pendingRuntimeUnlockUncommittedTunaFallbackAvailabilityGeneration ||
+                    command.SourceActivationPaused !=
+                        pendingRuntimeUnlockUncommittedTunaFallbackActivationPaused ||
+                    !string.Equals(
+                        command.SourceAvailabilityReason,
+                        pendingRuntimeUnlockUncommittedTunaFallbackAvailabilityReason,
+                        StringComparison.Ordinal) ||
+                    availabilityGeneration != command.SourceAvailabilityGeneration ||
+                    Volatile.Read(ref available) != 0 ||
+                    !IsTunaActivationNegotiationAvailabilityReason(
+                        Volatile.Read(ref availabilityReason)) ||
+                    !IsRuntimeUnlockUncommittedTunaFallbackAdoptionCommitForStage(command, pending))
+                {
+                    return new RuntimeUnlockUncommittedTunaFallbackAdoptionReceipt(
+                        command,
+                        RuntimeUnlockUncommittedTunaFallbackAdoptionStatus.Rejected,
+                        "uncommitted_tuna_fallback_adoption_stage_mismatch");
+                }
+
+                var previousReason = Volatile.Read(ref availabilityReason);
+                if (IsTunaActivationNegotiationAvailabilityReason(previousReason))
+                {
+                    Volatile.Write(ref lastTunaActivationPauseReason, previousReason);
+                }
+
+                Volatile.Write(ref available, 1);
+                Volatile.Write(
+                    ref availabilityReason,
+                    "coordinator_post_tuna_fallback_v6_committed");
+                Volatile.Write(
+                    ref lastTunaActivationPauseRecoveredUtcTicks,
+                    DateTimeOffset.UtcNow.UtcTicks);
+                ResetTunaActivationPauseSends();
+                availabilityGeneration = Math.Max(1, availabilityGeneration + 1);
+                pendingRuntimeUnlockUncommittedTunaFallbackAdoption = null;
+                pendingRuntimeUnlockUncommittedTunaFallbackAdoptionPreparation = null;
+                var appliedReceipt = new RuntimeUnlockUncommittedTunaFallbackAdoptionReceipt(
+                    command,
+                    RuntimeUnlockUncommittedTunaFallbackAdoptionStatus.Applied,
+                    "coordinator_post_tuna_fallback_v6_committed");
+                lastRuntimeUnlockUncommittedTunaFallbackAdoption = appliedReceipt;
+                return appliedReceipt;
+            }
+        }
+
+        public bool DiscardRuntimeUnlockUncommittedTunaFallbackAdoption(
+            RuntimeUnlockUncommittedTunaFallbackAdoptionStage stage,
+            string reason)
+        {
+            lock (uncommittedTunaFallbackAdoptionGate)
+            {
+                if (pendingRuntimeUnlockUncommittedTunaFallbackAdoption != stage)
+                {
+                    return false;
+                }
+
+                pendingRuntimeUnlockUncommittedTunaFallbackAdoption = null;
+                pendingRuntimeUnlockUncommittedTunaFallbackAdoptionPreparation = null;
+                return true;
+            }
+        }
+
+        private static bool IsRuntimeUnlockUncommittedTunaFallbackAdoptionCommitForStage(
+            RuntimeUnlockUncommittedTunaFallbackAdoptionCommand command,
+            RuntimeUnlockUncommittedTunaFallbackAdoptionStage stage)
+            => ReferenceEquals(command.DataSession, stage.DataSession) &&
+               command.DataSessionGeneration == stage.DataSessionGeneration &&
+               command.HandoffGeneration == stage.HandoffGeneration &&
+               command.DrainGeneration == stage.DrainGeneration &&
+               command.PeerProofEvidence == stage.PeerProofEvidence &&
+               command.PressureSettlementCommand == stage.PressureSettlementCommand &&
+               command.RuntimeOwner == stage.TargetRuntimeOwner &&
+               command.RoutePublication == stage.TargetRoutePublication;
 
         public void AuthorizeRuntimeUnlockPreCommitProbeAck(
             FileTransferRuntimeUnlockPreCommitProbeFrame probe,
@@ -9579,7 +10611,8 @@ public sealed partial class NknSignalingTransport
             string reason,
             bool requiresResumeRequest,
             FileTransferTransportHandoffKind handoffKind = FileTransferTransportHandoffKind.None,
-            FileTransferTransportKind targetTransport = FileTransferTransportKind.Unknown)
+            FileTransferTransportKind targetTransport = FileTransferTransportKind.Unknown,
+            PostTunaFallbackHandoffEvidence? postTunaFallbackHandoffEvidence = null)
         {
             if (disposed != 0)
             {
@@ -9590,6 +10623,27 @@ public sealed partial class NknSignalingTransport
             var previousReason = Volatile.Read(ref availabilityReason);
             var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "transport_state_changed" : reason.Trim();
             var activationBarrier = !isAvailable && IsTunaActivationNegotiationAvailabilityReason(normalizedReason);
+            if (postTunaFallbackHandoffEvidence is { IsComplete: true } evidence &&
+                string.Equals(evidence.SessionId, SessionId, StringComparison.Ordinal) &&
+                string.Equals(evidence.TransferId, TransferId, StringComparison.Ordinal))
+            {
+                var proofHandler = availabilityChanged;
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=filetransfer_data_session_availability_invoking; transfer_id={TransferId}; session_id={SessionId}; is_available={(IsAvailable ? 1 : 0)}; previous_available={(IsAvailable ? 1 : 0)}; reason={SanitizeLogToken(reason)}; requires_resume_request={(requiresResumeRequest ? 1 : 0)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(handoffKind)}; target_transport={FormatFileTransferTransportKindForLog(targetTransport)}; subscriber_count={proofHandler?.GetInvocationList().Length ?? 0}; proof_scoped_fallback_boundary=1; proof_transport_epoch={evidence.SourceTransportEpoch}");
+                proofHandler?.Invoke(
+                    this,
+                    new FileTransferDataSessionAvailabilityChangedEventArgs(
+                        IsAvailable,
+                        reason,
+                        requiresResumeRequest,
+                        handoffKind,
+                        targetTransport,
+                        runtimeUnlockPreCommitProbeSnapshot: null,
+                        evidence));
+                return;
+            }
+
             if (ShouldSuppressTransportLifecycleAvailabilityDuringTunaActivationPause(
                     isAvailable,
                     normalizedReason,
@@ -9600,23 +10654,29 @@ public sealed partial class NknSignalingTransport
                 return;
             }
 
-            var previous = Interlocked.Exchange(ref available, next);
-            Volatile.Write(ref availabilityReason, normalizedReason);
-            if (activationBarrier)
+            int previous;
+            lock (uncommittedTunaFallbackAdoptionGate)
             {
-                Volatile.Write(ref lastTunaActivationPauseReason, normalizedReason);
-                CancelTunaActivationPauseSends();
-            }
-
-            if (isAvailable && previous == 0)
-            {
-                if (IsTunaActivationNegotiationAvailabilityReason(previousReason))
+                previous = Interlocked.Exchange(ref available, next);
+                Volatile.Write(ref availabilityReason, normalizedReason);
+                if (activationBarrier)
                 {
-                    Volatile.Write(ref lastTunaActivationPauseReason, previousReason);
-                    Volatile.Write(ref lastTunaActivationPauseRecoveredUtcTicks, DateTimeOffset.UtcNow.UtcTicks);
+                    Volatile.Write(ref lastTunaActivationPauseReason, normalizedReason);
+                    CancelTunaActivationPauseSends();
                 }
 
-                ResetTunaActivationPauseSends();
+                if (isAvailable && previous == 0)
+                {
+                    if (IsTunaActivationNegotiationAvailabilityReason(previousReason))
+                    {
+                        Volatile.Write(ref lastTunaActivationPauseReason, previousReason);
+                        Volatile.Write(ref lastTunaActivationPauseRecoveredUtcTicks, DateTimeOffset.UtcNow.UtcTicks);
+                    }
+
+                    ResetTunaActivationPauseSends();
+                }
+
+                availabilityGeneration = Math.Max(1, availabilityGeneration + 1);
             }
 
             var explicitHandoff = requiresResumeRequest &&
@@ -9700,16 +10760,20 @@ public sealed partial class NknSignalingTransport
 
             if (IsNormalToTunaActivationHandoff(handoffKind, targetTransport))
             {
-                var previousReason = Volatile.Read(ref availabilityReason);
-                if (IsTunaActivationNegotiationAvailabilityReason(previousReason))
+                lock (uncommittedTunaFallbackAdoptionGate)
                 {
-                    Volatile.Write(ref lastTunaActivationPauseReason, previousReason);
-                }
+                    var previousReason = Volatile.Read(ref availabilityReason);
+                    if (IsTunaActivationNegotiationAvailabilityReason(previousReason))
+                    {
+                        Volatile.Write(ref lastTunaActivationPauseReason, previousReason);
+                    }
 
-                Volatile.Write(ref available, 1);
-                Volatile.Write(ref availabilityReason, string.IsNullOrWhiteSpace(reason) ? "tuna_activation_handoff" : reason.Trim());
-                Volatile.Write(ref lastTunaActivationPauseRecoveredUtcTicks, DateTimeOffset.UtcNow.UtcTicks);
-                ResetTunaActivationPauseSends();
+                    Volatile.Write(ref available, 1);
+                    Volatile.Write(ref availabilityReason, string.IsNullOrWhiteSpace(reason) ? "tuna_activation_handoff" : reason.Trim());
+                    Volatile.Write(ref lastTunaActivationPauseRecoveredUtcTicks, DateTimeOffset.UtcNow.UtcTicks);
+                    ResetTunaActivationPauseSends();
+                    availabilityGeneration = Math.Max(1, availabilityGeneration + 1);
+                }
             }
 
             var handler = availabilityChanged;

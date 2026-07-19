@@ -2098,6 +2098,10 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             "$startInfo.Environment['NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT'] = '1'",
             script,
             StringComparison.Ordinal);
+        Assert.Contains(
+            "if ($script:RouteAcceptanceExecutionMode -eq 'live')",
+            script,
+            StringComparison.Ordinal);
         Assert.DoesNotContain(
             "$env:NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT = '1'",
             script,

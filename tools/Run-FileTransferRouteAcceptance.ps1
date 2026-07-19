@@ -4854,7 +4854,9 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
         }) -join ' '
     $startInfo.WorkingDirectory = (Get-Location).Path
     $startInfo.UseShellExecute = $false
-    $startInfo.Environment['NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT'] = '1'
+    if ($script:RouteAcceptanceExecutionMode -eq 'live') {
+        $startInfo.Environment['NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT'] = '1'
+    }
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
 
