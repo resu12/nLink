@@ -1917,6 +1917,246 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4FrontierRepairPressure")]
+    public void RegularV4FrontierRepairPressure_RecoveryHandoffCommitsSettlementAndAuthorityAtomically()
+    {
+        var state = StateWithInstalledRegularV4FrontierRepairPressure();
+        var binding = state.InstalledRegularV4FrontierRepairPressureBinding!.Value;
+        var request = RecoveryActionRequest(
+            FileTransferCoordinatorActionKind.BridgeReceiveStallRecovery,
+            state.CurrentRuntimeOwner!.Value,
+            state.CurrentLeg!,
+            reason: "session_liveness_timeout_pending",
+            bridgeRecoveryKind: BridgeRecoveryKind.BridgeReceiveStallRecovery);
+
+        var direct = FileTransferCoordinator.AuthorizeAction(state, request);
+        Assert.False(direct.Accepted);
+        Assert.Equal(
+            "regular_v4_frontier_repair_pressure_retirement_required",
+            direct.RejectionReason);
+        Assert.Same(state, direct.State);
+
+        var prepared = FileTransferCoordinator.PrepareRegularV4FrontierRepairPressureRecoveryHandoff(
+            state,
+            request);
+        Assert.Equal(RegularV4FrontierRepairPressureRecoveryHandoffStatus.Prepared, prepared.Status);
+        Assert.Same(state, prepared.State);
+        Assert.Equal(binding, prepared.State.InstalledRegularV4FrontierRepairPressureBinding);
+        Assert.Null(prepared.State.CurrentBridgeRecoveryDecision);
+        Assert.Null(prepared.State.CurrentRecoveryLivenessLease);
+
+        var transition = Assert.IsType<RegularV4FrontierRepairPressureRecoveryHandoffTransition>(
+            prepared.Transition);
+        Assert.Equal(binding, transition.PressureBinding);
+        Assert.Equal(binding.Authority.AuthorityId, transition.Settlement.AuthorityId);
+        Assert.Equal(
+            FileTransferRegularV4FrontierRepairSettlementOutcome.StaleRejected,
+            transition.Settlement.Outcome);
+        Assert.Equal(
+            "bridge_receive_stall_recovery_pressure_handoff",
+            transition.Settlement.DecisionReason);
+        Assert.Equal(request, transition.RecoveryRequest);
+        Assert.Equal(
+            state.LastBridgeRecoveryDecisionGeneration + 1,
+            transition.BridgeRecoveryDecision.BridgeDecisionGeneration);
+        Assert.Equal(
+            state.LastRecoveryLivenessLeaseGeneration + 1,
+            transition.RecoveryLivenessLease.LeaseGeneration);
+        Assert.Equal(RecoveryLivenessLeaseState.Active, transition.RecoveryLivenessLease.State);
+
+        var duplicatePrepare =
+            FileTransferCoordinator.PrepareRegularV4FrontierRepairPressureRecoveryHandoff(state, request);
+        Assert.Equal(RegularV4FrontierRepairPressureRecoveryHandoffStatus.Prepared, duplicatePrepare.Status);
+        Assert.Equal(transition, duplicatePrepare.Transition);
+        Assert.Same(state, duplicatePrepare.State);
+
+        var receipt = new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+            transition.SettlementCommand,
+            FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+            "current_authority_cleared",
+            CurrentAuthorityCleared: true,
+            RetainedPredecessorCleared: false);
+        var committed = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureRecoveryHandoff(
+            state,
+            transition,
+            receipt);
+
+        Assert.Equal(RegularV4FrontierRepairPressureRecoveryHandoffStatus.Committed, committed.Status);
+        Assert.Null(committed.State.PendingRegularV4FrontierRepairPressureBinding);
+        Assert.Null(committed.State.InstalledRegularV4FrontierRepairPressureBinding);
+        Assert.Null(committed.State.RetainedRegularV4FrontierRepairPressurePredecessor);
+        Assert.Null(committed.State.CurrentRepairReplayDecision);
+        Assert.Equal(state.LastRepairReplayGeneration, committed.State.LastRepairReplayGeneration);
+        Assert.Equal(transition.Settlement, committed.State.LastRegularV4FrontierRepairPressureSettlement);
+        Assert.Equal(receipt, committed.State.LastRegularV4FrontierRepairPressureSettlementApplyReceipt);
+        Assert.Equal(transition, committed.State.LastRegularV4FrontierRepairPressureRecoveryHandoff);
+        Assert.Equal(transition.BridgeRecoveryDecision, committed.State.CurrentBridgeRecoveryDecision);
+        Assert.Equal(transition.RecoveryLivenessLease, committed.State.CurrentRecoveryLivenessLease);
+        Assert.Equal(
+            transition.BridgeRecoveryDecision.BridgeDecisionGeneration,
+            committed.State.LastBridgeRecoveryDecisionGeneration);
+        Assert.Equal(
+            transition.RecoveryLivenessLease.LeaseGeneration,
+            committed.State.LastRecoveryLivenessLeaseGeneration);
+
+        var duplicate = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureRecoveryHandoff(
+            committed.State,
+            transition,
+            receipt with
+            {
+                Status = FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent,
+                Reason = "settlement_already_applied",
+            });
+        Assert.Equal(RegularV4FrontierRepairPressureRecoveryHandoffStatus.Idempotent, duplicate.Status);
+        Assert.Same(committed.State, duplicate.State);
+        Assert.Equal(
+            committed.State.LastBridgeRecoveryDecisionGeneration,
+            duplicate.State.LastBridgeRecoveryDecisionGeneration);
+        Assert.Equal(
+            committed.State.LastRecoveryLivenessLeaseGeneration,
+            duplicate.State.LastRecoveryLivenessLeaseGeneration);
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4FrontierRepairPressure")]
+    public void RegularV4FrontierRepairPressure_RecoveryHandoffFailureRetainsBindingWithoutPartialAuthority()
+    {
+        var state = StateWithInstalledRegularV4FrontierRepairPressure();
+        var request = RecoveryActionRequest(
+            FileTransferCoordinatorActionKind.BridgeReceiveStallRecovery,
+            state.CurrentRuntimeOwner!.Value,
+            state.CurrentLeg!,
+            reason: "session_liveness_timeout_pending",
+            bridgeRecoveryKind: BridgeRecoveryKind.BridgeReceiveStallRecovery);
+        var prepared = FileTransferCoordinator.PrepareRegularV4FrontierRepairPressureRecoveryHandoff(
+            state,
+            request);
+        var transition = Assert.IsType<RegularV4FrontierRepairPressureRecoveryHandoffTransition>(
+            prepared.Transition);
+
+        var rejectedReceipt = new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+            transition.SettlementCommand,
+            FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+            "pressure_apply_rejected",
+            CurrentAuthorityCleared: false,
+            RetainedPredecessorCleared: false);
+        var rejected = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureRecoveryHandoff(
+            state,
+            transition,
+            rejectedReceipt);
+        Assert.Equal(RegularV4FrontierRepairPressureRecoveryHandoffStatus.Rejected, rejected.Status);
+        Assert.Same(state, rejected.State);
+        Assert.Equal(
+            state.InstalledRegularV4FrontierRepairPressureBinding,
+            rejected.State.InstalledRegularV4FrontierRepairPressureBinding);
+        Assert.Null(rejected.State.CurrentBridgeRecoveryDecision);
+        Assert.Null(rejected.State.CurrentRecoveryLivenessLease);
+
+        var mismatchedReceipt = rejectedReceipt with
+        {
+            Command = transition.SettlementCommand with
+            {
+                InstallGeneration = transition.SettlementCommand.InstallGeneration + 1,
+            },
+            Status = FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+            CurrentAuthorityCleared = true,
+        };
+        var mismatched = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureRecoveryHandoff(
+            state,
+            transition,
+            mismatchedReceipt);
+        Assert.Equal(RegularV4FrontierRepairPressureRecoveryHandoffStatus.Rejected, mismatched.Status);
+        Assert.Same(state, mismatched.State);
+
+        var mismatchedTransition = transition with
+        {
+            RecoveryRequest = transition.RecoveryRequest with { Reason = "stale_reason" },
+        };
+        var mismatchedAuthority = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureRecoveryHandoff(
+            state,
+            mismatchedTransition,
+            rejectedReceipt with
+            {
+                Status = FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+                CurrentAuthorityCleared = true,
+            });
+        Assert.Equal(
+            RegularV4FrontierRepairPressureRecoveryHandoffStatus.Rejected,
+            mismatchedAuthority.Status);
+        Assert.Same(state, mismatchedAuthority.State);
+
+        var mismatchedCheckpoint = FileTransferCoordinator
+            .CommitRegularV4FrontierRepairPressureRecoveryHandoff(
+                state,
+                transition with
+                {
+                    RecoveryRequest = transition.RecoveryRequest with
+                    {
+                        CheckpointRequestId = "stale_checkpoint",
+                    },
+                },
+                rejectedReceipt with
+                {
+                    Status = FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+                    CurrentAuthorityCleared = true,
+                });
+        Assert.Equal(
+            RegularV4FrontierRepairPressureRecoveryHandoffStatus.Rejected,
+            mismatchedCheckpoint.Status);
+        Assert.Same(state, mismatchedCheckpoint.State);
+
+        var terminalState = state with
+        {
+            IsTerminal = true,
+            TerminalGeneration = state.TerminalGeneration + 1,
+        };
+        var late = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureRecoveryHandoff(
+            terminalState,
+            transition,
+            rejectedReceipt with
+            {
+                Status = FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+                CurrentAuthorityCleared = true,
+            });
+        Assert.Equal(RegularV4FrontierRepairPressureRecoveryHandoffStatus.Rejected, late.Status);
+        Assert.Same(terminalState, late.State);
+        Assert.NotNull(late.State.InstalledRegularV4FrontierRepairPressureBinding);
+        Assert.Null(late.State.CurrentBridgeRecoveryDecision);
+        Assert.Null(late.State.CurrentRecoveryLivenessLease);
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4FrontierRepairPressure")]
+    public void RegularV4FrontierRepairPressure_RecoveryHandoffRejectsPendingAndPredecessorLineage()
+    {
+        foreach (var (bindingKind, state) in StatesWithRegularV4FrontierRepairPressure())
+        {
+            if (bindingKind == "installed")
+            {
+                continue;
+            }
+
+            var request = RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.BridgeReceiveStallRecovery,
+                state.CurrentRuntimeOwner!.Value,
+                state.CurrentLeg!,
+                reason: "session_liveness_timeout_pending",
+                bridgeRecoveryKind: BridgeRecoveryKind.BridgeReceiveStallRecovery);
+            var prepared = FileTransferCoordinator.PrepareRegularV4FrontierRepairPressureRecoveryHandoff(
+                state,
+                request);
+
+            Assert.Equal(
+                RegularV4FrontierRepairPressureRecoveryHandoffStatus.Rejected,
+                prepared.Status);
+            Assert.Null(prepared.Transition);
+            Assert.Same(state, prepared.State);
+            Assert.Null(prepared.State.CurrentBridgeRecoveryDecision);
+            Assert.Null(prepared.State.CurrentRecoveryLivenessLease);
+        }
+    }
+
+    [Fact]
     public void FallbackFrontierRepairAuthority_ForwardsCoordinatorIdentityAndFullTuple()
     {
         var predecessorAuthorityId = new FileTransferAuthorityId("fta2-fallback-frontier-predecessor");

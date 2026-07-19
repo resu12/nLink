@@ -882,6 +882,84 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
     }
 
     [Fact]
+    public async Task RunFileTransferRouteAcceptance_PressureRecoveryHandoffCountsReachScenarioAndRootSummaries()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string scenario = "regular-v4-live-activation-off-on-off-256mb";
+        const string candidate = "regular_v4_frontier_repair_pressure_recovery_handoff_missing";
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-pressure-recovery-handoff-summary-propagation");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-pressure-recovery-handoff-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_REGULAR_V4_PRESSURE_RECOVERY_HANDOFF_SUMMARY_FIXTURE"] = "1";
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ScenarioName", scenario,
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Expected fake pressure-recovery handoff summary propagation run to pass.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal(candidate, summary["runtime_failure_candidate"]);
+            Assert.Equal("incomplete_proof", summary["runtime_correctness_verdict"]);
+            Assert.Equal("filetransfer_recovery_authority_rejected", summary["first_proof_chain_failure_event"]);
+            Assert.Equal("installed_repair_pressure_not_retired_before_receive_recovery", summary["first_proof_chain_failure_reason"]);
+            Assert.Equal("1769", summary["first_proof_chain_failure_sequence"]);
+            Assert.Equal("1287", summary["first_proof_chain_failure_writer_sequence"]);
+            Assert.Equal("1", summary["regular_v4_frontier_repair_pressure_recovery_handoff_missing_raw_count"]);
+            Assert.Equal("1", summary["regular_v4_frontier_repair_pressure_recovery_handoff_missing_distinct_count"]);
+            Assert.Equal("0", summary["regular_v4_frontier_repair_pressure_recovery_handoff_missing_recovered_count"]);
+            Assert.Equal("1", summary["regular_v4_frontier_repair_pressure_recovery_handoff_missing_unresolved_count"]);
+            Assert.Equal("fail", summary["regular_v4_frontier_repair_pressure_recovery_handoff_verdict"]);
+            Assert.Equal(candidate, summary[$"{scenario}.runtime_failure_candidate"]);
+            Assert.Equal("incomplete_proof", summary[$"{scenario}.acceptance_failure_class"]);
+            Assert.Equal("route_runtime", summary[$"{scenario}.semantic_failure_domain"]);
+
+            using var summaryJson = JsonDocument.Parse(
+                await File.ReadAllTextAsync(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.json")));
+            var root = summaryJson.RootElement;
+            Assert.Equal(candidate, root.GetProperty("runtimeFailureCandidate").GetString());
+            Assert.Equal("incomplete_proof", root.GetProperty("runtimeCorrectnessVerdict").GetString());
+            Assert.Equal(1, root.GetProperty("regularV4FrontierRepairPressureRecoveryHandoffMissingRawCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("regularV4FrontierRepairPressureRecoveryHandoffMissingDistinctCount").GetInt32());
+            Assert.Equal(0, root.GetProperty("regularV4FrontierRepairPressureRecoveryHandoffMissingRecoveredCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("regularV4FrontierRepairPressureRecoveryHandoffMissingUnresolvedCount").GetInt32());
+            Assert.Equal("fail", root.GetProperty("regularV4FrontierRepairPressureRecoveryHandoffVerdict").GetString());
+
+            var run = Assert.Single(root.GetProperty("runs").EnumerateArray());
+            Assert.Equal(candidate, run.GetProperty("runtimeFailureCandidate").GetString());
+            Assert.Equal("incomplete_proof", run.GetProperty("acceptanceFailureClass").GetString());
+            Assert.Equal("route_runtime", run.GetProperty("semanticFailureDomain").GetString());
+            Assert.Equal(1, run.GetProperty("regularV4FrontierRepairPressureRecoveryHandoffMissingRawCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("regularV4FrontierRepairPressureRecoveryHandoffMissingDistinctCount").GetInt32());
+            Assert.Equal(0, run.GetProperty("regularV4FrontierRepairPressureRecoveryHandoffMissingRecoveredCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("regularV4FrontierRepairPressureRecoveryHandoffMissingUnresolvedCount").GetInt32());
+            Assert.Equal("fail", run.GetProperty("regularV4FrontierRepairPressureRecoveryHandoffVerdict").GetString());
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
     public async Task RunFileTransferRouteAcceptance_ClosureWindowLivenessCountsReachScenarioAndRootSummaries()
     {
         if (!OperatingSystem.IsWindows())

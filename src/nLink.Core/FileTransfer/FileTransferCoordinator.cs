@@ -517,6 +517,30 @@ internal readonly record struct RegularV4FrontierRepairPressureBindingDecision(
     public FileTransferCoordinatorState State { get; init; } = null!;
 }
 
+internal enum RegularV4FrontierRepairPressureRecoveryHandoffStatus
+{
+    Prepared,
+    Committed,
+    Idempotent,
+    Rejected,
+}
+
+internal readonly record struct RegularV4FrontierRepairPressureRecoveryHandoffTransition(
+    RegularV4FrontierRepairPressureBinding PressureBinding,
+    FileTransferRegularV4FrontierRepairSettlement Settlement,
+    FileTransferRegularV4FrontierRepairPressureSettlementCommand SettlementCommand,
+    FileTransferCoordinatorActionRequest RecoveryRequest,
+    BridgeRecoveryDecision BridgeRecoveryDecision,
+    RecoveryLivenessLease RecoveryLivenessLease);
+
+internal readonly record struct RegularV4FrontierRepairPressureRecoveryHandoffDecision(
+    RegularV4FrontierRepairPressureRecoveryHandoffStatus Status,
+    string Reason,
+    RegularV4FrontierRepairPressureRecoveryHandoffTransition? Transition)
+{
+    public FileTransferCoordinatorState State { get; init; } = null!;
+}
+
 internal enum FallbackFrontierRepairSourceKind
 {
     Unknown = 0,
@@ -703,7 +727,9 @@ internal sealed record FileTransferCoordinatorState(
     FileTransferRegularV4FrontierRepairSettlement? LastRegularV4FrontierRepairPressureSettlement = null,
     long LastRegularV4FrontierRepairPressureInstallGeneration = 0,
     FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
-        LastRegularV4FrontierRepairPressureSettlementApplyReceipt = null)
+        LastRegularV4FrontierRepairPressureSettlementApplyReceipt = null,
+    RegularV4FrontierRepairPressureRecoveryHandoffTransition?
+        LastRegularV4FrontierRepairPressureRecoveryHandoff = null)
 {
     public FileTransferRouteRuntimeDescriptor RouteRuntime => RouteSelection.RuntimeDescriptor;
 }
@@ -4400,6 +4426,359 @@ internal static class FileTransferCoordinator
             RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted,
             "regular_v4_frontier_repair_pressure_settlement_committed");
     }
+
+    internal static RegularV4FrontierRepairPressureRecoveryHandoffDecision
+        PrepareRegularV4FrontierRepairPressureRecoveryHandoff(
+            FileTransferCoordinatorState state,
+            FileTransferCoordinatorActionRequest recoveryRequest)
+    {
+        if (!TryCreateRegularV4FrontierRepairPressureRecoveryHandoffTransition(
+                state,
+                recoveryRequest,
+                out var transition,
+                out var rejectionReason))
+        {
+            return RegularV4PressureRecoveryHandoffDecision(
+                state,
+                RegularV4FrontierRepairPressureRecoveryHandoffStatus.Rejected,
+                rejectionReason);
+        }
+
+        return RegularV4PressureRecoveryHandoffDecision(
+            state,
+            RegularV4FrontierRepairPressureRecoveryHandoffStatus.Prepared,
+            "regular_v4_frontier_repair_pressure_recovery_handoff_prepared",
+            transition);
+    }
+
+    internal static RegularV4FrontierRepairPressureRecoveryHandoffDecision
+        CommitRegularV4FrontierRepairPressureRecoveryHandoff(
+            FileTransferCoordinatorState state,
+            RegularV4FrontierRepairPressureRecoveryHandoffTransition transition,
+            FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt receipt)
+    {
+        if (IsRegularV4FrontierRepairPressureRecoveryHandoffCommitted(state, transition, receipt))
+        {
+            return RegularV4PressureRecoveryHandoffDecision(
+                state,
+                RegularV4FrontierRepairPressureRecoveryHandoffStatus.Idempotent,
+                "regular_v4_frontier_repair_pressure_recovery_handoff_already_committed",
+                transition);
+        }
+
+        if (!TryValidateRegularV4FrontierRepairPressureRecoveryHandoffTransition(
+                state,
+                transition,
+                out var rejectionReason))
+        {
+            return RegularV4PressureRecoveryHandoffDecision(
+                state,
+                RegularV4FrontierRepairPressureRecoveryHandoffStatus.Rejected,
+                rejectionReason);
+        }
+
+        if (receipt.Command != transition.SettlementCommand ||
+            receipt.Status is not (
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied or
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent))
+        {
+            return RegularV4PressureRecoveryHandoffDecision(
+                state,
+                RegularV4FrontierRepairPressureRecoveryHandoffStatus.Rejected,
+                "regular_v4_frontier_repair_pressure_recovery_handoff_apply_receipt_mismatch");
+        }
+
+        var pressureCommit = CommitRegularV4FrontierRepairPressureSettlement(state, receipt);
+        if (pressureCommit.Status is not RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted)
+        {
+            return RegularV4PressureRecoveryHandoffDecision(
+                state,
+                RegularV4FrontierRepairPressureRecoveryHandoffStatus.Rejected,
+                pressureCommit.Reason);
+        }
+
+        var settledState = pressureCommit.State.CurrentRepairReplayDecision is { } currentRepair &&
+                           currentRepair.AuthorityId == transition.PressureBinding.Authority.AuthorityId
+            ? pressureCommit.State with { CurrentRepairReplayDecision = null }
+            : pressureCommit.State;
+        var committedState = ApplyIssuedRecoveryAuthority(
+            settledState,
+            transition.RecoveryRequest.Kind,
+            repairReplayDecision: null,
+            transportEpochDecision: null,
+            bridgeRecoveryDecision: transition.BridgeRecoveryDecision,
+            recoveryLivenessLease: transition.RecoveryLivenessLease) with
+        {
+            LastRegularV4FrontierRepairPressureRecoveryHandoff = transition,
+        };
+        return RegularV4PressureRecoveryHandoffDecision(
+            committedState,
+            RegularV4FrontierRepairPressureRecoveryHandoffStatus.Committed,
+            "regular_v4_frontier_repair_pressure_recovery_handoff_committed",
+            transition);
+    }
+
+    private static bool TryCreateRegularV4FrontierRepairPressureRecoveryHandoffTransition(
+        FileTransferCoordinatorState state,
+        FileTransferCoordinatorActionRequest recoveryRequest,
+        out RegularV4FrontierRepairPressureRecoveryHandoffTransition transition,
+        out string rejectionReason)
+    {
+        transition = default;
+        rejectionReason = "accepted";
+        if (recoveryRequest.Kind != FileTransferCoordinatorActionKind.BridgeReceiveStallRecovery ||
+            recoveryRequest.BridgeRecoveryKind != BridgeRecoveryKind.BridgeReceiveStallRecovery)
+        {
+            rejectionReason = "regular_v4_frontier_repair_pressure_recovery_handoff_action_mismatch";
+            return false;
+        }
+
+        if (state.PendingRegularV4FrontierRepairPressureBinding is not null)
+        {
+            rejectionReason = "regular_v4_frontier_repair_pressure_recovery_handoff_binding_pending";
+            return false;
+        }
+
+        if (state.RetainedRegularV4FrontierRepairPressurePredecessor is not null)
+        {
+            rejectionReason = "regular_v4_frontier_repair_pressure_recovery_handoff_predecessor_pending";
+            return false;
+        }
+
+        if (state.InstalledRegularV4FrontierRepairPressureBinding is not { } binding ||
+            binding.IsDefault ||
+            binding.State != RegularV4FrontierRepairPressureBindingState.Installed)
+        {
+            rejectionReason = "regular_v4_frontier_repair_pressure_recovery_handoff_binding_missing";
+            return false;
+        }
+
+        if (state.CurrentRepairReplayDecision is not { } repairDecision ||
+            repairDecision.AuthorityId != binding.Authority.AuthorityId ||
+            !IsRepairReplayDecisionCurrent(state, repairDecision, out rejectionReason))
+        {
+            rejectionReason = string.IsNullOrWhiteSpace(rejectionReason)
+                ? "regular_v4_frontier_repair_pressure_recovery_handoff_repair_authority_stale"
+                : rejectionReason;
+            return false;
+        }
+
+        var settlement = CreateRegularV4FrontierRepairPressureRecoveryHandoffSettlement(binding.Authority);
+        var preparedSettlement = PrepareRegularV4FrontierRepairPressureSettlement(state, settlement);
+        if (preparedSettlement.Status != RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted ||
+            preparedSettlement.SettlementCommand is not { } settlementCommand)
+        {
+            rejectionReason = preparedSettlement.Reason;
+            return false;
+        }
+
+        var projectedState = state with
+        {
+            PendingRegularV4FrontierRepairPressureBinding = null,
+            InstalledRegularV4FrontierRepairPressureBinding = null,
+            CurrentRepairReplayDecision = null,
+            LastRegularV4FrontierRepairPressureSettlement = settlement,
+        };
+        var recoveryDecision = AuthorizeAction(projectedState, recoveryRequest);
+        if (!recoveryDecision.Accepted)
+        {
+            rejectionReason = recoveryDecision.RejectionReason;
+            return false;
+        }
+
+        if (recoveryDecision.BridgeRecoveryDecision is not { } bridgeRecoveryDecision ||
+            bridgeRecoveryDecision.IsDefault ||
+            !bridgeRecoveryDecision.Accepted ||
+            bridgeRecoveryDecision.RecoveryKind != BridgeRecoveryKind.BridgeReceiveStallRecovery ||
+            recoveryDecision.RecoveryLivenessLease is not { } recoveryLivenessLease ||
+            recoveryLivenessLease.IsDefault ||
+            recoveryLivenessLease.State != RecoveryLivenessLeaseState.Active)
+        {
+            rejectionReason = "regular_v4_recovery_authority_incomplete";
+            return false;
+        }
+
+        transition = new RegularV4FrontierRepairPressureRecoveryHandoffTransition(
+            binding,
+            settlement,
+            settlementCommand,
+            recoveryRequest,
+            bridgeRecoveryDecision,
+            recoveryLivenessLease);
+        return true;
+    }
+
+    private static bool TryValidateRegularV4FrontierRepairPressureRecoveryHandoffTransition(
+        FileTransferCoordinatorState state,
+        RegularV4FrontierRepairPressureRecoveryHandoffTransition transition,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (state.IsTerminal)
+        {
+            rejectionReason = "terminal_state";
+            return false;
+        }
+
+        if (transition.RecoveryRequest.Kind !=
+                FileTransferCoordinatorActionKind.BridgeReceiveStallRecovery ||
+            transition.RecoveryRequest.BridgeRecoveryKind !=
+                BridgeRecoveryKind.BridgeReceiveStallRecovery)
+        {
+            rejectionReason = "regular_v4_frontier_repair_pressure_recovery_handoff_action_mismatch";
+            return false;
+        }
+
+        if (state.PendingRegularV4FrontierRepairPressureBinding is not null)
+        {
+            rejectionReason = "regular_v4_frontier_repair_pressure_recovery_handoff_binding_pending";
+            return false;
+        }
+
+        if (state.RetainedRegularV4FrontierRepairPressurePredecessor is not null)
+        {
+            rejectionReason = "regular_v4_frontier_repair_pressure_recovery_handoff_predecessor_pending";
+            return false;
+        }
+
+        if (state.InstalledRegularV4FrontierRepairPressureBinding is not { } binding ||
+            binding.IsDefault ||
+            binding.State != RegularV4FrontierRepairPressureBindingState.Installed ||
+            binding != transition.PressureBinding)
+        {
+            rejectionReason = "regular_v4_frontier_repair_pressure_recovery_handoff_binding_mismatch";
+            return false;
+        }
+
+        if (state.CurrentRepairReplayDecision is not { } repairDecision ||
+            repairDecision.AuthorityId != binding.Authority.AuthorityId ||
+            !IsRepairReplayDecisionCurrent(state, repairDecision, out rejectionReason))
+        {
+            rejectionReason = string.IsNullOrWhiteSpace(rejectionReason)
+                ? "regular_v4_frontier_repair_pressure_recovery_handoff_repair_authority_stale"
+                : rejectionReason;
+            return false;
+        }
+
+        var expectedSettlement =
+            CreateRegularV4FrontierRepairPressureRecoveryHandoffSettlement(binding.Authority);
+        var preparedSettlement = PrepareRegularV4FrontierRepairPressureSettlement(
+            state,
+            expectedSettlement);
+        if (preparedSettlement.Status !=
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted ||
+            preparedSettlement.SettlementCommand is not { } expectedCommand ||
+            expectedSettlement != transition.Settlement ||
+            expectedCommand != transition.SettlementCommand)
+        {
+            rejectionReason = preparedSettlement.Status ==
+                    RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted
+                ? "regular_v4_frontier_repair_pressure_recovery_handoff_transition_mismatch"
+                : preparedSettlement.Reason;
+            return false;
+        }
+
+        var request = transition.RecoveryRequest;
+        var owner = state.CurrentRuntimeOwner;
+        var leg = state.CurrentLeg;
+        if (owner is null ||
+            leg is null ||
+            request.RuntimeOwner != owner ||
+            request.Route != state.RouteSelection.Route ||
+            request.ProtocolVersion != state.RouteSelection.ProtocolVersion ||
+            request.LiveRouteEpoch != (state.CurrentLiveRouteEpoch?.EpochId ?? 0) ||
+            request.LegGeneration != leg.Generation ||
+            request.TransportEpochId != leg.TransportEpochId ||
+            request.BridgeRecoveryGeneration != leg.BridgeRecoveryGeneration ||
+            (request.CheckpointRequestId is not null &&
+             !string.Equals(
+                 request.CheckpointRequestId,
+                 leg.CheckpointRequestId,
+                 StringComparison.Ordinal)))
+        {
+            rejectionReason = "regular_v4_frontier_repair_pressure_recovery_handoff_recovery_scope_mismatch";
+            return false;
+        }
+
+        var expectedBridgeDecision = CreateBridgeRecoveryDecision(
+            state,
+            BridgeRecoveryKind.BridgeReceiveStallRecovery,
+            request.Reason,
+            Math.Max(1, state.LastBridgeRecoveryDecisionGeneration + 1));
+        var expectedLease = IssueRecoveryLivenessLease(
+            state,
+            Math.Max(1, state.LastRecoveryLivenessLeaseGeneration + 1),
+            RecoveryLivenessLeaseState.Active,
+            request.Reason);
+        if (expectedBridgeDecision is null ||
+            expectedLease is null ||
+            expectedBridgeDecision.Value != transition.BridgeRecoveryDecision ||
+            expectedLease.Value != transition.RecoveryLivenessLease)
+        {
+            rejectionReason = "regular_v4_frontier_repair_pressure_recovery_handoff_recovery_authority_mismatch";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static FileTransferRegularV4FrontierRepairSettlement
+        CreateRegularV4FrontierRepairPressureRecoveryHandoffSettlement(
+            FileTransferRegularV4FrontierRepairAuthority authority)
+        => new(
+            authority.SessionId,
+            authority.TransferId,
+            authority.Direction,
+            authority.RouteToken,
+            authority.ProtocolVersion,
+            authority.LiveRouteEpoch,
+            authority.RuntimeGeneration,
+            authority.TerminalGeneration,
+            authority.LegGeneration,
+            authority.TransportEpoch,
+            authority.BridgeRecoveryGeneration,
+            authority.BridgeDecisionGeneration,
+            authority.RoutePublicationGeneration,
+            authority.RouteCommitGeneration,
+            authority.RepairKey,
+            authority.FrontierChunkIndex,
+            authority.DurableReceivedHighestChunkIndex,
+            authority.PendingRepairCount,
+            authority.DecisionGeneration,
+            "bridge_receive_stall_recovery_pressure_handoff",
+            FileTransferRegularV4FrontierRepairSettlementOutcome.StaleRejected,
+            authority.TargetTransport)
+        {
+            AuthorityId = authority.AuthorityId,
+        };
+
+    private static bool IsRegularV4FrontierRepairPressureRecoveryHandoffCommitted(
+        FileTransferCoordinatorState state,
+        RegularV4FrontierRepairPressureRecoveryHandoffTransition transition,
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt receipt)
+        => state.InstalledRegularV4FrontierRepairPressureBinding is null &&
+           state.PendingRegularV4FrontierRepairPressureBinding is null &&
+           state.RetainedRegularV4FrontierRepairPressurePredecessor is null &&
+           state.LastRegularV4FrontierRepairPressureRecoveryHandoff == transition &&
+           state.LastRegularV4FrontierRepairPressureSettlement == transition.Settlement &&
+           state.LastRegularV4FrontierRepairPressureSettlementApplyReceipt is { } committedReceipt &&
+           committedReceipt.Command == transition.SettlementCommand &&
+           receipt.Command == transition.SettlementCommand &&
+           receipt.Status is (
+               FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied or
+               FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent) &&
+           committedReceipt.CurrentAuthorityCleared == receipt.CurrentAuthorityCleared &&
+           committedReceipt.RetainedPredecessorCleared == receipt.RetainedPredecessorCleared &&
+           state.CurrentBridgeRecoveryDecision == transition.BridgeRecoveryDecision &&
+           state.CurrentRecoveryLivenessLease == transition.RecoveryLivenessLease;
+
+    private static RegularV4FrontierRepairPressureRecoveryHandoffDecision
+        RegularV4PressureRecoveryHandoffDecision(
+            FileTransferCoordinatorState state,
+            RegularV4FrontierRepairPressureRecoveryHandoffStatus status,
+            string reason,
+            RegularV4FrontierRepairPressureRecoveryHandoffTransition? transition = null)
+        => new(status, NormalizeReason(reason), transition) { State = state };
 
     private static bool RegularV4FrontierRepairPressureBindingMatchesSettlement(
         RegularV4FrontierRepairPressureBinding binding,

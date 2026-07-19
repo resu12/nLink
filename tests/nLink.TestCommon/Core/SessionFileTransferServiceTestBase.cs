@@ -209,6 +209,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public Func<FileTransferCompleteV1, CancellationToken, Task>? BeforeCompleteDeliveredAsync { get; set; }
         public Exception? OfferSendException { get; init; }
         public Exception? ReceiveRecoveryException { get; set; }
+        public Action<FileTransferReceiveRecoveryRequest>? ReceiveRecoveryRequestObserver { get; set; }
         public ConcurrentQueue<FileTransferErrorV1> SentErrors { get; } = [];
         public ConcurrentQueue<FileTransferOfferV2> SentOffers { get; } = [];
         public ConcurrentQueue<FileTransferAcceptV1> SentAccepts { get; } = [];
@@ -344,6 +345,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
 
         public void RequestFileTransferReceiveRecovery(FileTransferReceiveRecoveryRequest request)
         {
+            ReceiveRecoveryRequestObserver?.Invoke(request);
             if (ReceiveRecoveryException is { } exception)
             {
                 throw exception;

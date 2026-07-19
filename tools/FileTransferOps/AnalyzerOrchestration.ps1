@@ -1153,7 +1153,15 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_pressure_binding_committed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_pressure_binding_retired') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_pressure_binding_invalidated') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_prepared') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_committed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_recovery_authority_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_bridge_recovery_authority_granted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_recovery_liveness_lease_granted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'session_liveness_timeout_active_filetransfer_progress_observed_without_recovery_authority') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'session_liveness_timeout') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_lifecycle_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_lease_closure_retained') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_data_session_availability_observed') +
@@ -1193,6 +1201,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             -SettlementDispositionProof $regularV4FrontierRepairSettlementDispositionProof
     $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof =
         Get-FileTransferRegularV4FrontierRepairPressureAuthorityLifecycleSplitProof `
+            -Events $regularV4FrontierRepairProjectionEvents
+    $regularV4FrontierRepairPressureRecoveryHandoffProof =
+        Get-FileTransferRegularV4FrontierRepairPressureRecoveryHandoffProof `
             -Events $regularV4FrontierRepairProjectionEvents
     $regularV4FrontierRepairSuccessorPressureInstallProof =
         Get-FileTransferRegularV4FrontierRepairSuccessorPressureInstallProof `
@@ -1253,6 +1264,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_rejected_after_regular_v4_receive_recovery') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_settlement_reported') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_settlement_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_frontier_repair_precontract_settlement_cached') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_frontier_repair_settlement_handoff_adopted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_frontier_repair_settlement_held') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_frontier_repair_settlement_handoff_held_for_bridge_lifecycle') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_lifecycle_reported') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_lifecycle_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_lease_closure_retained') +
@@ -1281,7 +1296,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $runtimeUnlockRegularV4RecoverySettlementProof =
         Get-FileTransferRuntimeUnlockRegularV4RecoverySettlementCorrelation `
             -Events $runtimeUnlockRegularV4RecoverySettlementEvents `
-            -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents
+            -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents `
+            -ResolvedRepairSettlementEvents $regularV4FrontierRepairSettlementDispositionProof.ResolvedAcceptedEvents
     $runtimeUnlockRetryBlockedByRegularV4RecoveryCount =
         Get-FileTransferCompactIndexEventCount -Index $Index -Name 'runtime_unlock_retry_blocked_by_regular_v4_receive_recovery'
     $runtimeUnlockRetryHeldByRegularV4RecoveryCount =
@@ -1607,6 +1623,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Reason = 'coordinator_repair_authority_outlived_legacy_pressure_ttl'
         }) | Out-Null
     }
+    foreach ($candidateEvent in @($regularV4FrontierRepairPressureRecoveryHandoffProof.UnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'regular_v4_frontier_repair_pressure_recovery_handoff_missing'
+            Event = $candidateEvent
+            Reason = 'installed_repair_pressure_not_retired_before_receive_recovery'
+        }) | Out-Null
+    }
     foreach ($candidateEvent in @($regularV4FrontierRepairLifecycleProof.UnresolvedCandidateEvents)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'regular_v4_frontier_repair_stalled'
@@ -1689,7 +1712,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     }
 
     if ($runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteUnresolvedCount -gt 0 -or
-        $regularV4FrontierRepairSettlementDispositionProof.UnresolvedCount -gt 0) {
+        $regularV4FrontierRepairSettlementDispositionProof.UnresolvedCount -gt 0 -or
+        $regularV4FrontierRepairPressureRecoveryHandoffProof.UnresolvedCount -gt 0) {
         $verdict = 'INCONCLUSIVE'
         $gateStatus = 'fail'
         $acceptanceFailureClass = 'incomplete_proof'
@@ -1728,6 +1752,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'regular_v4_frontier_repair_initial_pressure_install_missing',
                 'regular_v4_frontier_repair_successor_pressure_install_missing',
                 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery',
+                'regular_v4_frontier_repair_pressure_recovery_handoff_missing',
                 'regular_v4_frontier_repair_stalled')) {
             $verdict = 'INCONCLUSIVE'
             $gateStatus = 'fail'
@@ -1800,7 +1825,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     }
     $semanticFailureDomain = if ($firstProofChainFailureClass -in @(
             'runtime_unlock_regular_v4_route_commit_send_drain_missing',
-            'regular_v4_frontier_repair_pressure_authority_lifecycle_split')) {
+            'regular_v4_frontier_repair_pressure_authority_lifecycle_split',
+            'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
         'route_runtime'
     }
     else {
@@ -1897,6 +1923,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("regular_v4_frontier_repair_pressure_authority_lifecycle_split_recovered_count={0}" -f $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.RecoveredCount),
         ("regular_v4_frontier_repair_pressure_authority_lifecycle_split_unresolved_count={0}" -f $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.UnresolvedCount),
         ("regular_v4_frontier_repair_pressure_authority_lifecycle_split_verdict={0}" -f $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.Verdict),
+        ("regular_v4_frontier_repair_pressure_recovery_handoff_missing_raw_count={0}" -f $regularV4FrontierRepairPressureRecoveryHandoffProof.RawCount),
+        ("regular_v4_frontier_repair_pressure_recovery_handoff_missing_distinct_count={0}" -f $regularV4FrontierRepairPressureRecoveryHandoffProof.DistinctCount),
+        ("regular_v4_frontier_repair_pressure_recovery_handoff_missing_recovered_count={0}" -f $regularV4FrontierRepairPressureRecoveryHandoffProof.RecoveredCount),
+        ("regular_v4_frontier_repair_pressure_recovery_handoff_missing_unresolved_count={0}" -f $regularV4FrontierRepairPressureRecoveryHandoffProof.UnresolvedCount),
+        ("regular_v4_frontier_repair_pressure_recovery_handoff_verdict={0}" -f $regularV4FrontierRepairPressureRecoveryHandoffProof.Verdict),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_raw_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.RawCount),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_distinct_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.DistinctCount),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.RecoveredCount),
@@ -2060,6 +2091,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("regular_v4_frontier_repair_pressure_authority_lifecycle_split_recovered_count={0}" -f $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.RecoveredCount),
         ("regular_v4_frontier_repair_pressure_authority_lifecycle_split_unresolved_count={0}" -f $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.UnresolvedCount),
         ("regular_v4_frontier_repair_pressure_authority_lifecycle_split_verdict={0}" -f $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.Verdict),
+        ("regular_v4_frontier_repair_pressure_recovery_handoff_missing_raw_count={0}" -f $regularV4FrontierRepairPressureRecoveryHandoffProof.RawCount),
+        ("regular_v4_frontier_repair_pressure_recovery_handoff_missing_distinct_count={0}" -f $regularV4FrontierRepairPressureRecoveryHandoffProof.DistinctCount),
+        ("regular_v4_frontier_repair_pressure_recovery_handoff_missing_recovered_count={0}" -f $regularV4FrontierRepairPressureRecoveryHandoffProof.RecoveredCount),
+        ("regular_v4_frontier_repair_pressure_recovery_handoff_missing_unresolved_count={0}" -f $regularV4FrontierRepairPressureRecoveryHandoffProof.UnresolvedCount),
+        ("regular_v4_frontier_repair_pressure_recovery_handoff_verdict={0}" -f $regularV4FrontierRepairPressureRecoveryHandoffProof.Verdict),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_raw_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.RawCount),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_distinct_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.DistinctCount),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.RecoveredCount),
@@ -2215,6 +2251,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("regular_v4_frontier_repair_pressure_authority_lifecycle_split_recovered_count={0}" -f $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.RecoveredCount),
         ("regular_v4_frontier_repair_pressure_authority_lifecycle_split_unresolved_count={0}" -f $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.UnresolvedCount),
         ("regular_v4_frontier_repair_pressure_authority_lifecycle_split_verdict={0}" -f $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.Verdict),
+        ("regular_v4_frontier_repair_pressure_recovery_handoff_missing_raw_count={0}" -f $regularV4FrontierRepairPressureRecoveryHandoffProof.RawCount),
+        ("regular_v4_frontier_repair_pressure_recovery_handoff_missing_distinct_count={0}" -f $regularV4FrontierRepairPressureRecoveryHandoffProof.DistinctCount),
+        ("regular_v4_frontier_repair_pressure_recovery_handoff_missing_recovered_count={0}" -f $regularV4FrontierRepairPressureRecoveryHandoffProof.RecoveredCount),
+        ("regular_v4_frontier_repair_pressure_recovery_handoff_missing_unresolved_count={0}" -f $regularV4FrontierRepairPressureRecoveryHandoffProof.UnresolvedCount),
+        ("regular_v4_frontier_repair_pressure_recovery_handoff_verdict={0}" -f $regularV4FrontierRepairPressureRecoveryHandoffProof.Verdict),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_raw_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.RawCount),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_distinct_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.DistinctCount),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.RecoveredCount),
@@ -2354,6 +2395,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("regular_v4_frontier_repair_pressure_authority_lifecycle_split_recovered_count={0}" -f $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.RecoveredCount),
         ("regular_v4_frontier_repair_pressure_authority_lifecycle_split_unresolved_count={0}" -f $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.UnresolvedCount),
         ("regular_v4_frontier_repair_pressure_authority_lifecycle_split_verdict={0}" -f $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.Verdict),
+        ("regular_v4_frontier_repair_pressure_recovery_handoff_missing_raw_count={0}" -f $regularV4FrontierRepairPressureRecoveryHandoffProof.RawCount),
+        ("regular_v4_frontier_repair_pressure_recovery_handoff_missing_distinct_count={0}" -f $regularV4FrontierRepairPressureRecoveryHandoffProof.DistinctCount),
+        ("regular_v4_frontier_repair_pressure_recovery_handoff_missing_recovered_count={0}" -f $regularV4FrontierRepairPressureRecoveryHandoffProof.RecoveredCount),
+        ("regular_v4_frontier_repair_pressure_recovery_handoff_missing_unresolved_count={0}" -f $regularV4FrontierRepairPressureRecoveryHandoffProof.UnresolvedCount),
+        ("regular_v4_frontier_repair_pressure_recovery_handoff_verdict={0}" -f $regularV4FrontierRepairPressureRecoveryHandoffProof.Verdict),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_raw_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.RawCount),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_distinct_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.DistinctCount),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count={0}" -f $regularV4FrontierRepairSuccessorPressureInstallProof.RecoveredCount),
@@ -2507,6 +2553,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         regular_v4_frontier_repair_pressure_authority_lifecycle_split_recovered_count = $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.RecoveredCount
         regular_v4_frontier_repair_pressure_authority_lifecycle_split_unresolved_count = $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.UnresolvedCount
         regular_v4_frontier_repair_pressure_authority_lifecycle_split_verdict = $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.Verdict
+        regular_v4_frontier_repair_pressure_recovery_handoff_missing_raw_count = $regularV4FrontierRepairPressureRecoveryHandoffProof.RawCount
+        regular_v4_frontier_repair_pressure_recovery_handoff_missing_distinct_count = $regularV4FrontierRepairPressureRecoveryHandoffProof.DistinctCount
+        regular_v4_frontier_repair_pressure_recovery_handoff_missing_recovered_count = $regularV4FrontierRepairPressureRecoveryHandoffProof.RecoveredCount
+        regular_v4_frontier_repair_pressure_recovery_handoff_missing_unresolved_count = $regularV4FrontierRepairPressureRecoveryHandoffProof.UnresolvedCount
+        regular_v4_frontier_repair_pressure_recovery_handoff_verdict = $regularV4FrontierRepairPressureRecoveryHandoffProof.Verdict
         regular_v4_frontier_repair_successor_pressure_install_missing_raw_count = $regularV4FrontierRepairSuccessorPressureInstallProof.RawCount
         regular_v4_frontier_repair_successor_pressure_install_missing_distinct_count = $regularV4FrontierRepairSuccessorPressureInstallProof.DistinctCount
         regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count = $regularV4FrontierRepairSuccessorPressureInstallProof.RecoveredCount
