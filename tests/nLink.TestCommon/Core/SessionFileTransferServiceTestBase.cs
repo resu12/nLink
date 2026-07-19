@@ -272,7 +272,8 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             string reason,
             long transactionGeneration = 1,
             long offerGeneration = 1,
-            long leaseGeneration = 1)
+            long leaseGeneration = 1,
+            long launchGeneration = 0)
         {
             var normalizedTransferId = string.IsNullOrWhiteSpace(transferId) ? "loopback-transfer" : transferId.Trim();
             var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "loopback_runtime_unlock_route_commit" : reason.Trim();
@@ -298,7 +299,9 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                 TunaPathLeaseRequired: true,
                 TunaPathLeaseGeneration: leaseGeneration,
                 TunaPathLeaseState: RuntimeUnlockTunaPathLeaseState.ListenerReady.ToString(),
-                TunaPathLeaseCurrent: true);
+                TunaPathLeaseListenerRunId: $"loopback-listener-{leaseGeneration}",
+                TunaPathLeaseCurrent: true,
+                LaunchGeneration: launchGeneration);
         }
 
         public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
@@ -832,6 +835,25 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             }
         }
 
+        internal void RequestAllDataSessionHandoffsWithSnapshot(
+            string reason,
+            FileTransferTransportHandoffKind handoffKind,
+            FileTransferTransportKind targetTransport,
+            RuntimeUnlockRouteCommitSnapshot snapshot)
+        {
+            NextDataFrameTransportKind = targetTransport == FileTransferTransportKind.Unknown
+                ? FileTransferTransportKind.RegularNkn
+                : targetTransport;
+            foreach (var session in dataSessions.Values)
+            {
+                session.RequestHandoff(
+                    reason,
+                    handoffKind,
+                    targetTransport,
+                    snapshot);
+            }
+        }
+
         private bool TryGetOrCreateDataSession(string normalizedSessionId, string normalizedTransferId, out LoopbackDataSession session)
         {
             session = dataSessions.GetOrAdd(normalizedTransferId, _ => new LoopbackDataSession(this, normalizedSessionId, normalizedTransferId));
@@ -1155,6 +1177,17 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                 string reason,
                 FileTransferTransportHandoffKind handoffKind,
                 FileTransferTransportKind targetTransport)
+                => RequestHandoff(
+                    reason,
+                    handoffKind,
+                    targetTransport,
+                    runtimeUnlockPreCommitProbeSnapshot: null);
+
+            internal void RequestHandoff(
+                string reason,
+                FileTransferTransportHandoffKind handoffKind,
+                FileTransferTransportKind targetTransport,
+                RuntimeUnlockRouteCommitSnapshot? runtimeUnlockPreCommitProbeSnapshot)
             {
                 if (disposed != 0)
                 {
@@ -1168,7 +1201,8 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                         reason,
                         requiresResumeRequest: true,
                         handoffKind,
-                        targetTransport));
+                        targetTransport,
+                        runtimeUnlockPreCommitProbeSnapshot));
             }
 
             public void Dispose()

@@ -29311,15 +29311,67 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
             var provider = Assert.IsAssignableFrom<IRuntimeUnlockRouteCommitProofProvider>(helper);
             Assert.True(provider.TryGetRuntimeUnlockRouteCommitProof(sessionId, transferId, out var snapshot));
+            Assert.Equal(transferId, snapshot.TransferId);
             Assert.True(snapshot.TunaPathLeaseRequired);
             Assert.True(snapshot.TunaPathLeaseGeneration > 0);
             Assert.True(snapshot.TunaPathLeaseCurrent);
             Assert.Equal(RuntimeUnlockTunaPathLeaseState.ListenerReady.ToString(), snapshot.TunaPathLeaseState);
             Assert.Equal(9L, snapshot.OfferGeneration);
+            Assert.Equal(0L, snapshot.LaunchGeneration);
+            Assert.False(provider.TryGetRuntimeUnlockRouteCommitProof(
+                sessionId,
+                transferId + "_mismatch",
+                out _));
+
+            var transactionState = Assert.IsType<RuntimeUnlockTransactionSnapshot>(
+                typeof(NknSignalingTransport)
+                    .GetField("runtimeUnlockTransactionState", BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .GetValue(helper));
+            InvokePrivateMethod(
+                helper,
+                "RequestRuntimeUnlockPreCommitProbeLaunch",
+                sessionId,
+                NknAccelerationLaneKind.File,
+                "unit_test_exact_launch_snapshot",
+                transactionState);
+            var launchSnapshot = Assert.IsType<RuntimeUnlockRouteCommitSnapshot>(
+                typeof(NknSignalingTransport)
+                    .GetField("runtimeUnlockPreCommitProbeLaunchSnapshot", BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .GetValue(helper));
+            Assert.True(launchSnapshot.LaunchGeneration > 0);
+            Assert.Equal(transferId, launchSnapshot.TransferId);
+            Assert.Equal(snapshot.TunaPathLeaseGeneration, launchSnapshot.TunaPathLeaseGeneration);
+
+            provider.NotifyRuntimeUnlockPathProbeStarted(
+                sessionId,
+                transferId,
+                transportEpoch: 1,
+                probeId: "runtime-unlock-precommit:1:9:exact-launch",
+                FileTransferTransportKind.Tuna,
+                reason: "unit_test_exact_launch_snapshot");
+            Assert.True(provider.TryGetRuntimeUnlockRouteCommitProof(sessionId, transferId, out var startedSnapshot));
+            Assert.Equal(launchSnapshot.LaunchGeneration, startedSnapshot.LaunchGeneration);
+            Assert.Equal(transferId, startedSnapshot.TransferId);
+            Assert.Equal(launchSnapshot.TunaPathLeaseGeneration, startedSnapshot.TunaPathLeaseGeneration);
+            provider.NotifyRuntimeUnlockPathProbeResult(
+                sessionId,
+                transferId,
+                transportEpoch: 1,
+                probeId: "runtime-unlock-precommit:1:9:exact-launch",
+                FileTransferTransportKind.Tuna,
+                acked: true,
+                reason: "unit_test_exact_launch_snapshot_ack");
+            Assert.True(provider.TryGetRuntimeUnlockRouteCommitProof(sessionId, transferId, out var ackedSnapshot));
+            Assert.Equal(launchSnapshot.LaunchGeneration, ackedSnapshot.LaunchGeneration);
+            Assert.Equal(transferId, ackedSnapshot.TransferId);
+            Assert.Equal(launchSnapshot.TunaPathLeaseGeneration, ackedSnapshot.TunaPathLeaseGeneration);
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=tuna_path_lease_listener_ready;", logTail, StringComparison.Ordinal);
             Assert.Contains("offer_generation=9", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("tuna_path_lease_generation=0", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_precommit_probe_launch_requested;", logTail, StringComparison.Ordinal);
+            Assert.Contains($"launch_generation={launchSnapshot.LaunchGeneration}", logTail, StringComparison.Ordinal);
+            Assert.Contains($"transfer_id={transferId}", logTail, StringComparison.Ordinal);
         }
         finally
         {

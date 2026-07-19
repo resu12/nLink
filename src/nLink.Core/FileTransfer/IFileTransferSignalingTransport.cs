@@ -530,7 +530,8 @@ internal sealed record RuntimeUnlockRouteCommitSnapshot(
     string TunaPathLeaseState = "none",
     string? TunaPathLeaseListenerRunId = null,
     bool TunaPathLeaseCurrent = false,
-    string? TunaPathLeaseFailureReason = null);
+    string? TunaPathLeaseFailureReason = null,
+    long LaunchGeneration = 0);
 
 internal interface IRuntimeUnlockRouteCommitProofProvider
 {

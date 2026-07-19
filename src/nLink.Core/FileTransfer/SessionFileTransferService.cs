@@ -3221,6 +3221,33 @@ public sealed partial class SessionFileTransferService : IDisposable
     {
         if (dataSession.IsAvailable != availability.IsAvailable)
         {
+            if (availability.RuntimeUnlockPreCommitProbeSnapshot is
+                { LaunchGeneration: > 0 } staleLaunchSnapshot)
+            {
+                lock (gate)
+                {
+                    if (outboundTransfer is { } invalidatedOutbound &&
+                        string.Equals(invalidatedOutbound.SessionId, staleLaunchSnapshot.SessionId, StringComparison.Ordinal) &&
+                        string.Equals(invalidatedOutbound.TransferId, staleLaunchSnapshot.TransferId, StringComparison.Ordinal))
+                    {
+                        RecordRuntimeUnlockPreCommitProbeLaunchDispositionLocked(
+                            invalidatedOutbound,
+                            staleLaunchSnapshot,
+                            "Invalidated",
+                            "data_session_availability_stale",
+                            invalidatedOutbound.PendingRuntimeUnlockRegularV4RouteCommitDrain?.DrainGeneration ?? 0);
+                    }
+                    else
+                    {
+                        LogRuntimeUnlockPreCommitProbeLaunchHandoffWithoutContext(
+                            dataSession,
+                            staleLaunchSnapshot,
+                            "Invalidated",
+                            "data_session_availability_stale");
+                    }
+                }
+            }
+
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_data_session_availability_stale_ignored; session_id={dataSession.SessionId}; transfer_id={dataSession.TransferId}; observed_available={(availability.IsAvailable ? 1 : 0)}; current_available={(dataSession.IsAvailable ? 1 : 0)}; reason={FormatProtocolLogValue(availability.Reason)}; requires_resume_request={(availability.RequiresResumeRequest ? 1 : 0)}; handoff_kind={FormatFileTransferTransportHandoffKind(availability.HandoffKind)}; target_transport={FormatFileTransferTransportKind(availability.TargetTransport)}");
@@ -3270,6 +3297,38 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         lock (gate)
         {
+            if (effectiveIsAvailable &&
+                effectiveHandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
+                effectiveTargetTransport == FileTransferTransportKind.Tuna &&
+                availability.RuntimeUnlockPreCommitProbeSnapshot is { } staleLaunchSnapshot &&
+                !(ReferenceEquals(outboundTransfer?.DataSession, dataSession) &&
+                  outboundTransfer is { IsTerminal: false } currentOutbound &&
+                  string.Equals(currentOutbound.SessionId, staleLaunchSnapshot.SessionId, StringComparison.Ordinal) &&
+                  string.Equals(currentOutbound.TransferId, staleLaunchSnapshot.TransferId, StringComparison.Ordinal)))
+            {
+                if (outboundTransfer is { } invalidatedOutbound &&
+                    string.Equals(invalidatedOutbound.SessionId, staleLaunchSnapshot.SessionId, StringComparison.Ordinal) &&
+                    string.Equals(invalidatedOutbound.TransferId, staleLaunchSnapshot.TransferId, StringComparison.Ordinal))
+                {
+                    RecordRuntimeUnlockPreCommitProbeLaunchDispositionLocked(
+                        invalidatedOutbound,
+                        staleLaunchSnapshot,
+                        "Invalidated",
+                        invalidatedOutbound.IsTerminal
+                            ? "terminal_context"
+                            : "data_session_replaced",
+                        invalidatedOutbound.PendingRuntimeUnlockRegularV4RouteCommitDrain?.DrainGeneration ?? 0);
+                }
+                else
+                {
+                    LogRuntimeUnlockPreCommitProbeLaunchHandoffWithoutContext(
+                        dataSession,
+                        staleLaunchSnapshot,
+                        "Invalidated",
+                        "transfer_context_replaced");
+                }
+            }
+
             if (ReferenceEquals(outboundTransfer?.DataSession, dataSession) &&
                 outboundTransfer is { IsTerminal: false } outbound)
             {
@@ -3281,23 +3340,37 @@ public sealed partial class SessionFileTransferService : IDisposable
                     var wasNormalToTunaActivation =
                         effectiveHandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
                         effectiveTargetTransport == FileTransferTransportKind.Tuna;
-                    outboundResumed = TryResumeOutboundTransportLocked(
-                        outbound,
-                        effectiveReason,
-                        effectiveRequiresResumeRequest,
-                        effectiveHandoffKind,
-                        effectiveTargetTransport);
-                    if (outboundResumed)
+                    if (wasNormalToTunaActivation &&
+                        outbound.RouteRuntime.UsesRegularNknV4FastRuntime &&
+                        outbound.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+                        availability.RuntimeUnlockPreCommitProbeSnapshot is { } launchSnapshot)
                     {
-                        outboundToResume = outbound;
-                        outboundActivationPauseResumed = wasActivationPause;
-                        outboundNormalToTunaActivationResumed =
-                            wasNormalToTunaActivation &&
-                            outbound.RouteRuntime.UsesFileTunaV4Runtime &&
-                            outbound.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV4;
+                        TryHandleOutboundRuntimeUnlockPreCommitProbeLaunchSnapshotLocked(
+                            outbound,
+                            dataSession,
+                            launchSnapshot,
+                            effectiveReason);
                     }
+                    else
+                    {
+                        outboundResumed = TryResumeOutboundTransportLocked(
+                            outbound,
+                            effectiveReason,
+                            effectiveRequiresResumeRequest,
+                            effectiveHandoffKind,
+                            effectiveTargetTransport);
+                        if (outboundResumed)
+                        {
+                            outboundToResume = outbound;
+                            outboundActivationPauseResumed = wasActivationPause;
+                            outboundNormalToTunaActivationResumed =
+                                wasNormalToTunaActivation &&
+                                outbound.RouteRuntime.UsesFileTunaV4Runtime &&
+                                outbound.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV4;
+                        }
 
-                    RetryOutboundFallbackTailLocalYieldProofIfPendingLocked(outbound, effectiveReason);
+                        RetryOutboundFallbackTailLocalYieldProofIfPendingLocked(outbound, effectiveReason);
+                    }
                 }
                 else
                 {
@@ -20055,6 +20128,13 @@ public sealed partial class SessionFileTransferService : IDisposable
         RuntimeUnlockRouteCommitSnapshot RouteCommitSnapshot,
         string Reason);
 
+    private sealed record RuntimeUnlockPreCommitProbeLaunchDisposition(
+        long LaunchGeneration,
+        RuntimeUnlockRouteCommitSnapshot Snapshot,
+        string Status,
+        string Reason,
+        long DrainGeneration);
+
     private sealed class OutboundTransferContext
     {
         private TaskCompletionSource<bool> controlSignal = CreateSignal();
@@ -20223,6 +20303,9 @@ public sealed partial class SessionFileTransferService : IDisposable
             PendingRuntimeUnlockRegularV4RouteCommitDrain { get; set; }
 
         public bool RuntimeUnlockRegularV4RouteCommitDrainRecheckQueued { get; set; }
+
+        public RuntimeUnlockPreCommitProbeLaunchDisposition?
+            LastRuntimeUnlockPreCommitProbeLaunchDisposition { get; set; }
 
         public long LastOutboundSparsePumpInstallGeneration { get; set; }
 

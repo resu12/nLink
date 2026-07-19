@@ -3019,6 +3019,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             chunksAcceptedForTransport: 256,
             remoteGrantedUntilExclusive: 256,
             lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        SetPrivateProperty(context, "DataSession", null);
+        SetPrivateProperty(context, "DataSessionGeneration", 0L);
         SeedRuntimeUnlockAdmissionForTest(
             context,
             FileTransferDirection.Outbound,
@@ -3084,6 +3086,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             chunksAcceptedForTransport: 256,
             remoteGrantedUntilExclusive: 256,
             lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        SetPrivateProperty(context, "DataSession", null);
+        SetPrivateProperty(context, "DataSessionGeneration", 0L);
         SeedRuntimeUnlockAdmissionForTest(
             context,
             FileTransferDirection.Outbound,
@@ -3175,6 +3179,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             chunksAcceptedForTransport: 256,
             remoteGrantedUntilExclusive: 256,
             lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        SetPrivateProperty(context, "DataSession", null);
+        SetPrivateProperty(context, "DataSessionGeneration", 0L);
         SeedRuntimeUnlockAdmissionForTest(
             context,
             FileTransferDirection.Outbound,
