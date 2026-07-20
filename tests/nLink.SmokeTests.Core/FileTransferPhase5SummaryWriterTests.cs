@@ -1317,11 +1317,15 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             var summary = ReadArtifactReport(dryRunRoot, "phase5-analyzer-gui-acceptance-summary.txt");
             Assert.Equal("1", summary["manifest_present"]);
             Assert.Equal("pass", summary["cursor_integrity_verdict"]);
+            Assert.Equal("3", summary["writer_evidence_version"]);
             Assert.Equal("pass", summary["writer_integrity_verdict"]);
             Assert.Equal("0", summary["writer_gap_count"]);
             Assert.Equal("0", summary["writer_duplicate_count"]);
             Assert.Equal("0", summary["writer_identity_mismatch_count"]);
             Assert.Equal("0", summary["writer_write_failure_count"]);
+            Assert.Equal("0", summary["writer_chronology_inversion_count"]);
+            Assert.Equal("0", summary["writer_chronology_collision_count"]);
+            Assert.Equal("pass", summary["writer_chronology_verdict"]);
             Assert.Equal("0", summary["current_runtime_proof"]);
             Assert.Equal("incomplete_proof", summary["runtime_correctness_verdict"]);
 
@@ -1334,9 +1338,22 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.True(root.GetProperty("harness").GetProperty("hashStable").GetBoolean());
             Assert.True(root.GetProperty("bridge").GetProperty("hashStable").GetBoolean());
             var ledgerEvidence = root.GetProperty("scenarioAttempts")[0].GetProperty("logLedger");
-            Assert.Equal(2, ledgerEvidence.GetProperty("writerEvidenceVersion").GetInt64());
+            Assert.Equal(3, ledgerEvidence.GetProperty("writerEvidenceVersion").GetInt64());
             Assert.Equal("PASS", ledgerEvidence.GetProperty("writerIntegrityVerdict").GetString());
             Assert.Equal("pass", ledgerEvidence.GetProperty("producerWriterIntegrityVerdict").GetString());
+
+            using var summaryJson = JsonDocument.Parse(
+                await File.ReadAllTextAsync(Path.Combine(dryRunRoot, "phase5-analyzer-gui-acceptance-summary.json")));
+            var summaryRoot = summaryJson.RootElement;
+            Assert.Equal(3, summaryRoot.GetProperty("writerEvidenceVersion").GetInt64());
+            Assert.Equal(0, summaryRoot.GetProperty("writerChronologyInversionCount").GetInt64());
+            Assert.Equal(0, summaryRoot.GetProperty("writerChronologyCollisionCount").GetInt64());
+            Assert.Equal("pass", summaryRoot.GetProperty("writerChronologyVerdict").GetString());
+            var summaryRun = Assert.Single(summaryRoot.GetProperty("runs").EnumerateArray());
+            Assert.Equal(3, summaryRun.GetProperty("writerEvidenceVersion").GetInt64());
+            Assert.Equal(0, summaryRun.GetProperty("writerChronologyInversionCount").GetInt64());
+            Assert.Equal(0, summaryRun.GetProperty("writerChronologyCollisionCount").GetInt64());
+            Assert.Equal("pass", summaryRun.GetProperty("writerChronologyVerdict").GetString());
 
             const string scenario = "regular-v4-live-activation-off-on-off-256mb";
             var sourceLedger = await File.ReadAllBytesAsync(Path.Combine(sourceRunRoot, scenario, "filetransfer-gui-log-ledger.json"));

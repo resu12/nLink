@@ -293,6 +293,17 @@ $ledgerIdentity.scenarioAttempts[0].logLedger.acceptanceRunId = [guid]::NewGuid(
 $ledgerIdentityResult = Test-RouteAcceptanceEvidenceManifest -Manifest $ledgerIdentity
 Assert-Contains $ledgerIdentityResult.reasons 'cursor_acceptance_run_id_mismatch' 'ledger acceptance ID must match manifest'
 
+$legacyWriterManifest = Copy-EvidenceManifest -Manifest $manifest
+$legacyWriterManifest.scenarioAttempts[0].logLedger.writerEvidenceVersion = 2
+$legacyWriterManifestResult = Test-RouteAcceptanceEvidenceManifest -Manifest $legacyWriterManifest
+Assert-Contains $legacyWriterManifestResult.reasons 'cursor_writer_evidence_version_invalid' 'version 2 manifest evidence cannot prove current runtime'
+Assert-False $legacyWriterManifestResult.currentRuntimeProof 'version 2 manifest evidence must fail closed'
+
+$chronologyCountManifest = Copy-EvidenceManifest -Manifest $manifest
+$chronologyCountManifest.scenarioAttempts[0].logLedger.writerChronologyInversionCount = 1
+$chronologyCountManifestResult = Test-RouteAcceptanceEvidenceManifest -Manifest $chronologyCountManifest
+Assert-Contains $chronologyCountManifestResult.reasons 'cursor_writer_chronology_count_mismatch' 'manifest chronology counts must match the bound ledger slice'
+
 $reopenPath = Join-Path $fixture.ArtifactDir 'tampered-manifest.json'
 $reopened = Write-RouteAcceptanceEvidenceManifest -Path $reopenPath -Manifest $runtime
 Assert-Contains $reopened.validation.reasons 'runtime_provenance_inconsistent' 'reopened validation must recompute derived claims'
@@ -342,13 +353,13 @@ $fixture = New-EvidenceFixture -Name 'cursor'
 $valid = Get-RouteAcceptanceCursorEvidence -LogLedger $fixture.LedgerPath -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
 Assert-Equal $valid.verdict 'PASS' 'valid rotated cursor verdict'
 Assert-Equal $valid.rotationCount 2 'rotation count'
-Assert-Equal $valid.writerEvidenceVersion 2 'writer evidence version'
+Assert-Equal $valid.writerEvidenceVersion 3 'writer evidence version'
 Assert-Equal $valid.writerIntegrityVerdict 'PASS' 'writer integrity verdict'
 
 $ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
-$ledger.PSObject.Properties.Remove('writerEvidenceVersion')
+$ledger.writerEvidenceVersion = 2
 $legacyWriterEvidence = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
-Assert-Contains $legacyWriterEvidence.reasons 'cursor_writer_evidence_version_invalid' 'legacy writer evidence cannot prove current runtime'
+Assert-Contains $legacyWriterEvidence.reasons 'cursor_writer_evidence_version_invalid' 'version 2 writer evidence cannot prove current runtime'
 
 $ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
 $ledger.writerGapCount = 1
@@ -377,6 +388,49 @@ $ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
 $ledger.writerChronologyInversionCount = 1
 $writerChronology = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
 Assert-Contains $writerChronology.reasons 'cursor_writer_chronology_inversion' 'writer chronology inversion reason'
+Assert-Contains $writerChronology.reasons 'cursor_writer_chronology_count_mismatch' 'reported chronology count must match recomputed writer evidence'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.writerChronologyCollisionCount = 1
+$writerChronologyCollision = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $writerChronologyCollision.reasons 'cursor_writer_chronology_collision' 'writer chronology collision reason'
+Assert-Contains $writerChronologyCollision.reasons 'cursor_writer_chronology_count_mismatch' 'reported collision count must match recomputed writer evidence'
+
+$chronologyPath = Join-Path $fixture.ArtifactDir 'writer-chronology-fixture.log'
+$crossWriterLines = New-Object System.Collections.Generic.List[string]
+for ($batch = 1; $batch -le 24; $batch++) {
+    $crossWriterLines.Add("event=b; log_writer_id=writer-b; log_writer_sequence=$batch; log_writer_batch_generation=$batch; log_writer_batch_first_sequence=$batch; log_writer_batch_last_sequence=$batch; log_writer_attempt_utc_ticks=$(1000 + (2 * $batch))") | Out-Null
+    $crossWriterLines.Add("event=a; log_writer_id=writer-a; log_writer_sequence=$batch; log_writer_batch_generation=$batch; log_writer_batch_first_sequence=$batch; log_writer_batch_last_sequence=$batch; log_writer_attempt_utc_ticks=$(999 + (2 * $batch))") | Out-Null
+}
+[System.IO.File]::WriteAllText($chronologyPath, (($crossWriterLines.ToArray() -join "`n") + "`n"), [System.Text.UTF8Encoding]::new($false))
+$crossWriterChronology = Get-RouteAcceptanceEvidenceWriterChronology -Path $chronologyPath
+Assert-True $crossWriterChronology.batchEvidenceValid 'cross-writer batch evidence must be valid'
+Assert-Equal $crossWriterChronology.inversionCount 0 'cross-writer physical order must not create inversions'
+Assert-Equal $crossWriterChronology.collisionCount 0 'cross-writer physical order must not create collisions'
+
+$sameWriterInversionLines = @(
+    'event=a; log_writer_id=writer-a; log_writer_sequence=1; log_writer_batch_generation=1; log_writer_batch_first_sequence=1; log_writer_batch_last_sequence=1; log_writer_attempt_utc_ticks=200',
+    'event=a; log_writer_id=writer-a; log_writer_sequence=2; log_writer_batch_generation=2; log_writer_batch_first_sequence=2; log_writer_batch_last_sequence=2; log_writer_attempt_utc_ticks=100'
+)
+[System.IO.File]::WriteAllText($chronologyPath, (($sameWriterInversionLines -join "`n") + "`n"), [System.Text.UTF8Encoding]::new($false))
+$sameWriterInversion = Get-RouteAcceptanceEvidenceWriterChronology -Path $chronologyPath
+Assert-Equal $sameWriterInversion.inversionCount 1 'same-writer decreasing batch timestamp must invert'
+
+$sameWriterCollisionLines = @(
+    'event=a; log_writer_id=writer-a; log_writer_sequence=1; log_writer_batch_generation=1; log_writer_batch_first_sequence=1; log_writer_batch_last_sequence=1; log_writer_attempt_utc_ticks=100',
+    'event=a; log_writer_id=writer-a; log_writer_sequence=2; log_writer_batch_generation=2; log_writer_batch_first_sequence=2; log_writer_batch_last_sequence=2; log_writer_attempt_utc_ticks=100'
+)
+[System.IO.File]::WriteAllText($chronologyPath, (($sameWriterCollisionLines -join "`n") + "`n"), [System.Text.UTF8Encoding]::new($false))
+$sameWriterCollision = Get-RouteAcceptanceEvidenceWriterChronology -Path $chronologyPath
+Assert-Equal $sameWriterCollision.collisionCount 1 'same-writer distinct equal batch timestamps must collide'
+
+$invalidBatchLines = @(
+    'event=a; log_writer_id=writer-a; log_writer_sequence=1; log_writer_batch_generation=1; log_writer_batch_first_sequence=1; log_writer_batch_last_sequence=3; log_writer_attempt_utc_ticks=100',
+    'event=a; log_writer_id=writer-a; log_writer_sequence=3; log_writer_batch_generation=1; log_writer_batch_first_sequence=1; log_writer_batch_last_sequence=3; log_writer_attempt_utc_ticks=100'
+)
+[System.IO.File]::WriteAllText($chronologyPath, (($invalidBatchLines -join "`n") + "`n"), [System.Text.UTF8Encoding]::new($false))
+$invalidBatchChronology = Get-RouteAcceptanceEvidenceWriterChronology -Path $chronologyPath
+Assert-False $invalidBatchChronology.batchEvidenceValid 'noncontiguous batch range must fail validation'
 
 $ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
 $ledger.writerDrainMissingCount = 1
@@ -615,7 +669,11 @@ function New-EvidenceFixture {
     Write-JsonNoBom -Path (Join-Path $bridgeDir 'bridge-manifest.json') -Value ([ordered]@{ bridgeScriptSha256 = $declaredHash })
 
     $slicePath = Join-Path $artifactDir 'filetransfer-retained-ledger-slice.log'
-    [System.IO.File]::WriteAllText($slicePath, "event=one`nevent=two`n", [System.Text.UTF8Encoding]::new($false))
+    $writerLines = @(
+        "event=operational_log_writer_started; acceptance_run_id=$runId; scenario_run_id=$scenarioRunId; log_writer_id=writer-current; log_writer_sequence=1; log_writer_batch_generation=1; log_writer_batch_first_sequence=1; log_writer_batch_last_sequence=1; log_writer_attempt_utc_ticks=100",
+        "event=operational_log_writer_drained; acceptance_run_id=$runId; scenario_run_id=$scenarioRunId; log_writer_id=writer-current; log_writer_sequence=2; log_writer_batch_generation=2; log_writer_batch_first_sequence=2; log_writer_batch_last_sequence=2; log_writer_attempt_utc_ticks=200"
+    )
+    [System.IO.File]::WriteAllText($slicePath, (($writerLines -join "`n") + "`n"), [System.Text.UTF8Encoding]::new($false))
     $sliceHash = Get-RouteAcceptanceEvidenceSha256 -Path $slicePath
     $writerFailureMarkerPath = Join-Path $artifactDir 'filetransfer-gui-log-writer-failure-markers.log'
     [System.IO.File]::WriteAllText($writerFailureMarkerPath, '', [System.Text.UTF8Encoding]::new($false))
@@ -657,7 +715,7 @@ function New-EvidenceFixture {
         transientRescanCount = 0
         gapCount = 0
         duplicateIndexCount = 0
-        writerEvidenceVersion = 2
+        writerEvidenceVersion = 3
         writerGapCount = 0
         writerDuplicateCount = 0
         writerIdentityMismatchCount = 0

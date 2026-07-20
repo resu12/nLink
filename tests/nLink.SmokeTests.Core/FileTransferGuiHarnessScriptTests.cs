@@ -650,12 +650,111 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeLogLedger_ValidatesWriterChronologyWithinEachProcess()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var chronologyBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-GuiSmokeLogWriterChronology",
+            "Write-FileTransferGuiLogLedgerEvidence");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-GuiSmokeLogWriterChronology { {{chronologyBody}} }
+            function New-WriterLineRecord {
+                param(
+                    [string]$WriterId,
+                    [long]$Sequence,
+                    [long]$BatchGeneration,
+                    [long]$BatchFirstSequence,
+                    [long]$BatchLastSequence,
+                    [long]$AttemptUtcTicks)
+                return [pscustomobject]@{
+                    writerId = $WriterId
+                    sequence = $Sequence
+                    batchGeneration = $BatchGeneration
+                    batchFirstSequence = $BatchFirstSequence
+                    batchLastSequence = $BatchLastSequence
+                    attemptUtcTicks = $AttemptUtcTicks
+                }
+            }
+            function Assert-Chronology {
+                param(
+                    [object[]]$Records,
+                    [long]$ExpectedInversions,
+                    [long]$ExpectedCollisions,
+                    [string]$Name)
+                $result = Get-GuiSmokeLogWriterChronology -WriterLineRecords $Records
+                if ([long]$result.inversionCount -ne $ExpectedInversions -or
+                    [long]$result.collisionCount -ne $ExpectedCollisions -or
+                    @($result.reasons).Count -ne 0) {
+                    throw "$Name failed: inversions=$($result.inversionCount); collisions=$($result.collisionCount); reasons=$(@($result.reasons) -join ',')"
+                }
+            }
+            function Assert-InvalidChronology {
+                param([object[]]$Records, [string]$Name)
+                $result = Get-GuiSmokeLogWriterChronology -WriterLineRecords $Records
+                if (@($result.reasons) -notcontains 'writer_recovery_chronology_batch_invalid') {
+                    throw "$Name did not reject malformed batch evidence"
+                }
+            }
+
+            # Writer B may persist a newer batch before writer A recovers its
+            # older batch. Physical cross-writer ordering is not chronology.
+            Assert-Chronology -Name 'cross-writer-later-tick' -ExpectedInversions 0 -ExpectedCollisions 0 -Records @(
+                (New-WriterLineRecord writer-a 1 1 1 1 100),
+                (New-WriterLineRecord writer-b 1 1 1 1 300),
+                (New-WriterLineRecord writer-a 2 2 2 2 200))
+            Assert-Chronology -Name 'cross-writer-equal-tick' -ExpectedInversions 0 -ExpectedCollisions 0 -Records @(
+                (New-WriterLineRecord writer-a 1 1 1 1 100),
+                (New-WriterLineRecord writer-b 1 1 1 1 100))
+
+            $artifactLikeInterleaving = [Collections.Generic.List[object]]::new()
+            for ($batch = 1; $batch -le 24; $batch++) {
+                # Writer B's newer attempt is physically before writer A's
+                # recovered older attempt for every batch.
+                $artifactLikeInterleaving.Add((New-WriterLineRecord writer-b $batch $batch $batch $batch (1000 + (2 * $batch))))
+                $artifactLikeInterleaving.Add((New-WriterLineRecord writer-a $batch $batch $batch $batch (999 + (2 * $batch))))
+            }
+            Assert-Chronology -Name 'artifact-like-24-batch-interleaving' -ExpectedInversions 0 -ExpectedCollisions 0 -Records @($artifactLikeInterleaving.ToArray())
+
+            Assert-Chronology -Name 'same-writer-lower-tick' -ExpectedInversions 1 -ExpectedCollisions 0 -Records @(
+                (New-WriterLineRecord writer-a 1 1 1 1 200),
+                (New-WriterLineRecord writer-a 2 2 2 2 100))
+            Assert-Chronology -Name 'same-writer-equal-distinct-batch' -ExpectedInversions 0 -ExpectedCollisions 1 -Records @(
+                (New-WriterLineRecord writer-a 1 1 1 1 100),
+                (New-WriterLineRecord writer-a 2 2 2 2 100))
+
+            # Lines in one batch intentionally share one attempt timestamp.
+            Assert-Chronology -Name 'multiline-same-batch-equal-tick' -ExpectedInversions 0 -ExpectedCollisions 0 -Records @(
+                (New-WriterLineRecord writer-a 1 1 1 2 100),
+                (New-WriterLineRecord writer-a 2 1 1 2 100),
+                (New-WriterLineRecord writer-a 3 2 3 3 200))
+            Assert-InvalidChronology -Name 'noncontiguous-batch-range' -Records @(
+                (New-WriterLineRecord writer-a 1 1 1 3 100),
+                (New-WriterLineRecord writer-a 3 1 1 3 100))
+            Assert-InvalidChronology -Name 'nonpositive-batch-timestamp' -Records @(
+                (New-WriterLineRecord writer-a 1 1 1 1 0))
+
+            Write-Output 'gui-log-writer-chronology-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Writer chronology test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-log-writer-chronology-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GuiSmokeLogLedger_WriterFailureMarkersAreBoundAndScopedToCurrentArtifact()
     {
         var repoRoot = FindRepoRoot();
         var helperPath = Path.Combine(repoRoot, "tools", "GuiSmokeLogLedger.ps1")
             .Replace("'", "''", StringComparison.Ordinal);
         var guiText = File.ReadAllText(Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1"));
+        var chronologyBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-GuiSmokeLogWriterChronology",
+            "Write-FileTransferGuiLogLedgerEvidence");
         var writerBody = ExtractPowerShellFunctionBody(
             guiText,
             "Write-FileTransferGuiLogLedgerEvidence",
@@ -663,6 +762,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var scriptText = $$"""
             $ErrorActionPreference = 'Stop'
             . '{{helperPath}}'
+            function Get-GuiSmokeLogWriterChronology { {{chronologyBody}} }
             function Write-FileTransferGuiLogLedgerEvidence { {{writerBody}} }
             function Get-FileSha256Hex {
                 param([string]$Path)
@@ -729,7 +829,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                         [IO.File]::AppendAllText($currentError, 'event=operational_log_write_failed; log_writer_id=writer-current; log_writer_sequence=4; failure_code=mutex_timeout' + $nl, $utf8)
                     }
                 $ledger = Get-Content -LiteralPath (Join-Path $artifactDir 'filetransfer-gui-log-ledger.json') -Raw | ConvertFrom-Json
-                if ($ledger.writerEvidenceVersion -ne 2 -or
+                if ($ledger.writerEvidenceVersion -ne 3 -or
                     $ledger.writerWriteFailureCount -ne 1 -or
                     $ledger.writerIntegrityVerdict -ne 'fail' -or
                     $ledger.cursorIntegrityVerdict -ne 'fail') {
@@ -806,7 +906,113 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     $recoveredLedger.writerDrainMissingCount -ne 0 -or
                     $recoveredLedger.writerRecoveryVerdict -ne 'pass' -or
                     $recoveredLedger.writerIntegrityVerdict -ne 'pass') {
-                    throw 'exact recovered writer batch and final drain did not pass v2 writer evidence'
+                    throw 'exact recovered writer batch and final drain did not pass v3 writer evidence'
+                }
+
+                $failureCaseIndex = 0
+                function Assert-RecoveryMarkerFailure {
+                    param([string]$Name, [string[]]$MarkerLines)
+                    $script:failureCaseIndex++
+                    $caseArtifactDir = Join-Path $tempRoot ("recovery-failure-$($script:failureCaseIndex)-$Name")
+                    $caseOutputRoot = Join-Path $caseArtifactDir 'process-output'
+                    [void][IO.Directory]::CreateDirectory($caseOutputRoot)
+                    $script:testLogPath = Join-Path $tempRoot 'recovered-nlink.log'
+                    $script:GuiSmokeAppLogLedger = New-GuiSmokeLogLedgerState
+                    Sync-GuiSmokeAppLogLedger
+                    $caseBookmark = Get-GuiSmokeLogLedgerBookmark -State $script:GuiSmokeAppLogLedger
+                    $caseInitial = Get-GuiSmokeLogLedgerSnapshot -State $script:GuiSmokeAppLogLedger -Bookmark $caseBookmark
+                    Set-GuiSmokeLogLedgerWriterEvidenceBookmark -State $script:GuiSmokeAppLogLedger -Bookmark $caseBookmark
+                    $caseError = Join-Path $caseOutputRoot 'helper.stderr.log'
+                    [IO.File]::WriteAllText($caseError, (($MarkerLines -join $nl) + $nl), $utf8)
+                    $script:GuiSmokeProcessOutputFiles = [Collections.Generic.List[string]]::new()
+                    $script:GuiSmokeProcessOutputFiles.Add($caseError)
+                    Write-FileTransferGuiLogLedgerEvidence `
+                        -ArtifactDir $caseArtifactDir `
+                        -Bookmark $caseBookmark `
+                        -InitialSnapshot $caseInitial
+                    $caseLedger = Get-Content -LiteralPath (Join-Path $caseArtifactDir 'filetransfer-gui-log-ledger.json') -Raw | ConvertFrom-Json
+                    if ($caseLedger.writerRecoveryVerdict -ne 'fail' -or
+                        $caseLedger.writerRecoveryMismatchCount -le 0 -or
+                        $caseLedger.writerIntegrityVerdict -ne 'fail') {
+                        throw "$Name marker evidence unexpectedly passed"
+                    }
+                }
+
+                Assert-RecoveryMarkerFailure -Name 'missing-recovery' -MarkerLines @($deferred)
+                Assert-RecoveryMarkerFailure -Name 'duplicate-recovery' -MarkerLines @($deferred, $recovered, $recovered)
+                $orphanRecovery = $recovered `
+                    -replace 'batch_generation=2', 'batch_generation=99' `
+                    -replace 'first_sequence=2', 'first_sequence=99' `
+                    -replace 'last_sequence=2', 'last_sequence=99'
+                Assert-RecoveryMarkerFailure -Name 'orphan-recovery' -MarkerLines @($deferred, $recovered, $orphanRecovery)
+                $wrongRunDeferred = $deferred -replace 'acceptance_run_id=run-current', 'acceptance_run_id=run-other'
+                $wrongRunRecovered = $recovered -replace 'acceptance_run_id=run-current', 'acceptance_run_id=run-other'
+                Assert-RecoveryMarkerFailure -Name 'run-mismatch' -MarkerLines @($wrongRunDeferred, $wrongRunRecovered)
+                $wrongTimestampRecovery = $recovered -replace 'attempt_utc_ticks=200', 'attempt_utc_ticks=201'
+                Assert-RecoveryMarkerFailure -Name 'timestamp-mismatch' -MarkerLines @($deferred, $wrongTimestampRecovery)
+
+                $crossArtifactDir = Join-Path $tempRoot 'cross-writer-recovery'
+                $crossOutputRoot = Join-Path $crossArtifactDir 'process-output'
+                $crossLogRoot = Join-Path $tempRoot 'cross-writer-log'
+                [void][IO.Directory]::CreateDirectory($crossOutputRoot)
+                [void][IO.Directory]::CreateDirectory($crossLogRoot)
+                $script:testLogPath = Join-Path $crossLogRoot 'nlink.log'
+                $writerAStart = '[a] event=operational_log_writer_started; acceptance_run_id=run-current; scenario_run_id=run-current:scenario:1; log_writer_id=writer-a; log_writer_sequence=1; log_writer_batch_generation=1; log_writer_batch_first_sequence=1; log_writer_batch_last_sequence=1; log_writer_attempt_utc_ticks=100'
+                $writerBStart = '[b] event=operational_log_writer_started; acceptance_run_id=run-current; scenario_run_id=run-current:scenario:1; log_writer_id=writer-b; log_writer_sequence=1; log_writer_batch_generation=1; log_writer_batch_first_sequence=1; log_writer_batch_last_sequence=1; log_writer_attempt_utc_ticks=100'
+                [IO.File]::WriteAllText($script:testLogPath, $writerAStart + $nl + $writerBStart + $nl, $utf8)
+                $script:GuiSmokeAppLogLedger = New-GuiSmokeLogLedgerState
+                Sync-GuiSmokeAppLogLedger
+                $crossBookmark = Get-GuiSmokeLogLedgerBookmark -State $script:GuiSmokeAppLogLedger
+                $crossInitial = Get-GuiSmokeLogLedgerSnapshot -State $script:GuiSmokeAppLogLedger -Bookmark $crossBookmark
+                Set-GuiSmokeLogLedgerWriterEvidenceBookmark -State $script:GuiSmokeAppLogLedger -Bookmark $crossBookmark
+                $writerBPayload = '[b] event=after; log_writer_id=writer-b; log_writer_sequence=2; log_writer_batch_generation=2; log_writer_batch_first_sequence=2; log_writer_batch_last_sequence=2; log_writer_attempt_utc_ticks=300'
+                $writerAPayload = '[a] event=after; log_writer_id=writer-a; log_writer_sequence=2; log_writer_batch_generation=2; log_writer_batch_first_sequence=2; log_writer_batch_last_sequence=2; log_writer_attempt_utc_ticks=200'
+                $writerADrain = '[a] event=operational_log_writer_drained; acceptance_run_id=run-current; scenario_run_id=run-current:scenario:1; last_payload_sequence=2; log_writer_id=writer-a; log_writer_sequence=3; log_writer_batch_generation=3; log_writer_batch_first_sequence=3; log_writer_batch_last_sequence=3; log_writer_attempt_utc_ticks=400'
+                $writerBDrain = '[b] event=operational_log_writer_drained; acceptance_run_id=run-current; scenario_run_id=run-current:scenario:1; last_payload_sequence=2; log_writer_id=writer-b; log_writer_sequence=3; log_writer_batch_generation=3; log_writer_batch_first_sequence=3; log_writer_batch_last_sequence=3; log_writer_attempt_utc_ticks=400'
+                [IO.File]::AppendAllText($script:testLogPath, $writerBPayload + $nl + $writerAPayload + $nl + $writerADrain + $nl + $writerBDrain + $nl, $utf8)
+                $writerAHash = Get-GuiSmokeLogLedgerHash -Value $writerAPayload
+                $writerADeferred = 'event=operational_log_write_deferred; acceptance_run_id=run-current; scenario_run_id=run-current:scenario:1; log_writer_id=writer-a; batch_generation=2; first_sequence=2; last_sequence=2; line_count=1; payload_sha256=' + $writerAHash + '; attempt_utc_ticks=200; attempt_count=1; failure_code=mutex_timeout'
+                $writerARecovered = 'event=operational_log_write_recovered; acceptance_run_id=run-current; scenario_run_id=run-current:scenario:1; log_writer_id=writer-a; batch_generation=2; first_sequence=2; last_sequence=2; line_count=1; payload_sha256=' + $writerAHash + '; attempt_utc_ticks=200; attempt_count=2; failure_code=none'
+                $crossError = Join-Path $crossOutputRoot 'helper.stderr.log'
+                [IO.File]::WriteAllText($crossError, $writerADeferred + $nl + $writerARecovered + $nl, $utf8)
+                $script:GuiSmokeProcessOutputFiles = [Collections.Generic.List[string]]::new()
+                $script:GuiSmokeProcessOutputFiles.Add($crossError)
+                Write-FileTransferGuiLogLedgerEvidence `
+                    -ArtifactDir $crossArtifactDir `
+                    -Bookmark $crossBookmark `
+                    -InitialSnapshot $crossInitial
+                $crossLedger = Get-Content -LiteralPath (Join-Path $crossArtifactDir 'filetransfer-gui-log-ledger.json') -Raw | ConvertFrom-Json
+                if ($crossLedger.writerChronologyInversionCount -ne 0 -or
+                    $crossLedger.writerChronologyCollisionCount -ne 0 -or
+                    $crossLedger.writerChronologyVerdict -ne 'pass' -or
+                    $crossLedger.writerIntegrityVerdict -ne 'pass' -or
+                    $crossLedger.cursorIntegrityVerdict -ne 'pass') {
+                    throw "cross-writer deferred/recovered ordering did not pass complete ledger validation: chronology=$($crossLedger.writerChronologyInversionCount)/$($crossLedger.writerChronologyCollisionCount)/$($crossLedger.writerChronologyVerdict); writer=$($crossLedger.writerIntegrityVerdict):$(@($crossLedger.writerIntegrityReasons) -join ','); cursor=$($crossLedger.cursorIntegrityVerdict):$(@($crossLedger.cursorIntegrityReasons) -join ',')"
+                }
+
+                $missingDrainArtifactDir = Join-Path $tempRoot 'missing-drain'
+                $missingDrainOutputRoot = Join-Path $missingDrainArtifactDir 'process-output'
+                [void][IO.Directory]::CreateDirectory($missingDrainOutputRoot)
+                $script:testLogPath = Join-Path $tempRoot 'missing-drain-nlink.log'
+                [IO.File]::WriteAllText($script:testLogPath, $recoveredStart + $nl + $recoveredPayload + $nl, $utf8)
+                $script:GuiSmokeAppLogLedger = New-GuiSmokeLogLedgerState
+                Sync-GuiSmokeAppLogLedger
+                $missingDrainBookmark = Get-GuiSmokeLogLedgerBookmark -State $script:GuiSmokeAppLogLedger
+                $missingDrainInitial = Get-GuiSmokeLogLedgerSnapshot -State $script:GuiSmokeAppLogLedger -Bookmark $missingDrainBookmark
+                Set-GuiSmokeLogLedgerWriterEvidenceBookmark -State $script:GuiSmokeAppLogLedger -Bookmark $missingDrainBookmark
+                $missingDrainError = Join-Path $missingDrainOutputRoot 'helper.stderr.log'
+                [IO.File]::WriteAllText($missingDrainError, '', $utf8)
+                $script:GuiSmokeProcessOutputFiles = [Collections.Generic.List[string]]::new()
+                $script:GuiSmokeProcessOutputFiles.Add($missingDrainError)
+                Write-FileTransferGuiLogLedgerEvidence `
+                    -ArtifactDir $missingDrainArtifactDir `
+                    -Bookmark $missingDrainBookmark `
+                    -InitialSnapshot $missingDrainInitial
+                $missingDrainLedger = Get-Content -LiteralPath (Join-Path $missingDrainArtifactDir 'filetransfer-gui-log-ledger.json') -Raw | ConvertFrom-Json
+                if ($missingDrainLedger.writerDrainMissingCount -ne 1 -or
+                    $missingDrainLedger.writerRecoveryVerdict -ne 'fail' -or
+                    $missingDrainLedger.writerIntegrityVerdict -ne 'fail') {
+                    throw 'missing writer drain did not fail producer evidence'
                 }
                 Write-Output 'gui-log-ledger-marker-ok'
             }

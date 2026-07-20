@@ -411,6 +411,91 @@ function Get-RouteAcceptanceOperationalLogMarkerCounts {
     return [pscustomobject]$counts
 }
 
+function Get-RouteAcceptanceEvidenceWriterChronology {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $records = New-Object System.Collections.Generic.List[object]
+    $invalid = $false
+    foreach ($line in [System.IO.File]::ReadLines([System.IO.Path]::GetFullPath($Path))) {
+        $writerId = Get-RouteAcceptanceEvidenceStructuredField -Line ([string]$line) -Name 'log_writer_id'
+        $sequence = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidenceStructuredField -Line ([string]$line) -Name 'log_writer_sequence')
+        $batchGeneration = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidenceStructuredField -Line ([string]$line) -Name 'log_writer_batch_generation')
+        $batchFirstSequence = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidenceStructuredField -Line ([string]$line) -Name 'log_writer_batch_first_sequence')
+        $batchLastSequence = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidenceStructuredField -Line ([string]$line) -Name 'log_writer_batch_last_sequence')
+        $attemptUtcTicks = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidenceStructuredField -Line ([string]$line) -Name 'log_writer_attempt_utc_ticks')
+        if ([string]::IsNullOrWhiteSpace($writerId) -or
+            $sequence -le 0 -or
+            $batchGeneration -le 0 -or
+            $batchFirstSequence -le 0 -or
+            $batchLastSequence -lt $batchFirstSequence -or
+            $attemptUtcTicks -le 0) {
+            $invalid = $true
+            continue
+        }
+        $records.Add([pscustomobject]@{
+                writerId = $writerId
+                sequence = $sequence
+                batchGeneration = $batchGeneration
+                batchFirstSequence = $batchFirstSequence
+                batchLastSequence = $batchLastSequence
+                attemptUtcTicks = $attemptUtcTicks
+            }) | Out-Null
+    }
+
+    $batches = New-Object System.Collections.Generic.List[object]
+    foreach ($group in @($records | Group-Object writerId, batchGeneration)) {
+        $batchRecords = @($group.Group | Sort-Object sequence)
+        $writerIds = @($batchRecords | ForEach-Object { [string]$_.writerId } | Select-Object -Unique)
+        $batchGenerations = @($batchRecords | ForEach-Object { [long]$_.batchGeneration } | Select-Object -Unique)
+        $batchFirstSequences = @($batchRecords | ForEach-Object { [long]$_.batchFirstSequence } | Select-Object -Unique)
+        $batchLastSequences = @($batchRecords | ForEach-Object { [long]$_.batchLastSequence } | Select-Object -Unique)
+        $attemptUtcTicks = @($batchRecords | ForEach-Object { [long]$_.attemptUtcTicks } | Select-Object -Unique)
+        $sequences = @($batchRecords | ForEach-Object { [long]$_.sequence })
+        $uniqueSequences = @($sequences | Select-Object -Unique)
+        $batchValid = $writerIds.Count -eq 1 -and
+            $batchGenerations.Count -eq 1 -and
+            $batchFirstSequences.Count -eq 1 -and
+            $batchLastSequences.Count -eq 1 -and
+            $attemptUtcTicks.Count -eq 1 -and
+            [long]$attemptUtcTicks[0] -gt 0 -and
+            $uniqueSequences.Count -eq $sequences.Count -and
+            [long]$batchRecords[0].sequence -eq [long]$batchFirstSequences[0] -and
+            [long]$batchRecords[-1].sequence -eq [long]$batchLastSequences[0] -and
+            $batchRecords.Count -eq ([long]$batchLastSequences[0] - [long]$batchFirstSequences[0] + 1L)
+        if (-not $batchValid) {
+            $invalid = $true
+            continue
+        }
+        $batches.Add([pscustomobject]@{
+                writerId = [string]$writerIds[0]
+                firstSequence = [long]$batchFirstSequences[0]
+                attemptUtcTicks = [long]$attemptUtcTicks[0]
+            }) | Out-Null
+    }
+
+    $inversionCount = 0L
+    $collisionCount = 0L
+    foreach ($writerGroup in @($batches | Group-Object writerId)) {
+        $orderedBatches = @($writerGroup.Group | Sort-Object firstSequence)
+        for ($index = 1; $index -lt $orderedBatches.Count; $index++) {
+            $previousTicks = [long]$orderedBatches[$index - 1].attemptUtcTicks
+            $currentTicks = [long]$orderedBatches[$index].attemptUtcTicks
+            if ($currentTicks -lt $previousTicks) {
+                $inversionCount++
+            }
+            elseif ($currentTicks -eq $previousTicks) {
+                $collisionCount++
+            }
+        }
+    }
+
+    return [pscustomobject][ordered]@{
+        inversionCount = $inversionCount
+        collisionCount = $collisionCount
+        batchEvidenceValid = -not $invalid
+    }
+}
+
 function Get-RouteAcceptanceCursorEvidence {
     param(
         [Parameter(Mandatory = $true)][AllowNull()]$LogLedger,
@@ -487,7 +572,7 @@ function Get-RouteAcceptanceCursorEvidence {
 
 
     $writerEvidenceVersion = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerEvidenceVersion' -DefaultValue 0)
-    if ($writerEvidenceVersion -ne 2) {
+    if ($writerEvidenceVersion -ne 3) {
         $reasons.Add('cursor_writer_evidence_version_invalid') | Out-Null
     }
     $reportedWriterVerdict = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerIntegrityVerdict' -DefaultValue '')
@@ -859,6 +944,16 @@ function Get-RouteAcceptanceCursorEvidence {
         }
         if ((Get-RouteAcceptanceEvidenceLineCount -Path $writerEvidenceSlicePath) -ne $writerEvidenceSliceLineCount) {
             $reasons.Add('cursor_writer_evidence_slice_line_count_mismatch') | Out-Null
+        }
+        if ($writerEvidenceVersion -eq 3) {
+            $recomputedWriterChronology = Get-RouteAcceptanceEvidenceWriterChronology -Path $writerEvidenceSlicePath
+            if (-not $recomputedWriterChronology.batchEvidenceValid) {
+                $reasons.Add('cursor_writer_chronology_batch_invalid') | Out-Null
+            }
+            if ($writerChronologyInversionCount -ne [long]$recomputedWriterChronology.inversionCount -or
+                $writerChronologyCollisionCount -ne [long]$recomputedWriterChronology.collisionCount) {
+                $reasons.Add('cursor_writer_chronology_count_mismatch') | Out-Null
+            }
         }
     }
 
@@ -1535,7 +1630,7 @@ function Get-RouteAcceptanceEvidenceManifestValidation {
         if ($duplicateIndexCount -ne 0) {
             $cursorReasons.Add('cursor_duplicate_index') | Out-Null
         }
-        if ($writerEvidenceVersion -ne 2) {
+        if ($writerEvidenceVersion -ne 3) {
             $cursorReasons.Add('cursor_writer_evidence_version_invalid') | Out-Null
         }
         if ($writerGapCount -ne 0) {
@@ -1603,6 +1698,10 @@ function Get-RouteAcceptanceEvidenceManifestValidation {
                 foreach ($currentCursorReason in @($currentCursor.reasons)) {
                     $cursorReasons.Add([string]$currentCursorReason) | Out-Null
                 }
+            }
+            if ($writerChronologyInversionCount -ne [long]$currentCursor.writerChronologyInversionCount -or
+                $writerChronologyCollisionCount -ne [long]$currentCursor.writerChronologyCollisionCount) {
+                $cursorReasons.Add('cursor_writer_chronology_count_mismatch') | Out-Null
             }
             if (-not [string]::Equals([string](Get-RouteAcceptanceEvidencePropertyValue -Object $logLedger -Name 'sha256' -DefaultValue ''), $currentCursor.ledgerSha256, [System.StringComparison]::OrdinalIgnoreCase)) {
                 $cursorReasons.Add('cursor_ledger_current_sha256_mismatch') | Out-Null

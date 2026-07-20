@@ -279,7 +279,7 @@ function Write-RouteAcceptanceFakeCursorEvidence {
         transientRescanCount = 0
         gapCount = 0
         duplicateIndexCount = 0
-        writerEvidenceVersion = 2
+        writerEvidenceVersion = 3
         writerGapCount = 0
         writerDuplicateCount = 0
         writerIdentityMismatchCount = 0
@@ -401,6 +401,7 @@ function Set-RouteAcceptanceResultEvidence {
     } | Select-Object -First 1)
     if ($selectedAttempt.Count -gt 0) {
         $Result.cursorIntegrityVerdict = ([string]$selectedAttempt[0].logLedger.cursorIntegrityVerdict).ToLowerInvariant()
+        $Result.writerEvidenceVersion = [long]$selectedAttempt[0].logLedger.writerEvidenceVersion
         $Result.writerIntegrityVerdict = ([string]$selectedAttempt[0].logLedger.writerIntegrityVerdict).ToLowerInvariant()
         $Result.writerGapCount = [long]$selectedAttempt[0].logLedger.writerGapCount
         $Result.writerDuplicateCount = [long]$selectedAttempt[0].logLedger.writerDuplicateCount
@@ -420,6 +421,7 @@ function Set-RouteAcceptanceResultEvidence {
     }
     else {
         $Result.cursorIntegrityVerdict = 'missing'
+        $Result.writerEvidenceVersion = 0L
         $Result.writerIntegrityVerdict = 'missing'
         $Result.writerGapCount = 0L
         $Result.writerDuplicateCount = 0L
@@ -1028,6 +1030,7 @@ function New-RouteAcceptanceRunResult {
         provenanceVerdict = 'missing'
         provenanceFailureReasons = @()
         cursorIntegrityVerdict = 'missing'
+        writerEvidenceVersion = 0L
         writerIntegrityVerdict = 'missing'
         writerGapCount = 0L
         writerDuplicateCount = 0L
@@ -6430,11 +6433,22 @@ function Write-Phase5PreflightFailureSummaryFiles {
         ("provenance_verdict={0}" -f [string]$evidence.ProvenanceVerdict),
         ("provenance_failure_reasons={0}" -f (Join-RouteAcceptanceTokenList -Values $evidence.ProvenanceFailureReasons)),
         'cursor_integrity_verdict=missing',
+        'writer_evidence_version=0',
         'writer_integrity_verdict=missing',
         'writer_gap_count=0',
         'writer_duplicate_count=0',
         'writer_identity_mismatch_count=0',
         'writer_write_failure_count=0',
+        'writer_deferred_batch_count=0',
+        'writer_recovered_batch_count=0',
+        'writer_unresolved_deferred_batch_count=0',
+        'writer_terminal_failure_count=0',
+        'writer_recovery_mismatch_count=0',
+        'writer_chronology_inversion_count=0',
+        'writer_chronology_collision_count=0',
+        'writer_drain_missing_count=0',
+        'writer_recovery_verdict=missing',
+        'writer_chronology_verdict=missing',
         'current_runtime_proof=0',
         ("current_runtime_proof_reasons={0}" -f (Join-RouteAcceptanceTokenList -Values $preflightProofReasons)),
         'transfer_evidence_status=not_started',
@@ -6509,6 +6523,7 @@ function Write-Phase5PreflightFailureSummaryFiles {
         provenanceVerdict = [string]$evidence.ProvenanceVerdict
         provenanceFailureReasons = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $evidence.ProvenanceFailureReasons -Limit 32)
         cursorIntegrityVerdict = 'missing'
+        writerEvidenceVersion = 0
         writerIntegrityVerdict = 'missing'
         writerGapCount = 0
         writerDuplicateCount = 0
@@ -8083,6 +8098,7 @@ function New-RouteAcceptanceSummaryRunDto {
         provenanceVerdict = [string]$Result.provenanceVerdict
         provenanceFailureReasons = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $Result.provenanceFailureReasons -Limit 32)
         cursorIntegrityVerdict = [string]$Result.cursorIntegrityVerdict
+        writerEvidenceVersion = [long]$Result.writerEvidenceVersion
         writerIntegrityVerdict = [string]$Result.writerIntegrityVerdict
         writerGapCount = [long]$Result.writerGapCount
         writerDuplicateCount = [long]$Result.writerDuplicateCount
@@ -8311,6 +8327,12 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     }
     else {
         'pass'
+    }
+    $writerEvidenceVersion = if ($runDtos.Count -eq 0) {
+        0L
+    }
+    else {
+        [long](($runDtos | Measure-Object -Property writerEvidenceVersion -Minimum).Minimum)
     }
     $writerGapCount = [long](($runDtos | Measure-Object -Property writerGapCount -Sum).Sum)
     $writerDuplicateCount = [long](($runDtos | Measure-Object -Property writerDuplicateCount -Sum).Sum)
@@ -8826,6 +8848,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("current_runtime_proof={0}" -f ($(if ([bool]$evidence.CurrentRuntimeProof) { 1 } else { 0 }))),
         ("current_runtime_proof_reasons={0}" -f (Join-RouteAcceptanceTokenList -Values $evidence.CurrentRuntimeProofReasons)),
         ("cursor_integrity_verdict={0}" -f $cursorIntegrityVerdict),
+        ("writer_evidence_version={0}" -f $writerEvidenceVersion),
         ("writer_integrity_verdict={0}" -f $writerIntegrityVerdict),
         ("writer_gap_count={0}" -f $writerGapCount),
         ("writer_duplicate_count={0}" -f $writerDuplicateCount),
@@ -9023,6 +9046,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.provenance_verdict={1}" -f $prefix, $result.provenanceVerdict)
         $textLines += ("{0}.provenance_failure_reasons={1}" -f $prefix, (Join-RouteAcceptanceTokenList -Values $result.provenanceFailureReasons))
         $textLines += ("{0}.cursor_integrity_verdict={1}" -f $prefix, $result.cursorIntegrityVerdict)
+        $textLines += ("{0}.writer_evidence_version={1}" -f $prefix, $result.writerEvidenceVersion)
         $textLines += ("{0}.writer_integrity_verdict={1}" -f $prefix, $result.writerIntegrityVerdict)
         $textLines += ("{0}.writer_gap_count={1}" -f $prefix, $result.writerGapCount)
         $textLines += ("{0}.writer_duplicate_count={1}" -f $prefix, $result.writerDuplicateCount)
@@ -9274,6 +9298,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         currentRuntimeProof = [bool]$evidence.CurrentRuntimeProof
         currentRuntimeProofReasons = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $evidence.CurrentRuntimeProofReasons -Limit 32)
         cursorIntegrityVerdict = $cursorIntegrityVerdict
+        writerEvidenceVersion = $writerEvidenceVersion
         writerIntegrityVerdict = $writerIntegrityVerdict
         writerGapCount = $writerGapCount
         writerDuplicateCount = $writerDuplicateCount

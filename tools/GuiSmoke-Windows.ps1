@@ -2721,6 +2721,75 @@ function Copy-FileTransferLiveLogSlice {
     }
 }
 
+function Get-GuiSmokeLogWriterChronology {
+    param(
+        [AllowEmptyCollection()][object[]]$WriterLineRecords = @()
+    )
+
+    $inversionCount = 0L
+    $collisionCount = 0L
+    $reasons = New-Object System.Collections.Generic.List[string]
+    foreach ($writerGroup in @($WriterLineRecords |
+            Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.writerId) } |
+            Group-Object -Property writerId)) {
+        $validBatches = New-Object System.Collections.Generic.List[object]
+        foreach ($batchGroup in @($writerGroup.Group | Group-Object -Property batchGeneration)) {
+            $batchLines = @($batchGroup.Group | Sort-Object sequence)
+            $attemptUtcTicks = @($batchLines | ForEach-Object { [long]$_.attemptUtcTicks } | Select-Object -Unique)
+            $declaredFirstSequences = @($batchLines | ForEach-Object { [long]$_.batchFirstSequence } | Select-Object -Unique)
+            $declaredLastSequences = @($batchLines | ForEach-Object { [long]$_.batchLastSequence } | Select-Object -Unique)
+            $actualFirstSequence = if ($batchLines.Count -gt 0) { [long]$batchLines[0].sequence } else { 0L }
+            $actualLastSequence = if ($batchLines.Count -gt 0) { [long]$batchLines[-1].sequence } else { 0L }
+            $sequenceRangeIsContiguous = $batchLines.Count -gt 0 -and
+                ($actualLastSequence - $actualFirstSequence + 1L) -eq [long]$batchLines.Count
+            if ($sequenceRangeIsContiguous) {
+                for ($lineIndex = 0; $lineIndex -lt $batchLines.Count; $lineIndex++) {
+                    if ([long]$batchLines[$lineIndex].sequence -ne ($actualFirstSequence + $lineIndex)) {
+                        $sequenceRangeIsContiguous = $false
+                        break
+                    }
+                }
+            }
+
+            $batchIsValid = [long]$batchGroup.Name -gt 0 -and
+                $attemptUtcTicks.Count -eq 1 -and
+                [long]$attemptUtcTicks[0] -gt 0 -and
+                $declaredFirstSequences.Count -eq 1 -and
+                [long]$declaredFirstSequences[0] -eq $actualFirstSequence -and
+                $declaredLastSequences.Count -eq 1 -and
+                [long]$declaredLastSequences[0] -eq $actualLastSequence -and
+                $sequenceRangeIsContiguous
+            if (-not $batchIsValid) {
+                $reasons.Add('writer_recovery_chronology_batch_invalid') | Out-Null
+                continue
+            }
+
+            $validBatches.Add([pscustomobject]@{
+                firstSequence = $actualFirstSequence
+                attemptUtcTicks = [long]$attemptUtcTicks[0]
+            }) | Out-Null
+        }
+
+        $orderedBatches = @($validBatches.ToArray() | Sort-Object firstSequence)
+        for ($batchIndex = 1; $batchIndex -lt $orderedBatches.Count; $batchIndex++) {
+            $previousTicks = [long]$orderedBatches[$batchIndex - 1].attemptUtcTicks
+            $currentTicks = [long]$orderedBatches[$batchIndex].attemptUtcTicks
+            if ($currentTicks -lt $previousTicks) {
+                $inversionCount++
+            }
+            elseif ($currentTicks -eq $previousTicks) {
+                $collisionCount++
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        inversionCount = $inversionCount
+        collisionCount = $collisionCount
+        reasons = @($reasons.ToArray() | Select-Object -Unique)
+    }
+}
+
 function Write-FileTransferGuiLogLedgerEvidence {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
@@ -2979,16 +3048,15 @@ function Write-FileTransferGuiLogLedgerEvidence {
     }
 
     $writerLineRecords = New-Object System.Collections.Generic.List[object]
-    $writerLineIndex = 0L
     foreach ($writerLine in $writerEvidenceLines) {
-        $writerLineIndex++
         $writerLineRecords.Add([pscustomobject]@{
-            index = $writerLineIndex
             rawLine = [string]$writerLine
             event = Get-GuiSmokeLogLedgerStructuredField -Line ([string]$writerLine) -Name 'event'
             writerId = Get-GuiSmokeLogLedgerStructuredField -Line ([string]$writerLine) -Name 'log_writer_id'
             sequence = [long](Get-GuiSmokeLogLedgerStructuredField -Line ([string]$writerLine) -Name 'log_writer_sequence')
             batchGeneration = [long](Get-GuiSmokeLogLedgerStructuredField -Line ([string]$writerLine) -Name 'log_writer_batch_generation')
+            batchFirstSequence = [long](Get-GuiSmokeLogLedgerStructuredField -Line ([string]$writerLine) -Name 'log_writer_batch_first_sequence')
+            batchLastSequence = [long](Get-GuiSmokeLogLedgerStructuredField -Line ([string]$writerLine) -Name 'log_writer_batch_last_sequence')
             attemptUtcTicks = [long](Get-GuiSmokeLogLedgerStructuredField -Line ([string]$writerLine) -Name 'log_writer_attempt_utc_ticks')
         }) | Out-Null
     }
@@ -3041,25 +3109,16 @@ function Write-FileTransferGuiLogLedgerEvidence {
             [long]$persistedBatchLines[0].sequence -eq [long]$deferred.firstSequence -and
             [long]$persistedBatchLines[-1].sequence -eq [long]$deferred.lastSequence -and
             [string]::Equals($persistedPayloadSha256, [string]$deferred.payloadSha256, [System.StringComparison]::OrdinalIgnoreCase)
-        $resolved = $exactRecovery.Count -eq 1 -and $matchingRecoveries.Count -eq 1 -and $persistedRangeMatches
+        $markerIdentityMatches = [string]::Equals([string]$deferred.acceptanceRunId, $expectedAcceptanceRunId, [System.StringComparison]::Ordinal) -and
+            [string]::Equals([string]$deferred.scenarioRunId, $expectedScenarioRunId, [System.StringComparison]::Ordinal)
+        $resolved = $exactRecovery.Count -eq 1 -and
+            $matchingRecoveries.Count -eq 1 -and
+            $persistedRangeMatches -and
+            $markerIdentityMatches
         if (-not $resolved) {
             $writerUnresolvedDeferredBatchCount++
             $writerUnresolvedDeferredLineCount += [long]$deferred.lineCount
             $writerRecoveryMismatchCount++
-        }
-        elseif ($persistedBatchLines.Count -gt 0) {
-            $firstPersistedIndex = [long]$persistedBatchLines[0].index
-            $precedingOtherWriterLines = @($writerLineRecords | Where-Object {
-                    [long]$_.index -lt $firstPersistedIndex -and
-                    $_.writerId -ne $deferred.writerId -and
-                    [long]$_.attemptUtcTicks -gt 0
-                })
-            if (@($precedingOtherWriterLines | Where-Object { [long]$_.attemptUtcTicks -gt [long]$deferred.attemptUtcTicks }).Count -gt 0) {
-                $writerChronologyInversionCount++
-            }
-            if (@($precedingOtherWriterLines | Where-Object { [long]$_.attemptUtcTicks -eq [long]$deferred.attemptUtcTicks }).Count -gt 0) {
-                $writerChronologyCollisionCount++
-            }
         }
         $writerDeferredBatchEvidence.Add([ordered]@{
             writerId = [string]$deferred.writerId
@@ -3072,6 +3131,15 @@ function Write-FileTransferGuiLogLedgerEvidence {
             failureCode = [string]$deferred.failureCode
             recovered = $resolved
         }) | Out-Null
+    }
+    foreach ($recovered in $recoveredMarkers) {
+        $matchingDeferredMarkers = @($deferredMarkers | Where-Object {
+                $_.writerId -eq $recovered.writerId -and
+                [long]$_.batchGeneration -eq [long]$recovered.batchGeneration
+            })
+        if ($matchingDeferredMarkers.Count -ne 1) {
+            $writerRecoveryMismatchCount++
+        }
     }
 
     $writerDrainEvidence = New-Object System.Collections.Generic.List[object]
@@ -3099,6 +3167,12 @@ function Write-FileTransferGuiLogLedgerEvidence {
     if ($terminalMarkers.Count -ne 0) { $writerRecoveryReasons.Add('operational_log_write_failure_observed') | Out-Null }
     if ($writerDrainMissingCount -ne 0) { $writerRecoveryReasons.Add('writer_drain_missing') | Out-Null }
     $writerChronologyReasons = New-Object System.Collections.Generic.List[string]
+    $writerChronology = Get-GuiSmokeLogWriterChronology -WriterLineRecords @($writerLineRecords.ToArray())
+    $writerChronologyInversionCount = [long]$writerChronology.inversionCount
+    $writerChronologyCollisionCount = [long]$writerChronology.collisionCount
+    foreach ($chronologyReason in @($writerChronology.reasons)) {
+        $writerChronologyReasons.Add([string]$chronologyReason) | Out-Null
+    }
     if ($writerChronologyInversionCount -ne 0) { $writerChronologyReasons.Add('writer_recovery_chronology_inversion') | Out-Null }
     if ($writerChronologyCollisionCount -ne 0) { $writerChronologyReasons.Add('writer_recovery_chronology_collision') | Out-Null }
     foreach ($reason in @($writerRecoveryReasons.ToArray()) + @($writerChronologyReasons.ToArray())) {
@@ -3190,7 +3264,7 @@ function Write-FileTransferGuiLogLedgerEvidence {
         acceptanceRunId = $expectedAcceptanceRunId
         scenarioRunId = $expectedScenarioRunId
         ledgerId = [string]$finalSnapshot.ledgerId
-        writerEvidenceVersion = 2
+        writerEvidenceVersion = 3
         initial = $initialEvidence
         final = $finalEvidence
         rotationCount = [int]$diagnostics.RotationCount
