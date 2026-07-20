@@ -378,6 +378,22 @@ function Test-RouteAcceptanceIncompleteProofRuntimeCandidate {
         'runtime_unlock_precommit_fallback_recovery_handoff_suppressed')
 }
 
+function Test-RouteAcceptanceConclusiveRouteRuntimeCandidate {
+    param(
+        [AllowEmptyString()][string]$Candidate,
+        [AllowEmptyString()][string]$SemanticFailureDomain
+    )
+
+    return [string]::Equals(
+            $Candidate,
+            'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing',
+            [System.StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals(
+            $SemanticFailureDomain,
+            'route_runtime',
+            [System.StringComparison]::OrdinalIgnoreCase)
+}
+
 function Set-RouteAcceptanceResultEvidence {
     param(
         [Parameter(Mandatory = $true)]$Result,
@@ -465,8 +481,19 @@ function Set-RouteAcceptanceResultEvidence {
         'not_started'
     }
 
-    if (-not [bool]$Result.currentRuntimeProof -or
-        (Test-RouteAcceptanceIncompleteProofRuntimeCandidate -Candidate ([string]$Result.runtimeFailureCandidate)) -or
+    $conclusiveRouteRuntimeCandidate = Test-RouteAcceptanceConclusiveRouteRuntimeCandidate `
+        -Candidate ([string]$Result.runtimeFailureCandidate) `
+        -SemanticFailureDomain ([string]$Result.semanticFailureDomain)
+    if (-not [bool]$Result.currentRuntimeProof -and
+        -not ($script:RouteAcceptanceExecutionMode -eq 'fake' -and $conclusiveRouteRuntimeCandidate)) {
+        $Result.runtimeCorrectnessVerdict = 'incomplete_proof'
+        $Result.evidenceClassification = 'incomplete_proof'
+    }
+    elseif ($conclusiveRouteRuntimeCandidate) {
+        $Result.runtimeCorrectnessVerdict = 'fail'
+        $Result.evidenceClassification = 'runtime_failure'
+    }
+    elseif ((Test-RouteAcceptanceIncompleteProofRuntimeCandidate -Candidate ([string]$Result.runtimeFailureCandidate)) -or
         -not [string]::Equals([string]$Result.transferEvidenceStatus, 'complete', [System.StringComparison]::OrdinalIgnoreCase)) {
         $Result.runtimeCorrectnessVerdict = 'incomplete_proof'
         $Result.evidenceClassification = 'incomplete_proof'
@@ -4157,6 +4184,40 @@ function Write-RouteAcceptanceFakePhase4Run {
         }
     }
 
+    if (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'FALLBACK_TAIL_TRANSPORT_EPOCH_REAUTHORIZATION_SUMMARY_FIXTURE') {
+        $transportEpochReauthorizationFixtureLines = @(
+            'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_verdict=fail',
+            'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_raw_count=1',
+            'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count=1',
+            'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count=0',
+            'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count=1',
+            'first_proof_chain_failure_class=post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing',
+            'first_proof_chain_failure_event=filetransfer_fallback_tail_local_yield_blocked',
+            'first_proof_chain_failure_reason=local_yield_transport_epoch_reauthorization_missing',
+            'first_proof_chain_failure_sequence=27225',
+            'first_proof_chain_failure_source_path=filetransfer-retained-log-slice.log',
+            'first_proof_chain_failure_line_number=27225',
+            'first_proof_chain_failure_writer_sequence=13864',
+            'semantic_failure_domain=route_runtime'
+        )
+        foreach ($reportName in @('filetransfer-route-consistency-summary.txt', 'filetransfer-operator-verdict.txt')) {
+            $reportPath = Join-Path $ArtifactDir $reportName
+            $reportText = Get-Content -LiteralPath $reportPath -Raw
+            foreach ($fixtureLine in $transportEpochReauthorizationFixtureLines) {
+                $separatorIndex = $fixtureLine.IndexOf('=')
+                $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
+                $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
+                if ([regex]::IsMatch($reportText, $fixturePattern)) {
+                    $reportText = [regex]::Replace($reportText, $fixturePattern, $fixtureLine)
+                }
+                else {
+                    $reportText = $reportText.TrimEnd("`r", "`n") + [Environment]::NewLine + $fixtureLine + [Environment]::NewLine
+                }
+            }
+            Set-Content -LiteralPath $reportPath -Value $reportText -Encoding UTF8
+        }
+    }
+
     if (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'REGULAR_V4_FRONTIER_REPAIR_PROJECTION_SUMMARY_FIXTURE') {
         $projectionFixtureLines = @(
             'regular_v4_frontier_repair_missing_range_not_preserved_raw_count=3',
@@ -7547,6 +7608,9 @@ function Get-RouteAcceptanceResultFailureClass {
         [Parameter(Mandatory = $true)]$Result
     )
 
+    $conclusiveRouteRuntimeCandidate = Test-RouteAcceptanceConclusiveRouteRuntimeCandidate `
+        -Candidate ([string]$Result.runtimeFailureCandidate) `
+        -SemanticFailureDomain ([string]$Result.semanticFailureDomain)
     if ($AcceptancePhase -eq 'phase5' -and $script:RouteAcceptanceExecutionMode -ne 'fake') {
         if (-not [bool]$Result.currentRuntimeProof -or
             -not [string]::Equals([string]$Result.manifestValidationVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
@@ -7554,7 +7618,8 @@ function Get-RouteAcceptanceResultFailureClass {
             return 'incomplete_proof'
         }
 
-        if (-not [string]::Equals([string]$Result.transferEvidenceStatus, 'complete', [System.StringComparison]::OrdinalIgnoreCase)) {
+        if (-not $conclusiveRouteRuntimeCandidate -and
+            -not [string]::Equals([string]$Result.transferEvidenceStatus, 'complete', [System.StringComparison]::OrdinalIgnoreCase)) {
             return 'incomplete_proof'
         }
 
@@ -7570,6 +7635,7 @@ function Get-RouteAcceptanceResultFailureClass {
         if ([string]$Result.runtimeFailureCandidate -in @(
             'active_file_tuna_v6_evidence',
             'diagnostic_regular_nkn_v6_evidence',
+            'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing',
             'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing',
             'runtime_unlock_regular_v4_route_commit_send_drain_missing')) {
             return 'route_runtime'
@@ -8849,9 +8915,19 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     }
     $correctnessVerdict = if ($correctnessFailureLines.Count -eq 0 -and $script:RunResults.Count -eq $expectedRunCount) { 'PASS' } else { 'FAIL' }
     $performanceVerdict = if ($performanceFailureLines.Count -eq 0) { 'PASS' } else { 'FAIL' }
+    $conclusiveRouteRuntimeCandidate = Test-RouteAcceptanceConclusiveRouteRuntimeCandidate `
+        -Candidate $runtimeFailureCandidate `
+        -SemanticFailureDomain $semanticFailureDomain
     $runtimeCorrectnessVerdict = if ($AcceptancePhase -eq 'phase5' -and
-        (-not [bool]$evidence.CurrentRuntimeProof -or
-            $transferEvidenceStatus -ne 'complete' -or
+        -not [bool]$evidence.CurrentRuntimeProof -and
+        -not ($script:RouteAcceptanceExecutionMode -eq 'fake' -and $conclusiveRouteRuntimeCandidate)) {
+        'incomplete_proof'
+    }
+    elseif ($AcceptancePhase -eq 'phase5' -and $conclusiveRouteRuntimeCandidate) {
+        'fail'
+    }
+    elseif ($AcceptancePhase -eq 'phase5' -and
+        ($transferEvidenceStatus -ne 'complete' -or
             (Test-RouteAcceptanceIncompleteProofRuntimeCandidate -Candidate $runtimeFailureCandidate))) {
         'incomplete_proof'
     }

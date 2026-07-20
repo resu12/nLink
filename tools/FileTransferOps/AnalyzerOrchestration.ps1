@@ -1428,6 +1428,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_quiescent_yield_granted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_yield_proof_sent') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_yield_proof_received') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_local_yield_blocked') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_paired_yield_granted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_yield_local_authority_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_yield_proof_stale_ignored') +
@@ -1593,7 +1594,12 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing'
             Event = $candidateEvent
-            Reason = 'retired_owner_cross_transport_epoch_suppression'
+            Reason = if ($candidateEvent.EventName -eq 'filetransfer_fallback_tail_local_yield_blocked') {
+                'local_yield_transport_epoch_reauthorization_missing'
+            }
+            else {
+                'retired_owner_cross_transport_epoch_suppression'
+            }
         }) | Out-Null
     }
     foreach ($candidateRecord in @($runtimeUnlockRegularV4RouteCommitSendDrainProof.UnresolvedCandidateRecords)) {
@@ -1917,6 +1923,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'runtime_unlock_precommit_probe_start_handoff_missing',
             'runtime_unlock_precommit_fallback_recovery_handoff_suppressed',
             'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid',
+            'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing',
             'regular_v4_frontier_repair_pressure_authority_lifecycle_split',
             'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
         'route_runtime'
