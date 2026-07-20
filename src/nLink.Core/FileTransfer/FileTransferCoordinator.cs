@@ -5378,7 +5378,7 @@ internal static class FileTransferCoordinator
         var releaseValid = currentContract is not null
             ? TryValidateInheritedRuntimeUnlockRetryRelease(
                 state,
-                currentContract,
+                currentContract.Authority,
                 authorizedReleaseKind,
                 authorizedReleaseAuthorityId,
                 authorizedReleaseGeneration,
@@ -6306,6 +6306,9 @@ internal static class FileTransferCoordinator
 
         if (currentReceipt is null)
         {
+            var predecessorReleaseAuthority = stagedContract.RequestActivePredecessorSupersession
+                ? activePredecessorContract?.Authority
+                : lastSettlement?.Authority;
             var releaseCurrent = authority.PredecessorAuthorityId is null
                 ? TryValidateRuntimeUnlockRetryRelease(
                     state,
@@ -6317,7 +6320,7 @@ internal static class FileTransferCoordinator
                     out _)
                 : TryValidateInheritedRuntimeUnlockRetryRelease(
                     state,
-                    currentContract,
+                    predecessorReleaseAuthority,
                     authority.ReleaseKind,
                     authority.ReleaseAuthorityId,
                     authority.ReleaseGeneration,
@@ -6520,10 +6523,13 @@ internal static class FileTransferCoordinator
                     return false;
                 }
 
-                if (releaseOutcome is not (
-                        nameof(FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved) or
-                        nameof(FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch) or
-                        nameof(FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled)))
+                if (!TryValidateRuntimeUnlockRetryReleaseTuple(
+                        releaseKind,
+                        releaseAuthorityId,
+                        releaseGeneration,
+                        releaseOutcome,
+                        expectedAuthority: null,
+                        out _))
                 {
                     rejectionReason = string.Equals(
                         releaseOutcome,
@@ -6578,7 +6584,14 @@ internal static class FileTransferCoordinator
 
             if (releaseKind == RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure)
             {
-                if (state.CurrentRecoveryLivenessLease is not null ||
+                if (!TryValidateRuntimeUnlockRetryReleaseTuple(
+                        releaseKind,
+                        releaseAuthorityId,
+                        releaseGeneration,
+                        releaseOutcome,
+                        expectedAuthority: null,
+                        out _) ||
+                    state.CurrentRecoveryLivenessLease is not null ||
                     !state.RuntimeUnlockRecoveryLeaseClosureAvailable ||
                     state.LastRetiredRecoveryLivenessLease is not { } retiredLease ||
                     state.LastRuntimeUnlockRegularV4RecoveryLifecycle is not { } lifecycle ||
@@ -6645,12 +6658,29 @@ internal static class FileTransferCoordinator
         }
 
         if (state.RouteSelection.Route != FileTransferRoute.PostTunaFallbackV6 ||
-            releaseKind != RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield ||
+            releaseKind != RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield)
+        {
+            rejectionReason = "fallback_paired_tail_yield_pending";
+            return false;
+        }
+
+        if (!TryValidateRuntimeUnlockRetryReleaseTuple(
+                releaseKind,
+                releaseAuthorityId,
+                releaseGeneration,
+                releaseOutcome,
+                expectedAuthority: null,
+                out rejectionReason) ||
             state.LastFallbackTailYieldDecision is not { Accepted: true } tailYield ||
-            releaseAuthorityId is not { IsDefault: false } ||
+            tailYield.YieldKind != FallbackTailYieldKind.Quiescent ||
             tailYield.AuthorityId != releaseAuthorityId ||
-            releaseGeneration != tailYield.YieldGeneration ||
-            !state.RuntimeUnlockFallbackSurvivalState.PairedFallbackYieldGranted)
+            releaseGeneration != tailYield.YieldGeneration)
+        {
+            rejectionReason = "retry_dispatch_predecessor_release_invalid";
+            return false;
+        }
+
+        if (!state.RuntimeUnlockFallbackSurvivalState.PairedFallbackYieldGranted)
         {
             rejectionReason = "fallback_paired_tail_yield_pending";
             return false;
@@ -6699,7 +6729,7 @@ internal static class FileTransferCoordinator
 
     private static bool TryValidateInheritedRuntimeUnlockRetryRelease(
         FileTransferCoordinatorState state,
-        RuntimeUnlockRetryDispatchContract currentContract,
+        RuntimeUnlockRetryDispatchAuthority? predecessorAuthority,
         RuntimeUnlockRetryReleaseKind releaseKind,
         FileTransferAuthorityId? releaseAuthorityId,
         int releaseGeneration,
@@ -6707,7 +6737,14 @@ internal static class FileTransferCoordinator
         out string rejectionReason)
     {
         rejectionReason = "accepted";
-        if (releaseAuthorityId is not { IsDefault: false } || releaseGeneration <= 0)
+        if (predecessorAuthority is not { } expectedPredecessor ||
+            !TryValidateRuntimeUnlockRetryReleaseTuple(
+                releaseKind,
+                releaseAuthorityId,
+                releaseGeneration,
+                releaseOutcome,
+                expectedPredecessor,
+                out rejectionReason))
         {
             rejectionReason = "retry_dispatch_predecessor_release_invalid";
             return false;
@@ -6727,18 +6764,38 @@ internal static class FileTransferCoordinator
                 !string.Equals(
                     handoff.Settlement.Outcome.ToString(),
                     releaseOutcome,
-                    StringComparison.Ordinal) ||
-                currentContract.Authority.ReleaseKind != releaseKind ||
-                currentContract.Authority.ReleaseAuthorityId != releaseAuthorityId ||
-                currentContract.Authority.ReleaseGeneration != releaseGeneration ||
-                !string.Equals(
-                    currentContract.Authority.ReleaseOutcome,
-                    releaseOutcome,
                     StringComparison.Ordinal))
             {
                 rejectionReason = "retry_dispatch_predecessor_recovery_handoff_stale";
                 return false;
             }
+        }
+
+        return true;
+    }
+
+    private static bool TryValidateRuntimeUnlockRetryReleaseTuple(
+        RuntimeUnlockRetryReleaseKind releaseKind,
+        FileTransferAuthorityId? releaseAuthorityId,
+        int releaseGeneration,
+        string releaseOutcome,
+        RuntimeUnlockRetryDispatchAuthority? expectedAuthority,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (releaseAuthorityId is not { IsDefault: false } ||
+            releaseGeneration <= 0 ||
+            (expectedAuthority is { } predecessor &&
+             (predecessor.ReleaseKind != releaseKind ||
+              predecessor.ReleaseAuthorityId != releaseAuthorityId ||
+              predecessor.ReleaseGeneration != releaseGeneration ||
+              !string.Equals(
+                  predecessor.ReleaseOutcome,
+                  releaseOutcome,
+                  StringComparison.Ordinal))))
+        {
+            rejectionReason = "retry_dispatch_predecessor_release_invalid";
+            return false;
         }
 
         var outcomeValid = releaseKind switch
@@ -6753,7 +6810,7 @@ internal static class FileTransferCoordinator
                 StringComparison.Ordinal),
             RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield => string.Equals(
                 releaseOutcome,
-                "PairedYieldGranted",
+                nameof(FallbackTailYieldKind.Quiescent),
                 StringComparison.Ordinal),
             _ => false,
         };

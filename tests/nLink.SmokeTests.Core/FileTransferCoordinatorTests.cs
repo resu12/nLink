@@ -3633,6 +3633,209 @@ public sealed class FileTransferCoordinatorTests
             granted.Contract!.Authority.ReleaseKind);
         Assert.Equal(tailYield.AuthorityId, granted.Contract.Authority.ReleaseAuthorityId);
         Assert.Equal(tailYield.YieldGeneration, granted.Contract.Authority.ReleaseGeneration);
+        Assert.Equal(tailYield.YieldKind.ToString(), granted.Contract.Authority.ReleaseOutcome);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRetryDispatchAuthority_FallbackMissingDispatchSuccessorPreservesCanonicalReleaseAcrossTransportEpoch()
+    {
+        var (state, request, tailYield) = AuthorizeFallbackRuntimeUnlockRetryDispatchSource();
+        var first = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            state,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield,
+            tailYield.AuthorityId,
+            tailYield.YieldGeneration,
+            tailYield.YieldKind.ToString());
+        var predecessor = Assert.IsType<RuntimeUnlockRetryDispatchContract>(first.Contract);
+        Assert.True(predecessor.TryBindOfferAlias(2, "fallback-missing-dispatch"));
+        Assert.True(predecessor.TrySettle(
+            RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch,
+            "fallback_dispatch_not_observed"));
+        Assert.True(predecessor.TryCreateSettlementReport(out var predecessorReport));
+        var settlement = FileTransferCoordinator.ObserveRuntimeUnlockRetryDispatchSettlement(
+            first.State,
+            predecessor,
+            null,
+            predecessorReport);
+        Assert.Equal(RuntimeUnlockRetryDispatchSettlementDecisionStatus.Accepted, settlement.Status);
+
+        var sourceTransportEpoch = settlement.State.CurrentLeg!.TransportEpochId;
+        settlement.State.CurrentLeg.TransportEpochId = sourceTransportEpoch + 1;
+        var successorRequest = request with
+        {
+            RetiredOfferGeneration = 2,
+            DispatchAttemptGeneration = 2,
+            MissingDispatchSuccessorGeneration = 1,
+            PredecessorAuthorityId = predecessor.Authority.AuthorityId,
+            RequestActivePredecessorSupersession = false,
+        };
+        var successor = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            settlement.State,
+            successorRequest,
+            predecessor,
+            RuntimeUnlockRetryReleaseKind.Unknown,
+            null,
+            0,
+            "pending");
+
+        Assert.True(successor.Granted);
+        var successorContract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(successor.Contract);
+        Assert.Equal(2, successorContract.Authority.DispatchAttemptGeneration);
+        Assert.Equal(1, successorContract.Authority.MissingDispatchSuccessorGeneration);
+        Assert.Equal(predecessor.Authority.AuthorityId, successorContract.Authority.PredecessorAuthorityId);
+        Assert.False(successorContract.RequestActivePredecessorSupersession);
+        Assert.Equal(sourceTransportEpoch + 1, successorContract.Authority.TransportEpoch);
+        Assert.Equal(predecessor.Authority.ReleaseKind, successorContract.Authority.ReleaseKind);
+        Assert.Equal(predecessor.Authority.ReleaseAuthorityId, successorContract.Authority.ReleaseAuthorityId);
+        Assert.Equal(predecessor.Authority.ReleaseGeneration, successorContract.Authority.ReleaseGeneration);
+        Assert.Equal(nameof(FallbackTailYieldKind.Quiescent), successorContract.Authority.ReleaseOutcome);
+
+        var mutatedAuthority = successorContract.Authority with
+        {
+            ReleaseAuthorityId = new FileTransferAuthorityId("fta2-mutated-successor-release"),
+        };
+        var mutatedContract = new RuntimeUnlockRetryDispatchContract(
+            mutatedAuthority,
+            successorContract.RequestActivePredecessorSupersession,
+            successorContract.RegularV4LivenessGeneration,
+            successorContract.RequestBridgeDecisionGeneration);
+        var mutatedState = successor.State with
+        {
+            CurrentRuntimeUnlockRetryDispatchAuthority = mutatedAuthority,
+        };
+        var mutatedDecision = successor with
+        {
+            Contract = mutatedContract,
+            State = mutatedState,
+        };
+        Assert.False(FileTransferCoordinator.TryIssueRuntimeUnlockRetryDispatchInstallReceipt(
+            mutatedState,
+            mutatedDecision,
+            successorRequest,
+            mutatedContract,
+            activePredecessorContract: null,
+            lastSettlement: predecessorReport,
+            currentReceipt: null,
+            lastInstallGeneration: 1,
+            out _,
+            out var mutatedMismatchField));
+        Assert.Equal("release_currentness", mutatedMismatchField);
+
+        Assert.True(FileTransferCoordinator.TryIssueRuntimeUnlockRetryDispatchInstallReceipt(
+            successor.State,
+            successor,
+            successorRequest,
+            successorContract,
+            activePredecessorContract: null,
+            lastSettlement: predecessorReport,
+            currentReceipt: null,
+            lastInstallGeneration: 1,
+            out var receipt,
+            out var mismatchField));
+        Assert.Equal("none", mismatchField);
+        Assert.Equal(2, receipt.InstallGeneration);
+        Assert.Equal(successorContract.Authority, receipt.Authority);
+
+        Assert.True(successorContract.TryBindOfferAlias(3, "fallback-successor-bounded"));
+        Assert.True(successorContract.TrySettle(
+            RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch,
+            "fallback_successor_dispatch_not_observed"));
+        Assert.True(successorContract.TryCreateSettlementReport(out var successorReport));
+        var successorSettlement = FileTransferCoordinator.ObserveRuntimeUnlockRetryDispatchSettlement(
+            successor.State,
+            successorContract,
+            predecessorReport,
+            successorReport);
+        Assert.Equal(RuntimeUnlockRetryDispatchSettlementDecisionStatus.Accepted, successorSettlement.Status);
+        var bounded = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            successorSettlement.State,
+            successorRequest with
+            {
+                RetiredOfferGeneration = 3,
+                DispatchAttemptGeneration = 3,
+                MissingDispatchSuccessorGeneration = 2,
+                PredecessorAuthorityId = successorContract.Authority.AuthorityId,
+            },
+            successorContract,
+            RuntimeUnlockRetryReleaseKind.Unknown,
+            null,
+            0,
+            "pending");
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, bounded.Status);
+        Assert.Equal("retry_dispatch_missing_successor_limit_exhausted", bounded.Reason);
+        Assert.Null(bounded.State.CurrentRuntimeUnlockRetryDispatchAuthority);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRetryDispatchAuthority_FallbackReleaseTupleRejectsSyntheticAndMutatedValues()
+    {
+        var (state, request, tailYield) = AuthorizeFallbackRuntimeUnlockRetryDispatchSource();
+
+        RuntimeUnlockRetryDispatchDecision Authorize(
+            FileTransferAuthorityId authorityId,
+            int generation,
+            string outcome)
+            => FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+                state,
+                request,
+                null,
+                RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield,
+                authorityId,
+                generation,
+                outcome);
+
+        foreach (var rejected in new[]
+                 {
+                     Authorize(tailYield.AuthorityId, tailYield.YieldGeneration, "PairedYieldGranted"),
+                     Authorize(new FileTransferAuthorityId("fta2-mutated-fallback-yield"), tailYield.YieldGeneration, tailYield.YieldKind.ToString()),
+                     Authorize(tailYield.AuthorityId, tailYield.YieldGeneration + 1, tailYield.YieldKind.ToString()),
+                     Authorize(tailYield.AuthorityId, tailYield.YieldGeneration, FallbackTailYieldKind.Failed.ToString()),
+                 })
+        {
+            Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, rejected.Status);
+            Assert.Equal("retry_dispatch_predecessor_release_invalid", rejected.Reason);
+            Assert.Null(rejected.Contract);
+            Assert.Null(rejected.State.CurrentRuntimeUnlockRetryDispatchAuthority);
+        }
+    }
+
+    [Fact]
+    public void RuntimeUnlockRetryDispatchAuthority_FallbackActiveSupersessionPreservesCanonicalRelease()
+    {
+        var (state, request, tailYield) = AuthorizeFallbackRuntimeUnlockRetryDispatchSource();
+        var first = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            state,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield,
+            tailYield.AuthorityId,
+            tailYield.YieldGeneration,
+            tailYield.YieldKind.ToString());
+        var predecessor = Assert.IsType<RuntimeUnlockRetryDispatchContract>(first.Contract);
+        var successorRequest = request with
+        {
+            DispatchAttemptGeneration = 2,
+            PredecessorAuthorityId = predecessor.Authority.AuthorityId,
+            RequestActivePredecessorSupersession = true,
+        };
+
+        var successor = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            first.State,
+            successorRequest,
+            predecessor,
+            RuntimeUnlockRetryReleaseKind.Unknown,
+            null,
+            0,
+            "pending");
+
+        Assert.True(successor.Granted);
+        Assert.True(successor.Contract!.RequestActivePredecessorSupersession);
+        Assert.Equal(predecessor.Authority.ReleaseKind, successor.Contract.Authority.ReleaseKind);
+        Assert.Equal(predecessor.Authority.ReleaseAuthorityId, successor.Contract.Authority.ReleaseAuthorityId);
+        Assert.Equal(predecessor.Authority.ReleaseGeneration, successor.Contract.Authority.ReleaseGeneration);
+        Assert.Equal(predecessor.Authority.ReleaseOutcome, successor.Contract.Authority.ReleaseOutcome);
     }
 
     [Fact]
