@@ -2158,6 +2158,200 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_count"]);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryFallbackPairedYieldSuccessorReleaseInvalid_HasFullCompactParity(
+        bool compact,
+        bool recovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_fallback_release_successor";
+        const string predecessorAuthorityId = "fta2-runtime-unlock-fallback-1";
+        const string successorAuthorityId = "fta2-runtime-unlock-fallback-2";
+        const string settlementReason = "runtime_unlock_retry_dispatch_missing_after_authority_granted";
+        var messages = new List<string>
+        {
+            "event=file_transfer_outbound_terminal; session_id=sess_stale_sparse_receive; transfer_id=transfer_stale_sparse_receive; state=Failed; error_code=diagnostic_fixture",
+            "event=filetransfer_data_frame_ignored; session_id=sess_stale_sparse_receive; transfer_id=transfer_stale_sparse_receive; frame_type=filetransfer.cancel.v6; chunk_index=(none); reason=post_terminal_late_frame_canceled",
+            "event=filetransfer_data_frame_ignored; session_id=sess_stale_sparse_receive; transfer_id=transfer_stale_sparse_receive; frame_type=filetransfer.state.v4; chunk_index=(none); reason=stale_outbound_sparse_receive_descriptor",
+            RuntimeUnlockFallbackPairedYieldInstallLine(
+                "runtime_unlock_retry_dispatch_decision_staged",
+                transferId,
+                predecessorAuthorityId,
+                installGeneration: 0,
+                suffix: "; stage_status=Staged; decision_status=Granted",
+                decisionReason: "retry_dispatch_decision_staged"),
+            RuntimeUnlockFallbackPairedYieldInstallLine(
+                "runtime_unlock_retry_dispatch_install_receipt_issued",
+                transferId,
+                predecessorAuthorityId,
+                installGeneration: 1,
+                suffix: "; decision_status=Granted",
+                decisionReason: "retry_dispatch_install_receipt_issued"),
+            RuntimeUnlockFallbackPairedYieldInstallLine(
+                "runtime_unlock_retry_dispatch_install_committed",
+                transferId,
+                predecessorAuthorityId,
+                installGeneration: 1,
+                suffix: "; install_status=Installed; decision_status=Granted",
+                decisionReason: "retry_dispatch_install_committed"),
+            RuntimeUnlockFallbackPairedYieldInstallLine(
+                "runtime_unlock_retry_dispatch_authority_granted",
+                transferId,
+                predecessorAuthorityId,
+                installGeneration: 1,
+                suffix: "; install_status=Installed; decision_status=Granted",
+                decisionReason: "accepted"),
+            RuntimeUnlockFallbackPairedYieldLine(
+                "runtime_unlock_retry_dispatch_missing_after_authority_granted",
+                transferId,
+                predecessorAuthorityId,
+                suffix: "; offer_generation=2",
+                decisionReason: settlementReason),
+            RuntimeUnlockFallbackPairedYieldLine(
+                "runtime_unlock_retry_dispatch_contract_settled",
+                transferId,
+                predecessorAuthorityId,
+                suffix: "; offer_generation=2; settlement_outcome=MissingDispatch; dispatch_observed=0",
+                decisionReason: settlementReason),
+            RuntimeUnlockFallbackPairedYieldLine(
+                "runtime_unlock_retry_dispatch_settlement_reported",
+                transferId,
+                predecessorAuthorityId,
+                suffix: $"; settlement_outcome=MissingDispatch; settlement_reason={settlementReason}; subscriber_present=1",
+                decisionReason: "reported_to_core"),
+            RuntimeUnlockFallbackPairedYieldLine(
+                "runtime_unlock_retry_dispatch_settlement_decided",
+                transferId,
+                predecessorAuthorityId,
+                suffix: $"; settlement_outcome=MissingDispatch; settlement_reason={settlementReason}; decision_status=Accepted",
+                decisionReason: "retry_dispatch_settlement_accepted"),
+            $"event=runtime_unlock_retry_successor_intent_requested; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=outbound; predecessor_authority_id={predecessorAuthorityId}; contract_generation=7; retired_generation=2; dispatch_attempt_generation=2; missing_dispatch_successor_generation=1; missing_dispatch_successor_limit=1; request_active_predecessor_supersession=0; intent_disposition=Requested; trigger=predecessor_missing_dispatch_settlement_accepted",
+            RuntimeUnlockFallbackPairedYieldLine(
+                "runtime_unlock_retry_successor_intent_rejected",
+                transferId,
+                predecessorAuthorityId,
+                suffix: $"; requested_predecessor_authority_id={predecessorAuthorityId}; requested_retired_generation=2; requested_dispatch_attempt_generation=2; requested_missing_dispatch_successor_generation=1; request_active_predecessor_supersession=0; intent_disposition=Rejected",
+                decisionReason: "retry_dispatch_predecessor_release_invalid")
+        };
+
+        if (recovered)
+        {
+            messages.AddRange(
+            [
+                RuntimeUnlockFallbackPairedYieldInstallLine(
+                    "runtime_unlock_retry_dispatch_decision_staged",
+                    transferId,
+                    successorAuthorityId,
+                    predecessorAuthorityId,
+                    retiredGeneration: 2,
+                    dispatchAttemptGeneration: 2,
+                    missingDispatchSuccessorGeneration: 1,
+                    installGeneration: 0,
+                    suffix: "; stage_status=Staged; decision_status=Granted",
+                    decisionReason: "retry_dispatch_decision_staged"),
+                RuntimeUnlockFallbackPairedYieldInstallLine(
+                    "runtime_unlock_retry_dispatch_install_receipt_issued",
+                    transferId,
+                    successorAuthorityId,
+                    predecessorAuthorityId,
+                    retiredGeneration: 2,
+                    dispatchAttemptGeneration: 2,
+                    missingDispatchSuccessorGeneration: 1,
+                    installGeneration: 2,
+                    suffix: "; decision_status=Granted",
+                    decisionReason: "retry_dispatch_install_receipt_issued"),
+                RuntimeUnlockFallbackPairedYieldInstallLine(
+                    "runtime_unlock_retry_dispatch_install_committed",
+                    transferId,
+                    successorAuthorityId,
+                    predecessorAuthorityId,
+                    retiredGeneration: 2,
+                    dispatchAttemptGeneration: 2,
+                    missingDispatchSuccessorGeneration: 1,
+                    installGeneration: 2,
+                    suffix: "; install_status=Installed; decision_status=Granted",
+                    decisionReason: "retry_dispatch_install_committed"),
+                RuntimeUnlockFallbackPairedYieldInstallLine(
+                    "runtime_unlock_retry_dispatch_authority_granted",
+                    transferId,
+                    successorAuthorityId,
+                    predecessorAuthorityId,
+                    retiredGeneration: 2,
+                    dispatchAttemptGeneration: 2,
+                    missingDispatchSuccessorGeneration: 1,
+                    installGeneration: 2,
+                    suffix: "; install_status=Installed; decision_status=Granted",
+                    decisionReason: "accepted"),
+                RuntimeUnlockFallbackPairedYieldLine(
+                    "runtime_unlock_retry_dispatch_observed",
+                    transferId,
+                    successorAuthorityId,
+                    predecessorAuthorityId,
+                    retiredGeneration: 2,
+                    dispatchAttemptGeneration: 2,
+                    missingDispatchSuccessorGeneration: 1),
+                RuntimeUnlockFallbackPairedYieldLine(
+                    "runtime_unlock_retry_dispatch_contract_settled",
+                    transferId,
+                    successorAuthorityId,
+                    predecessorAuthorityId,
+                    retiredGeneration: 2,
+                    dispatchAttemptGeneration: 2,
+                    missingDispatchSuccessorGeneration: 1,
+                    suffix: "; settlement_outcome=DispatchObserved; dispatch_observed=1",
+                    decisionReason: "runtime_unlock_retry_dispatch_observed")
+            ]);
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(transferId, messages.ToArray()),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_distinct_count"]);
+        Assert.Equal(recovered ? "1" : "0", verdict["runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_recovered_count"]);
+        Assert.Equal(recovered ? "0" : "1", verdict["runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_unresolved_count"]);
+        Assert.Equal(recovered ? "pass" : "fail", verdict["runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_verdict"]);
+        if (verdict.TryGetValue(
+                "runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_count",
+                out var genericSuccessorMissingCount))
+        {
+            Assert.Equal("0", genericSuccessorMissingCount);
+        }
+
+        if (!recovered)
+        {
+            Assert.Equal("incomplete_proof", verdict["acceptance_failure_class"]);
+            Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+            Assert.Equal("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid", verdict["recovery_failure_class"]);
+            Assert.Equal("runtime_unlock_retry_successor_intent_rejected", verdict["first_proof_chain_failure_event"]);
+            Assert.Equal("retry_dispatch_predecessor_release_invalid", verdict["first_proof_chain_failure_reason"]);
+            Assert.Equal("14", verdict["first_proof_chain_failure_sequence"]);
+        }
+        else
+        {
+            Assert.NotEqual("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid", verdict["recovery_failure_class"]);
+            Assert.NotEqual("runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch", verdict["recovery_failure_class"]);
+        }
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RuntimeUnlockRetrySuccessorAttemptMismatch_PrecedesLaterFallbackSymptoms()
@@ -8620,6 +8814,75 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             missingDispatchSuccessorGeneration: missingDispatchSuccessorGeneration,
             decisionReason: decisionReason);
     }
+
+    private static string RuntimeUnlockFallbackPairedYieldLine(
+        string eventName,
+        string transferId,
+        string authorityId,
+        string predecessorAuthorityId = "(none)",
+        long retiredGeneration = 1,
+        int dispatchAttemptGeneration = 1,
+        int missingDispatchSuccessorGeneration = 0,
+        string suffix = "",
+        string decisionReason = "accepted")
+        => RuntimeUnlockRetrySchema2Line(
+                eventName,
+                transferId,
+                authorityId: authorityId,
+                predecessorAuthorityId: predecessorAuthorityId,
+                retiredGeneration: retiredGeneration,
+                dispatchAttemptGeneration: dispatchAttemptGeneration,
+                missingDispatchSuccessorGeneration: missingDispatchSuccessorGeneration,
+                runtimeOwnerFamily: "post_tuna_fallback_v6",
+                runtimeOwnerCreatedReason: "header_switch_off",
+                sourcePublicationReason: "header_switch_off",
+                sourcePublicationTargetRoute: "post_tuna_fallback_v6",
+                sourcePublicationTargetRouteKind: "PostTunaFallbackV6",
+                sourcePublicationTargetProtocolVersion: 6,
+                suffix: suffix,
+                decisionReason: decisionReason)
+            .Replace(
+                "route=regular_nkn_v4_fast; route_kind=RegularNknV4Fast; protocol_version=4;",
+                "route=post_tuna_fallback_v6; route_kind=PostTunaFallbackV6; protocol_version=6;",
+                StringComparison.Ordinal)
+            .Replace(
+                "retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=session_liveness_timeout_pending; release_kind=RegularV4RepairSettlement; release_authority_id=fta2-regular-v4-release-1; release_generation=3; release_outcome=ProgressObserved;",
+                "retry_reason=runtime_unlock_after_fallback_tail_quiescent; recovery_reason=post_tuna_fallback_activation_intent; release_kind=FallbackPairedTailYield; release_authority_id=fta2-fallback-tail-yield-1; release_generation=1; release_outcome=Quiescent;",
+                StringComparison.Ordinal)
+            .Replace(
+                "runtime_owner_route=regular_nkn_v4_fast; runtime_owner_route_kind=RegularNknV4Fast; runtime_owner_protocol_version=4;",
+                "runtime_owner_route=post_tuna_fallback_v6; runtime_owner_route_kind=PostTunaFallbackV6; runtime_owner_protocol_version=6;",
+                StringComparison.Ordinal)
+            .Replace(
+                "source_publication_route=regular_nkn_v4_fast; source_publication_route_kind=RegularNknV4Fast; source_publication_protocol_version=4;",
+                "source_publication_route=post_tuna_fallback_v6; source_publication_route_kind=PostTunaFallbackV6; source_publication_protocol_version=6;",
+                StringComparison.Ordinal)
+            .Replace(
+                "source_publication_runtime_owner_route=regular_nkn_v4_fast; source_publication_runtime_owner_route_kind=RegularNknV4Fast; source_publication_runtime_owner_protocol_version=4;",
+                "source_publication_runtime_owner_route=post_tuna_fallback_v6; source_publication_runtime_owner_route_kind=PostTunaFallbackV6; source_publication_runtime_owner_protocol_version=6;",
+                StringComparison.Ordinal);
+
+    private static string RuntimeUnlockFallbackPairedYieldInstallLine(
+        string eventName,
+        string transferId,
+        string authorityId,
+        string predecessorAuthorityId = "(none)",
+        long retiredGeneration = 1,
+        int dispatchAttemptGeneration = 1,
+        int missingDispatchSuccessorGeneration = 0,
+        long installGeneration = 1,
+        string suffix = "",
+        string decisionReason = "accepted")
+        => RuntimeUnlockFallbackPairedYieldLine(
+            eventName,
+            transferId,
+            authorityId,
+            predecessorAuthorityId,
+            retiredGeneration,
+            dispatchAttemptGeneration,
+            missingDispatchSuccessorGeneration,
+            $"; install_generation={installGeneration}; request_regular_v4_liveness_generation=0; request_bridge_decision_generation=0; request_active_predecessor_supersession=0{suffix}",
+            decisionReason);
 
     private static string[] RuntimeUnlockRetryStagedIssuedGrantWithoutCommitLines(
         string grantLine)

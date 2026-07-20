@@ -89,6 +89,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("0", summary["runtime_unlock_precommit_fallback_recovery_handoff_suppressed_recovered_count"]);
             Assert.Equal("0", summary["runtime_unlock_precommit_fallback_recovery_handoff_suppressed_unresolved_count"]);
             Assert.Equal("none", summary["runtime_unlock_precommit_fallback_recovery_handoff_suppression_verdict"]);
+            Assert.Equal("0", summary["runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_raw_count"]);
+            Assert.Equal("0", summary["runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_distinct_count"]);
+            Assert.Equal("0", summary["runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_recovered_count"]);
+            Assert.Equal("0", summary["runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_unresolved_count"]);
+            Assert.Equal("none", summary["runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_verdict"]);
             Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.manifest_present"]);
             Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-256mb.cursor_integrity_verdict"]);
             Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.current_runtime_proof"]);
@@ -119,6 +124,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count"]);
             Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count"]);
             Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_raw_count"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_distinct_count"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_recovered_count"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_unresolved_count"]);
+            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_verdict"]);
             var manifestPath = Path.Combine(runRoot, "route-acceptance-run-manifest.json");
             Assert.True(File.Exists(manifestPath), "Expected immutable route-acceptance manifest.");
             await using (var manifestStream = File.OpenRead(manifestPath))
@@ -149,6 +159,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                 Assert.Equal(0, root.GetProperty("runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRecoveredCount").GetInt32());
                 Assert.Equal(0, root.GetProperty("runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedUnresolvedCount").GetInt32());
                 Assert.Equal("none", root.GetProperty("runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressionVerdict").GetString());
+                Assert.Equal(0, root.GetProperty("runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRawCount").GetInt32());
+                Assert.Equal(0, root.GetProperty("runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidDistinctCount").GetInt32());
+                Assert.Equal(0, root.GetProperty("runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRecoveredCount").GetInt32());
+                Assert.Equal(0, root.GetProperty("runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidUnresolvedCount").GetInt32());
+                Assert.Equal("none", root.GetProperty("runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseVerdict").GetString());
                 Assert.Equal(0, root.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedRawCount").GetInt32());
                 Assert.Equal(0, root.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedDistinctCount").GetInt32());
                 Assert.Equal(0, root.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount").GetInt32());
@@ -181,6 +196,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                 Assert.Equal(0, run.GetProperty("runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRecoveredCount").GetInt32());
                 Assert.Equal(0, run.GetProperty("runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressedUnresolvedCount").GetInt32());
                 Assert.Equal("none", run.GetProperty("runtimeUnlockPrecommitFallbackRecoveryHandoffSuppressionVerdict").GetString());
+                Assert.Equal(0, run.GetProperty("runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRawCount").GetInt32());
+                Assert.Equal(0, run.GetProperty("runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidDistinctCount").GetInt32());
+                Assert.Equal(0, run.GetProperty("runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRecoveredCount").GetInt32());
+                Assert.Equal(0, run.GetProperty("runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidUnresolvedCount").GetInt32());
+                Assert.Equal("none", run.GetProperty("runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseVerdict").GetString());
                 Assert.Equal(0, run.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedRawCount").GetInt32());
                 Assert.Equal(0, run.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedDistinctCount").GetInt32());
                 Assert.Equal(0, run.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount").GetInt32());

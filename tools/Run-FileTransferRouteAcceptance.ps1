@@ -1147,6 +1147,11 @@ function New-RouteAcceptanceRunResult {
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount = 0
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedUnresolvedCount = 0
         runtimeUnlockRetryDispatchZeroOfferSuccessorVerdict = 'none'
+        runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRawCount = 0
+        runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidDistinctCount = 0
+        runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRecoveredCount = 0
+        runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidUnresolvedCount = 0
+        runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseVerdict = 'none'
         firstProofChainFailureClass = '(none)'
         firstProofChainFailureEvent = '(none)'
         firstProofChainFailureReason = '(none)'
@@ -2684,6 +2689,11 @@ function Assert-Phase4OperatorVerdict {
     $Result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected_recovered_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected_unresolved_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchZeroOfferSuccessorVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_zero_offer_successor_verdict' -DefaultValue 'none'
+    $Result.runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_raw_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_distinct_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_recovered_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_unresolved_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_verdict' -DefaultValue 'none'
     $Result.firstProofChainFailureEvent = Get-RouteAcceptanceReportValue -Report $operator -Name 'first_proof_chain_failure_event' -DefaultValue '(none)'
     $Result.firstProofChainFailureReason = Get-RouteAcceptanceReportValue -Report $operator -Name 'first_proof_chain_failure_reason' -DefaultValue '(none)'
     $Result.firstProofChainFailureSequence = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'first_proof_chain_failure_sequence' -DefaultValue '0')
@@ -8215,6 +8225,11 @@ function New-RouteAcceptanceSummaryRunDto {
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount = [int]$Result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedUnresolvedCount = [int]$Result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedUnresolvedCount
         runtimeUnlockRetryDispatchZeroOfferSuccessorVerdict = [string]$Result.runtimeUnlockRetryDispatchZeroOfferSuccessorVerdict
+        runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRawCount = [int]$Result.runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRawCount
+        runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidDistinctCount = [int]$Result.runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidDistinctCount
+        runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRecoveredCount = [int]$Result.runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRecoveredCount
+        runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidUnresolvedCount = [int]$Result.runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidUnresolvedCount
+        runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseVerdict = [string]$Result.runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseVerdict
         firstProofChainFailureClass = [string]$Result.firstProofChainFailureClass
         firstProofChainFailureEvent = [string]$Result.firstProofChainFailureEvent
         firstProofChainFailureReason = [string]$Result.firstProofChainFailureReason
@@ -8455,6 +8470,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount = 0
     $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount = 0
     $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedUnresolvedCount = 0
+    $runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRawCount = 0
+    $runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidDistinctCount = 0
+    $runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRecoveredCount = 0
+    $runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidUnresolvedCount = 0
     foreach ($runDto in $runDtos) {
         $runtimeUnlockRetryDispatchAuthorityGrantedRawCount += [int]$runDto.runtimeUnlockRetryDispatchAuthorityGrantedRawCount
         $runtimeUnlockRetryDispatchAuthorityGrantedCount += [int]$runDto.runtimeUnlockRetryDispatchAuthorityGrantedCount
@@ -8546,6 +8565,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount += [int]$runDto.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount
         $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount += [int]$runDto.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount
         $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedUnresolvedCount += [int]$runDto.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedUnresolvedCount
+        $runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRawCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRawCount
+        $runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidDistinctCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidDistinctCount
+        $runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRecoveredCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRecoveredCount
+        $runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidUnresolvedCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidUnresolvedCount
     }
     $runtimeUnlockRegularV4RouteCommitSendDrainVerdict = if (
         $runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount -gt 0 -or
@@ -8750,6 +8773,18 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     }
     elseif ($runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount -gt 0 -or
         @($runDtos | Where-Object { [string]$_.runtimeUnlockRetryDispatchZeroOfferSuccessorVerdict -eq 'pass' }).Count -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
+    }
+    $runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseVerdict = if (
+        $runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidUnresolvedCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseVerdict -eq 'fail' }).Count -gt 0) {
+        'fail'
+    }
+    elseif ($runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidDistinctCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseVerdict -eq 'pass' }).Count -gt 0) {
         'pass'
     }
     else {
@@ -8971,6 +9006,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("runtime_unlock_retry_dispatch_zero_offer_successor_rejected_recovered_count={0}" -f $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_rejected_unresolved_count={0}" -f $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedUnresolvedCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_verdict={0}" -f $runtimeUnlockRetryDispatchZeroOfferSuccessorVerdict),
+        ("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_raw_count={0}" -f $runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRawCount),
+        ("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_distinct_count={0}" -f $runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidDistinctCount),
+        ("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_recovered_count={0}" -f $runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRecoveredCount),
+        ("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_unresolved_count={0}" -f $runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_verdict={0}" -f $runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseVerdict),
         ("fallback_tail_bridge_recovery_generation_pairing_verdict={0}" -f $fallbackTailBridgeRecoveryGenerationPairingVerdict),
         ("fallback_tail_bridge_recovery_generation_mismatch_raw_count={0}" -f $fallbackTailBridgeRecoveryGenerationMismatchRawCount),
         ("fallback_tail_bridge_recovery_generation_mismatch_distinct_count={0}" -f $fallbackTailBridgeRecoveryGenerationMismatchDistinctCount),
@@ -9164,6 +9204,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.runtime_unlock_retry_dispatch_zero_offer_successor_rejected_recovered_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_zero_offer_successor_rejected_unresolved_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedUnresolvedCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_zero_offer_successor_verdict={1}" -f $prefix, $result.runtimeUnlockRetryDispatchZeroOfferSuccessorVerdict)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_raw_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRawCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_distinct_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidDistinctCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_recovered_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRecoveredCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_unresolved_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidUnresolvedCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_verdict={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseVerdict)
         $textLines += ("{0}.first_proof_chain_failure_class={1}" -f $prefix, $result.firstProofChainFailureClass)
         $textLines += ("{0}.first_proof_chain_failure_event={1}" -f $prefix, $result.firstProofChainFailureEvent)
         $textLines += ("{0}.first_proof_chain_failure_reason={1}" -f $prefix, $result.firstProofChainFailureReason)
@@ -9420,6 +9465,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount = $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedUnresolvedCount = $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedUnresolvedCount
         runtimeUnlockRetryDispatchZeroOfferSuccessorVerdict = $runtimeUnlockRetryDispatchZeroOfferSuccessorVerdict
+        runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRawCount = $runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRawCount
+        runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidDistinctCount = $runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidDistinctCount
+        runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRecoveredCount = $runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRecoveredCount
+        runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidUnresolvedCount = $runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidUnresolvedCount
+        runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseVerdict = $runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseVerdict
         fallbackTailBridgeRecoveryGenerationPairingVerdict = $fallbackTailBridgeRecoveryGenerationPairingVerdict
         fallbackTailBridgeRecoveryGenerationMismatchRawCount = $fallbackTailBridgeRecoveryGenerationMismatchRawCount
         fallbackTailBridgeRecoveryGenerationMismatchDistinctCount = $fallbackTailBridgeRecoveryGenerationMismatchDistinctCount
