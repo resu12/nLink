@@ -6479,7 +6479,8 @@ public sealed partial class SessionFileTransferService
             context.PullPostTunaRecoveryActive &&
             currentFallbackLegMatchesLiveEpoch &&
             context.PullPostTunaRecoveryGeneration == generation &&
-            context.PullPostTunaRecoveryFrontierChunkIndex == frontier)
+            context.PullPostTunaRecoveryFrontierChunkIndex == frontier &&
+            context.PendingFallbackTailYieldTransportEpochReauthorizationRequest is null)
         {
             return;
         }
@@ -6747,7 +6748,8 @@ public sealed partial class SessionFileTransferService
         if (context.PullPostTunaRecoveryActive &&
             currentFallbackLegMatchesLiveEpoch &&
             context.PullPostTunaRecoveryGeneration == generation &&
-            context.PullPostTunaRecoveryFrontierChunkIndex == frontier)
+            context.PullPostTunaRecoveryFrontierChunkIndex == frontier &&
+            context.PendingFallbackTailYieldTransportEpochReauthorizationRequest is null)
         {
             return;
         }

@@ -4722,7 +4722,13 @@ public sealed partial class SessionFileTransferService
             epoch.EpochId,
             "peer_transport_epoch_adopted");
         AdoptOutboundFallbackLegTransportEpochLocked(context, epoch.EpochId, reason);
-        ResolveOutboundFallbackTailSurvivalLocked(context, "transport_epoch_adopted");
+        if (TryStartOutboundFallbackTailTransportEpochReauthorizationRestartLocked(
+                context,
+                epoch.EpochId,
+                "peer_transport_epoch_adopted"))
+        {
+            ResolveOutboundFallbackTailSurvivalLocked(context, "transport_epoch_adopted");
+        }
         context.StatusMessage = GetV6TransportEpochStatus(epoch);
         LogV6TransportEpochStarted(context.TransferId, context.SessionId, epoch);
         PublishV6TransportEpochSnapshot(context.SessionId, context.TransferId, epoch);
@@ -4867,7 +4873,13 @@ public sealed partial class SessionFileTransferService
         context.V6LastReceiverStateSentUtc = null;
         context.V6LastFrontierRequestSentUtc = null;
         AdoptInboundFallbackLegTransportEpochLocked(context, epoch.EpochId, reason);
-        ResolveInboundFallbackTailSurvivalLocked(context, "transport_epoch_adopted");
+        if (TryStartInboundFallbackTailTransportEpochReauthorizationRestartLocked(
+                context,
+                epoch.EpochId,
+                "peer_transport_epoch_adopted"))
+        {
+            ResolveInboundFallbackTailSurvivalLocked(context, "transport_epoch_adopted");
+        }
         context.StatusMessage = GetV6TransportEpochStatus(epoch);
         LogV6TransportEpochStarted(context.TransferId, context.SessionId, epoch);
         PublishV6TransportEpochSnapshot(context.SessionId, context.TransferId, epoch);
@@ -5634,6 +5646,7 @@ public sealed partial class SessionFileTransferService
                 fallbackFrontierContractHandoff) &&
             !fallbackFrontierContractHandoff.Lifecycle.IsSettled;
         var fallbackTailYieldReauthorizationExpected =
+            context.PendingFallbackTailYieldTransportEpochReauthorizationRequest is not null ||
             context.RequiredFallbackTailYieldTransportEpochReauthorization is
             {
                 TargetTransportEpoch: var requiredTransportEpoch,
@@ -5778,6 +5791,7 @@ public sealed partial class SessionFileTransferService
         }
 
         var fallbackTailYieldReauthorizationExpected =
+            context.PendingFallbackTailYieldTransportEpochReauthorizationRequest is not null ||
             context.RequiredFallbackTailYieldTransportEpochReauthorization is
             {
                 TargetTransportEpoch: var requiredTransportEpoch,

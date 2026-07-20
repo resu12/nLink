@@ -14254,6 +14254,485 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     [Theory]
+    [InlineData(false, true, false, false)]
+    [InlineData(true, true, false, false)]
+    [InlineData(false, false, false, false)]
+    [InlineData(true, false, false, false)]
+    [InlineData(false, false, true, false)]
+    [InlineData(true, false, true, false)]
+    [InlineData(false, false, false, true)]
+    [InlineData(true, false, false, true)]
+    [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
+    public async Task PeerTransportEpochAdoption_StartsCoordinatorReauthorizationBeforeTailSurvival(
+        bool inbound,
+        bool dataSessionInitiallyAvailable,
+        bool recheckWithPeerProof,
+        bool replaceCheckpointBeforeRestart)
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        var transferId = inbound
+            ? "transfer_peer_epoch_inbound_reauthorization_restart"
+            : "transfer_peer_epoch_outbound_reauthorization_restart";
+        var sessionId = $"session_{transferId}";
+        var context = inbound
+            ? CreatePostTunaFallbackV6InboundContext(transferId)
+            : CreatePostTunaFallbackV6OutboundContext(
+                transferId,
+                remoteNextExpectedChunkIndex: 100,
+                chunksAcceptedForTransport: 100,
+                remoteGrantedUntilExclusive: 100,
+                chunkCount: 256);
+        serviceType
+            .GetField(
+                inbound ? "inboundTransfer" : "outboundTransfer",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var dataSession = new MutableAvailabilityDataSession(
+            sessionId,
+            transferId,
+            dataSessionInitiallyAvailable);
+        SetPrivateProperty(context, "DataSession", dataSession);
+        SetPrivateProperty(context, "DataSessionGeneration", 1L);
+        SetPrivateProperty(context, "PullTransportRebindGeneration", 2);
+        SetPrivateProperty(context, "PullPostTunaRecoveryActive", false);
+        var originalLeg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        originalLeg.State = FileTransferLegState.Active;
+        originalLeg.CanSendData = true;
+        originalLeg.CheckpointRequestId = null;
+        originalLeg.TransportEpochId = 1;
+        originalLeg.BridgeRecoveryGeneration = 1;
+
+        object?[] authorizeArgs =
+        [
+            context,
+            originalLeg,
+            originalLeg.TransportEpochId,
+            originalLeg.ProvenCommittedChunkIndex,
+            originalLeg.ProvenHighestObservedChunkIndex,
+            "fallback_tail_quiescent",
+            null,
+        ];
+        var authorizeMethod = serviceType
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(candidate =>
+                candidate.Name == (inbound
+                    ? "TryMarkInboundFallbackTailQuiescentWithCoordinatorLocked"
+                    : "TryMarkOutboundFallbackTailQuiescentWithCoordinatorLocked") &&
+                candidate.GetParameters()[0].ParameterType == context.GetType());
+        Assert.True((bool)authorizeMethod.Invoke(null, authorizeArgs)!);
+        var predecessor = Assert.IsType<FallbackTailYieldDecision>(authorizeArgs[^1]);
+        var recordMethod = serviceType.GetMethod(
+            inbound
+                ? "RecordInboundFallbackTailLocalYieldLocked"
+                : "RecordOutboundFallbackTailLocalYieldLocked",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        Assert.True((bool)recordMethod.Invoke(
+            service,
+            [
+                context,
+                originalLeg,
+                predecessor,
+                originalLeg.ProvenCommittedChunkIndex,
+                originalLeg.ProvenHighestObservedChunkIndex,
+                "fallback_tail_quiescent",
+            ])!);
+        serviceType
+            .GetMethod(
+                inbound
+                    ? "ClearInboundFallbackTailRecoveryOwnershipAfterYieldLocked"
+                    : "ClearOutboundFallbackTailRecoveryOwnershipAfterYieldLocked",
+                BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, originalLeg, "fallback_tail_quiescent"]);
+
+        if (!dataSessionInitiallyAvailable)
+        {
+            await (Task)serviceType
+                .GetMethod(
+                    "HandleDataSessionAvailabilityChangedAsync",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(
+                    service,
+                    [
+                        dataSession,
+                        new FileTransferDataSessionAvailabilityChangedEventArgs(
+                            isAvailable: false,
+                            reason: "peer_transport_epoch_data_session_unavailable",
+                            requiresResumeRequest: false,
+                            FileTransferTransportHandoffKind.None,
+                            FileTransferTransportKind.Unknown),
+                    ])!;
+            Assert.True(GetPrivateProperty<bool>(context, "PullTransportPaused"));
+        }
+
+        var logStart = GetOperationalLogLength();
+        var peerEpoch = new FileTransferTransportEpochV6
+        {
+            SessionId = sessionId,
+            TransferId = transferId,
+            TransportEpoch = 2,
+            State = "target_proof_pending",
+            HandoffKind = "regular_nkn_recovery",
+            SourceTransport = "regular_nkn",
+            TargetTransport = "regular_nkn",
+            Reason = "peer_transport_epoch_reauthorization",
+        };
+        serviceType
+            .GetMethod(
+                inbound
+                    ? "AdoptInboundV6TransportEpochLocked"
+                    : "AdoptOutboundV6TransportEpochLocked",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, peerEpoch]);
+
+        if (!dataSessionInitiallyAvailable)
+        {
+            Assert.Same(originalLeg, GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+            Assert.NotNull(GetPrivatePropertyValue(
+                context,
+                "PendingFallbackTailYieldTransportEpochReauthorizationRequest"));
+            Assert.Null(GetPrivatePropertyValue(
+                context,
+                "PendingFallbackTailYieldTransportEpochReauthorization"));
+            var completeMethod = serviceType.GetMethod(
+                inbound
+                    ? "CompleteInboundV6TransportEpochLocked"
+                    : "CompleteOutboundV6TransportEpochLocked",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+            var completeArgs = inbound
+                ? new object?[] { context, "peer_epoch_before_reauthorization" }
+                : [context, "peer_epoch_before_reauthorization", null];
+            Assert.False((bool)completeMethod.Invoke(service, completeArgs)!);
+            Assert.NotNull(GetPrivatePropertyValue(context, "V6TransportEpoch"));
+            var heldLog = ReadOperationalLogTail(logStart);
+            Assert.DoesNotContain(
+                "event=filetransfer_v6_epoch_tail_unblocked;",
+                heldLog,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=filetransfer_fallback_tail_transport_epoch_reauthorization_successor_issued;",
+                heldLog,
+                StringComparison.Ordinal);
+            var availabilityMethod = serviceType.GetMethod(
+                "HandleDataSessionAvailabilityChangedAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+            var matchingAvailability = new FileTransferDataSessionAvailabilityChangedEventArgs(
+                isAvailable: true,
+                reason: "peer_transport_epoch_data_session_available",
+                requiresResumeRequest: false,
+                FileTransferTransportHandoffKind.RegularNknRecovery,
+                FileTransferTransportKind.RegularNkn);
+            if (replaceCheckpointBeforeRestart)
+            {
+                const string replacementCheckpointId = "checkpoint_replaced_while_reauthorization_held";
+                var adoptedLeg = Assert.IsType<FileTransferLeg>(
+                    GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+                var currentOwner = GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner");
+                var replacementLease = new FallbackCheckpointLease(
+                    sessionId,
+                    transferId,
+                    inbound ? FileTransferDirection.Inbound : FileTransferDirection.Outbound,
+                    currentOwner,
+                    adoptedLeg.RouteSelection.Route,
+                    adoptedLeg.RouteSelection.TelemetryToken,
+                    adoptedLeg.ProtocolVersion,
+                    adoptedLeg.LiveRouteEpochId,
+                    currentOwner.RuntimeGeneration,
+                    currentOwner.TerminalGeneration,
+                    adoptedLeg.Generation,
+                    adoptedLeg.TransportEpochId,
+                    adoptedLeg.BridgeRecoveryGeneration,
+                    replacementCheckpointId,
+                    Math.Max(1, adoptedLeg.CheckpointGeneration + 1),
+                    1,
+                    FallbackCheckpointLeaseState.Pending,
+                    "checkpoint_replaced_while_reauthorization_held");
+                adoptedLeg.CheckpointRequestId = replacementCheckpointId;
+                adoptedLeg.CheckpointGeneration = replacementLease.CheckpointGeneration;
+                adoptedLeg.State = FileTransferLegState.CheckpointPending;
+                adoptedLeg.CanSendData = false;
+                SetPrivateProperty(context, "CurrentFallbackCheckpointLease", replacementLease);
+                dataSession.IsAvailable = true;
+                await (Task)availabilityMethod.Invoke(
+                    service,
+                    [dataSession, matchingAvailability])!;
+
+                Assert.Same(originalLeg, GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+                Assert.Equal(
+                    replacementCheckpointId,
+                    adoptedLeg.CheckpointRequestId);
+                Assert.Equal(
+                    replacementLease,
+                    GetPrivatePropertyValue(context, "CurrentFallbackCheckpointLease"));
+                Assert.Null(GetPrivatePropertyValue(
+                    context,
+                    "PendingFallbackTailYieldTransportEpochReauthorizationRequest"));
+                Assert.Null(GetPrivatePropertyValue(
+                    context,
+                    "PendingFallbackTailYieldTransportEpochReauthorization"));
+                Assert.Null(GetPrivatePropertyValue(
+                    context,
+                    "RequiredFallbackTailYieldTransportEpochReauthorization"));
+                Assert.True(GetPrivateProperty<bool>(context, "PullTransportPaused"));
+                var invalidatedLog = ReadOperationalLogTail(logStart);
+                Assert.Contains(
+                    "status=invalidated; decision_reason=peer_transport_epoch_reauthorization_source_scope_replaced",
+                    invalidatedLog,
+                    StringComparison.Ordinal);
+                Assert.DoesNotContain(
+                    $"event=filetransfer_post_tuna_recovery_started; direction={(inbound ? "inbound" : "outbound")};",
+                    invalidatedLog,
+                    StringComparison.Ordinal);
+                Assert.DoesNotContain(
+                    "event=filetransfer_fallback_tail_transport_epoch_reauthorization_staged;",
+                    invalidatedLog,
+                    StringComparison.Ordinal);
+                return;
+            }
+
+            dataSession.IsAvailable = true;
+            await (Task)availabilityMethod.Invoke(
+                service,
+                [
+                    dataSession,
+                    new FileTransferDataSessionAvailabilityChangedEventArgs(
+                        isAvailable: true,
+                        reason: "unrelated_tuna_activation_availability",
+                        requiresResumeRequest: true,
+                        FileTransferTransportHandoffKind.NormalToTunaActivation,
+                        FileTransferTransportKind.Tuna),
+                ])!;
+            Assert.NotNull(GetPrivatePropertyValue(
+                context,
+                "PendingFallbackTailYieldTransportEpochReauthorizationRequest"));
+            Assert.Null(GetPrivatePropertyValue(
+                context,
+                "PendingFallbackTailYieldTransportEpochReauthorization"));
+            Assert.True(GetPrivateProperty<bool>(context, "PullTransportPaused"));
+            if (recheckWithPeerProof)
+            {
+                var adoptedLeg = Assert.IsType<FileTransferLeg>(
+                    GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+                var checkpoint = "(none)";
+                var peerProof = new FileTransferFallbackTailYieldFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    TransportEpoch = 2,
+                    Direction = inbound ? "outbound" : "inbound",
+                    LiveRouteEpoch = adoptedLeg.LiveRouteEpochId,
+                    FallbackLegGeneration = adoptedLeg.Generation,
+                    BridgeRecoveryGeneration = adoptedLeg.BridgeRecoveryGeneration,
+                    OwnerKey = FileTransferCoordinator.BuildFallbackTailYieldOwnerKey(
+                        sessionId,
+                        transferId,
+                        FileTransferRouteResolver.PostTunaFallbackV6Token,
+                        FileTransferProtocol.ProtocolVersionV6,
+                        adoptedLeg.LiveRouteEpochId,
+                        adoptedLeg.Generation,
+                        adoptedLeg.BridgeRecoveryGeneration,
+                        2,
+                        checkpoint),
+                    PairKey = FileTransferCoordinator.BuildFallbackTailYieldPairKey(
+                        sessionId,
+                        transferId,
+                        FileTransferRouteResolver.PostTunaFallbackV6Token,
+                        FileTransferProtocol.ProtocolVersionV6,
+                        adoptedLeg.LiveRouteEpochId,
+                        2,
+                        checkpoint),
+                    YieldGeneration = predecessor.YieldGeneration,
+                    AuthoritySchema = FileTransferAuthoritySchema.Current,
+                    AuthorityId = predecessor.AuthorityId.ToString(),
+                };
+                serviceType
+                    .GetMethod(
+                        inbound ? "ApplyInboundFallbackTailYieldProof" : "ApplyOutboundFallbackTailYieldProof",
+                        BindingFlags.Instance | BindingFlags.NonPublic,
+                        binder: null,
+                        types: [context.GetType(), typeof(FileTransferFallbackTailYieldFrameV6)],
+                        modifiers: null)!
+                    .Invoke(service, [context, peerProof]);
+                Assert.Null(GetPrivatePropertyValue(
+                    context,
+                    "PendingFallbackTailYieldTransportEpochReauthorizationRequest"));
+                Assert.NotNull(GetPrivatePropertyValue(
+                    context,
+                    "PendingFallbackTailYieldTransportEpochReauthorization"));
+                Assert.True(GetPrivateProperty<bool>(context, "PullTransportPaused"));
+                Assert.True(GetPrivateProperty<bool>(context, "PeerFallbackTailYieldGranted"));
+                Assert.Equal(
+                    peerProof.OwnerKey,
+                    GetPrivateProperty<string>(context, "PeerFallbackTailYieldOwnerKey"));
+                Assert.Equal(
+                    peerProof.PairKey,
+                    GetPrivateProperty<string>(context, "PeerFallbackTailYieldPairKey"));
+                Assert.Equal(
+                    peerProof.AuthorityId,
+                    GetPrivateProperty<string>(context, "PeerFallbackTailYieldAuthorityId"));
+                Assert.Equal(
+                    peerProof.YieldGeneration,
+                    GetPrivateProperty<long>(context, "PeerFallbackTailYieldGeneration"));
+            }
+
+            await (Task)availabilityMethod.Invoke(
+                    service,
+                    [dataSession, matchingAvailability])!;
+            Assert.False(GetPrivateProperty<bool>(context, "PullTransportPaused"));
+            await (Task)availabilityMethod.Invoke(
+                service,
+                [dataSession, matchingAvailability])!;
+            Assert.False(GetPrivateProperty<bool>(context, "PullTransportPaused"));
+        }
+
+        var currentLeg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        Assert.NotSame(originalLeg, currentLeg);
+        Assert.Equal(2L, currentLeg.TransportEpochId);
+        Assert.Null(GetPrivatePropertyValue(context, "PendingFallbackTailYieldTransportEpochReauthorizationRequest"));
+        var staged = Assert.IsType<FallbackTailYieldTransportEpochReauthorization>(
+            GetPrivatePropertyValue(context, "PendingFallbackTailYieldTransportEpochReauthorization"));
+        Assert.Equal(staged, GetPrivatePropertyValue(context, "RequiredFallbackTailYieldTransportEpochReauthorization"));
+        Assert.Equal(predecessor.AuthorityId, staged.PredecessorDecision.AuthorityId);
+        Assert.Equal(1L, staged.SourceTransportEpoch);
+        Assert.Equal(2L, staged.TargetTransportEpoch);
+        var targetPublication = Assert.IsType<RoutePublicationToken>(staged.TargetRoutePublicationToken);
+        Assert.Equal(targetPublication, GetPrivatePropertyValue(context, "CurrentRoutePublicationToken"));
+        Assert.Equal(staged.TargetRuntimeOwner, GetPrivatePropertyValue(context, "CurrentRuntimeOwner"));
+        var currentEpochState = GetPrivatePropertyValue(context, "V6TransportEpoch");
+        Assert.NotNull(currentEpochState);
+        Assert.Equal(targetPublication, GetPrivatePropertyValue(
+            currentEpochState!,
+            "RoutePublicationToken"));
+        Assert.Equal(targetPublication, GetPrivatePropertyValue(
+            Assert.IsType<LiveRouteEpoch>(GetPrivatePropertyValue(context, "CurrentLiveRouteEpoch")),
+            "RoutePublicationToken"));
+        Assert.Equal(1L, GetPrivateProperty<long>(
+            context,
+            "FallbackTailYieldTransportEpochReauthorizationDataSessionGeneration"));
+        var coordinatorState = Assert.IsType<FileTransferCoordinatorState>(serviceType
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(candidate =>
+                candidate.Name == "CreateCoordinatorStateLocked" &&
+                candidate.GetParameters()[0].ParameterType == context.GetType())
+            .Invoke(null, [context]));
+        Assert.True(
+            FileTransferCoordinator.IsFallbackTailYieldTransportEpochReauthorizationCurrent(
+                coordinatorState,
+                staged,
+                out var currentnessReason),
+            currentnessReason);
+
+        currentLeg.State = FileTransferLegState.RecoveryActive;
+        currentLeg.CanSendData = true;
+        currentLeg.CheckpointRequestId = null;
+        currentLeg.CheckpointPriority = null;
+        currentLeg.CheckpointRequestedUtc = null;
+        var handoffType = serviceType.Assembly.GetType("NLink.Core.FileTransfer.TransportHandoffEpoch");
+        Assert.NotNull(handoffType);
+        var ownerWorkHandoff = Activator.CreateInstance(handoffType!)!;
+        SetPrivateProperty(ownerWorkHandoff, "EpochId", 2L);
+        SetPrivateProperty(ownerWorkHandoff, "Kind", FileTransferTransportHandoffKind.RegularNknRecovery);
+        SetPrivateProperty(ownerWorkHandoff, "SourceTransport", FileTransferTransportKind.RegularNkn);
+        SetPrivateProperty(ownerWorkHandoff, "TargetTransport", FileTransferTransportKind.RegularNkn);
+        SetPrivateProperty(
+            ownerWorkHandoff,
+            "Direction",
+            inbound ? FileTransferDirection.Inbound : FileTransferDirection.Outbound);
+        SetPrivateProperty(ownerWorkHandoff, "Reason", "peer_epoch_owner_work_pending");
+        SetPrivateProperty(ownerWorkHandoff, "State", V6TransportHandoffState.WaitingForTargetTransport);
+        SetPrivateProperty(context, "V6TransportHandoff", ownerWorkHandoff);
+        var markLocalYieldMethod = serviceType.GetMethod(
+            inbound
+                ? "TryMarkInboundFallbackTailLocalYieldFromCurrentLegLocked"
+                : "TryMarkOutboundFallbackTailLocalYieldFromCurrentLegLocked",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        Assert.False((bool)markLocalYieldMethod.Invoke(
+            service,
+            [context, "peer_epoch_owner_work_pending", false])!);
+        Assert.Equal(
+            staged,
+            GetPrivatePropertyValue(context, "PendingFallbackTailYieldTransportEpochReauthorization"));
+
+        SetPrivateProperty(context, "PullPostTunaRecoveryActive", false);
+        TrySetPrivateProperty(context, "PullTransportFrontierOnlyRepairActive", false);
+        TrySetPrivateProperty(context, "V6RegularNknFallbackCheckpointDeliveryRecoveryPending", false);
+        TrySetPrivateProperty(context, "V6RegularNknStateRefreshSendInFlight", 0);
+        TrySetPrivateProperty(context, "V6RegularNknDeferredStateRefreshRequest", null);
+        TrySetPrivateProperty(context, "V6PostTunaFallbackProofReplayReceiverStatePending", false);
+        TrySetPrivateProperty(context, "V6PostTunaFallbackProofReplayFrontierRequestPending", false);
+        SetPrivateProperty(context, "V6TransportHandoff", null);
+        Assert.True((bool)markLocalYieldMethod.Invoke(
+            service,
+            [context, "peer_epoch_owner_work_settled", false])!);
+        var successor = Assert.IsType<FallbackTailYieldDecision>(
+            GetPrivatePropertyValue(context, "LastFallbackTailYieldDecision"));
+        Assert.Equal(predecessor.AuthorityId, successor.PredecessorAuthorityId);
+        Assert.Equal(predecessor.YieldGeneration + 1, successor.YieldGeneration);
+        Assert.Null(GetPrivatePropertyValue(context, "PendingFallbackTailYieldTransportEpochReauthorization"));
+        Assert.Null(GetPrivatePropertyValue(context, "RequiredFallbackTailYieldTransportEpochReauthorization"));
+
+        var direction = inbound ? "inbound" : "outbound";
+        var log = ReadOperationalLogTail(logStart);
+        var adoptionIndex = log.IndexOf(
+            $"event=filetransfer_fallback_leg_transport_epoch_adopted; direction={direction};",
+            StringComparison.Ordinal);
+        var stagedIndex = log.IndexOf(
+            $"event=filetransfer_fallback_tail_transport_epoch_reauthorization_staged; authority_schema=2; direction={direction};",
+            StringComparison.Ordinal);
+        var restartIndex = log.IndexOf(
+            $"event=filetransfer_fallback_tail_transport_epoch_reauthorization_restart_decided; authority_schema=2; direction={direction};",
+            Math.Max(0, stagedIndex),
+            StringComparison.Ordinal);
+        var ownerWorkHoldIndex = log.IndexOf(
+            $"event=filetransfer_fallback_tail_local_yield_blocked; direction={direction};",
+            Math.Max(0, restartIndex),
+            StringComparison.Ordinal);
+        var successorIndex = log.IndexOf(
+            $"event=filetransfer_fallback_tail_transport_epoch_reauthorization_successor_issued; authority_schema=2; direction={direction};",
+            Math.Max(0, ownerWorkHoldIndex),
+            StringComparison.Ordinal);
+        Assert.True(adoptionIndex >= 0, log);
+        Assert.True(stagedIndex > adoptionIndex, log);
+        Assert.True(restartIndex > stagedIndex, log);
+        Assert.True(ownerWorkHoldIndex > restartIndex, log);
+        Assert.True(successorIndex > ownerWorkHoldIndex, log);
+        if (!dataSessionInitiallyAvailable)
+        {
+            Assert.Contains("status=held; decision_reason=data_session_unavailable", log, StringComparison.Ordinal);
+            Assert.Contains(
+                recheckWithPeerProof
+                    ? "trigger=fallback_tail_peer_yield; status=started;"
+                    : "trigger=data_session_available; status=started;",
+                log,
+                StringComparison.Ordinal);
+            if (recheckWithPeerProof)
+            {
+                var peerProofIndex = log.IndexOf(
+                    $"event=filetransfer_fallback_tail_yield_proof_received; direction={direction};",
+                    restartIndex,
+                    StringComparison.Ordinal);
+                Assert.True(peerProofIndex > restartIndex, log);
+                Assert.DoesNotContain(
+                    $"event=filetransfer_fallback_tail_owner_generation_mismatch; direction={direction};",
+                    log,
+                    StringComparison.Ordinal);
+            }
+            Assert.Equal(
+                1,
+                CountOccurrences(
+                    log,
+                    $"event=filetransfer_transport_rebind_generation_started; direction={direction};"));
+        }
+        Assert.Contains("status=started; decision_reason=coordinator_reauthorization_staged", log, StringComparison.Ordinal);
+        Assert.Contains($"predecessor_authority_id={predecessor.AuthorityId};", log, StringComparison.Ordinal);
+        Assert.Contains("source_transport_epoch=1; target_transport_epoch=2; current_transport_epoch=2;", log, StringComparison.Ordinal);
+        Assert.Contains($"current_route_publication_generation={targetPublication.PublicationGeneration};", log, StringComparison.Ordinal);
+        Assert.Contains("data_session_generation=1;", log, StringComparison.Ordinal);
+        Assert.Contains($"predecessor_authority_id={predecessor.AuthorityId};", log, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
@@ -24148,6 +24627,37 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         public string TransferId { get; } = transferId;
 
         public bool IsAvailable => true;
+
+        public event EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? AvailabilityChanged
+        {
+            add { }
+            remove { }
+        }
+
+        public ValueTask<FileTransferDataFrame> ReceiveAsync(CancellationToken ct)
+            => throw new NotSupportedException();
+
+        public ValueTask<FileTransferReceivedDataFrame> ReceiveWithMetadataAsync(CancellationToken ct)
+            => throw new NotSupportedException();
+
+        public Task SendAsync(FileTransferDataFrame frame, CancellationToken ct)
+            => Task.CompletedTask;
+
+        public void Dispose()
+        {
+        }
+    }
+
+    private sealed class MutableAvailabilityDataSession(
+        string sessionId,
+        string transferId,
+        bool isAvailable) : IFileTransferDataSession
+    {
+        public string SessionId { get; } = sessionId;
+
+        public string TransferId { get; } = transferId;
+
+        public bool IsAvailable { get; set; } = isAvailable;
 
         public event EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? AvailabilityChanged
         {
