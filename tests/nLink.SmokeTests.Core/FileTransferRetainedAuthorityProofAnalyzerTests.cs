@@ -227,6 +227,30 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
     [Fact]
     [Trait("RetainedAuthorityProofSuite", "StaleRejectedActionEffectIsolation")]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RejectedRetryInstallAfterRejectedRuntimeUnlockCallback_IsDiagnosticOnly()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_rejected_retry_install_diagnostic";
+        var lines = BuildAuthorityProofFixture(
+            transferId,
+            $"event=filetransfer_runtime_unlock_callback_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; action_kind=RuntimeUnlockTransactionCallback; source=runtime_unlock_paired_commit_timeout; attempted_action=paired_commit_timeout; rejection_reason=transfer_not_current; current_route=(none); current_protocol_version=0; attempted_route=file_tuna_v4; attempted_protocol_version=4; transaction_generation=1; offer_generation=5; tuna_path_lease_generation=5; probe_id=probe-a; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna",
+            $"event=runtime_unlock_retry_dispatch_install_rejected; authority_schema=2; authority_id=fta2-runtime_unlock_retry_dispatch-b; predecessor_authority_id=fta2-runtime_unlock_retry_dispatch-a; direction=outbound; session_id=sess_a; transfer_id={transferId}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; route_publication_generation=1; route_commit_generation=0; contract_generation=2; retired_generation=4; dispatch_attempt_generation=3; missing_dispatch_successor_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; install_generation=4; install_status=Rejected; decision_reason=retry_dispatch_install_authority_no_longer_current_offer_answer_timeout");
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["stale_rejected_action_effect_isolation_verdict"]);
+        Assert.Equal("1", route["stale_rejected_action_count"]);
+        Assert.Equal("0", route["stale_rejected_action_forbidden_effect_count"]);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "StaleRejectedActionEffectIsolation")]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_FallbackCurrentAuthorityEffectAfterStaleRejection_Passes()
     {
         if (!OperatingSystem.IsWindows())
@@ -1696,6 +1720,120 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedAuthorityProofSuite", "RouteCommitSendDrain")]
+    public async Task AnalyzeRetained_RouteCommitInvalidationWithCapturedWritesStillActive_FailsAtInvalidation(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_route_commit_invalidated_with_active_writes";
+        var lines = BuildFileTunaV4DataPathProofFixture(
+            transferId,
+            RouteCommitSendDrainMessage(
+                "runtime_unlock_regular_v4_route_commit_send_drain_staged",
+                transferId,
+                probeId: "(none)",
+                probeState: "None",
+                capturedSendCount: 45,
+                matchingRetiredSendCount: 0,
+                activeSendCount: 45,
+                writerSequence: 2780),
+            RouteCommitSendDrainMessage(
+                "runtime_unlock_regular_v4_route_commit_send_drain_deferred",
+                transferId,
+                capturedSendCount: 45,
+                matchingRetiredSendCount: 0,
+                activeSendCount: 45,
+                decisionReason: "regular_v4_physical_sends_in_flight",
+                writerSequence: 2841),
+            RouteCommitSendDrainMessage(
+                "runtime_unlock_regular_v4_route_commit_send_drain_invalidated",
+                transferId,
+                capturedSendCount: 45,
+                matchingRetiredSendCount: 0,
+                activeSendCount: 45,
+                decisionReason: "coordinator_source_scope_replaced",
+                writerSequence: 3300));
+
+        var result = compact
+            ? await RunAnalyzeFixtureAsync(
+                lines,
+                environment: new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                })
+            : await RunAnalyzeFixtureAsync(lines);
+        Assert.Equal(0, result.Script.ExitCode);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count"]);
+        Assert.Equal("fail", verdict["runtime_unlock_regular_v4_route_commit_send_drain_verdict"]);
+        Assert.Equal("runtime_unlock_regular_v4_route_commit_send_drain_missing", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal(
+            "runtime_unlock_regular_v4_route_commit_send_drain_invalidated",
+            verdict["first_proof_chain_failure_event"]);
+        Assert.Equal(
+            "captured_physical_sends_not_retired_before_scope_invalidation",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("3300", verdict["first_proof_chain_failure_writer_sequence"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedAuthorityProofSuite", "RouteCommitSendDrain")]
+    public async Task AnalyzeRetained_RouteCommitInvalidationAfterCapturedWritesRetire_DisposesDrain(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_route_commit_invalidated_after_writes_retire";
+        var lines = BuildFileTunaV4DataPathProofFixture(
+            transferId,
+            RouteCommitSendDrainMessage(
+                "runtime_unlock_regular_v4_route_commit_send_drain_staged",
+                transferId,
+                capturedSendCount: 2,
+                matchingRetiredSendCount: 0,
+                activeSendCount: 2),
+            RouteCommitSendDrainMessage(
+                "runtime_unlock_regular_v4_route_commit_send_drain_invalidated",
+                transferId,
+                capturedSendCount: 2,
+                matchingRetiredSendCount: 2,
+                activeSendCount: 0,
+                decisionReason: "coordinator_source_scope_replaced"));
+
+        var result = compact
+            ? await RunAnalyzeFixtureAsync(
+                lines,
+                environment: new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                })
+            : await RunAnalyzeFixtureAsync(lines);
+        Assert.Equal(0, result.Script.ExitCode);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("0", verdict["runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count"]);
+        Assert.Equal("pass", verdict["runtime_unlock_regular_v4_route_commit_send_drain_verdict"]);
+        Assert.NotEqual(
+            "runtime_unlock_regular_v4_route_commit_send_drain_missing",
+            verdict["first_proof_chain_failure_class"]);
+    }
+
+    [Theory]
     [InlineData("(none)", "None", "probe-1", "Acked", false)]
     [InlineData("probe-1", "Started", "probe-2", "Acked", true)]
     [Trait("RetainedAuthorityProofSuite", "RouteCommitSendDrain")]
@@ -2510,7 +2648,12 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
         string eventName,
         string transferId,
         string probeId = "probe-1",
-        string probeState = "Acked")
+        string probeState = "Acked",
+        int? capturedSendCount = null,
+        int? matchingRetiredSendCount = null,
+        int activeSendCount = 0,
+        string decisionReason = "fixture",
+        int? writerSequence = null)
         => $"event={eventName}; direction=outbound; transfer_id={transferId}; session_id=sess_a; drain_generation=1; " +
            "source_route=regular_nkn_v4_fast; source_protocol_version=4; source_live_route_epoch=0; " +
            "source_runtime_generation=1; source_terminal_generation=0; source_leg_generation=1; " +
@@ -2518,7 +2661,10 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
            "source_route_commit_generation=0; source_data_session_generation=1; transaction_generation=1; " +
            $"offer_generation=1; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=listener-1; probe_id={probeId}; probe_state={probeState}; target_route=file_tuna_v4; " +
            "target_protocol_version=4; target_transport=tuna; handoff_kind=normal_to_tuna_activation; registered_send_count=1; retired_send_count=1; " +
-           "active_send_count=0; decision_reason=fixture";
+           $"active_send_count={activeSendCount}; decision_reason={decisionReason}" +
+           (capturedSendCount.HasValue ? $"; captured_send_count={capturedSendCount.Value}" : string.Empty) +
+           (matchingRetiredSendCount.HasValue ? $"; matching_retired_send_count={matchingRetiredSendCount.Value}" : string.Empty) +
+           (writerSequence.HasValue ? $"; log_writer_sequence={writerSequence.Value}" : string.Empty);
 
     private static string RouteCommitDrainTransitionMessage(string transferId, int completedDrainGeneration)
         => $"event=filetransfer_route_transitioned; direction=outbound; transfer_id={transferId}; session_id=sess_a; " +

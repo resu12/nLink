@@ -4918,6 +4918,17 @@ function Get-FileTransferFallbackTailReconciliationProof {
             } |
             Sort-Object Sequence
     )
+    [object[]]$frontierRequestDeliveryObservedEvents = @(
+        $events |
+            Where-Object {
+                $_.EventName -eq 'filetransfer_control_plane_delivery_observed' -and
+                (Get-FileTransferEventField -Event $_ -Name 'kind' -Default '') -eq 'frontier_request' -and
+                (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -eq 'filetransfer.frontier_request.v6' -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'peer_visible_any' -Default 0) -gt 0 -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'accepted_any' -Default 0) -gt 0
+            } |
+            Sort-Object Sequence
+    )
     [object[]]$frontierRequestReceiveDispatchAttemptedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_v6_frontier_request_receive_dispatch_attempted' } | Sort-Object Sequence)
     [object[]]$frontierRequestReceiveDispatchedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_v6_frontier_request_receive_dispatched' } | Sort-Object Sequence)
     [object[]]$frontierRequestReceiveDispatchRejectedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_v6_frontier_request_receive_dispatch_rejected' } | Sort-Object Sequence)
@@ -5090,6 +5101,82 @@ function Get-FileTransferFallbackTailReconciliationProof {
         }).Count -gt 0
     }
 
+    function Test-FallbackFrontierRepairStallHasLaterSuccessor {
+        param([Parameter(Mandatory = $true)]$StallEvent)
+
+        $settlement = @($frontierRepairContractSettledEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$StallEvent.Sequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq 'SettledStalled' -and
+                (Test-FallbackFrontierRepairTupleMatch -Anchor $StallEvent -Candidate $_)
+            } | Sort-Object Sequence | Select-Object -First 1)
+        if ($settlement.Count -ne 1) {
+            return $false
+        }
+
+        return @($frontierRepairAuthorityGrantedEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$settlement[0].Sequence -and
+                (Test-FallbackFrontierRepairSuccessorTupleMatch -Predecessor $StallEvent -Successor $_)
+            }).Count -eq 1
+    }
+
+    function Test-FallbackFrontierRepairSuccessorTupleMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Predecessor,
+            [Parameter(Mandatory = $true)]$Successor
+        )
+
+        if ((Get-FileTransferAuthoritySchema -Line ([string]$Predecessor.RawLine)) -lt 2 -or
+            (Get-FileTransferAuthoritySchema -Line ([string]$Successor.RawLine)) -lt 2) {
+            return $false
+        }
+
+        $predecessorAuthorityId = Get-FileTransferEventField -Event $Predecessor -Name 'authority_id' -Default ''
+        if ([string]::IsNullOrWhiteSpace($predecessorAuthorityId) -or
+            $predecessorAuthorityId -eq '(none)' -or
+            (Get-FileTransferEventField -Event $Successor -Name 'predecessor_authority_id' -Default '') -ne $predecessorAuthorityId) {
+            return $false
+        }
+
+        foreach ($fieldName in @(
+                'session_id',
+                'transfer_id',
+                'direction',
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'runtime_generation',
+                'terminal_generation',
+                'leg_generation',
+                'transport_epoch',
+                'bridge_recovery_generation',
+                'bridge_decision_generation',
+                'checkpoint_request_id',
+                'route_publication_generation',
+                'route_commit_generation',
+                'repair_request_key',
+                'range_fingerprint',
+                'frontier_chunk_index',
+                'durable_received_highest_chunk_index',
+                'range_count',
+                'requested_chunk_count',
+                'source_kind',
+                'priority',
+                'recovery_mode',
+                'target_transport')) {
+            $predecessorValue = Get-FileTransferEventField -Event $Predecessor -Name $fieldName -Default ''
+            $successorValue = Get-FileTransferEventField -Event $Successor -Name $fieldName -Default ''
+            if ([string]::IsNullOrWhiteSpace($predecessorValue) -or
+                [string]::IsNullOrWhiteSpace($successorValue) -or
+                $predecessorValue -ne $successorValue) {
+                return $false
+            }
+        }
+
+        $predecessorGeneration = Get-FileTransferEventInt64Field -Event $Predecessor -Name 'repair_generation' -Default -1
+        $successorGeneration = Get-FileTransferEventInt64Field -Event $Successor -Name 'repair_generation' -Default -1
+        return $predecessorGeneration -ge 0 -and $successorGeneration -eq ($predecessorGeneration + 1)
+    }
+
     function Test-FallbackFrontierRepairHasLaterFailure {
         param([Parameter(Mandatory = $true)]$Anchor)
 
@@ -5114,10 +5201,202 @@ function Get-FileTransferFallbackTailReconciliationProof {
         param([Parameter(Mandatory = $true)]$DeliveryEvent)
 
         $deliverySequence = [int64]$DeliveryEvent.Sequence
-        return @($frontierRequestReceiveDispatchedEvents + $frontierRequestReceiveDispatchRejectedEvents + $frontierRequestReceiveDispatchCoalescedEvents | Where-Object {
+        if (@($frontierRequestReceiveDispatchedEvents + $frontierRequestReceiveDispatchRejectedEvents + $frontierRequestReceiveDispatchCoalescedEvents | Where-Object {
             [int64]$_.Sequence -gt $deliverySequence -and
             (Test-FallbackFrontierRequestDispatchTupleMatch -Anchor $DeliveryEvent -Candidate $_)
-        }).Count -gt 0
+        }).Count -gt 0) {
+            return $true
+        }
+
+        foreach ($observed in @($frontierRequestDeliveryObservedEvents | Where-Object {
+                    [int64]$_.Sequence -gt $deliverySequence -and
+                    (Test-FallbackFrontierRequestObservedDeliveryTupleMatch -Delivery $DeliveryEvent -Observed $_)
+                })) {
+            if (@($frontierRepairDispatchedEvents | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$observed.Sequence -and
+                        (Test-FallbackFrontierRequestObservedRepairDispatchTupleMatch -Observed $observed -Dispatch $_)
+                    }).Count -gt 0) {
+                return $true
+            }
+        }
+
+        return $false
+    }
+
+    function Test-FallbackFrontierRequestObservedDeliveryTupleMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Delivery,
+            [Parameter(Mandatory = $true)]$Observed
+        )
+
+        if ((Get-FileTransferAuthoritySchema -Line ([string]$Delivery.RawLine)) -lt 2 -or
+            (Get-FileTransferAuthoritySchema -Line ([string]$Observed.RawLine)) -lt 2) {
+            return $false
+        }
+
+        foreach ($fieldName in @(
+                'authority_id',
+                'control_plane_generation',
+                'session_id',
+                'transfer_id',
+                'direction',
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'leg_generation',
+                'bridge_recovery_generation',
+                'transport_epoch',
+                'checkpoint_request_id',
+                'kind',
+                'frame_type',
+                'reason',
+                'repair_request_id',
+                'request_correlation_id',
+                'first_start_chunk_index',
+                'first_chunk_count',
+                'range_count',
+                'recovery_mode',
+                'priority')) {
+            $deliveryValue = Get-FileTransferEventField -Event $Delivery -Name $fieldName -Default ''
+            $observedValue = Get-FileTransferEventField -Event $Observed -Name $fieldName -Default ''
+            if ([string]::IsNullOrWhiteSpace($deliveryValue) -or
+                [string]::IsNullOrWhiteSpace($observedValue) -or
+                $deliveryValue -ne $observedValue) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-FallbackFrontierRequestObservedRepairDispatchTupleMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Observed,
+            [Parameter(Mandatory = $true)]$Dispatch
+        )
+
+        if ((Get-FileTransferAuthoritySchema -Line ([string]$Dispatch.RawLine)) -lt 2 -or
+            (Get-FileTransferEventField -Event $Dispatch -Name 'source_kind' -Default '') -ne 'ReceiverRequest' -or
+            (Get-FileTransferEventField -Event $Dispatch -Name 'stage' -Default '') -ne 'receiver_request_send' -or
+            (Get-FileTransferEventInt64Field -Event $Dispatch -Name 'dispatch_observed' -Default 0) -ne 1) {
+            return $false
+        }
+
+        foreach ($fieldName in @(
+                'session_id',
+                'transfer_id',
+                'direction',
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'leg_generation',
+                'bridge_recovery_generation',
+                'transport_epoch',
+                'checkpoint_request_id',
+                'range_fingerprint',
+                'range_count',
+                'recovery_mode',
+                'priority')) {
+            $observedValue = Get-FileTransferEventField -Event $Observed -Name $fieldName -Default ''
+            $dispatchValue = Get-FileTransferEventField -Event $Dispatch -Name $fieldName -Default ''
+            if ([string]::IsNullOrWhiteSpace($observedValue) -or
+                [string]::IsNullOrWhiteSpace($dispatchValue) -or
+                $observedValue -ne $dispatchValue) {
+                return $false
+            }
+        }
+
+        $repairKey = Get-FileTransferEventField -Event $Observed -Name 'repair_request_key' -Default ''
+        $dispatchRepairKey = Get-FileTransferEventField -Event $Dispatch -Name 'repair_request_key' -Default ''
+        if ([string]::IsNullOrWhiteSpace($repairKey) -or $repairKey -eq '(none)' -or
+            $repairKey -ne $dispatchRepairKey) {
+            return $false
+        }
+
+        if (@($frontierRepairAuthorityGrantedEvents | Where-Object {
+                    [int64]$_.Sequence -lt [int64]$Dispatch.Sequence -and
+                    (Test-FallbackFrontierRequestRepairAuthorityGrantTupleMatch -Grant $_ -Dispatch $Dispatch)
+                }).Count -ne 1) {
+            return $false
+        }
+
+        $repairRequestId = Get-FileTransferEventField -Event $Observed -Name 'repair_request_id' -Default ''
+        $dispatchRepairRequestId = Get-FileTransferEventField -Event $Dispatch -Name 'primary_protocol_repair_request_id' -Default ''
+        if ([string]::IsNullOrWhiteSpace($dispatchRepairRequestId)) {
+            $dispatchRepairRequestId = Get-FileTransferEventField -Event $Dispatch -Name 'protocol_repair_request_id' -Default ''
+        }
+        $requestCorrelationId = Get-FileTransferEventField -Event $Observed -Name 'request_correlation_id' -Default ''
+        $dispatchCorrelationId = Get-FileTransferEventField -Event $Dispatch -Name 'primary_request_correlation_id' -Default ''
+        if ([string]::IsNullOrWhiteSpace($dispatchCorrelationId)) {
+            $dispatchCorrelationId = Get-FileTransferEventField -Event $Dispatch -Name 'request_correlation_id' -Default ''
+        }
+        if ([string]::IsNullOrWhiteSpace($repairRequestId) -or
+            $repairRequestId -ne $dispatchRepairRequestId -or
+            [string]::IsNullOrWhiteSpace($requestCorrelationId) -or
+            $requestCorrelationId -ne $dispatchCorrelationId) {
+            return $false
+        }
+
+        $firstStart = Get-FileTransferEventInt64Field -Event $Observed -Name 'first_start_chunk_index' -Default -1
+        $firstCount = Get-FileTransferEventInt64Field -Event $Observed -Name 'requested_chunk_count' -Default -1
+        if ($firstCount -lt 0) {
+            $firstCount = Get-FileTransferEventInt64Field -Event $Observed -Name 'first_chunk_count' -Default -1
+        }
+        return $firstStart -ge 0 -and
+            $firstStart -eq (Get-FileTransferEventInt64Field -Event $Dispatch -Name 'frontier_chunk_index' -Default -1) -and
+            $firstCount -gt 0 -and
+            $firstCount -eq (Get-FileTransferEventInt64Field -Event $Dispatch -Name 'requested_chunk_count' -Default -1)
+    }
+
+    function Test-FallbackFrontierRequestRepairAuthorityGrantTupleMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Grant,
+            [Parameter(Mandatory = $true)]$Dispatch
+        )
+
+        if ((Get-FileTransferAuthoritySchema -Line ([string]$Grant.RawLine)) -lt 2) {
+            return $false
+        }
+
+        foreach ($fieldName in @(
+                'authority_id',
+                'predecessor_authority_id',
+                'session_id',
+                'transfer_id',
+                'direction',
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'runtime_generation',
+                'terminal_generation',
+                'leg_generation',
+                'transport_epoch',
+                'bridge_recovery_generation',
+                'bridge_decision_generation',
+                'checkpoint_request_id',
+                'route_publication_generation',
+                'route_commit_generation',
+                'repair_generation',
+                'repair_request_key',
+                'range_fingerprint',
+                'frontier_chunk_index',
+                'range_count',
+                'requested_chunk_count',
+                'source_kind',
+                'primary_protocol_repair_request_id',
+                'primary_request_correlation_id',
+                'priority',
+                'recovery_mode')) {
+            $grantValue = Get-FileTransferEventField -Event $Grant -Name $fieldName -Default ''
+            $dispatchValue = Get-FileTransferEventField -Event $Dispatch -Name $fieldName -Default ''
+            if ([string]::IsNullOrWhiteSpace($grantValue) -or
+                [string]::IsNullOrWhiteSpace($dispatchValue) -or
+                $grantValue -ne $dispatchValue) {
+                return $false
+            }
+        }
+
+        return $true
     }
 
     function Test-FallbackFrontierRequestDispatchTupleMatch {
@@ -5307,15 +5586,19 @@ function Get-FileTransferFallbackTailReconciliationProof {
     })
     [object[]]$frontierRepairUnresolvedStalledEvents = @($frontierRepairStalledEvents | Where-Object {
         -not (Test-FallbackFrontierRepairHasLaterProgress -DispatchEvent $_) -and
+        -not (Test-FallbackFrontierRepairStallHasLaterSuccessor -StallEvent $_) -and
         -not (Test-FallbackFrontierRepairHasLaterCleanTerminal -Anchor $_)
     })
     [object[]]$currentFrontierRequestDeliveryAcceptedEvents = @(
         $frontierRequestDeliveryAcceptedEvents |
             Select-Object -Last 1
     )
+    [object[]]$frontierRequestDispatchResolvedEvents = @($currentFrontierRequestDeliveryAcceptedEvents | Where-Object {
+        Test-FallbackFrontierRequestHasLaterDispatchOutcome -DeliveryEvent $_
+    })
     [object[]]$frontierRequestDispatchMissingEvents = @($currentFrontierRequestDeliveryAcceptedEvents | Where-Object {
         (Test-FallbackFrontierRepairHasLaterFailure -Anchor $_) -and
-        -not (Test-FallbackFrontierRequestHasLaterDispatchOutcome -DeliveryEvent $_) -and
+        [int64]$_.Sequence -notin @($frontierRequestDispatchResolvedEvents | ForEach-Object { [int64]$_.Sequence }) -and
         -not (Test-FallbackFrontierRepairHasLaterCleanTerminal -Anchor $_)
     })
 
@@ -5327,7 +5610,8 @@ function Get-FileTransferFallbackTailReconciliationProof {
             $quiescenceEvidence.Add($event) | Out-Null
         }
     }
-    elseif ($frontierRequestReceiveDispatchedEvents.Count -gt 0 -or
+    elseif ($frontierRequestDispatchResolvedEvents.Count -gt 0 -or
+        $frontierRequestReceiveDispatchedEvents.Count -gt 0 -or
         $frontierRequestReceiveDispatchRejectedEvents.Count -gt 0 -or
         $frontierRequestReceiveDispatchCoalescedEvents.Count -gt 0) {
         $frontierRequestDispatchVerdict = 'pass'
@@ -6483,7 +6767,6 @@ function Test-FileTransferStaleRejectedProofForbiddenEffect {
                 'runtime_unlock_retry_dispatch_decision_staged',
                 'runtime_unlock_retry_dispatch_install_receipt_issued',
                 'runtime_unlock_retry_dispatch_install_committed',
-                'runtime_unlock_retry_dispatch_install_rejected',
                 'runtime_unlock_retry_dispatch_authority_granted',
                 'runtime_unlock_retry_dispatch_authority_rejected',
                 'runtime_unlock_retry_dispatch_observed',
@@ -7530,6 +7813,42 @@ function Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation {
             [System.StringComparison]::OrdinalIgnoreCase)
     }
 
+    function Test-RouteCommitSendDrainInvalidationRetiredCapturedWrites {
+        param([Parameter(Mandatory = $true)]$Invalidation)
+
+        $capturedText = Get-FileTransferEventField `
+            -Event $Invalidation `
+            -Name 'captured_send_count' `
+            -Default ''
+        if ([string]::IsNullOrWhiteSpace($capturedText)) {
+            # Pre-drain-accounting artifacts used invalidation as the only terminal
+            # disposition. Keep that legacy meaning; new evidence is loss-detecting.
+            return $true
+        }
+
+        $matchingRetiredText = Get-FileTransferEventField `
+            -Event $Invalidation `
+            -Name 'matching_retired_send_count' `
+            -Default ''
+        $activeText = Get-FileTransferEventField `
+            -Event $Invalidation `
+            -Name 'active_send_count' `
+            -Default ''
+        [int64]$captured = 0
+        [int64]$matchingRetired = 0
+        [int64]$active = 0
+        if (-not [int64]::TryParse($capturedText, [ref]$captured) -or
+            -not [int64]::TryParse($matchingRetiredText, [ref]$matchingRetired) -or
+            -not [int64]::TryParse($activeText, [ref]$active) -or
+            $captured -lt 0 -or
+            $matchingRetired -lt 0 -or
+            $active -lt 0) {
+            return $false
+        }
+
+        return $active -eq 0 -and $matchingRetired -ge $captured
+    }
+
     $rawCandidateRecords = New-Object System.Collections.Generic.List[object]
     $distinctCandidateRecords = New-Object System.Collections.Generic.List[object]
     $corroboratingEvents = New-Object System.Collections.Generic.List[object]
@@ -7771,8 +8090,17 @@ function Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation {
         [object[]]$exactInvalidations = @($invalidatedDrains | Where-Object {
                 [int64]$_.Sequence -gt [int64]$drain.Sequence -and
                 (Get-RouteCommitSendDrainTupleKey -Event $_) -eq $tupleKey
-            })
+            } | Sort-Object Sequence, LineNumber)
         if ($exactInvalidations.Count -gt 0) {
+            [object[]]$unsafeInvalidations = @($exactInvalidations | Where-Object {
+                -not (Test-RouteCommitSendDrainInvalidationRetiredCapturedWrites -Invalidation $_)
+            })
+            if ($unsafeInvalidations.Count -gt 0) {
+                Add-RouteCommitSendDrainCandidate `
+                    -Event $unsafeInvalidations[0] `
+                    -DistinctKey ("new-drain-invalidated-active|{0}" -f $tupleKey) `
+                    -Reason 'captured_physical_sends_not_retired_before_scope_invalidation'
+            }
             continue
         }
 
@@ -21754,6 +22082,9 @@ function Get-FileTransferRuntimeUnlockRetryDispatchPostGrantHoldCorrelation {
     [object[]]$settledEvents = @($orderedEvents | Where-Object {
         $_.EventName -eq 'runtime_unlock_retry_dispatch_contract_settled'
     })
+    [object[]]$settlementReports = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_settlement_reported'
+    })
     [object[]]$settlementDecisions = @($orderedEvents | Where-Object {
         $_.EventName -eq 'runtime_unlock_retry_dispatch_settlement_decided'
     })
@@ -21780,6 +22111,205 @@ function Get-FileTransferRuntimeUnlockRetryDispatchPostGrantHoldCorrelation {
         }
 
         return $true
+    }
+
+    function Get-PostGrantAcceptedSettlement {
+        param(
+            [Parameter(Mandatory = $true)]$Grant,
+            [Parameter(Mandatory = $true)][int64]$AfterSequence,
+            [string]$Outcome = ''
+        )
+
+        [object[]]$matchingSettlements = @($settledEvents | Where-Object {
+            [int64]$_.Sequence -gt $AfterSequence -and
+            ([string]::IsNullOrWhiteSpace($Outcome) -or
+                (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq $Outcome) -and
+            (Test-PostGrantExactMatch -Left $Grant -Right $_)
+        } | Sort-Object Sequence, LineNumber)
+        foreach ($settlement in $matchingSettlements) {
+            $settlementOutcome = Get-FileTransferEventField -Event $settlement -Name 'settlement_outcome' -Default ''
+            $settlementReason = Get-FileTransferEventField -Event $settlement -Name 'decision_reason' -Default ''
+            [object[]]$matchingReports = @($settlementReports | Where-Object {
+                [int64]$_.Sequence -gt [int64]$settlement.Sequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq $settlementOutcome -and
+                (Get-FileTransferEventField -Event $_ -Name 'settlement_reason' -Default '') -eq $settlementReason -and
+                (Test-PostGrantExactMatch -Left $Grant -Right $_)
+            } | Sort-Object Sequence, LineNumber)
+            if ($matchingReports.Count -eq 0) {
+                continue
+            }
+
+            $report = $matchingReports[0]
+            [object[]]$matchingDecisions = @($settlementDecisions | Where-Object {
+                [int64]$_.Sequence -gt [int64]$report.Sequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq $settlementOutcome -and
+                (Get-FileTransferEventField -Event $_ -Name 'settlement_reason' -Default '') -eq $settlementReason -and
+                (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in @('Accepted', 'Idempotent') -and
+                (Test-PostGrantExactMatch -Left $Grant -Right $_)
+            } | Sort-Object Sequence, LineNumber)
+            if ($matchingDecisions.Count -gt 0) {
+                return [pscustomobject]@{
+                    Settlement = $settlement
+                    Report = $report
+                    Decision = $matchingDecisions[0]
+                }
+            }
+        }
+
+        return $null
+    }
+
+    function Test-PostGrantActiveSuccessorLineage {
+        param(
+            [Parameter(Mandatory = $true)]$PredecessorGrant,
+            [Parameter(Mandatory = $true)]$SuccessorGrant
+        )
+
+        $predecessorAuthorityId = Get-FileTransferEventField -Event $PredecessorGrant -Name 'authority_id' -Default ''
+        $successorAuthorityId = Get-FileTransferEventField -Event $SuccessorGrant -Name 'authority_id' -Default ''
+        if ([string]::IsNullOrWhiteSpace($predecessorAuthorityId) -or
+            [string]::IsNullOrWhiteSpace($successorAuthorityId) -or
+            $predecessorAuthorityId -in @('(none)', 'none') -or
+            $successorAuthorityId -in @('(none)', 'none') -or
+            (Get-FileTransferEventField -Event $SuccessorGrant -Name 'predecessor_authority_id' -Default '') -ne
+                $predecessorAuthorityId -or
+            (Get-FileTransferEventField -Event $SuccessorGrant -Name 'request_active_predecessor_supersession' -Default '') -notin
+                @('1', 'true', 'True')) {
+            return $false
+        }
+
+        [string[]]$mutableSuccessorFields = @(
+            'authority_id',
+            'authority_generation',
+            'predecessor_authority_id',
+            'bridge_decision_generation',
+            'dispatch_attempt_generation',
+            'recovery_reason')
+        foreach ($field in @(Get-FileTransferRuntimeUnlockRetryDispatchCompleteAuthorityTupleFields | Where-Object {
+                    $_ -notin $mutableSuccessorFields
+                })) {
+            $predecessorValue = Get-FileTransferEventField -Event $PredecessorGrant -Name $field -Default ''
+            $successorValue = Get-FileTransferEventField -Event $SuccessorGrant -Name $field -Default ''
+            if ([string]::IsNullOrWhiteSpace($predecessorValue) -or
+                [string]::IsNullOrWhiteSpace($successorValue) -or
+                -not [string]::Equals($predecessorValue, $successorValue, [System.StringComparison]::Ordinal)) {
+                return $false
+            }
+        }
+
+        $predecessorAuthorityGeneration = Get-FileTransferEventInt64Field `
+            -Event $PredecessorGrant -Name 'authority_generation' -Default -1
+        $successorAuthorityGeneration = Get-FileTransferEventInt64Field `
+            -Event $SuccessorGrant -Name 'authority_generation' -Default -1
+        $predecessorAttempt = Get-FileTransferEventInt64Field `
+            -Event $PredecessorGrant -Name 'dispatch_attempt_generation' -Default -1
+        $successorAttempt = Get-FileTransferEventInt64Field `
+            -Event $SuccessorGrant -Name 'dispatch_attempt_generation' -Default -1
+        if ($successorAuthorityGeneration -ne ($predecessorAuthorityGeneration + 1) -or
+            $successorAttempt -ne ($predecessorAttempt + 1)) {
+            return $false
+        }
+
+        $requestBridgeDecisionGeneration = Get-FileTransferEventInt64Field `
+            -Event $SuccessorGrant -Name 'request_bridge_decision_generation' -Default -1
+        $predecessorBridgeDecisionGeneration = Get-FileTransferEventInt64Field `
+            -Event $PredecessorGrant -Name 'bridge_decision_generation' -Default -2
+        return $requestBridgeDecisionGeneration -eq $predecessorBridgeDecisionGeneration
+    }
+
+    function Get-PostGrantAcceptedActiveSuccessor {
+        param(
+            [Parameter(Mandatory = $true)]$Grant,
+            [Parameter(Mandatory = $true)][int64]$AfterSequence
+        )
+
+        $acceptedSupersession = Get-PostGrantAcceptedSettlement `
+            -Grant $Grant `
+            -AfterSequence $AfterSequence `
+            -Outcome 'Superseded'
+        if ($null -eq $acceptedSupersession) {
+            return $null
+        }
+
+        $successorAuthorityId = Get-FileTransferEventField `
+            -Event $acceptedSupersession.Settlement `
+            -Name 'successor_authority_id' `
+            -Default ''
+        if ([string]::IsNullOrWhiteSpace($successorAuthorityId) -or
+            $successorAuthorityId -in @('(none)', 'none')) {
+            return $null
+        }
+
+        [object[]]$matchingSuccessors = @($EffectiveGrantEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$acceptedSupersession.Decision.Sequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq $successorAuthorityId -and
+            (Test-PostGrantActiveSuccessorLineage -PredecessorGrant $Grant -SuccessorGrant $_)
+        } | Sort-Object Sequence, LineNumber)
+        if ($matchingSuccessors.Count -ne 1) {
+            return $null
+        }
+
+        return [pscustomobject]@{
+            Grant = $matchingSuccessors[0]
+            Settlement = $acceptedSupersession.Settlement
+            Decision = $acceptedSupersession.Decision
+        }
+    }
+
+    function Test-PostGrantDispatchObserved {
+        param(
+            [Parameter(Mandatory = $true)]$Grant,
+            [Parameter(Mandatory = $true)][int64]$AfterSequence
+        )
+
+        [object[]]$observed = @($dispatchObservedEvents | Where-Object {
+            [int64]$_.Sequence -gt $AfterSequence -and
+            (Test-PostGrantExactMatch -Left $Grant -Right $_)
+        } | Sort-Object Sequence, LineNumber)
+        if ($observed.Count -eq 0) {
+            return $false
+        }
+
+        $acceptedDispatch = Get-PostGrantAcceptedSettlement `
+            -Grant $Grant `
+            -AfterSequence $AfterSequence `
+            -Outcome 'DispatchObserved'
+        return $null -ne $acceptedDispatch -and
+            (Get-FileTransferEventField -Event $acceptedDispatch.Settlement -Name 'dispatch_observed' -Default '0') -eq '1'
+    }
+
+    function Test-PostGrantHoldRecovered {
+        param(
+            [Parameter(Mandatory = $true)]$Grant,
+            [Parameter(Mandatory = $true)][int64]$AfterSequence
+        )
+
+        $currentGrant = $Grant
+        $currentBoundary = $AfterSequence
+        $visitedAuthorities = New-Object 'System.Collections.Generic.HashSet[string]'
+        for ($depth = 0; $depth -lt 16; $depth++) {
+            $currentAuthorityId = Get-FileTransferEventField -Event $currentGrant -Name 'authority_id' -Default ''
+            if ([string]::IsNullOrWhiteSpace($currentAuthorityId) -or
+                -not $visitedAuthorities.Add($currentAuthorityId)) {
+                return $false
+            }
+
+            if (Test-PostGrantDispatchObserved -Grant $currentGrant -AfterSequence $currentBoundary) {
+                return $true
+            }
+
+            $successor = Get-PostGrantAcceptedActiveSuccessor `
+                -Grant $currentGrant `
+                -AfterSequence $currentBoundary
+            if ($null -eq $successor) {
+                return $false
+            }
+
+            $currentGrant = $successor.Grant
+            $currentBoundary = [int64]$currentGrant.Sequence
+        }
+
+        return $false
     }
 
     function Get-PostGrantHoldKey {
@@ -21826,24 +22356,9 @@ function Get-FileTransferRuntimeUnlockRetryDispatchPostGrantHoldCorrelation {
 
             $recovered = $false
             if ($held.EventName -eq 'runtime_unlock_retry_dispatch_held_by_active_negotiation') {
-                [object[]]$observed = @($dispatchObservedEvents | Where-Object {
-                    [int64]$_.Sequence -gt [int64]$held.Sequence -and
-                    (Test-PostGrantExactMatch -Left $grant -Right $_)
-                } | Sort-Object Sequence, LineNumber)
-                [object[]]$dispatchSettlements = @($matchingSettlements | Where-Object {
-                    [int64]$_.Sequence -gt [int64]$held.Sequence -and
-                    (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq 'DispatchObserved' -and
-                    (Get-FileTransferEventField -Event $_ -Name 'dispatch_observed' -Default '0') -eq '1'
-                } | Sort-Object Sequence, LineNumber)
-                if ($observed.Count -gt 0 -and $dispatchSettlements.Count -gt 0) {
-                    $settlement = $dispatchSettlements[0]
-                    $recovered = @($settlementDecisions | Where-Object {
-                        [int64]$_.Sequence -gt [int64]$settlement.Sequence -and
-                        (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq 'DispatchObserved' -and
-                        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in @('Accepted', 'Idempotent') -and
-                        (Test-PostGrantExactMatch -Left $grant -Right $_)
-                    }).Count -gt 0
-                }
+                $recovered = Test-PostGrantHoldRecovered `
+                    -Grant $grant `
+                    -AfterSequence ([int64]$held.Sequence)
             }
 
             $distinctRecords.Add([pscustomobject]@{
@@ -21856,6 +22371,50 @@ function Get-FileTransferRuntimeUnlockRetryDispatchPostGrantHoldCorrelation {
     [object[]]$distinct = @($distinctRecords.ToArray() | ForEach-Object { $_.Event })
     [object[]]$recovered = @($distinctRecords.ToArray() | Where-Object { $_.Recovered } | ForEach-Object { $_.Event })
     [object[]]$unresolved = @($distinctRecords.ToArray() | Where-Object { -not $_.Recovered } | ForEach-Object { $_.Event })
+    $unresolvedGrantList = New-Object System.Collections.Generic.List[object]
+    $acceptedDispositionSettlementList = New-Object System.Collections.Generic.List[object]
+    foreach ($grant in @($EffectiveGrantEvents | Sort-Object Sequence, LineNumber)) {
+        [object[]]$observed = @($dispatchObservedEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$grant.Sequence -and
+            (Test-PostGrantExactMatch -Left $grant -Right $_)
+        })
+        if ($observed.Count -gt 0) {
+            continue
+        }
+
+        $disposed = $false
+        foreach ($outcome in @(
+                'DispatchObserved',
+                'MissingDispatch',
+                'AuthorityRejected',
+                'StaleRejected',
+                'TerminalRejected',
+                'TransferTerminal')) {
+            $acceptedDisposition = Get-PostGrantAcceptedSettlement `
+                    -Grant $grant `
+                    -AfterSequence ([int64]$grant.Sequence) `
+                    -Outcome $outcome
+            if ($null -ne $acceptedDisposition) {
+                $acceptedDispositionSettlementList.Add($acceptedDisposition.Settlement) | Out-Null
+                $disposed = $true
+                break
+            }
+        }
+        if ($disposed) {
+            continue
+        }
+
+        $acceptedSuccessor = Get-PostGrantAcceptedActiveSuccessor `
+            -Grant $grant `
+            -AfterSequence ([int64]$grant.Sequence)
+        if ($null -ne $acceptedSuccessor) {
+            $acceptedDispositionSettlementList.Add($acceptedSuccessor.Settlement) | Out-Null
+            continue
+        }
+
+        $unresolvedGrantList.Add($grant) | Out-Null
+    }
+    [object[]]$unresolvedGrants = @($unresolvedGrantList.ToArray())
     return [pscustomobject]@{
         RawCount = $rawCandidates.Count
         DistinctCount = $distinct.Count
@@ -21866,6 +22425,8 @@ function Get-FileTransferRuntimeUnlockRetryDispatchPostGrantHoldCorrelation {
         DistinctCandidateEvents = $distinct
         RecoveredCandidateEvents = $recovered
         UnresolvedCandidateEvents = $unresolved
+        UnresolvedGrantEvents = $unresolvedGrants
+        AcceptedDispositionSettlementEvents = @($acceptedDispositionSettlementList.ToArray())
     }
 }
 
@@ -22359,7 +22920,10 @@ function Get-FileTransferRecoveryFailureClassification {
     })
     [object[]]$runtimeUnlockRetryAcceptedMissingDispatchSettlementEvents = @(
         @($runtimeUnlockRetryZeroOfferSuccessorProof.AcceptedMissingDispatchSettlementEvents) +
-        @($runtimeUnlockRetryFallbackPairedYieldSuccessorReleaseProof.AcceptedMissingDispatchSettlementEvents) |
+        @($runtimeUnlockRetryFallbackPairedYieldSuccessorReleaseProof.AcceptedMissingDispatchSettlementEvents) +
+        @($runtimeUnlockRetryDispatchPostGrantHoldProof.AcceptedDispositionSettlementEvents | Where-Object {
+            (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq 'MissingDispatch'
+        }) |
             Sort-Object Sequence, LineNumber -Unique
     )
     $runtimeUnlockRetryDispatchUnsettledMissingAfterAuthorityGrantedEvents = @(
@@ -23667,7 +24231,7 @@ function Get-FileTransferRecoveryFailureClassification {
         'none'
     }
 
-    $runtimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount = $runtimeUnlockRetryDispatchMissingAfterAuthorityGrantedEvents.Count
+    $runtimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount = $runtimeUnlockRetryDispatchUnsettledMissingAfterAuthorityGrantedEvents.Count
     $runtimeUnlockRetryDispatchMissingCount = $runtimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount
     $runtimeUnlockRetryDispatchReleaseCount = $runtimeUnlockRetryReleasedEvents.Count
     $runtimeUnlockRetryDispatchDuplicateObservedCount = (@(

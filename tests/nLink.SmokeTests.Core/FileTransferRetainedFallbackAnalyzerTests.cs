@@ -2170,6 +2170,41 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
     [Fact]
     [Trait("RetainedFallbackSuite", "FrontierRequestDispatch")]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PeerVisibleFallbackFrontierRequestWithObservedCoordinatorRepairDispatch_PassesDispatchEdge()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_frontier_observed_repair_dispatch";
+        const string controlAuthority = "fta2-fallback_control_plane-control";
+        const string repairAuthority = "fta2-repair_replay-repair";
+        const string repairRequestId = "v6-frontier:1:522:5";
+        const string correlationId = "frq-correlated-observed";
+        const string repairKey = "fallback-frontier:522:1:frng-correlated";
+        const string scope = $"direction=inbound; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; leg_generation=3; bridge_recovery_generation=1; transport_epoch=1; checkpoint_request_id=(none)";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; live_route_epoch=2", secondsOffset: 0),
+            LogLine($"event=filetransfer_fallback_frontier_repair_authority_granted; authority_schema=2; authority_id={repairAuthority}; predecessor_authority_id=(none); {scope}; runtime_generation=3; terminal_generation=0; bridge_decision_generation=0; route_publication_generation=4; route_commit_generation=0; repair_generation=8; repair_request_key={repairKey}; range_fingerprint=frng-correlated; frontier_chunk_index=522; range_count=1; requested_chunk_count=1; source_kind=ReceiverRequest; primary_protocol_repair_request_id={repairRequestId}; primary_request_correlation_id={correlationId}; priority=frontier; recovery_mode=frontier_repair_only; stage=request", secondsOffset: 1),
+            LogLine($"event=filetransfer_control_plane_delivery_result; authority_schema=2; authority_id={controlAuthority}; control_plane_generation=9; {scope}; kind=frontier_request; reason=transport_epoch; frame_type=filetransfer.frontier_request.v6; repair_request_id={repairRequestId}; request_correlation_id={correlationId}; first_start_chunk_index=522; first_chunk_count=1; range_count=1; recovery_mode=frontier_repair_only; priority=frontier; peer_visible_any=1; accepted_any=1", secondsOffset: 2),
+            LogLine($"event=filetransfer_control_plane_delivery_observed; authority_schema=2; authority_id={controlAuthority}; control_plane_generation=9; {scope}; kind=frontier_request; reason=transport_epoch; frame_type=filetransfer.frontier_request.v6; repair_request_id={repairRequestId}; request_correlation_id={correlationId}; repair_request_key={repairKey}; range_fingerprint=frng-correlated; first_start_chunk_index=522; first_chunk_count=1; range_count=1; requested_chunk_count=1; recovery_mode=frontier_repair_only; priority=frontier; peer_visible_any=1; accepted_any=1", secondsOffset: 3),
+            LogLine($"event=filetransfer_fallback_frontier_repair_dispatched; authority_schema=2; authority_id={repairAuthority}; predecessor_authority_id=(none); {scope}; runtime_generation=3; terminal_generation=0; bridge_decision_generation=0; route_publication_generation=4; route_commit_generation=0; repair_generation=8; repair_request_key={repairKey}; range_fingerprint=frng-correlated; frontier_chunk_index=522; range_count=1; requested_chunk_count=1; source_kind=ReceiverRequest; primary_protocol_repair_request_id={repairRequestId}; primary_request_correlation_id={correlationId}; priority=frontier; recovery_mode=frontier_repair_only; stage=receiver_request_send; dispatched_chunk_count=1; dispatch_observed=1", secondsOffset: 4),
+            LogLine($"event=filetransfer_fallback_frontier_repair_contract_settled; authority_schema=2; authority_id={repairAuthority}; predecessor_authority_id=(none); {scope}; runtime_generation=3; terminal_generation=0; bridge_decision_generation=0; route_publication_generation=4; route_commit_generation=0; repair_generation=8; repair_request_key={repairKey}; range_fingerprint=frng-correlated; frontier_chunk_index=522; range_count=1; requested_chunk_count=1; source_kind=ReceiverRequest; primary_protocol_repair_request_id={repairRequestId}; primary_request_correlation_id={correlationId}; priority=frontier; recovery_mode=frontier_repair_only; settlement_outcome=ProgressObserved", secondsOffset: 5),
+            LogLine($"event=filetransfer_live_progress_timeout; transfer_id={transferId}; session_id=sess_a; reason=no useful data progress for 180s", secondsOffset: 190)
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("0", verdict["fallback_frontier_request_dispatch_missing_count"]);
+        Assert.Equal("pass", verdict["fallback_frontier_request_dispatch_verdict"]);
+    }
+
+    [Fact]
+    [Trait("RetainedFallbackSuite", "FrontierRequestDispatch")]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_PeerVisibleFallbackFrontierRequestWithCoalescedDispatchProof_PassesDispatchEdge()
     {
         if (!OperatingSystem.IsWindows())

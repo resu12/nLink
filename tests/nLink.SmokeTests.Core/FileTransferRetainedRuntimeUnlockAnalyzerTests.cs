@@ -3670,6 +3670,177 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     [InlineData(false)]
     [InlineData(true)]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryActiveNegotiationHoldAfterGrant_ExactActiveSuccessorDispatchRecovers(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_active_negotiation_successor_recovered";
+        const string predecessorAuthorityId = "fta2-runtime-unlock-active-predecessor";
+        const string successorAuthorityId = "fta2-runtime-unlock-active-successor";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_decision_staged",
+                    transferId,
+                    "; stage_status=Staged; decision_status=Granted",
+                    "retry_dispatch_decision_staged",
+                    authorityId: predecessorAuthorityId,
+                    installGeneration: 0,
+                    authorityGeneration: 3),
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_install_receipt_issued",
+                    transferId,
+                    "; stage_status=Staged; decision_status=Granted",
+                    "coordinator_install_receipt_issued",
+                    authorityId: predecessorAuthorityId,
+                    installGeneration: 3,
+                    authorityGeneration: 3),
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_install_committed",
+                    transferId,
+                    "; stage_status=Staged; install_status=Installed; decision_status=Granted",
+                    "retry_dispatch_install_committed",
+                    authorityId: predecessorAuthorityId,
+                    installGeneration: 3,
+                    authorityGeneration: 3),
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_authority_granted",
+                    transferId,
+                    "; attempt_phase=Granted",
+                    "accepted",
+                    authorityId: predecessorAuthorityId,
+                    installGeneration: 3,
+                    authorityGeneration: 3),
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_held_by_active_negotiation",
+                    transferId,
+                    authorityId: predecessorAuthorityId,
+                    authorityGeneration: 3,
+                    decisionReason: "active_negotiation_pending"),
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_decision_staged",
+                    transferId,
+                    "; stage_status=Staged; decision_status=Granted",
+                    "retry_dispatch_decision_staged",
+                    authorityId: successorAuthorityId,
+                    predecessorAuthorityId: predecessorAuthorityId,
+                    dispatchAttemptGeneration: 2,
+                    installGeneration: 0,
+                    requestActivePredecessorSupersession: true,
+                    authorityGeneration: 4),
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_install_receipt_issued",
+                    transferId,
+                    "; stage_status=Staged; decision_status=Granted",
+                    "coordinator_install_receipt_issued",
+                    authorityId: successorAuthorityId,
+                    predecessorAuthorityId: predecessorAuthorityId,
+                    dispatchAttemptGeneration: 2,
+                    installGeneration: 4,
+                    requestActivePredecessorSupersession: true,
+                    authorityGeneration: 4),
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_install_committed",
+                    transferId,
+                    "; stage_status=Staged; install_status=Installed; decision_status=Granted",
+                    "retry_dispatch_install_committed",
+                    authorityId: successorAuthorityId,
+                    predecessorAuthorityId: predecessorAuthorityId,
+                    dispatchAttemptGeneration: 2,
+                    installGeneration: 4,
+                    requestActivePredecessorSupersession: true,
+                    authorityGeneration: 4),
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_contract_settled",
+                    transferId,
+                    suffix: $"; settlement_outcome=Superseded; dispatch_observed=0; successor_authority_id={successorAuthorityId}",
+                    authorityId: predecessorAuthorityId,
+                    authorityGeneration: 3,
+                    decisionReason: "coordinator_successor_installed"),
+                RuntimeUnlockRetrySettlementReportedLine(
+                    transferId,
+                    "Superseded",
+                    authorityId: predecessorAuthorityId,
+                    authorityGeneration: 3,
+                    settlementReason: "coordinator_successor_installed"),
+                RuntimeUnlockRetrySettlementDecidedLine(
+                    transferId,
+                    "Superseded",
+                    decisionStatus: "Idempotent",
+                    authorityId: predecessorAuthorityId,
+                    authorityGeneration: 3,
+                    settlementReason: "coordinator_successor_installed"),
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_authority_granted",
+                    transferId,
+                    "; attempt_phase=Granted",
+                    "accepted",
+                    authorityId: successorAuthorityId,
+                    predecessorAuthorityId: predecessorAuthorityId,
+                    dispatchAttemptGeneration: 2,
+                    installGeneration: 4,
+                    requestActivePredecessorSupersession: true,
+                    authorityGeneration: 4),
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_contract_settled",
+                    transferId,
+                    suffix: "; settlement_outcome=DispatchObserved; dispatch_observed=1",
+                    authorityId: successorAuthorityId,
+                    predecessorAuthorityId: predecessorAuthorityId,
+                    dispatchAttemptGeneration: 2,
+                    authorityGeneration: 4,
+                    decisionReason: "peer_visible_offer_send_observed"),
+                RuntimeUnlockRetrySettlementReportedLine(
+                    transferId,
+                    "DispatchObserved",
+                    authorityId: successorAuthorityId,
+                    predecessorAuthorityId: predecessorAuthorityId,
+                    dispatchAttemptGeneration: 2,
+                    authorityGeneration: 4,
+                    settlementReason: "peer_visible_offer_send_observed"),
+                RuntimeUnlockRetrySettlementDecidedLine(
+                    transferId,
+                    "DispatchObserved",
+                    authorityId: successorAuthorityId,
+                    predecessorAuthorityId: predecessorAuthorityId,
+                    dispatchAttemptGeneration: 2,
+                    authorityGeneration: 4,
+                    settlementReason: "peer_visible_offer_send_observed"),
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_observed",
+                    transferId,
+                    authorityId: successorAuthorityId,
+                    predecessorAuthorityId: predecessorAuthorityId,
+                    dispatchAttemptGeneration: 2,
+                    authorityGeneration: 4,
+                    decisionReason: "peer_visible_offer_send_observed")),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_post_grant_hold_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_post_grant_hold_distinct_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_post_grant_hold_recovered_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_post_grant_hold_unresolved_count"]);
+        Assert.Equal("pass", verdict["runtime_unlock_retry_dispatch_post_grant_hold_verdict"]);
+        Assert.Equal("pass", verdict["runtime_unlock_retry_dispatch_proof_verdict"]);
+        Assert.NotEqual("runtime_unlock_retry_dispatch_held_after_authority_granted", verdict["recovery_failure_class"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_PreCommitProbeInitiatorLaunchTimesOutWithoutDisposition_ClassifiesHandoff(
         bool compact)
     {
@@ -8956,7 +9127,8 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         int dispatchAttemptGeneration = 1,
         int missingDispatchSuccessorGeneration = 0,
         long? installGeneration = null,
-        bool requestActivePredecessorSupersession = false)
+        bool requestActivePredecessorSupersession = false,
+        int authorityGeneration = 1)
     {
         var effectiveInstallGeneration = installGeneration ??
             (string.Equals(
@@ -8977,7 +9149,8 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             predecessorAuthorityId: predecessorAuthorityId,
             dispatchAttemptGeneration: dispatchAttemptGeneration,
             missingDispatchSuccessorGeneration: missingDispatchSuccessorGeneration,
-            decisionReason: decisionReason);
+            decisionReason: decisionReason,
+            authorityGeneration: authorityGeneration);
     }
 
     private static string RuntimeUnlockFallbackPairedYieldLine(

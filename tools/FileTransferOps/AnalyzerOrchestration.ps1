@@ -1038,6 +1038,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_held_for_missing_dispatch_successor') +
         $runtimeUnlockRetryDispatchObservedEvents +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_contract_settled') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_settlement_reported') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_settlement_decided')
     )
     $runtimeUnlockRetryDispatchPostGrantHoldProof =
@@ -1060,15 +1061,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             -Events $runtimeUnlockPreCommitProbeStartHandoffEvents
     $runtimeUnlockRetryDispatchObservedCount = $runtimeUnlockRetryDispatchObservedEvents.Count
     [object[]]$runtimeUnlockRetryDispatchUnobservedGrantEvents = @(
-        $runtimeUnlockRetryDispatchEffectiveGrantEvents | Where-Object {
-            $grant = $_
-            @($runtimeUnlockRetryDispatchObservedEvents | Where-Object {
-                [int64]$_.Sequence -gt [int64]$grant.Sequence -and
-                (Test-FileTransferRuntimeUnlockRetryDispatchTupleMatch `
-                    -Left $grant `
-                    -Right $_)
-            }).Count -eq 0
-        }
+        $runtimeUnlockRetryDispatchPostGrantHoldProof.UnresolvedGrantEvents
     )
     $runtimeUnlockRetryDispatchProofVerdict = if (
         $runtimeUnlockRetryDispatchEffectiveGrantEvents.Count -gt 0 -and
