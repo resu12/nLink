@@ -83,4 +83,15 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Rerun only the targeted failing GUI scenarios after a fix. Do not run the full Phase 5 matrix until the targeted correctness paths pass or advance to a new first proof edge.
 - For `regular-v4-live-activation-off-on-off-256mb`, do not accept SHA OK or fallback completion as proof of the route-cycle contract unless a second coordinator-published `file_tuna_v4` route is observed.
 
+## Test Selection and Rerun Policy
 
+- During implementation, run only tests directly affected by the changed contract or production path.
+- After small follow-up edits, rerun only tests whose covered behavior could have changed.
+- Run the relevant contract lane once after the implementation stabilizes.
+- Do not repeatedly run aggregate `FileTransferContract`, `FileTransferAnalyzer`, `FileTransferAcceptanceFake`, or generic Smoke lanes unless the change affects their shared infrastructure.
+- Before targeted GUI validation, require:
+  1. Focused regression tests.
+  2. Directly affected coordinator/Core/Infra/analyzer lanes.
+  3. At most one broader contract regression lane.
+- Reserve full aggregate suites and the full GUI matrix for nightly, pre-release, or an explicitly requested final gate.
+- A newly discovered proof edge does not require rerunning unrelated lanes before preparing its RCA.
