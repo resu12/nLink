@@ -9281,6 +9281,7 @@ public sealed partial class NknSignalingTransport
         {
             var sendCt = ct;
             CancellationTokenSource? activationPauseLinkedCts = null;
+            var activationPauseLifetimeRetained = false;
             try
             {
                 var runtimeUnlockPreCommitProbe = IsRuntimeUnlockPreCommitProbeFrame(frame);
@@ -9302,6 +9303,11 @@ public sealed partial class NknSignalingTransport
                         ct,
                         Volatile.Read(ref tunaActivationPauseCts).Token);
                     sendCt = activationPauseLinkedCts.Token;
+                    if (physicalSendCompletion is not null)
+                    {
+                        physicalSendCompletion.RetainCancellationLifetime(activationPauseLinkedCts);
+                        activationPauseLifetimeRetained = true;
+                    }
                 }
 
                 if (frame is FileTransferChunkBatchFrameV4 v4Batch && v4Batch.DataSegments.Count > 0)
@@ -9369,7 +9375,10 @@ public sealed partial class NknSignalingTransport
             }
             finally
             {
-                activationPauseLinkedCts?.Dispose();
+                if (!activationPauseLifetimeRetained)
+                {
+                    activationPauseLinkedCts?.Dispose();
+                }
             }
         }
 
@@ -9791,7 +9800,27 @@ public sealed partial class NknSignalingTransport
         {
             private readonly object gate = new();
             private readonly List<Task> physicalOperations = [];
+            private CancellationTokenSource? retainedCancellationLifetime;
             private bool sealedForRegistration;
+
+            public void RetainCancellationLifetime(CancellationTokenSource lifetime)
+            {
+                ArgumentNullException.ThrowIfNull(lifetime);
+                lock (gate)
+                {
+                    if (sealedForRegistration)
+                    {
+                        throw new InvalidOperationException("Physical send completion registration is closed.");
+                    }
+
+                    if (retainedCancellationLifetime is not null)
+                    {
+                        throw new InvalidOperationException("Physical send cancellation lifetime is already retained.");
+                    }
+
+                    retainedCancellationLifetime = lifetime;
+                }
+            }
 
             public void Register(Task operation)
             {
@@ -9819,31 +9848,45 @@ public sealed partial class NknSignalingTransport
             {
                 try
                 {
-                    await deliveryTask.ConfigureAwait(false);
-                }
-                catch
-                {
-                    // Delivery failures remain observable through DeliveryTask. Drain proof only waits for settlement.
-                }
+                    try
+                    {
+                        await deliveryTask.ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        // Delivery failures remain observable through DeliveryTask. Drain proof only waits for settlement.
+                    }
 
-                Task[] operations;
-                lock (gate)
-                {
-                    operations = physicalOperations.ToArray();
-                }
+                    Task[] operations;
+                    lock (gate)
+                    {
+                        operations = physicalOperations.ToArray();
+                    }
 
-                if (operations.Length == 0)
-                {
-                    return;
-                }
+                    if (operations.Length == 0)
+                    {
+                        return;
+                    }
 
-                try
-                {
-                    await Task.WhenAll(operations).ConfigureAwait(false);
+                    try
+                    {
+                        await Task.WhenAll(operations).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        // Individual delivery status is already reported by the existing send path.
+                    }
                 }
-                catch
+                finally
                 {
-                    // Individual delivery status is already reported by the existing send path.
+                    CancellationTokenSource? cancellationLifetime;
+                    lock (gate)
+                    {
+                        cancellationLifetime = retainedCancellationLifetime;
+                        retainedCancellationLifetime = null;
+                    }
+
+                    cancellationLifetime?.Dispose();
                 }
             }
         }

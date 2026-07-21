@@ -1586,6 +1586,102 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
         }
     }
 
+    [Trait("FileTransferRuntimeSuite", "SparseWorkerHandoff")]
+    [Fact]
+    public async Task NknTransport_PhysicalSendSubmission_ActivationPauseSettlesOutstandingRedundantRepairCopy()
+    {
+        FakeNknClient.ResetNetwork();
+        TaskCompletionSource<bool> controlEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            using CancellationTokenSource cts = new(TimeSpan.FromSeconds(8));
+            NknTransportOptions options = NknTransportOptions.Load();
+            FakeNknClient hostClient = new("host.filetransfer.physicalsend.pause.v4.address");
+            FakeNknClient helperClient = new("helper.filetransfer.physicalsend.pause.v4.address");
+            NknIdentity hostIdentity = new("host-physicalsend-pause-v4-id", hostClient.Address);
+            NknIdentity helperIdentity = new("helper-physicalsend-pause-v4-id", helperClient.Address);
+            using NknSignalingTransport host = new(hostClient, options, hostIdentity);
+            using NknSignalingTransport helper = new(helperClient, options, helperIdentity);
+
+            string sessionId = await CoreSmokeTestsBase.ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_nkn_physicalsend_pause_v4";
+            IFileTransferDataSession outboundSession = await helper.OpenFileTransferDataSessionAsync(
+                sessionId,
+                transferId,
+                cts.Token);
+            ConcurrentQueue<NknIncomingMessage> deliveredFrames = new();
+            hostClient.MessageReceived += (_, message) =>
+            {
+                if (!message.IsTopic &&
+                    EnvelopeCodec.TryDeserialize(message.Payload, out Envelope envelope) &&
+                    envelope.Type == MsgType.FileTransferDataFrame)
+                {
+                    deliveredFrames.Enqueue(message);
+                }
+            };
+            helperClient.BeforeSendCoreAsync = async (_, _, channel, sendCt) =>
+            {
+                if (channel != NknBridgeChannel.Control)
+                {
+                    return;
+                }
+
+                controlEntered.TrySetResult(true);
+                await Task.Delay(Timeout.InfiniteTimeSpan, sendCt);
+            };
+            IFileTransferPhysicalSendSubmissionSession submissionSession =
+                Assert.IsAssignableFrom<IFileTransferPhysicalSendSubmissionSession>(outboundSession);
+            FileTransferChunkBatchFrameV6 batch = new()
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                StartChunkIndex = 9,
+                ChunkCount = 1,
+                DataSegments = [new byte[21 * 1024]],
+                BatchProfile = "v4_repair_21k",
+                RepairDeliveryMode = FileTransferV4RepairDeliveryMode.ControlBulkRedundant,
+            };
+
+            FileTransferPhysicalSendSubmission submission = submissionSession.SubmitPhysicalSend(
+                batch,
+                authority: null,
+                cts.Token);
+            await controlEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await submission.DeliveryTask.WaitAsync(TimeSpan.FromSeconds(2));
+
+            Assert.False(submission.PhysicalCompletionTask.IsCompleted);
+            Assert.Contains(deliveredFrames, static message => message.Channel == NknBridgeChannel.Bulk);
+            Assert.DoesNotContain(deliveredFrames, static message => message.Channel == NknBridgeChannel.Control);
+
+            MethodInfo setAvailability = Assert.Single(
+                outboundSession.GetType()
+                    .GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                    .Where(static method => method.Name == "SetAvailability"));
+            setAvailability.Invoke(
+                outboundSession,
+                [
+                    false,
+                    "tuna_activation_negotiating",
+                    false,
+                    FileTransferTransportHandoffKind.None,
+                    FileTransferTransportKind.RegularNkn,
+                    null,
+                    null,
+                ]);
+
+            await submission.PhysicalCompletionTask.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.DoesNotContain(deliveredFrames, static message => message.Channel == NknBridgeChannel.Control);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
     [Trait("Category", "Smoke")]
     [Fact]
     public async Task NknTransport_PostTunaFallbackV6FrontierCancellation_DefersHardBothFailedEvidence()
