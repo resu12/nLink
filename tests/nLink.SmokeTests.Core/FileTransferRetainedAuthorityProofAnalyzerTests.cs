@@ -1186,6 +1186,45 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
         Assert.NotEqual("file_tuna_data_path_mismatch", compactVerdict["first_proof_chain_failure_class"]);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedAuthorityProofSuite", "FileTunaV4DataPathProof")]
+    public async Task AnalyzeRetained_FileTunaV4LateRegularDeliveryBeforeSenderTransition_IsFailClosed(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_file_tuna_v4_late_regular_delivery";
+        var lines = BuildFileTunaV4RejectedReceiveFixture(
+            transferId,
+            includeOutboundTransition: false);
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        if (!compact)
+        {
+            var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+            Assert.Equal("pass", route["file_tuna_v4_data_path_proof_verdict"]);
+            Assert.Equal("0", route["file_tuna_v4_data_path_mismatch_count"]);
+        }
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("0", verdict["file_tuna_v4_data_path_mismatch_count"]);
+        Assert.NotEqual("file_tuna_data_path_mismatch", verdict["recovery_failure_class"]);
+        Assert.NotEqual("file_tuna_data_path_mismatch", verdict["first_proof_chain_failure_class"]);
+    }
+
     [Fact]
     [Trait("RetainedAuthorityProofSuite", "RouteCommitSendDrain")]
     public async Task AnalyzeRetained_RouteCommitOldPhysicalWritesAfterOwnerInstall_AreOnePreciseFailure()
@@ -2247,7 +2286,8 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
 
     private static List<string> BuildFileTunaV4RejectedReceiveFixture(
         string transferId,
-        string? omittedCompanionEvidence = null)
+        string? omittedCompanionEvidence = null,
+        bool includeOutboundTransition = true)
     {
         const string sourceWriterId = "writer_source_regular";
         const string writerId = "writer_receive_regular_rejected";
@@ -2303,10 +2343,16 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
             "frame_type=filetransfer.chunk_batch.v4; chunk_index=0-1; lane=bulk; " +
             "reason=file_tuna_v4_payload_requires_tuna; actual_transport=regular_nkn; target_transport=tuna; " +
             $"route=file_tuna_v4; protocol_version=4; log_writer_id={writerId}; log_writer_sequence=21";
-        var lines = BuildFileTunaV4DataPathProofFixture(
-            transferId,
-            sourceSend,
-            outboundTransition,
+        var messages = new List<string>
+        {
+            sourceSend
+        };
+        if (includeOutboundTransition)
+        {
+            messages.Add(outboundTransition);
+        }
+        messages.AddRange(
+        [
             inboundTransition,
             FileTunaV4DataPathIntentMessage(transferId),
             receive,
@@ -2317,7 +2363,9 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
                 actualTransport: "tuna",
                 eventName: "filetransfer_tuna_data_path_peer_visible",
                 proofDirection: "send",
-                startChunkIndex: 0));
+                startChunkIndex: 0)
+        ]);
+        var lines = BuildFileTunaV4DataPathProofFixture(transferId, messages.ToArray());
         var sourceLineIndex = lines.FindIndex(line => line.Contains(sourceSend, StringComparison.Ordinal));
         Assert.True(sourceLineIndex >= 0);
         lines[sourceLineIndex] = "\uFEFF" + lines[sourceLineIndex];
