@@ -174,9 +174,9 @@ public sealed partial class SessionFileTransferV4SenderTests
             context,
             "PendingRuntimeUnlockUncommittedTunaFallbackHandoff");
         Assert.NotNull(pairedIntent);
-        Assert.Equal(evidence, GetPrivateProperty<PostTunaFallbackHandoffEvidence>(
+        Assert.Equal(evidence.ToPeerProofEvidence(), GetPrivateProperty<PostTunaFallbackPeerProofEvidence>(
             pairedIntent!,
-            "AvailabilityEvidence"));
+            "PeerProofEvidence"));
         Assert.Equal(wrongFrame, GetPrivateProperty<FileTransferReceiverStateFrameV6>(
             pairedIntent!,
             "PeerProofFrame"));
@@ -206,9 +206,9 @@ public sealed partial class SessionFileTransferV4SenderTests
             "PendingRuntimeUnlockUncommittedTunaFallbackHandoff");
         Assert.NotNull(exactIntent);
         Assert.Equal(handoffGeneration, GetPrivateProperty<int>(exactIntent!, "HandoffGeneration"));
-        Assert.Equal(evidence, GetPrivateProperty<PostTunaFallbackHandoffEvidence>(
+        Assert.Equal(evidence.ToPeerProofEvidence(), GetPrivateProperty<PostTunaFallbackPeerProofEvidence>(
             exactIntent!,
-            "AvailabilityEvidence"));
+            "PeerProofEvidence"));
         Assert.Equal(exactFrame, GetPrivateProperty<FileTransferReceiverStateFrameV6>(
             exactIntent!,
             "PeerProofFrame"));
@@ -459,7 +459,7 @@ public sealed partial class SessionFileTransferV4SenderTests
                 GetPrivatePropertyValue(
                     context,
                     "PendingRuntimeUnlockUncommittedTunaFallbackHandoff")!,
-                "AvailabilityEvidence"));
+                "PeerProofEvidence"));
 
             var availabilityResult = RetainUncommittedTunaFallbackAvailability(
                 service,
@@ -5767,7 +5767,15 @@ public sealed partial class SessionFileTransferV4SenderTests
             IFileTransferDataSession dataSession,
             PostTunaFallbackHandoffEvidence evidence)
     {
-        object?[] args = [context, dataSession, evidence, "transport_recovered", null];
+        object?[] args =
+        [
+            context,
+            dataSession,
+            evidence.ToPeerProofEvidence(),
+            "transport_recovered",
+            null,
+            null,
+        ];
         var handled = Assert.IsType<bool>(typeof(SessionFileTransferService)
             .GetMethod(
                 "TryRetainRuntimeUnlockUncommittedTunaFallbackHandoffLocked",

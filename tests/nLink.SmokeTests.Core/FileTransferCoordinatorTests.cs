@@ -8630,7 +8630,7 @@ public sealed class FileTransferCoordinatorTests
             SourceDataSessionGeneration: 23,
             DrainGeneration: 29,
             CompletedDrainGeneration: 29,
-            proof,
+            proof.ToPeerProofEvidence(),
             proofTransportEpoch,
             HandoffGeneration: 31,
             Reason: "uncommitted_tuna_fallback_handoff");
@@ -8678,7 +8678,7 @@ public sealed class FileTransferCoordinatorTests
             setup.Handoff.DrainGeneration,
             setup.Handoff.CompletedDrainGeneration,
             setup.Handoff.ProofTransportEpoch,
-            setup.Handoff.PeerProofEvidence.SourceBridgeRecoveryGeneration,
+            preparedRoute.State.CurrentLeg!.BridgeRecoveryGeneration,
             setup.Handoff.PeerProofEvidence,
             transition.PressureSettlementCommand,
             targetOwner,

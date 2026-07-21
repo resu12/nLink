@@ -290,6 +290,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private long fileTransferFallbackProofTransportEpoch;
     private string? fileTransferFallbackProofCheckpointRequestId;
     private string? fileTransferFallbackProofAuthorityReason;
+    private RuntimeUnlockRouteCommitSnapshot? fileTransferFallbackProofPreCommitSnapshot;
     private int bridgeReceiveStallRecoveryActive;
     private SessionId? activeApprovedSessionId;
     private PeerAddress? activeApprovedHelperAddress;

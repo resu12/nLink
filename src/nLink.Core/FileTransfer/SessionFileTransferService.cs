@@ -3219,6 +3219,41 @@ public sealed partial class SessionFileTransferService : IDisposable
         IFileTransferDataSession dataSession,
         FileTransferDataSessionAvailabilityChangedEventArgs availability)
     {
+        if (availability.PostTunaFallbackProofBoundary is { IsComplete: true } fallbackBoundary)
+        {
+            SessionFileTransferSnapshot? fallbackSnapshot = null;
+            var fallbackHandled = false;
+            lock (gate)
+            {
+                if (ReferenceEquals(outboundTransfer?.DataSession, dataSession) &&
+                    outboundTransfer is { IsTerminal: false } outbound)
+                {
+                    fallbackHandled = TryRetainRuntimeUnlockUncommittedTunaFallbackHandoffLocked(
+                        outbound,
+                        dataSession,
+                        fallbackBoundary.PeerProofEvidence,
+                        availability.Reason,
+                        out fallbackSnapshot,
+                        fallbackBoundary.PreCommitSnapshot);
+                }
+            }
+
+            if (fallbackSnapshot is not null)
+            {
+                RaiseTransferChanged(fallbackSnapshot);
+            }
+
+            if (!fallbackHandled)
+            {
+                var proof = fallbackBoundary.PeerProofEvidence;
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=runtime_unlock_uncommitted_tuna_fallback_handoff_decided; direction=outbound; session_id={FormatProtocolLogValue(proof.SessionId)}; transfer_id={FormatProtocolLogValue(proof.TransferId)}; proof_generation={proof.ProofGeneration}; proof_transport_epoch={proof.TransportEpoch}; transaction_generation={fallbackBoundary.PreCommitSnapshot.TransactionGeneration}; offer_generation={fallbackBoundary.PreCommitSnapshot.OfferGeneration}; tuna_path_lease_generation={fallbackBoundary.PreCommitSnapshot.TunaPathLeaseGeneration}; launch_generation={fallbackBoundary.PreCommitSnapshot.LaunchGeneration}; decision_status=Rejected; decision_reason=proof_boundary_not_current");
+            }
+
+            return;
+        }
+
         if (availability.PostTunaFallbackHandoffEvidence is { } fallbackEvidence)
         {
             SessionFileTransferSnapshot? fallbackSnapshot = null;
@@ -3231,7 +3266,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                     fallbackHandled = TryRetainRuntimeUnlockUncommittedTunaFallbackHandoffLocked(
                         outbound,
                         dataSession,
-                        fallbackEvidence,
+                        fallbackEvidence.ToPeerProofEvidence(),
                         availability.Reason,
                         out fallbackSnapshot);
                 }
@@ -21090,7 +21125,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         RuntimeUnlockRegularV4RouteCommitDrain RouteCommitDrain,
         IFileTransferDataSession SourceDataSession,
         long SourceDataSessionGeneration,
-        PostTunaFallbackHandoffEvidence? AvailabilityEvidence,
+        PostTunaFallbackPeerProofEvidence? PeerProofEvidence,
         FileTransferDataFrame? PeerProofFrame,
         long ProofTransportEpoch,
         string Reason);

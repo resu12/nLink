@@ -29670,7 +29670,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 CompletedDrainGeneration: 1,
                 TargetTransportEpoch: 7,
                 TargetBridgeRecoveryGeneration: 1,
-                evidence,
+                evidence.ToPeerProofEvidence(),
                 PressureSettlementCommand: null,
                 TargetRuntimeOwner: owner,
                 TargetRoutePublication: publication);
@@ -29689,7 +29689,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 BridgeRecoveryGeneration: 1,
                 HandoffGeneration: 1,
                 DrainGeneration: 1,
-                evidence,
+                evidence.ToPeerProofEvidence(),
                 PressureSettlementCommand: null,
                 SourceAvailabilityGeneration: stageReceipt.AvailabilityGeneration,
                 SourceActivationPaused: stageReceipt.ActivationPaused,
@@ -30852,8 +30852,31 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 TimeSpan.FromSeconds(2));
 
             var logStart = GetOperationalLogLength();
+            var proofFrame = new FileTransferReceiverStateFrameV6
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                Epoch = 1,
+                ContiguousCommittedChunkIndex = 0,
+                DurableReceivedHighestChunkIndex = 0,
+                CreditUntilChunkIndexExclusive = 1,
+                MissingRanges = Array.Empty<FileTransferRangeV4>(),
+                BytesCommitted = 0,
+                ReceiverMemoryPressure = false,
+                ReceiverDiskPressure = false,
+                TerminalReady = false,
+                TransportEpoch = 1,
+                RepairRequestId = "committed-fallback-v6-proof",
+                Priority = "control",
+                RecoveryMode = "post_tuna_fallback",
+            };
             var completed = Assert.IsType<bool>(
-                InvokePrivateMethod(helper, "CompleteFileTransferFallbackNknProofIfPending", "file_transfer_v6_state_frame_received", sessionId));
+                InvokePrivateMethod(
+                    helper,
+                    "CompleteFileTransferFallbackNknProofIfPending",
+                    "file_transfer_v6_state_frame_received",
+                    sessionId,
+                    proofFrame));
 
             Assert.True(completed);
             var logTail = ReadOperationalLogTail(logStart);
@@ -30863,6 +30886,163 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             Assert.Contains("event=filetransfer_post_tuna_fallback_cleanup_completed;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_disable_handoff_completed;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_fallback_nkn_proof_waiting_for_v6_epoch;", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    [Trait("FileTransferInfraSuite", "UncommittedTunaFallback")]
+    public async Task FileTransferFallbackProof_CurrentV6ReceiverStateBindsAcceptedUncommittedPreCommit()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.tuna.file.uncommitted-v6-proof.address");
+            var helperClient = new FakeNknClient("helper.tuna.file.uncommitted-v6-proof.address");
+            var fakeLane = new FakeNknAccelerationLane(isAvailable: true);
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-tuna-file-uncommitted-v6-proof-id", hostClient.Address));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-tuna-file-uncommitted-v6-proof-id", helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                fakeLane);
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_tuna_file_uncommitted_v6_proof";
+            var dataSession = await helper.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            var availabilityEvents = new ConcurrentQueue<FileTransferDataSessionAvailabilityChangedEventArgs>();
+            dataSession.AvailabilityChanged += (_, e) => availabilityEvents.Enqueue(e);
+            TrackAuthorizedRegularV4RouteForTests(helper, transferId);
+            helper.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
+
+            var offer = CreateOfferPayload(
+                sessionId,
+                "uncommittedv6proof0011223344556677",
+                supportedLanes: new[] { "file" },
+                payerDecisionId: 81);
+            offer.Trigger = "runtime_unlock";
+            InvokePrivateMethod(helper, "MarkInboundRuntimeUnlockOfferAccepted", offer, 11L);
+            var transactionState = Assert.IsType<RuntimeUnlockTransactionSnapshot>(
+                typeof(NknSignalingTransport)
+                    .GetField("runtimeUnlockTransactionState", BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .GetValue(helper));
+            InvokePrivateMethod(
+                helper,
+                "RequestRuntimeUnlockPreCommitProbeLaunch",
+                sessionId,
+                NknAccelerationLaneKind.File,
+                "unit_test_uncommitted_v6_proof",
+                transactionState);
+
+            var proofProvider = Assert.IsAssignableFrom<IRuntimeUnlockRouteCommitProofProvider>(helper);
+            proofProvider.NotifyRuntimeUnlockPathProbeStarted(
+                sessionId,
+                transferId,
+                transportEpoch: 1,
+                probeId: "runtime-unlock-precommit:1:11:uncommitted-v6-proof",
+                FileTransferTransportKind.Tuna,
+                reason: "unit_test_uncommitted_v6_proof");
+            proofProvider.NotifyRuntimeUnlockPathProbeResult(
+                sessionId,
+                transferId,
+                transportEpoch: 1,
+                probeId: "runtime-unlock-precommit:1:11:uncommitted-v6-proof",
+                FileTransferTransportKind.Tuna,
+                acked: true,
+                reason: "unit_test_uncommitted_v6_proof_ack");
+            Assert.True(proofProvider.TryGetRuntimeUnlockRouteCommitProof(sessionId, transferId, out var preCommit));
+            Assert.Equal("Acked", preCommit.PathProbeState);
+            Assert.True(preCommit.LaunchGeneration > 0);
+
+            var fallbackLogStart = GetOperationalLogLength();
+            fakeLane.SetAvailable(false, "byte_cap_reached");
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(fallbackLogStart).Contains(
+                    "event=filetransfer_fallback_nkn_proof_pending;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(2));
+            Assert.DoesNotContain(
+                availabilityEvents,
+                e => e.PostTunaFallbackProofBoundary is not null);
+            var availabilityBeforeProof = dataSession.IsAvailable;
+
+            var logStart = GetOperationalLogLength();
+            var proofFrame = new FileTransferReceiverStateFrameV6
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                Epoch = 1,
+                ContiguousCommittedChunkIndex = 0,
+                DurableReceivedHighestChunkIndex = 0,
+                CreditUntilChunkIndexExclusive = 1,
+                MissingRanges = Array.Empty<FileTransferRangeV4>(),
+                BytesCommitted = 0,
+                ReceiverMemoryPressure = false,
+                ReceiverDiskPressure = false,
+                TerminalReady = false,
+                TransportEpoch = 2,
+                RepairRequestId = "uncommitted-v6-proof",
+                Priority = "control",
+                RecoveryMode = "post_tuna_fallback",
+            };
+            var proofIdentity = PostTunaFallbackPeerProofFrameIdentity.Create(proofFrame);
+            var expectedBoundary = new RuntimeUnlockUncommittedTunaFallbackProofBoundary(
+                new PostTunaFallbackPeerProofEvidence(
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Outbound,
+                    1,
+                    proofFrame.TransportEpoch,
+                    "file_transfer_v6_state_frame_received",
+                    "sidecar_byte_cap_reached",
+                    proofIdentity),
+                preCommit);
+            Assert.True(
+                expectedBoundary.IsComplete,
+                $"state={preCommit.PathProbeState}; peer={preCommit.PeerVisibleProof}/{preCommit.PeerReceived}/{preCommit.AnswerReceived}; lease={preCommit.TunaPathLeaseRequired}/{preCommit.TunaPathLeaseCurrent}; route={preCommit.TargetRoute}/{preCommit.ProtocolVersion}; handoff={preCommit.HandoffKind}; transport={preCommit.TargetTransport}");
+            var completed = Assert.IsType<bool>(
+                InvokePrivateMethod(
+                    helper,
+                    "CompleteFileTransferFallbackNknProofIfPending",
+                    "file_transfer_v6_state_frame_received",
+                    sessionId,
+                    proofFrame));
+
+            Assert.True(completed);
+            var boundaryEvent = Assert.Single(
+                availabilityEvents.Where(e => e.PostTunaFallbackProofBoundary is not null));
+            var boundary = Assert.IsType<RuntimeUnlockUncommittedTunaFallbackProofBoundary>(
+                boundaryEvent.PostTunaFallbackProofBoundary);
+            Assert.Equal(sessionId, boundary.PeerProofEvidence.SessionId);
+            Assert.Equal(transferId, boundary.PeerProofEvidence.TransferId);
+            Assert.Equal(preCommit.TransactionGeneration, boundary.PreCommitSnapshot.TransactionGeneration);
+            Assert.Equal(preCommit.OfferGeneration, boundary.PreCommitSnapshot.OfferGeneration);
+            Assert.Equal(preCommit.LaunchGeneration, boundary.PreCommitSnapshot.LaunchGeneration);
+            Assert.Equal(availabilityBeforeProof, dataSession.IsAvailable);
+            Assert.Equal(availabilityBeforeProof, boundaryEvent.IsAvailable);
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=runtime_unlock_uncommitted_tuna_fallback_peer_proof_binding_decided;",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.Contains("binding_status=Bound", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_post_tuna_fallback_nkn_proved;", logTail, StringComparison.Ordinal);
+            Assert.Contains("binding_status=bound", logTail, StringComparison.Ordinal);
         }
         finally
         {

@@ -1622,7 +1622,7 @@ public sealed partial class NknSignalingTransport
 
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=runtime_unlock_uncommitted_tuna_fallback_transport_adoption_staged; session_id={SanitizeLogToken(stage.SourceRuntimeOwner.SessionId)}; transfer_id={SanitizeLogToken(stage.SourceRuntimeOwner.TransferId)}; direction={FormatFileTransferDirection(stage.SourceRuntimeOwner.Direction)}; source_route={SanitizeLogToken(stage.SourceRuntimeOwner.RouteToken)}; source_protocol_version={stage.SourceRuntimeOwner.ProtocolVersion}; source_live_route_epoch={stage.SourceRuntimeOwner.LiveRouteEpoch}; source_runtime_generation={stage.SourceRuntimeOwner.RuntimeGeneration}; source_terminal_generation={stage.SourceRuntimeOwner.TerminalGeneration}; source_leg_generation={stage.SourceRoutePublication.LegGeneration}; proof_generation={stage.PeerProofEvidence.ProofGeneration}; proof_transport_epoch={stage.PeerProofEvidence.SourceTransportEpoch}; proof_live_route_epoch={stage.PeerProofEvidence.SourceLiveRouteEpoch}; proof_leg_generation={stage.PeerProofEvidence.SourceLegGeneration}; proof_bridge_recovery_generation={stage.PeerProofEvidence.SourceBridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(stage.PeerProofEvidence.CheckpointRequestId)}; proof_kind={SanitizeLogToken(stage.PeerProofEvidence.ProofKind)}; proof_reason={SanitizeLogToken(stage.PeerProofEvidence.Reason)}; data_session_generation={stage.DataSessionGeneration}; handoff_generation={stage.HandoffGeneration}; drain_generation={stage.DrainGeneration}; stage_status={receipt.Status}; decision_reason={SanitizeLogToken(receipt.Reason)}");
+            $"event=runtime_unlock_uncommitted_tuna_fallback_transport_adoption_staged; session_id={SanitizeLogToken(stage.SourceRuntimeOwner.SessionId)}; transfer_id={SanitizeLogToken(stage.SourceRuntimeOwner.TransferId)}; direction={FormatFileTransferDirection(stage.SourceRuntimeOwner.Direction)}; source_route={SanitizeLogToken(stage.SourceRuntimeOwner.RouteToken)}; source_protocol_version={stage.SourceRuntimeOwner.ProtocolVersion}; source_live_route_epoch={stage.SourceRuntimeOwner.LiveRouteEpoch}; source_runtime_generation={stage.SourceRuntimeOwner.RuntimeGeneration}; source_terminal_generation={stage.SourceRuntimeOwner.TerminalGeneration}; source_leg_generation={stage.SourceRoutePublication.LegGeneration}; proof_generation={stage.PeerProofEvidence.ProofGeneration}; proof_transport_epoch={stage.PeerProofEvidence.TransportEpoch}; target_live_route_epoch={stage.TargetRuntimeOwner.LiveRouteEpoch}; target_leg_generation={stage.TargetRoutePublication.LegGeneration}; target_bridge_recovery_generation={stage.TargetBridgeRecoveryGeneration}; checkpoint_request_id=(none); proof_kind={SanitizeLogToken(stage.PeerProofEvidence.ProofKind)}; proof_reason={SanitizeLogToken(stage.PeerProofEvidence.Reason)}; data_session_generation={stage.DataSessionGeneration}; handoff_generation={stage.HandoffGeneration}; drain_generation={stage.DrainGeneration}; stage_status={receipt.Status}; decision_reason={SanitizeLogToken(receipt.Reason)}");
         return receipt;
     }
 
@@ -1808,7 +1808,7 @@ public sealed partial class NknSignalingTransport
             FallbackLegState: "checkpoint_pending",
             FallbackLegCanSendData: false,
             FallbackLegGeneration: command.RoutePublication.LegGeneration,
-            FallbackCheckpointRequestId: command.PeerProofEvidence.CheckpointRequestId,
+            FallbackCheckpointRequestId: "(none)",
             FallbackTransportEpoch: command.TransportEpoch,
             FallbackBridgeRecoveryGeneration: command.BridgeRecoveryGeneration,
             RoutePublicationGeneration: command.RoutePublication.PublicationGeneration,
@@ -1957,8 +1957,8 @@ public sealed partial class NknSignalingTransport
             !IsRuntimeUnlockUncommittedTunaFallbackPublicationTupleConsistent(
                 targetPublication,
                 targetOwner) ||
-            targetPublication.LegGeneration != stage.PeerProofEvidence.SourceLegGeneration ||
-            targetOwner.LiveRouteEpoch != stage.PeerProofEvidence.SourceLiveRouteEpoch ||
+            targetPublication.LegGeneration <= stage.SourceLegGeneration ||
+            targetOwner.LiveRouteEpoch <= owner.LiveRouteEpoch ||
             targetPublication.TargetRoute != FileTransferRoute.PostTunaFallbackV6 ||
             targetPublication.TargetProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
             targetPublication.TargetTransport != FileTransferTransportKind.RegularNkn ||
@@ -1973,10 +1973,8 @@ public sealed partial class NknSignalingTransport
             evidence.Direction != owner.Direction ||
             !string.Equals(evidence.SessionId, owner.SessionId, StringComparison.Ordinal) ||
             !string.Equals(evidence.TransferId, owner.TransferId, StringComparison.Ordinal) ||
-            !fileTransferPostTunaFallbackHandoffEvidence.TryGetValue(owner.TransferId, out var retained) ||
-            retained != evidence ||
-            evidence.SourceTransportEpoch != stage.TargetTransportEpoch ||
-            evidence.SourceBridgeRecoveryGeneration != stage.TargetBridgeRecoveryGeneration)
+            evidence.TransportEpoch != stage.TargetTransportEpoch ||
+            evidence.FrameIdentity is not { IsComplete: true })
         {
             rejectionReason = "uncommitted_tuna_fallback_adoption_stage_peer_proof_stale";
             return false;
@@ -2069,17 +2067,8 @@ public sealed partial class NknSignalingTransport
             evidence.Direction != owner.Direction ||
             !string.Equals(evidence.SessionId, owner.SessionId, StringComparison.Ordinal) ||
             !string.Equals(evidence.TransferId, owner.TransferId, StringComparison.Ordinal) ||
-            !string.Equals(
-                evidence.SourceRouteToken,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                StringComparison.Ordinal) ||
-            evidence.SourceProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
-            evidence.SourceLiveRouteEpoch != owner.LiveRouteEpoch ||
-            evidence.SourceLegGeneration != publication.LegGeneration ||
-            evidence.SourceBridgeRecoveryGeneration != command.BridgeRecoveryGeneration ||
-            evidence.SourceTransportEpoch != command.TransportEpoch ||
-            !fileTransferPostTunaFallbackHandoffEvidence.TryGetValue(owner.TransferId, out var retained) ||
-            retained != evidence)
+            evidence.TransportEpoch != command.TransportEpoch ||
+            evidence.FrameIdentity is not { IsComplete: true })
         {
             rejectionReason = "uncommitted_tuna_fallback_adoption_peer_proof_mismatch";
             return false;
@@ -2180,7 +2169,8 @@ public sealed partial class NknSignalingTransport
         bool requiresResumeRequest,
         FileTransferTransportHandoffKind handoffKind = FileTransferTransportHandoffKind.None,
         FileTransferTransportKind targetTransport = FileTransferTransportKind.Unknown,
-        PostTunaFallbackHandoffEvidence? postTunaFallbackHandoffEvidence = null)
+        PostTunaFallbackHandoffEvidence? postTunaFallbackHandoffEvidence = null,
+        RuntimeUnlockUncommittedTunaFallbackProofBoundary? postTunaFallbackProofBoundary = null)
     {
         var effectiveHandoffKind = ResolveFileTransferDataSessionAvailabilityHandoffKind(
             reason,
@@ -2321,9 +2311,12 @@ public sealed partial class NknSignalingTransport
                     clearPending: false);
             var proofScopedFallbackBoundary =
                 uncommittedFallbackSuppressed &&
-                postTunaFallbackHandoffEvidence is { IsComplete: true } evidence &&
-                string.Equals(evidence.SessionId, session.SessionId, StringComparison.Ordinal) &&
-                string.Equals(evidence.TransferId, session.TransferId, StringComparison.Ordinal);
+                ((postTunaFallbackHandoffEvidence is { IsComplete: true } evidence &&
+                  string.Equals(evidence.SessionId, session.SessionId, StringComparison.Ordinal) &&
+                  string.Equals(evidence.TransferId, session.TransferId, StringComparison.Ordinal)) ||
+                 (postTunaFallbackProofBoundary is { IsComplete: true } boundary &&
+                  string.Equals(boundary.PeerProofEvidence.SessionId, session.SessionId, StringComparison.Ordinal) &&
+                  string.Equals(boundary.PeerProofEvidence.TransferId, session.TransferId, StringComparison.Ordinal)));
             var stagedFallbackBoundary =
                 effectiveHandoffKind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
                 targetTransport == FileTransferTransportKind.RegularNkn &&
@@ -2363,7 +2356,8 @@ public sealed partial class NknSignalingTransport
                 requiresResumeRequest,
                 effectiveHandoffKind,
                 targetTransport,
-                proofScopedFallbackBoundary ? postTunaFallbackHandoffEvidence : null);
+                proofScopedFallbackBoundary ? postTunaFallbackHandoffEvidence : null,
+                proofScopedFallbackBoundary ? postTunaFallbackProofBoundary : null);
         }
     }
 
@@ -8595,11 +8589,12 @@ public sealed partial class NknSignalingTransport
         public bool TryInvalidateRuntimeUnlockUncommittedTunaFallbackAdoptionForProofReplacement(
             PostTunaFallbackHandoffEvidence evidence)
         {
+            var peerProofEvidence = evidence.ToPeerProofEvidence();
             lock (uncommittedTunaFallbackAdoptionGate)
             {
                 if (pendingRuntimeUnlockUncommittedTunaFallbackAdoption is not { } pending ||
-                    pending.PeerProofEvidence == evidence ||
-                    !pending.PeerProofEvidence.CanBeReplacedBy(evidence))
+                    pending.PeerProofEvidence == peerProofEvidence ||
+                    !pending.PeerProofEvidence.CanBeReplacedBy(peerProofEvidence))
                 {
                     return false;
                 }
@@ -10612,7 +10607,8 @@ public sealed partial class NknSignalingTransport
             bool requiresResumeRequest,
             FileTransferTransportHandoffKind handoffKind = FileTransferTransportHandoffKind.None,
             FileTransferTransportKind targetTransport = FileTransferTransportKind.Unknown,
-            PostTunaFallbackHandoffEvidence? postTunaFallbackHandoffEvidence = null)
+            PostTunaFallbackHandoffEvidence? postTunaFallbackHandoffEvidence = null,
+            RuntimeUnlockUncommittedTunaFallbackProofBoundary? postTunaFallbackProofBoundary = null)
         {
             if (disposed != 0)
             {
@@ -10641,6 +10637,28 @@ public sealed partial class NknSignalingTransport
                         targetTransport,
                         runtimeUnlockPreCommitProbeSnapshot: null,
                         evidence));
+                return;
+            }
+
+            if (postTunaFallbackProofBoundary is { IsComplete: true } boundary &&
+                string.Equals(boundary.PeerProofEvidence.SessionId, SessionId, StringComparison.Ordinal) &&
+                string.Equals(boundary.PeerProofEvidence.TransferId, TransferId, StringComparison.Ordinal))
+            {
+                var proofHandler = availabilityChanged;
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=filetransfer_data_session_availability_invoking; transfer_id={TransferId}; session_id={SessionId}; is_available={(IsAvailable ? 1 : 0)}; previous_available={(IsAvailable ? 1 : 0)}; reason={SanitizeLogToken(reason)}; requires_resume_request={(requiresResumeRequest ? 1 : 0)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(handoffKind)}; target_transport={FormatFileTransferTransportKindForLog(targetTransport)}; subscriber_count={proofHandler?.GetInvocationList().Length ?? 0}; proof_scoped_fallback_boundary=1; proof_transport_epoch={boundary.PeerProofEvidence.TransportEpoch}; transaction_generation={boundary.PreCommitSnapshot.TransactionGeneration}; offer_generation={boundary.PreCommitSnapshot.OfferGeneration}; tuna_path_lease_generation={boundary.PreCommitSnapshot.TunaPathLeaseGeneration}; launch_generation={boundary.PreCommitSnapshot.LaunchGeneration}");
+                proofHandler?.Invoke(
+                    this,
+                    new FileTransferDataSessionAvailabilityChangedEventArgs(
+                        IsAvailable,
+                        reason,
+                        requiresResumeRequest,
+                        handoffKind,
+                        targetTransport,
+                        runtimeUnlockPreCommitProbeSnapshot: null,
+                        postTunaFallbackHandoffEvidence: null,
+                        boundary));
                 return;
             }
 

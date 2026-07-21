@@ -243,7 +243,7 @@ internal readonly record struct RuntimeUnlockUncommittedTunaFallbackHandoff(
     long SourceDataSessionGeneration,
     long DrainGeneration,
     long CompletedDrainGeneration,
-    PostTunaFallbackHandoffEvidence PeerProofEvidence,
+    PostTunaFallbackPeerProofEvidence PeerProofEvidence,
     long ProofTransportEpoch,
     int HandoffGeneration,
     string Reason);
@@ -7619,7 +7619,7 @@ internal static class FileTransferCoordinator
                stage.DrainGeneration == handoff.DrainGeneration &&
                stage.CompletedDrainGeneration == handoff.CompletedDrainGeneration &&
                stage.TargetTransportEpoch == handoff.ProofTransportEpoch &&
-               stage.TargetBridgeRecoveryGeneration == handoff.PeerProofEvidence.SourceBridgeRecoveryGeneration &&
+               stage.TargetBridgeRecoveryGeneration > handoff.SourceBridgeRecoveryGeneration &&
                stage.PeerProofEvidence == handoff.PeerProofEvidence;
     }
 
@@ -7968,10 +7968,6 @@ internal static class FileTransferCoordinator
             !peerProof.IsComplete ||
             !peerProof.IsExactFrameBound ||
             peerProof.Direction != FileTransferDirection.Outbound ||
-            peerProof.SourceLiveRouteEpoch != Math.Max(1, state.LastLiveRouteEpochId + 1) ||
-            peerProof.SourceLegGeneration != Math.Max(1, state.LastTransferLegGeneration + 1) ||
-            peerProof.SourceBridgeRecoveryGeneration != coordinatorEvent.BridgeRecoveryGeneration ||
-            !string.Equals(peerProof.CheckpointRequestId, "(none)", StringComparison.Ordinal) ||
             !string.Equals(peerProof.ProofKind, NormalizeReason(peerProof.ProofKind), StringComparison.Ordinal) ||
             !string.Equals(peerProof.Reason, NormalizeReason(peerProof.Reason), StringComparison.Ordinal) ||
             snapshot.LaunchGeneration <= 0 ||
@@ -7982,13 +7978,9 @@ internal static class FileTransferCoordinator
             !snapshot.TunaPathLeaseCurrent ||
             !string.Equals(peerProof.SessionId, state.SessionId, StringComparison.Ordinal) ||
             !string.Equals(peerProof.TransferId, state.TransferId, StringComparison.Ordinal) ||
-            !string.Equals(
-                peerProof.SourceRouteToken,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                StringComparison.Ordinal) ||
-            peerProof.SourceProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
-            peerProof.SourceTransportEpoch != handoff.ProofTransportEpoch ||
-            peerProof.SourceTransportEpoch != coordinatorEvent.TransportEpochId ||
+            peerProof.TransportEpoch != handoff.ProofTransportEpoch ||
+            peerProof.TransportEpoch != coordinatorEvent.TransportEpochId ||
+            coordinatorEvent.BridgeRecoveryGeneration <= handoff.SourceBridgeRecoveryGeneration ||
             !string.Equals(snapshot.SessionId, state.SessionId, StringComparison.Ordinal) ||
             !string.Equals(snapshot.TransferId, state.TransferId, StringComparison.Ordinal) ||
             snapshot.TransactionGeneration != commit.TransactionGeneration ||

@@ -4441,14 +4441,15 @@ public sealed partial class SessionFileTransferService
     private bool TryRetainRuntimeUnlockUncommittedTunaFallbackHandoffLocked(
         OutboundTransferContext context,
         IFileTransferDataSession dataSession,
-        PostTunaFallbackHandoffEvidence evidence,
+        PostTunaFallbackPeerProofEvidence evidence,
         string reason,
-        out SessionFileTransferSnapshot? transferSnapshot)
+        out SessionFileTransferSnapshot? transferSnapshot,
+        RuntimeUnlockRouteCommitSnapshot? expectedPreCommitSnapshot = null)
     {
         transferSnapshot = null;
         if (context.PendingRuntimeUnlockUncommittedTunaFallbackAdoptionContinuation is { } continuation &&
             ReferenceEquals(continuation.Intent.SourceDataSession, dataSession) &&
-            continuation.Intent.AvailabilityEvidence == evidence)
+            continuation.Intent.PeerProofEvidence == evidence)
         {
             TryCommitRuntimeUnlockUncommittedTunaFallbackAdoptionContinuationLocked(
                 context,
@@ -4458,13 +4459,13 @@ public sealed partial class SessionFileTransferService
         }
 
         if (!evidence.IsComplete ||
-            !evidence.IsExactFrameBound ||
             !string.Equals(evidence.SessionId, context.SessionId, StringComparison.Ordinal) ||
             !string.Equals(evidence.TransferId, context.TransferId, StringComparison.Ordinal) ||
-            !string.Equals(evidence.SourceRouteToken, FileTransferRouteResolver.PostTunaFallbackV6Token, StringComparison.Ordinal) ||
             !ReferenceEquals(context.DataSession, dataSession) ||
             context.PendingRuntimeUnlockRegularV4RouteCommitDrain is not { } drain ||
             context.RuntimeUnlockRouteCommitToken is not { IsDefault: false } routeCommit ||
+            (expectedPreCommitSnapshot is not null &&
+             expectedPreCommitSnapshot != drain.RouteCommitSnapshot) ||
             !IsRuntimeUnlockRegularV4RouteCommitDrainSourceCurrentForSnapshotLocked(
                 context,
                 drain,
@@ -4478,7 +4479,7 @@ public sealed partial class SessionFileTransferService
                 { } replacedContinuation &&
             ReferenceEquals(replacedContinuation.Intent.SourceDataSession, dataSession))
         {
-            if (replacedContinuation.Intent.AvailabilityEvidence is not { } currentEvidence ||
+            if (replacedContinuation.Intent.PeerProofEvidence is not { } currentEvidence ||
                 !currentEvidence.CanBeReplacedBy(evidence))
             {
                 LogRuntimeUnlockUncommittedTunaFallbackHandoff(
@@ -4527,7 +4528,7 @@ public sealed partial class SessionFileTransferService
                 context.DataSessionGeneration,
                 evidence,
                 PeerProofFrame: null,
-                ProofTransportEpoch: evidence.SourceTransportEpoch,
+                ProofTransportEpoch: evidence.TransportEpoch,
                 NormalizeReason(reason) ?? "transport_recovered");
             context.PendingRuntimeUnlockUncommittedTunaFallbackHandoff = intent;
             LogRuntimeUnlockUncommittedTunaFallbackHandoff(
@@ -4539,10 +4540,11 @@ public sealed partial class SessionFileTransferService
         }
         else
         {
-            if (pending.AvailabilityEvidence is { } retainedEvidence &&
-                retainedEvidence != evidence)
+            var peerProofEvidence = evidence;
+            if (pending.PeerProofEvidence is { } retainedEvidence &&
+                retainedEvidence != peerProofEvidence)
             {
-                if (!retainedEvidence.CanBeReplacedBy(evidence))
+                if (!retainedEvidence.CanBeReplacedBy(peerProofEvidence))
                 {
                     LogRuntimeUnlockUncommittedTunaFallbackHandoff(
                         "runtime_unlock_uncommitted_tuna_fallback_handoff_decided",
@@ -4562,7 +4564,7 @@ public sealed partial class SessionFileTransferService
 
             if (pending is not null &&
                 pending.PeerProofFrame is not null &&
-                pending.ProofTransportEpoch != evidence.SourceTransportEpoch)
+                pending.ProofTransportEpoch != peerProofEvidence.TransportEpoch)
             {
                 LogRuntimeUnlockUncommittedTunaFallbackHandoff(
                     "runtime_unlock_uncommitted_tuna_fallback_handoff_decided",
@@ -4580,12 +4582,12 @@ public sealed partial class SessionFileTransferService
                     retainedPeerProofFrame))
             {
                 if (context.PendingRuntimeUnlockUncommittedTunaFallbackAdoptionContinuation is null &&
-                    pending.AvailabilityEvidence is null &&
-                    pending.ProofTransportEpoch == evidence.SourceTransportEpoch)
+                    pending.PeerProofEvidence is null &&
+                    pending.ProofTransportEpoch == peerProofEvidence.TransportEpoch)
                 {
                     pending = pending with
                     {
-                        AvailabilityEvidence = evidence,
+                        PeerProofEvidence = peerProofEvidence,
                     };
                     context.PendingRuntimeUnlockUncommittedTunaFallbackHandoff = pending;
                     LogRuntimeUnlockUncommittedTunaFallbackHandoff(
@@ -4621,9 +4623,9 @@ public sealed partial class SessionFileTransferService
                     drain,
                     dataSession,
                     context.DataSessionGeneration,
-                    evidence,
+                    peerProofEvidence,
                     PeerProofFrame: null,
-                    ProofTransportEpoch: evidence.SourceTransportEpoch,
+                    ProofTransportEpoch: peerProofEvidence.TransportEpoch,
                     NormalizeReason(reason) ?? "transport_recovered");
                 LogRuntimeUnlockUncommittedTunaFallbackHandoff(
                     "runtime_unlock_uncommitted_tuna_fallback_handoff_retained",
@@ -4634,12 +4636,12 @@ public sealed partial class SessionFileTransferService
             }
             else
             {
-                intent = pending.AvailabilityEvidence is not null
+                intent = pending.PeerProofEvidence is not null
                     ? pending
                     : pending with
                     {
-                        AvailabilityEvidence = evidence,
-                        ProofTransportEpoch = evidence.SourceTransportEpoch,
+                        PeerProofEvidence = peerProofEvidence,
+                        ProofTransportEpoch = peerProofEvidence.TransportEpoch,
                     };
             }
 
@@ -4744,7 +4746,7 @@ public sealed partial class SessionFileTransferService
                 drain,
                 dataSession,
                 context.DataSessionGeneration,
-                AvailabilityEvidence: null,
+                PeerProofEvidence: null,
                 frame,
                 proofTransportEpoch,
                 NormalizeReason(reason) ?? "peer_post_tuna_fallback_v6_proof");
@@ -4758,8 +4760,8 @@ public sealed partial class SessionFileTransferService
         }
         else
         {
-            if (pending.AvailabilityEvidence is { } availabilityEvidence &&
-                availabilityEvidence.SourceTransportEpoch != proofTransportEpoch)
+            if (pending.PeerProofEvidence is { } availabilityEvidence &&
+                availabilityEvidence.TransportEpoch != proofTransportEpoch)
             {
                 LogRuntimeUnlockUncommittedTunaFallbackHandoff(
                     "runtime_unlock_uncommitted_tuna_fallback_handoff_decided",
@@ -4771,7 +4773,7 @@ public sealed partial class SessionFileTransferService
             }
 
 
-            if (pending.AvailabilityEvidence is { } exactAvailabilityEvidence &&
+            if (pending.PeerProofEvidence is { } exactAvailabilityEvidence &&
                 !IsRuntimeUnlockUncommittedTunaFallbackEvidenceForPeerFrame(
                     exactAvailabilityEvidence,
                     frame))
@@ -4793,7 +4795,7 @@ public sealed partial class SessionFileTransferService
                 var isExactAvailabilityBoundReplacement =
                     context.PendingRuntimeUnlockUncommittedTunaFallbackAdoptionContinuation is null &&
                     proofTransportEpoch == pending.ProofTransportEpoch &&
-                    pending.AvailabilityEvidence is { } retainedAvailability &&
+                    pending.PeerProofEvidence is { } retainedAvailability &&
                     IsRuntimeUnlockUncommittedTunaFallbackEvidenceForPeerFrame(
                         retainedAvailability,
                         frame);
@@ -4841,7 +4843,7 @@ public sealed partial class SessionFileTransferService
                     drain,
                     dataSession,
                     context.DataSessionGeneration,
-                    AvailabilityEvidence: null,
+                    PeerProofEvidence: null,
                     frame,
                     proofTransportEpoch,
                     NormalizeReason(reason) ?? "peer_post_tuna_fallback_v6_proof");
@@ -4905,31 +4907,31 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        if (intent.AvailabilityEvidence is null || intent.PeerProofFrame is null)
+        if (intent.PeerProofEvidence is null || intent.PeerProofFrame is null)
         {
             LogRuntimeUnlockUncommittedTunaFallbackHandoff(
                 "runtime_unlock_uncommitted_tuna_fallback_handoff_decided",
                 context,
                 intent,
                 "Held",
-                intent.AvailabilityEvidence is null
+                intent.PeerProofEvidence is null
                     ? "proof_scoped_availability_pending"
                     : "peer_v6_proof_frame_pending");
             return false;
         }
 
-        if (intent.AvailabilityEvidence.SourceTransportEpoch != intent.ProofTransportEpoch ||
+        if (intent.PeerProofEvidence.TransportEpoch != intent.ProofTransportEpoch ||
             ResolveV6RuntimeProofTransportEpoch(intent.PeerProofFrame) != intent.ProofTransportEpoch ||
             !IsRuntimeUnlockUncommittedTunaFallbackEvidenceForPeerFrame(
-                intent.AvailabilityEvidence,
+                intent.PeerProofEvidence,
                 intent.PeerProofFrame) ||
             !string.Equals(
                 intent.PeerProofFrame.SessionId,
-                intent.AvailabilityEvidence.SessionId,
+                intent.PeerProofEvidence.SessionId,
                 StringComparison.Ordinal) ||
             !string.Equals(
                 intent.PeerProofFrame.TransferId,
-                intent.AvailabilityEvidence.TransferId,
+                intent.PeerProofEvidence.TransferId,
                 StringComparison.Ordinal))
         {
             LogRuntimeUnlockUncommittedTunaFallbackHandoff(
@@ -4982,7 +4984,7 @@ public sealed partial class SessionFileTransferService
             intent.SourceDataSessionGeneration,
             intent.RouteCommitDrain.DrainGeneration,
             context.LastCompletedRuntimeUnlockRegularV4RouteCommitDrainGeneration,
-            intent.AvailabilityEvidence!,
+            intent.PeerProofEvidence!,
             intent.ProofTransportEpoch,
             intent.HandoffGeneration,
             NormalizeReason(reason) ?? intent.Reason);
@@ -4994,7 +4996,9 @@ public sealed partial class SessionFileTransferService
             HandoffKind: FileTransferTransportHandoffKind.TunaToNormalFallback,
             TransportProfileKind: ResolveTransportProfileKind(transport));
         var routeSelection = FileTransferRouteResolver.Resolve(routeInput);
-        var bridgeRecoveryGeneration = intent.AvailabilityEvidence.SourceBridgeRecoveryGeneration;
+        var bridgeRecoveryGeneration = Math.Max(
+            1,
+            intent.RouteCommitDrain.SourceBridgeRecoveryGeneration + 1);
         var coordinatorEvent = new FileTransferCoordinatorEvent(
             FileTransferCoordinatorEventKind.TunaLost,
             routeSelection,
@@ -5089,8 +5093,8 @@ public sealed partial class SessionFileTransferService
             intent.RouteCommitDrain.DrainGeneration,
             context.LastCompletedRuntimeUnlockRegularV4RouteCommitDrainGeneration,
             intent.ProofTransportEpoch,
-            intent.AvailabilityEvidence!.SourceBridgeRecoveryGeneration,
-            intent.AvailabilityEvidence!,
+            committedLeg.BridgeRecoveryGeneration,
+            intent.PeerProofEvidence!,
             transition.PressureSettlementCommand,
             committedRuntimeOwner,
             routePublicationToken);
@@ -5136,7 +5140,7 @@ public sealed partial class SessionFileTransferService
             committedLeg.BridgeRecoveryGeneration,
             intent.HandoffGeneration,
             intent.RouteCommitDrain.DrainGeneration,
-            intent.AvailabilityEvidence!,
+            intent.PeerProofEvidence!,
             transition.PressureSettlementCommand,
             adoptionStageReceipt.AvailabilityGeneration,
             adoptionStageReceipt.ActivationPaused,
@@ -5485,7 +5489,7 @@ public sealed partial class SessionFileTransferService
             new RuntimeUnlockUncommittedTunaFallbackRetainedPeerProof(
                 intent.HandoffGeneration,
                 intent.PeerProofFrame!,
-                intent.AvailabilityEvidence!.FrameIdentity!,
+                intent.PeerProofEvidence!.FrameIdentity!,
                 intent.ProofTransportEpoch,
                 intent.SourceDataSession,
                 intent.SourceDataSessionGeneration,
@@ -5614,15 +5618,15 @@ public sealed partial class SessionFileTransferService
            leftIdentity.Matches(right);
 
     private static bool IsRuntimeUnlockUncommittedTunaFallbackEvidenceForPeerFrame(
-        PostTunaFallbackHandoffEvidence evidence,
+        PostTunaFallbackPeerProofEvidence evidence,
         FileTransferDataFrame frame)
     {
-        if (!evidence.IsExactFrameBound ||
+        if (!evidence.IsComplete ||
             evidence.FrameIdentity is not { } frameIdentity ||
             !frameIdentity.Matches(frame) ||
             !string.Equals(evidence.SessionId, frame.SessionId, StringComparison.Ordinal) ||
             !string.Equals(evidence.TransferId, frame.TransferId, StringComparison.Ordinal) ||
-            evidence.SourceTransportEpoch != ResolveV6RuntimeProofTransportEpoch(frame))
+            evidence.TransportEpoch != ResolveV6RuntimeProofTransportEpoch(frame))
         {
             return false;
         }
@@ -5630,13 +5634,7 @@ public sealed partial class SessionFileTransferService
         return evidence.ProofKind switch
         {
             "file_transfer_v6_state_frame_received" => frame is FileTransferReceiverStateFrameV6,
-            "file_transfer_v6_transport_epoch_frame_received" => frame is FileTransferTransportEpochFrameV6,
             "file_transfer_v6_frontier_request_frame_received" => frame is FileTransferFrontierRequestFrameV6,
-            "file_transfer_v6_repair_proof_frame_received" => frame is FileTransferRepairProofFrameV6,
-            "file_transfer_v6_pause_control_frame_received" => frame is FileTransferPauseControlFrameV6,
-            "file_transfer_v6_complete_frame_received" => frame is FileTransferCompleteFrameV6,
-            "file_transfer_v6_cancel_frame_received" => frame is FileTransferCancelFrameV6,
-            "file_transfer_v6_error_frame_received" => frame is FileTransferErrorFrameV6,
             // A recovered V6 epoch is itself the exact coordinator-bound peer proof.
             // The retained frame is then only the first current-epoch input to replay.
             "filetransfer_v6_epoch_recovered" => IsPeerPostTunaFallbackV6RuntimeProofFrame(frame),
@@ -5684,7 +5682,7 @@ public sealed partial class SessionFileTransferService
         var drain = intent.RouteCommitDrain;
         var routeCommit = intent.PendingTunaRouteCommit;
         var snapshot = drain.RouteCommitSnapshot;
-        var proof = intent.AvailabilityEvidence;
+        var proof = intent.PeerProofEvidence;
         var continuation = context.PendingRuntimeUnlockUncommittedTunaFallbackAdoptionContinuation;
         var targetOwner = context.CurrentRuntimeOwner is
             { Route: FileTransferRoute.PostTunaFallbackV6 } owner
@@ -5696,7 +5694,7 @@ public sealed partial class SessionFileTransferService
             : default;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event={eventName}; direction=outbound; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; handoff_generation={intent.HandoffGeneration}; decision_status={FormatProtocolLogValue(status)}; source_route={FormatProtocolLogValue(intent.SourceRuntimeOwner.RouteToken)}; current_route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; source_protocol_version={intent.SourceRuntimeOwner.ProtocolVersion}; current_protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={intent.SourceRuntimeOwner.LiveRouteEpoch}; runtime_generation={intent.SourceRuntimeOwner.RuntimeGeneration}; terminal_generation={drain.SourceTerminalGeneration}; leg_generation={drain.SourceLegGeneration}; transport_epoch={drain.SourceTransportEpoch}; bridge_recovery_generation={drain.SourceBridgeRecoveryGeneration}; route_publication_generation={intent.SourceRoutePublication.PublicationGeneration}; route_commit_generation={intent.SourceRoutePublication.RouteCommitGeneration ?? 0}; data_session_generation={intent.SourceDataSessionGeneration}; transaction_generation={routeCommit.TransactionGeneration}; offer_generation={routeCommit.OfferGeneration}; tuna_path_lease_generation={routeCommit.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={FormatProtocolLogValue(routeCommit.TunaPathLeaseListenerRunId ?? "(none)")}; launch_generation={snapshot.LaunchGeneration}; probe_id={FormatProtocolLogValue(snapshot.PathProbeId ?? "(none)")}; drain_generation={drain.DrainGeneration}; proof_direction={FormatProtocolLogValue(proof?.Direction.ToString() ?? "(none)")}; proof_generation={proof?.ProofGeneration ?? 0}; proof_route={FormatProtocolLogValue(proof?.SourceRouteToken ?? "(none)")}; proof_protocol_version={proof?.SourceProtocolVersion ?? 0}; proof_live_route_epoch={proof?.SourceLiveRouteEpoch ?? 0}; proof_leg_generation={proof?.SourceLegGeneration ?? 0}; proof_bridge_recovery_generation={proof?.SourceBridgeRecoveryGeneration ?? 0}; proof_transport_epoch={intent.ProofTransportEpoch}; proof_checkpoint_request_id={FormatProtocolLogValue(proof?.CheckpointRequestId ?? "(none)")}; proof_kind={FormatProtocolLogValue(proof?.ProofKind ?? "(none)")}; proof_reason={FormatProtocolLogValue(proof?.Reason ?? "(none)")}; handoff_kind=tuna_to_normal_fallback; target_route=post_tuna_fallback_v6; target_protocol_version={FileTransferProtocol.ProtocolVersionV6}; target_transport=regular_nkn; target_runtime_generation={targetOwner.RuntimeGeneration}; target_leg_generation={targetPublication.LegGeneration}; target_route_publication_generation={targetPublication.PublicationGeneration}; adoption_stage_generation={continuation?.StageReceipt.StageGeneration ?? 0}; adoption_stage_status={FormatProtocolLogValue(continuation?.StageReceipt.Status.ToString() ?? "(none)")}; availability_proof_present={(intent.AvailabilityEvidence is null ? 0 : 1)}; peer_proof_present={(intent.PeerProofFrame is null ? 0 : 1)}; decision_reason={FormatProtocolLogValue(reason)}");
+            $"event={eventName}; direction=outbound; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; handoff_generation={intent.HandoffGeneration}; decision_status={FormatProtocolLogValue(status)}; source_route={FormatProtocolLogValue(intent.SourceRuntimeOwner.RouteToken)}; current_route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; source_protocol_version={intent.SourceRuntimeOwner.ProtocolVersion}; current_protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={intent.SourceRuntimeOwner.LiveRouteEpoch}; runtime_generation={intent.SourceRuntimeOwner.RuntimeGeneration}; terminal_generation={drain.SourceTerminalGeneration}; leg_generation={drain.SourceLegGeneration}; transport_epoch={drain.SourceTransportEpoch}; bridge_recovery_generation={drain.SourceBridgeRecoveryGeneration}; route_publication_generation={intent.SourceRoutePublication.PublicationGeneration}; route_commit_generation={intent.SourceRoutePublication.RouteCommitGeneration ?? 0}; data_session_generation={intent.SourceDataSessionGeneration}; transaction_generation={routeCommit.TransactionGeneration}; offer_generation={routeCommit.OfferGeneration}; tuna_path_lease_generation={routeCommit.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={FormatProtocolLogValue(routeCommit.TunaPathLeaseListenerRunId ?? "(none)")}; launch_generation={snapshot.LaunchGeneration}; probe_id={FormatProtocolLogValue(snapshot.PathProbeId ?? "(none)")}; drain_generation={drain.DrainGeneration}; proof_direction={FormatProtocolLogValue(proof?.Direction.ToString() ?? "(none)")}; proof_generation={proof?.ProofGeneration ?? 0}; proof_transport_epoch={intent.ProofTransportEpoch}; proof_kind={FormatProtocolLogValue(proof?.ProofKind ?? "(none)")}; proof_reason={FormatProtocolLogValue(proof?.Reason ?? "(none)")}; handoff_kind=tuna_to_normal_fallback; target_route=post_tuna_fallback_v6; target_protocol_version={FileTransferProtocol.ProtocolVersionV6}; target_transport=regular_nkn; target_runtime_generation={targetOwner.RuntimeGeneration}; target_leg_generation={targetPublication.LegGeneration}; target_route_publication_generation={targetPublication.PublicationGeneration}; adoption_stage_generation={continuation?.StageReceipt.StageGeneration ?? 0}; adoption_stage_status={FormatProtocolLogValue(continuation?.StageReceipt.Status.ToString() ?? "(none)")}; availability_proof_present={(intent.PeerProofEvidence is null ? 0 : 1)}; peer_proof_present={(intent.PeerProofFrame is null ? 0 : 1)}; decision_reason={FormatProtocolLogValue(reason)}");
     }
 
     private async Task RecheckRuntimeUnlockRegularV4RouteCommitAfterSendDrainAsync(

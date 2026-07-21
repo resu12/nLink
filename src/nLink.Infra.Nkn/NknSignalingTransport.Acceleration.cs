@@ -206,6 +206,7 @@ public sealed partial class NknSignalingTransport
     private long runtimeUnlockPreCommitProbeLaunchGeneration;
     private RuntimeUnlockRouteCommitSnapshot? runtimeUnlockPreCommitProbeLaunchSnapshot;
     private RuntimeUnlockRouteCommitSnapshot? runtimeUnlockPreCommitProbeStartedSnapshot;
+    private RuntimeUnlockRouteCommitSnapshot? runtimeUnlockAcceptedPreCommitSnapshot;
     private bool runtimeUnlockPreCommitProbeLaunchTimeoutScheduled;
     private bool runtimeUnlockPreCommitProbeLaunchHeldByCoordinatorDenial;
     private string? runtimeUnlockPreCommitProbeLaunchHeldReason;
@@ -3362,6 +3363,7 @@ public sealed partial class NknSignalingTransport
         fileTransferFallbackProofTransportEpoch = 0;
         fileTransferFallbackProofCheckpointRequestId = null;
         fileTransferFallbackProofAuthorityReason = null;
+        fileTransferFallbackProofPreCommitSnapshot = null;
     }
 
     private static bool IsSessionLivenessReceiveRecoveryReason(string? reason)
@@ -7728,12 +7730,50 @@ public sealed partial class NknSignalingTransport
         lock (accelerationGate)
         {
             var started = runtimeUnlockPreCommitProbeStartedSnapshot;
+            if (kind == RuntimeUnlockTransactionEventKind.PathProbeAcked &&
+                started is not null &&
+                string.Equals(started.SessionId, sessionId.Trim(), StringComparison.Ordinal) &&
+                string.Equals(started.TransferId, transferId.Trim(), StringComparison.Ordinal) &&
+                started.TransactionGeneration == decision.State.TransactionGeneration &&
+                started.OfferGeneration == decision.State.OfferGeneration &&
+                string.Equals(started.PathProbeId, probeId.Trim(), StringComparison.Ordinal))
+            {
+                started = started with
+                {
+                    PathProbeState = RuntimeUnlockPathProbeState.Acked.ToString(),
+                    PathProbeTransport = targetTransport,
+                    PathProbeAckedUtcMs = decision.State.PathProbeAckedUtcMs,
+                };
+                runtimeUnlockPreCommitProbeStartedSnapshot = started;
+            }
+
             launchEvidence = started is not null &&
                 string.Equals(started.SessionId, sessionId.Trim(), StringComparison.Ordinal) &&
                 started.TransactionGeneration == decision.State.TransactionGeneration &&
                 started.OfferGeneration == decision.State.OfferGeneration
                     ? started
                     : null;
+        }
+
+        if (kind == RuntimeUnlockTransactionEventKind.PathProbeAcked &&
+            ((IRuntimeUnlockRouteCommitProofProvider)this).TryGetRuntimeUnlockRouteCommitProof(
+                sessionId,
+                transferId,
+                out var acceptedSnapshot))
+        {
+            lock (accelerationGate)
+            {
+                if (runtimeUnlockPreCommitProbeStartedSnapshot is { } current &&
+                    current.LaunchGeneration == acceptedSnapshot.LaunchGeneration &&
+                    current.TransactionGeneration == acceptedSnapshot.TransactionGeneration &&
+                    current.OfferGeneration == acceptedSnapshot.OfferGeneration &&
+                    string.Equals(current.TransferId, acceptedSnapshot.TransferId, StringComparison.Ordinal))
+                {
+                    runtimeUnlockPreCommitProbeStartedSnapshot = acceptedSnapshot;
+                    runtimeUnlockAcceptedPreCommitSnapshot = acceptedSnapshot;
+                    launchEvidence = acceptedSnapshot;
+                }
+            }
         }
 
         LocalOperationalLog.Info(
@@ -8455,7 +8495,8 @@ public sealed partial class NknSignalingTransport
             runtimeUnlockPreCommitProbeLaunchTransactionGeneration == 0 &&
             runtimeUnlockPreCommitProbeLaunchOfferGeneration == 0 &&
             runtimeUnlockPreCommitProbeLaunchSnapshot is null &&
-            runtimeUnlockPreCommitProbeStartedSnapshot is null)
+            runtimeUnlockPreCommitProbeStartedSnapshot is null &&
+            runtimeUnlockAcceptedPreCommitSnapshot is null)
         {
             return;
         }
@@ -8466,6 +8507,7 @@ public sealed partial class NknSignalingTransport
         runtimeUnlockPreCommitProbeLaunchOfferGeneration = 0;
         runtimeUnlockPreCommitProbeLaunchSnapshot = null;
         runtimeUnlockPreCommitProbeStartedSnapshot = null;
+        runtimeUnlockAcceptedPreCommitSnapshot = null;
         runtimeUnlockPreCommitProbeLaunchGeneration++;
         runtimeUnlockPreCommitProbeLaunchTimeoutScheduled = false;
         ClearRuntimeUnlockPreCommitProbeLaunchHoldUnsafe();
@@ -11783,6 +11825,12 @@ public sealed partial class NknSignalingTransport
         var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId)
             ? currentSessionSecurityState.SessionId?.Value
             : sessionId.Trim();
+        RuntimeUnlockRouteCommitSnapshot? acceptedPreCommitSnapshot;
+        lock (accelerationGate)
+        {
+            acceptedPreCommitSnapshot = runtimeUnlockAcceptedPreCommitSnapshot;
+        }
+
         lock (fileTransferFallbackProofGate)
         {
             fileTransferFallbackProofPending = true;
@@ -11803,6 +11851,7 @@ public sealed partial class NknSignalingTransport
             fileTransferFallbackProofTransportEpoch = authorityRequest?.TransportEpoch ?? 0;
             fileTransferFallbackProofCheckpointRequestId = authorityRequest?.CheckpointRequestId;
             fileTransferFallbackProofAuthorityReason = authorityRequest?.AuthorityReason;
+            fileTransferFallbackProofPreCommitSnapshot = acceptedPreCommitSnapshot;
         }
 
         var authorityFields = authorityRequest is null
@@ -11853,6 +11902,112 @@ public sealed partial class NknSignalingTransport
         }
     }
 
+    private void CompleteFileTransferFallbackProofUnsafe()
+    {
+        fileTransferFallbackProofPending = false;
+        fileTransferFallbackProofReason = "none";
+        fileTransferFallbackProofSessionId = null;
+        fileTransferFallbackProofLanes = NknAccelerationLaneKind.None;
+        fileTransferFallbackProofGeneration++;
+        fileTransferFallbackProofProbeScheduled = false;
+        fileTransferFallbackBulkProofObserved = false;
+        fileTransferFallbackControlProofObserved = false;
+        ClearFileTransferFallbackProofAuthorityUnsafe();
+    }
+
+    private bool TryCreateRuntimeUnlockUncommittedTunaFallbackProofBoundary(
+        string sessionId,
+        string transferId,
+        long proofGeneration,
+        string proofKind,
+        string reason,
+        PostTunaFallbackPeerProofFrameIdentity frameIdentity,
+        RuntimeUnlockRouteCommitSnapshot? retainedPreCommitSnapshot,
+        out RuntimeUnlockUncommittedTunaFallbackProofBoundary boundary,
+        out string decisionReason)
+    {
+        boundary = null!;
+        decisionReason = "accepted_precommit_scope_unavailable";
+        TransportFileTransferDataSession? dataSession;
+        lock (gate)
+        {
+            if (!fileTransferDataSessions.TryGetValue(transferId, out dataSession) ||
+                dataSession.IsDisposed ||
+                !string.Equals(dataSession.SessionId, sessionId, StringComparison.Ordinal))
+            {
+                decisionReason = "data_session_scope_unavailable";
+                return false;
+            }
+        }
+
+        RuntimeUnlockRouteCommitSnapshot snapshot = retainedPreCommitSnapshot!;
+        if (snapshot is null &&
+            !((IRuntimeUnlockRouteCommitProofProvider)this)
+                .TryGetRuntimeUnlockRouteCommitProof(
+                    dataSession.SessionId,
+                    dataSession.TransferId,
+                    out snapshot))
+        {
+            lock (accelerationGate)
+            {
+                snapshot = runtimeUnlockPreCommitProbeStartedSnapshot!;
+                if (snapshot is null ||
+                    !string.Equals(snapshot.SessionId, dataSession.SessionId, StringComparison.Ordinal) ||
+                    !string.Equals(snapshot.TransferId, dataSession.TransferId, StringComparison.Ordinal) ||
+                    !string.Equals(
+                        snapshot.PathProbeState,
+                        RuntimeUnlockPathProbeState.Acked.ToString(),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    decisionReason = "accepted_precommit_snapshot_unavailable";
+                    return false;
+                }
+            }
+        }
+
+        var peerProof = new PostTunaFallbackPeerProofEvidence(
+            dataSession.SessionId,
+            dataSession.TransferId,
+            FileTransferDirection.Outbound,
+            proofGeneration,
+            frameIdentity.TransportEpoch,
+            proofKind,
+            reason,
+            frameIdentity);
+        boundary = new RuntimeUnlockUncommittedTunaFallbackProofBoundary(
+            peerProof,
+            snapshot);
+        decisionReason = boundary.IsComplete
+            ? "accepted_precommit_scope_bound"
+            : "accepted_precommit_snapshot_incomplete";
+        return boundary.IsComplete;
+    }
+
+    private static void LogRuntimeUnlockUncommittedTunaFallbackPeerProofBindingDecision(
+        string? sessionId,
+        string? transferId,
+        long proofGeneration,
+        long proofTransportEpoch,
+        string status,
+        string reason)
+        => LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_uncommitted_tuna_fallback_peer_proof_binding_decided; session_id={SanitizeLogToken(sessionId ?? "none")}; transfer_id={SanitizeLogToken(transferId ?? "none")}; direction=outbound; proof_generation={proofGeneration}; proof_transport_epoch={proofTransportEpoch}; binding_status={SanitizeLogToken(status)}; decision_reason={SanitizeLogToken(reason)}");
+
+    private bool HasCurrentFileTunaV4Publication(string sessionId, string transferId)
+    {
+        lock (gate)
+        {
+            return TryGetFileTransferRouteHintUnsafe(
+                       sessionId,
+                       transferId,
+                       FileTransferDirection.Outbound,
+                       out var hint) &&
+                   hint.Route == FileTransferRoute.FileTunaV4 &&
+                   hint.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4;
+        }
+    }
+
     private bool CompleteFileTransferFallbackNknProofIfPending(
         string proofKind,
         string? sessionId,
@@ -11877,6 +12032,10 @@ public sealed partial class NknSignalingTransport
         long authorityTransportEpoch = 0;
         string? authorityCheckpointRequestId = null;
         string? authorityReason = null;
+        bool needsUncommittedBoundaryBinding = false;
+        RuntimeUnlockUncommittedTunaFallbackProofBoundary? uncommittedProofBoundary = null;
+        var uncommittedProofBoundaryDecisionReason = "accepted_precommit_scope_unavailable";
+        RuntimeUnlockRouteCommitSnapshot? retainedPreCommitSnapshot = null;
         var normalizedProofKind = SanitizeLogToken(proofKind);
         var authoritativeProof = IsAuthoritativeFileTransferFallbackNknProof(normalizedProofKind);
         PostTunaFallbackPeerProofFrameIdentity? proofFrameIdentity = null;
@@ -11953,17 +12112,104 @@ public sealed partial class NknSignalingTransport
                     authorityTransportEpoch = fileTransferFallbackProofTransportEpoch;
                     authorityCheckpointRequestId = fileTransferFallbackProofCheckpointRequestId;
                     authorityReason = fileTransferFallbackProofAuthorityReason;
-                    fileTransferFallbackProofPending = false;
-                    fileTransferFallbackProofReason = "none";
-                    fileTransferFallbackProofSessionId = null;
-                    fileTransferFallbackProofLanes = NknAccelerationLaneKind.None;
-                    fileTransferFallbackProofGeneration++;
-                    fileTransferFallbackProofProbeScheduled = false;
-                    fileTransferFallbackBulkProofObserved = false;
-                    fileTransferFallbackControlProofObserved = false;
-                    ClearFileTransferFallbackProofAuthorityUnsafe();
+                    retainedPreCommitSnapshot = fileTransferFallbackProofPreCommitSnapshot;
+                    needsUncommittedBoundaryBinding =
+                        IsPostTunaFileTransferFallbackNknProof(normalizedProofKind) &&
+                        string.IsNullOrWhiteSpace(authorityTransferId);
+                    if (!needsUncommittedBoundaryBinding)
+                    {
+                        CompleteFileTransferFallbackProofUnsafe();
+                        completed = true;
+                    }
+                }
+            }
+        }
+
+        if (needsUncommittedBoundaryBinding)
+        {
+            if (proofFrame is not null &&
+                !string.IsNullOrWhiteSpace(pendingSessionId) &&
+                !string.IsNullOrWhiteSpace(proofFrame.TransferId) &&
+                string.Equals(proofFrame.SessionId, pendingSessionId, StringComparison.Ordinal) &&
+                HasCurrentFileTunaV4Publication(pendingSessionId, proofFrame.TransferId.Trim()))
+            {
+                lock (fileTransferFallbackProofGate)
+                {
+                    if (fileTransferFallbackProofPending &&
+                        fileTransferFallbackProofGeneration == authorityProofGeneration &&
+                        string.Equals(
+                            fileTransferFallbackProofSessionId,
+                            pendingSessionId,
+                            StringComparison.Ordinal))
+                    {
+                        CompleteFileTransferFallbackProofUnsafe();
+                        completed = true;
+                    }
+                }
+            }
+
+            if (completed)
+            {
+                needsUncommittedBoundaryBinding = false;
+            }
+            else if (proofFrameIdentity is null ||
+                string.IsNullOrWhiteSpace(pendingSessionId) ||
+                proofFrame is null ||
+                string.IsNullOrWhiteSpace(proofFrame.TransferId) ||
+                !string.Equals(proofFrame.SessionId, pendingSessionId, StringComparison.Ordinal) ||
+                !TryCreateRuntimeUnlockUncommittedTunaFallbackProofBoundary(
+                    pendingSessionId,
+                    proofFrame.TransferId.Trim(),
+                    authorityProofGeneration,
+                    normalizedProofKind,
+                    reason,
+                    proofFrameIdentity,
+                    retainedPreCommitSnapshot,
+                    out uncommittedProofBoundary,
+                    out uncommittedProofBoundaryDecisionReason))
+            {
+                LogRuntimeUnlockUncommittedTunaFallbackPeerProofBindingDecision(
+                    pendingSessionId,
+                    proofFrame?.TransferId ?? authorityTransferId,
+                    authorityProofGeneration,
+                    proofFrameIdentity?.TransportEpoch ?? 0,
+                    "Held",
+                    uncommittedProofBoundaryDecisionReason);
+                return false;
+            }
+
+            if (needsUncommittedBoundaryBinding)
+            {
+                lock (fileTransferFallbackProofGate)
+                {
+                    if (!fileTransferFallbackProofPending ||
+                        fileTransferFallbackProofGeneration != authorityProofGeneration ||
+                        !string.Equals(
+                            fileTransferFallbackProofSessionId,
+                            pendingSessionId,
+                            StringComparison.Ordinal))
+                    {
+                        LogRuntimeUnlockUncommittedTunaFallbackPeerProofBindingDecision(
+                            pendingSessionId,
+                            uncommittedProofBoundary!.PeerProofEvidence.TransferId,
+                            authorityProofGeneration,
+                            uncommittedProofBoundary.PeerProofEvidence.TransportEpoch,
+                            "Invalidated",
+                            "pending_proof_scope_replaced");
+                        return false;
+                    }
+
+                    CompleteFileTransferFallbackProofUnsafe();
                     completed = true;
                 }
+
+                LogRuntimeUnlockUncommittedTunaFallbackPeerProofBindingDecision(
+                    pendingSessionId,
+                    uncommittedProofBoundary!.PeerProofEvidence.TransferId,
+                    authorityProofGeneration,
+                    uncommittedProofBoundary.PeerProofEvidence.TransportEpoch,
+                    "Bound",
+                    "accepted_precommit_scope_bound");
             }
         }
 
@@ -12018,7 +12264,7 @@ public sealed partial class NknSignalingTransport
             {
                 LocalOperationalLog.Info(
                     "NKN.Tuna",
-                    $"event=filetransfer_post_tuna_fallback_nkn_proved; session_id={SanitizeLogToken(pendingSessionId ?? "none")}; reason={reason}; proof={normalizedProofKind}; lanes={FormatAccelerationLanesForLog(lanes)}");
+                    $"event=filetransfer_post_tuna_fallback_nkn_proved; session_id={SanitizeLogToken(pendingSessionId ?? "none")}; transfer_id={SanitizeLogToken(uncommittedProofBoundary?.PeerProofEvidence.TransferId ?? authorityTransferId ?? "none")}; direction={FormatFileTransferDirection(uncommittedProofBoundary?.PeerProofEvidence.Direction ?? authorityDirection)}; reason={reason}; proof={normalizedProofKind}; proof_generation={uncommittedProofBoundary?.PeerProofEvidence.ProofGeneration ?? authorityProofGeneration}; proof_transport_epoch={uncommittedProofBoundary?.PeerProofEvidence.TransportEpoch ?? authorityTransportEpoch}; proof_frame_identity={SanitizeLogToken(uncommittedProofBoundary?.PeerProofEvidence.FrameIdentity?.Sha256 ?? proofFrameIdentity?.Sha256 ?? "none")}; transaction_generation={uncommittedProofBoundary?.PreCommitSnapshot.TransactionGeneration ?? 0}; offer_generation={uncommittedProofBoundary?.PreCommitSnapshot.OfferGeneration ?? 0}; tuna_path_lease_generation={uncommittedProofBoundary?.PreCommitSnapshot.TunaPathLeaseGeneration ?? 0}; launch_generation={uncommittedProofBoundary?.PreCommitSnapshot.LaunchGeneration ?? 0}; probe_id={SanitizeLogToken(uncommittedProofBoundary?.PreCommitSnapshot.PathProbeId ?? "none")}; binding_status={(uncommittedProofBoundary is null ? "legacy" : "bound")}; lanes={FormatAccelerationLanesForLog(lanes)}");
                 if (!string.IsNullOrWhiteSpace(pendingSessionId) &&
                     !string.IsNullOrWhiteSpace(authorityTransferId) &&
                     authorityDirection == FileTransferDirection.Outbound &&
@@ -12064,7 +12310,8 @@ public sealed partial class NknSignalingTransport
                 requiresResumeRequest: true,
                 handoffKind: FileTransferTransportHandoffKind.TunaToNormalFallback,
                 targetTransport: FileTransferTransportKind.RegularNkn,
-                postTunaFallbackHandoffEvidence);
+                postTunaFallbackHandoffEvidence,
+                uncommittedProofBoundary);
             if (IsPostTunaFileTransferFallbackNknProof(normalizedProofKind))
             {
                 LocalOperationalLog.Info(

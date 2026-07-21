@@ -588,6 +588,77 @@ internal sealed record PostTunaFallbackHandoffEvidence(
                CheckpointRequestId,
                StringComparison.Ordinal) &&
            string.Equals(candidate.ProofKind, ProofKind, StringComparison.Ordinal);
+
+    public PostTunaFallbackPeerProofEvidence ToPeerProofEvidence()
+        => new(
+            SessionId,
+            TransferId,
+            Direction,
+            ProofGeneration,
+            SourceTransportEpoch,
+            ProofKind,
+            Reason,
+            FrameIdentity);
+}
+
+internal sealed record PostTunaFallbackPeerProofEvidence(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    long ProofGeneration,
+    long TransportEpoch,
+    string ProofKind,
+    string Reason,
+    PostTunaFallbackPeerProofFrameIdentity? FrameIdentity)
+{
+    public bool IsComplete =>
+        !string.IsNullOrWhiteSpace(SessionId) &&
+        !string.IsNullOrWhiteSpace(TransferId) &&
+        Direction == FileTransferDirection.Outbound &&
+        ProofGeneration > 0 &&
+        TransportEpoch > 0 &&
+        !string.IsNullOrWhiteSpace(ProofKind) &&
+        !string.IsNullOrWhiteSpace(Reason) &&
+        FrameIdentity is { IsComplete: true } identity &&
+        identity.TransportEpoch == TransportEpoch;
+
+    public bool IsExactFrameBound => IsComplete;
+
+    public bool CanBeReplacedBy(PostTunaFallbackPeerProofEvidence candidate)
+        => candidate.IsComplete &&
+           candidate.ProofGeneration > ProofGeneration &&
+           string.Equals(candidate.SessionId, SessionId, StringComparison.Ordinal) &&
+           string.Equals(candidate.TransferId, TransferId, StringComparison.Ordinal) &&
+           candidate.Direction == Direction &&
+           candidate.TransportEpoch >= TransportEpoch &&
+           string.Equals(candidate.ProofKind, ProofKind, StringComparison.Ordinal);
+}
+
+internal sealed record RuntimeUnlockUncommittedTunaFallbackProofBoundary(
+    PostTunaFallbackPeerProofEvidence PeerProofEvidence,
+    RuntimeUnlockRouteCommitSnapshot PreCommitSnapshot)
+{
+    public bool IsComplete =>
+        PeerProofEvidence.IsComplete &&
+        PreCommitSnapshot.LaunchGeneration > 0 &&
+        PreCommitSnapshot.PeerVisibleProof &&
+        PreCommitSnapshot.PeerReceived &&
+        PreCommitSnapshot.AnswerReceived &&
+        PreCommitSnapshot.TunaPathLeaseRequired &&
+        PreCommitSnapshot.TunaPathLeaseCurrent &&
+        string.Equals(
+            PeerProofEvidence.SessionId,
+            PreCommitSnapshot.SessionId,
+            StringComparison.Ordinal) &&
+        string.Equals(
+            PeerProofEvidence.TransferId,
+            PreCommitSnapshot.TransferId,
+            StringComparison.Ordinal) &&
+        PreCommitSnapshot.TargetRoute == FileTransferRoute.FileTunaV4 &&
+        PreCommitSnapshot.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+        PreCommitSnapshot.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
+        PreCommitSnapshot.TargetTransport == FileTransferTransportKind.Tuna &&
+        string.Equals(PreCommitSnapshot.PathProbeState, "Acked", StringComparison.OrdinalIgnoreCase);
 }
 
 internal sealed record PostTunaFallbackPeerProofFrameIdentity(
@@ -665,7 +736,7 @@ internal sealed record RuntimeUnlockUncommittedTunaFallbackAdoptionStage(
     long CompletedDrainGeneration,
     long TargetTransportEpoch,
     int TargetBridgeRecoveryGeneration,
-    PostTunaFallbackHandoffEvidence PeerProofEvidence,
+    PostTunaFallbackPeerProofEvidence PeerProofEvidence,
     FileTransferRegularV4FrontierRepairPressureSettlementCommand?
         PressureSettlementCommand = null,
     RuntimeOwnerToken TargetRuntimeOwner = default,
@@ -704,7 +775,7 @@ internal sealed record RuntimeUnlockUncommittedTunaFallbackAdoptionCommand(
     int BridgeRecoveryGeneration,
     int HandoffGeneration,
     long DrainGeneration,
-    PostTunaFallbackHandoffEvidence PeerProofEvidence,
+    PostTunaFallbackPeerProofEvidence PeerProofEvidence,
     FileTransferRegularV4FrontierRepairPressureSettlementCommand?
         PressureSettlementCommand = null,
     long SourceAvailabilityGeneration = 0,
@@ -1662,7 +1733,8 @@ public sealed class FileTransferDataSessionAvailabilityChangedEventArgs : EventA
         FileTransferTransportHandoffKind handoffKind,
         FileTransferTransportKind targetTransport,
         RuntimeUnlockRouteCommitSnapshot? runtimeUnlockPreCommitProbeSnapshot,
-        PostTunaFallbackHandoffEvidence? postTunaFallbackHandoffEvidence = null)
+        PostTunaFallbackHandoffEvidence? postTunaFallbackHandoffEvidence = null,
+        RuntimeUnlockUncommittedTunaFallbackProofBoundary? postTunaFallbackProofBoundary = null)
     {
         IsAvailable = isAvailable;
         Reason = string.IsNullOrWhiteSpace(reason) ? "transport_state_changed" : reason.Trim();
@@ -1671,6 +1743,7 @@ public sealed class FileTransferDataSessionAvailabilityChangedEventArgs : EventA
         TargetTransport = targetTransport;
         RuntimeUnlockPreCommitProbeSnapshot = runtimeUnlockPreCommitProbeSnapshot;
         PostTunaFallbackHandoffEvidence = postTunaFallbackHandoffEvidence;
+        PostTunaFallbackProofBoundary = postTunaFallbackProofBoundary;
     }
 
     public bool IsAvailable { get; }
@@ -1686,6 +1759,8 @@ public sealed class FileTransferDataSessionAvailabilityChangedEventArgs : EventA
     internal RuntimeUnlockRouteCommitSnapshot? RuntimeUnlockPreCommitProbeSnapshot { get; }
 
     internal PostTunaFallbackHandoffEvidence? PostTunaFallbackHandoffEvidence { get; }
+
+    internal RuntimeUnlockUncommittedTunaFallbackProofBoundary? PostTunaFallbackProofBoundary { get; }
 }
 
 public sealed class FileTransferOfferReceivedEventArgs : EventArgs
