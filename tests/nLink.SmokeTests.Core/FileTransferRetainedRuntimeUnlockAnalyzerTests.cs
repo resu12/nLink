@@ -51,16 +51,19 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("incomplete_proof", verdict["acceptance_failure_class"]);
-        Assert.Equal("runtime_unlock_precommit_fallback_recovery_handoff_suppressed", verdict["recovery_failure_class"]);
-        Assert.Equal("filetransfer_post_tuna_fallback_route_hint_suppressed_uncommitted_runtime_unlock", verdict["first_proof_chain_failure_event"]);
-        Assert.Equal("transport_recovered_availability_suppressed_with_uncommitted_runtime_unlock", verdict["first_proof_chain_failure_reason"]);
-        Assert.Equal("1079", verdict["first_proof_chain_failure_writer_sequence"]);
+        Assert.Equal("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing", verdict["recovery_failure_class"]);
+        Assert.Equal("filetransfer_post_tuna_fallback_nkn_proved", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("post_tuna_fallback_proof_completed_without_authority_scope", verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("1077", verdict["first_proof_chain_failure_writer_sequence"]);
         Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
-        Assert.Equal("1", verdict["runtime_unlock_precommit_fallback_recovery_handoff_suppressed_raw_count"]);
-        Assert.Equal("1", verdict["runtime_unlock_precommit_fallback_recovery_handoff_suppressed_distinct_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_unresolved_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_precommit_fallback_recovery_handoff_suppressed_raw_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_precommit_fallback_recovery_handoff_suppressed_distinct_count"]);
         Assert.Equal("0", verdict["runtime_unlock_precommit_fallback_recovery_handoff_suppressed_recovered_count"]);
-        Assert.Equal("1", verdict["runtime_unlock_precommit_fallback_recovery_handoff_suppressed_unresolved_count"]);
-        Assert.Equal("fail", verdict["runtime_unlock_precommit_fallback_recovery_handoff_suppression_verdict"]);
+        Assert.Equal("0", verdict["runtime_unlock_precommit_fallback_recovery_handoff_suppressed_unresolved_count"]);
     }
 
     [Theory]
@@ -80,7 +83,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         const string intentTuple = "direction=outbound; handoff_generation=7; handoff_kind=tuna_to_normal_fallback; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn";
         var lines = new[]
         {
-            LogLine($"event=filetransfer_post_tuna_fallback_nkn_proved; session_id={sessionId}; reason=header_switch_off; proof=file_transfer_v6_state_frame_received; lanes=file; log_writer_id={writerId}; log_writer_sequence=40"),
+            LogLine($"event=filetransfer_post_tuna_fallback_nkn_proved; session_id={sessionId}; transfer_id={transferId}; direction=outbound; reason=header_switch_off; proof=file_transfer_v6_state_frame_received; proof_generation=1; proof_transport_epoch=2; proof_frame_identity=receiver-state-v6:2:40; transaction_generation=1; offer_generation=1; tuna_path_lease_generation=2; probe_id=probe-1; lanes=file; log_writer_id={writerId}; log_writer_sequence=40"),
             LogLine($"event=filetransfer_data_session_availability_broadcast; is_available=1; reason=transport_recovered; requires_resume_request=1; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; log_writer_id={writerId}; log_writer_sequence=41"),
             LogLine($"event=filetransfer_post_tuna_fallback_route_hint_suppressed_uncommitted_runtime_unlock; session_id={sessionId}; transfer_id={transferId}; source=availability_broadcast; reason=transport_recovered; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; current_route=regular_nkn_v4_fast; current_protocol_version=4; log_writer_id={writerId}; log_writer_sequence=42"),
             LogLine($"event=runtime_unlock_uncommitted_tuna_fallback_handoff_retained; session_id={sessionId}; transfer_id={transferId}; {intentTuple}"),

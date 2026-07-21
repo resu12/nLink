@@ -1391,6 +1391,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_post_tuna_fallback_nkn_proved') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_data_session_availability_broadcast') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_post_tuna_fallback_route_hint_suppressed_uncommitted_runtime_unlock') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_uncommitted_tuna_fallback_peer_proof_binding_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_uncommitted_tuna_fallback_handoff_retained') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_uncommitted_tuna_fallback_peer_proof_observed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_uncommitted_tuna_fallback_handoff_decided') +
@@ -1407,6 +1408,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_terminalized') |
             Sort-Object Sequence, LineNumber
     )
+    $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof =
+        Get-FileTransferRuntimeUnlockUncommittedTunaFallbackProofAuthorityCorrelation `
+            -Events $runtimeUnlockUncommittedTunaFallbackHandoffSuppressionEvents
     $runtimeUnlockUncommittedTunaFallbackHandoffSuppressionProof =
         Get-FileTransferRuntimeUnlockUncommittedTunaFallbackHandoffSuppressionCorrelation `
             -Events $runtimeUnlockUncommittedTunaFallbackHandoffSuppressionEvents
@@ -1539,6 +1543,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Class = 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed'
             Event = $candidateEvent
             Reason = 'transport_recovered_availability_suppressed_with_uncommitted_runtime_unlock'
+        }) | Out-Null
+    }
+    foreach ($candidateEvent in @($runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.UnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing'
+            Event = $candidateEvent
+            Reason = 'post_tuna_fallback_proof_completed_without_authority_scope'
         }) | Out-Null
     }
     if ($outboundReceiveWorkerHandoffProof.Count -gt 0 -and
@@ -1805,6 +1816,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     if ($runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteUnresolvedCount -gt 0 -or
         $regularV4FrontierRepairSettlementDispositionProof.UnresolvedCount -gt 0 -or
         $regularV4FrontierRepairPressureRecoveryHandoffProof.UnresolvedCount -gt 0 -or
+        $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockUncommittedTunaFallbackHandoffSuppressionProof.UnresolvedCount -gt 0) {
         $verdict = 'INCONCLUSIVE'
         $gateStatus = 'fail'
@@ -1842,6 +1854,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved',
                 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid',
                 'runtime_unlock_precommit_probe_start_handoff_missing',
+                'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing',
                 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed',
                 'regular_v4_frontier_repair_settlement_disposition_unverifiable',
                 'regular_v4_frontier_repair_initial_pressure_install_missing',
@@ -1921,6 +1934,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $semanticFailureDomain = if ($firstProofChainFailureClass -in @(
             'runtime_unlock_regular_v4_route_commit_send_drain_missing',
             'runtime_unlock_precommit_probe_start_handoff_missing',
+            'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing',
             'runtime_unlock_precommit_fallback_recovery_handoff_suppressed',
             'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid',
             'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing',
@@ -2115,6 +2129,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_precommit_fallback_recovery_handoff_suppressed_recovered_count={0}" -f $runtimeUnlockUncommittedTunaFallbackHandoffSuppressionProof.RecoveredCount),
         ("runtime_unlock_precommit_fallback_recovery_handoff_suppressed_unresolved_count={0}" -f $runtimeUnlockUncommittedTunaFallbackHandoffSuppressionProof.UnresolvedCount),
         ("runtime_unlock_precommit_fallback_recovery_handoff_suppression_verdict={0}" -f $runtimeUnlockUncommittedTunaFallbackHandoffSuppressionProof.Verdict),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_raw_count={0}" -f $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.RawCount),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_distinct_count={0}" -f $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.DistinctCount),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_recovered_count={0}" -f $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.RecoveredCount),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_unresolved_count={0}" -f $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.UnresolvedCount),
         ("post_tuna_fallback_outbound_receive_worker_handoff_missing_count={0}" -f $outboundReceiveWorkerHandoffProof.Count),
         ("fallback_tail_yield_authority_rejected_count={0}" -f $fallbackTailYieldAuthorityRejectedCount),
         ("fallback_tail_owner_generation_mismatch_count={0}" -f $fallbackTailOwnerGenerationMismatchCount),
@@ -2294,6 +2312,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_precommit_fallback_recovery_handoff_suppressed_unresolved_count={0}" -f $runtimeUnlockUncommittedTunaFallbackHandoffSuppressionProof.UnresolvedCount),
         ("runtime_unlock_precommit_fallback_recovery_handoff_suppression_verdict={0}" -f $runtimeUnlockUncommittedTunaFallbackHandoffSuppressionProof.Verdict),
         ("post_tuna_fallback_outbound_receive_worker_handoff_missing_count={0}" -f $outboundReceiveWorkerHandoffProof.Count),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_raw_count={0}" -f $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.RawCount),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_distinct_count={0}" -f $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.DistinctCount),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_recovered_count={0}" -f $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.RecoveredCount),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_unresolved_count={0}" -f $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.UnresolvedCount),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_raw_count={0}" -f $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.RawCount),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_distinct_count={0}" -f $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.DistinctCount),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_recovered_count={0}" -f $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.RecoveredCount),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_unresolved_count={0}" -f $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.UnresolvedCount),
         ("fallback_tail_yield_authority_rejected_count={0}" -f $fallbackTailYieldAuthorityRejectedCount),
         ("fallback_tail_owner_generation_mismatch_count={0}" -f $fallbackTailOwnerGenerationMismatchCount),
         ("fallback_tail_bridge_recovery_generation_pairing_verdict={0}" -f $fallbackTailBridgeRecoveryPairingProof.Verdict),
@@ -2629,6 +2655,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_precommit_fallback_recovery_handoff_suppressed_unresolved_count={0}" -f $runtimeUnlockUncommittedTunaFallbackHandoffSuppressionProof.UnresolvedCount),
         ("runtime_unlock_precommit_fallback_recovery_handoff_suppression_verdict={0}" -f $runtimeUnlockUncommittedTunaFallbackHandoffSuppressionProof.Verdict),
         ("fallback_tail_yield_authority_rejected_count={0}" -f $fallbackTailYieldAuthorityRejectedCount),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_raw_count={0}" -f $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.RawCount),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_distinct_count={0}" -f $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.DistinctCount),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_recovered_count={0}" -f $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.RecoveredCount),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_unresolved_count={0}" -f $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.UnresolvedCount),
         ("fallback_tail_owner_generation_mismatch_count={0}" -f $fallbackTailOwnerGenerationMismatchCount),
         ("fallback_tail_bridge_recovery_generation_pairing_verdict={0}" -f $fallbackTailBridgeRecoveryPairingProof.Verdict),
         ("fallback_tail_bridge_recovery_generation_mismatch_raw_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.RawCount),
@@ -2807,6 +2837,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         runtime_unlock_precommit_fallback_recovery_handoff_suppressed_recovered_count = $runtimeUnlockUncommittedTunaFallbackHandoffSuppressionProof.RecoveredCount
         runtime_unlock_precommit_fallback_recovery_handoff_suppressed_unresolved_count = $runtimeUnlockUncommittedTunaFallbackHandoffSuppressionProof.UnresolvedCount
         runtime_unlock_precommit_fallback_recovery_handoff_suppression_verdict = $runtimeUnlockUncommittedTunaFallbackHandoffSuppressionProof.Verdict
+        runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_raw_count = $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.RawCount
+        runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_distinct_count = $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.DistinctCount
+        runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_recovered_count = $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.RecoveredCount
+        runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_unresolved_count = $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.UnresolvedCount
         post_tuna_fallback_outbound_receive_worker_handoff_missing_count = $outboundReceiveWorkerHandoffProof.Count
         fallback_tail_yield_authority_rejected_count = $fallbackTailYieldAuthorityRejectedCount
         fallback_tail_owner_generation_mismatch_count = $fallbackTailOwnerGenerationMismatchCount

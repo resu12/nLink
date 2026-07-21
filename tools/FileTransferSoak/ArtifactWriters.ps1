@@ -10834,6 +10834,10 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_precommit_fallback_recovery_handoff_suppressed_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockPrecommitFallbackRecoveryHandoffSuppressedDistinctCount),
         ("runtime_unlock_precommit_fallback_recovery_handoff_suppressed_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRecoveredCount),
         ("runtime_unlock_precommit_fallback_recovery_handoff_suppressed_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockPrecommitFallbackRecoveryHandoffSuppressedUnresolvedCount),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockUncommittedTunaFallbackProofAuthorityMissingRawCount),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockUncommittedTunaFallbackProofAuthorityMissingDistinctCount),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockUncommittedTunaFallbackProofAuthorityMissingRecoveredCount),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockUncommittedTunaFallbackProofAuthorityMissingUnresolvedCount),
         ("runtime_unlock_precommit_fallback_recovery_handoff_suppression_verdict={0}" -f $recoveryClassification.RuntimeUnlockPrecommitFallbackRecoveryHandoffSuppressionVerdict),
         ("post_fallback_runtime_unlock_resume_blocked_count={0}" -f $recoveryClassification.PostFallbackRuntimeUnlockResumeBlockedCount),
         ("runtime_unlock_tuna_probe_sidecar_failure_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSidecarFailureCount),
@@ -18188,6 +18192,129 @@ function Get-FileTransferRuntimeUnlockPostTunaFallbackTransportProofHandoffCorre
     }
 }
 
+function Get-FileTransferRuntimeUnlockUncommittedTunaFallbackProofAuthorityCorrelation {
+    param(
+        [AllowEmptyCollection()][object[]]$Events = @()
+    )
+
+    [object[]]$events = @($Events | Where-Object { $null -ne $_ } | Sort-Object Sequence, LineNumber)
+    [object[]]$proofEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_post_tuna_fallback_nkn_proved'
+    })
+    [object[]]$bindingEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_uncommitted_tuna_fallback_peer_proof_binding_decided'
+    })
+
+    function Get-ProofAuthorityField {
+        param([Parameter(Mandatory = $true)]$Event, [Parameter(Mandatory = $true)][string]$Name)
+        $value = Get-FileTransferEventField -Event $Event -Name $Name -Default ''
+        if ([string]::IsNullOrWhiteSpace($value) -or $value -in @('(none)', 'none', '(missing)', '__missing__')) {
+            return ''
+        }
+        return $value
+    }
+
+    function Test-ProofAuthoritySameWriter {
+        param([Parameter(Mandatory = $true)]$Left, [Parameter(Mandatory = $true)]$Right)
+        $leftWriter = Get-ProofAuthorityField -Event $Left -Name 'log_writer_id'
+        $rightWriter = Get-ProofAuthorityField -Event $Right -Name 'log_writer_id'
+        return -not [string]::IsNullOrWhiteSpace($leftWriter) -and
+            [string]::Equals($leftWriter, $rightWriter, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+
+    $raw = New-Object System.Collections.Generic.List[object]
+    $distinct = New-Object System.Collections.Generic.List[object]
+    $recovered = New-Object System.Collections.Generic.List[object]
+    $unresolved = New-Object System.Collections.Generic.List[object]
+    $downstream = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+
+    foreach ($proof in $proofEvents) {
+        $missingFields = @(@(
+            'transfer_id',
+            'direction',
+            'proof_generation',
+            'proof_transport_epoch',
+            'proof_frame_identity',
+            'transaction_generation',
+            'offer_generation',
+            'tuna_path_lease_generation',
+            'probe_id'
+        ) | Where-Object { [string]::IsNullOrWhiteSpace((Get-ProofAuthorityField -Event $proof -Name $_)) })
+        if ($missingFields.Count -eq 0) {
+            continue
+        }
+
+        $proofSequence = [int64]$proof.Sequence
+        $proofWriterSequence = Get-FileTransferEventInt64Field -Event $proof -Name 'log_writer_sequence' -Default 0
+        [object[]]$matchingSuppression = @($events | Where-Object {
+            $_.EventName -eq 'filetransfer_post_tuna_fallback_route_hint_suppressed_uncommitted_runtime_unlock' -and
+            [int64]$_.Sequence -gt $proofSequence -and
+            (Test-ProofAuthoritySameWriter -Left $proof -Right $_) -and
+            ($proofWriterSequence -le 0 -or
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -le ($proofWriterSequence + 2)) -and
+            (Get-ProofAuthorityField -Event $_ -Name 'source') -eq 'availability_broadcast' -and
+            (Get-ProofAuthorityField -Event $_ -Name 'reason') -eq 'transport_recovered' -and
+            (Get-ProofAuthorityField -Event $_ -Name 'current_route') -eq 'regular_nkn_v4_fast'
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($matchingSuppression.Count -eq 0) {
+            continue
+        }
+
+        $suppression = $matchingSuppression[0]
+        $raw.Add($proof) | Out-Null
+        $key = [string]::Join('|', @(
+                (Get-ProofAuthorityField -Event $proof -Name 'log_writer_id'),
+                (Get-ProofAuthorityField -Event $proof -Name 'log_writer_sequence'),
+                (Get-ProofAuthorityField -Event $proof -Name 'session_id'),
+                (Get-ProofAuthorityField -Event $proof -Name 'reason'),
+                (Get-ProofAuthorityField -Event $proof -Name 'proof'))).ToLowerInvariant()
+        if ($seen.ContainsKey($key)) {
+            continue
+        }
+        $seen[$key] = $true
+        $distinct.Add($proof) | Out-Null
+
+        [object[]]$matchingBinding = @($bindingEvents | Where-Object {
+            [int64]$_.Sequence -ge $proofSequence -and
+            [int64]$_.Sequence -le [int64]$suppression.Sequence -and
+            (Test-ProofAuthoritySameWriter -Left $proof -Right $_) -and
+            (Get-ProofAuthorityField -Event $_ -Name 'binding_status') -in @('Bound', 'Idempotent') -and
+            -not [string]::IsNullOrWhiteSpace((Get-ProofAuthorityField -Event $_ -Name 'transfer_id')) -and
+            -not [string]::IsNullOrWhiteSpace((Get-ProofAuthorityField -Event $_ -Name 'proof_frame_identity'))
+        } | Select-Object -First 1)
+        if ($matchingBinding.Count -gt 0) {
+            $recovered.Add($proof) | Out-Null
+            continue
+        }
+
+        $proof | Add-Member -NotePropertyName FailureReason -NotePropertyValue 'post_tuna_fallback_proof_completed_without_authority_scope' -Force
+        $unresolved.Add($proof) | Out-Null
+        foreach ($ignored in @($events | Where-Object {
+                [int64]$_.Sequence -gt [int64]$suppression.Sequence -and
+                $_.EventName -eq 'filetransfer_data_frame_ignored' -and
+                (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'protocol_not_v4' -and
+                (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -like '*.v6'
+            })) {
+            $downstream.Add($ignored) | Out-Null
+        }
+    }
+
+    return [pscustomobject]@{
+        RawCount = $raw.Count
+        DistinctCount = $distinct.Count
+        RecoveredCount = $recovered.Count
+        UnresolvedCount = $unresolved.Count
+        Verdict = if ($unresolved.Count -gt 0) { 'fail' } elseif ($distinct.Count -gt 0) { 'pass' } else { 'none' }
+        RawCandidateEvents = @($raw.ToArray())
+        DistinctCandidateEvents = @($distinct.ToArray())
+        RecoveredCandidateEvents = @($recovered.ToArray())
+        UnresolvedCandidateEvents = @($unresolved.ToArray())
+        DownstreamProtocolMismatchEvents = @($downstream.ToArray())
+        DownstreamProtocolMismatchSequences = @($downstream.ToArray() | ForEach-Object { [int64]$_.Sequence })
+    }
+}
+
 function Get-FileTransferRuntimeUnlockUncommittedTunaFallbackHandoffSuppressionCorrelation {
     param(
         [AllowEmptyCollection()][object[]]$Events = @()
@@ -18378,7 +18505,12 @@ function Get-FileTransferRuntimeUnlockUncommittedTunaFallbackHandoffSuppressionC
             [int64]$_.Sequence -lt [int64]$broadcast.Sequence -and
             (Test-UncommittedFallbackSameWriter -Left $suppression -Right $_) -and
             ((Get-UncommittedFallbackField -Event $_ -Names @('session_id')) -eq
-                (Get-UncommittedFallbackField -Event $suppression -Names @('session_id')))
+                (Get-UncommittedFallbackField -Event $suppression -Names @('session_id'))) -and
+            -not [string]::IsNullOrWhiteSpace((Get-UncommittedFallbackField -Event $_ -Names @('transfer_id'))) -and
+            -not [string]::IsNullOrWhiteSpace((Get-UncommittedFallbackField -Event $_ -Names @('direction'))) -and
+            -not [string]::IsNullOrWhiteSpace((Get-UncommittedFallbackField -Event $_ -Names @('proof_generation'))) -and
+            -not [string]::IsNullOrWhiteSpace((Get-UncommittedFallbackField -Event $_ -Names @('proof_transport_epoch'))) -and
+            -not [string]::IsNullOrWhiteSpace((Get-UncommittedFallbackField -Event $_ -Names @('proof_frame_identity')))
         } | Sort-Object Sequence, LineNumber)
         if ($matchingProofs.Count -eq 0) {
             continue
@@ -21906,6 +22038,9 @@ function Get-FileTransferRecoveryFailureClassification {
         Get-FileTransferRuntimeUnlockPostTunaFallbackTransportProofHandoffCorrelation `
             -Events $events `
             -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents
+    $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof =
+        Get-FileTransferRuntimeUnlockUncommittedTunaFallbackProofAuthorityCorrelation `
+            -Events $events
     $runtimeUnlockUncommittedTunaFallbackHandoffSuppressionProof =
         Get-FileTransferRuntimeUnlockUncommittedTunaFallbackHandoffSuppressionCorrelation `
             -Events $events
@@ -24836,7 +24971,9 @@ function Get-FileTransferRecoveryFailureClassification {
         -Summary $Summary `
         -TerminalWinner $terminalWinner `
         -ShaOk $terminalShaOk `
-        -ExcludedEventSequences $runtimeUnlockUncommittedTunaFallbackHandoffSuppressionProof.DownstreamProtocolMismatchSequences
+        -ExcludedEventSequences @(
+            $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.DownstreamProtocolMismatchSequences
+            $runtimeUnlockUncommittedTunaFallbackHandoffSuppressionProof.DownstreamProtocolMismatchSequences)
     $terminalLifecycleInvariant = Get-FileTransferInvariantTerminalLifecycleResult -Summary $Summary -LateFrameClassification $lateFrameProof.Classification
     $fallbackAuthorityProof = Get-FileTransferFallbackLegAuthorityProof -TransferEvents $Summary.TransferEvents
     $hasFallbackRouteOrOwnerEvidence = $hasPostTunaFallbackEvidence -or $fallbackAuthorityProof.StartedCount -gt 0
@@ -24846,6 +24983,12 @@ function Get-FileTransferRecoveryFailureClassification {
         -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete' `
         -Events @($runtimeUnlockRetryDispatchInstallProof.GrantEvidenceUnresolvedCandidateEvents)
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing' `
+        -Events @($runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.UnresolvedCandidateEvents) `
+        -DefaultReason 'post_tuna_fallback_proof_completed_without_authority_scope' `
+        -UseDefaultReason
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed' `
@@ -25388,6 +25531,9 @@ function Get-FileTransferRecoveryFailureClassification {
     elseif ($runtimeUnlockRetryRegularV4RecoverySettlementMissingCount -gt 0) {
         $class = 'runtime_unlock_retry_regular_v4_recovery_settlement_missing'
     }
+    elseif ($runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.UnresolvedCount -gt 0) {
+        $class = 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing'
+    }
     elseif ($runtimeUnlockUncommittedTunaFallbackHandoffSuppressionProof.UnresolvedCount -gt 0) {
         $class = 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed'
     }
@@ -25737,6 +25883,7 @@ function Get-FileTransferRecoveryFailureClassification {
         SemanticFailureDomain = if ($class -in @(
                 'runtime_unlock_regular_v4_route_commit_send_drain_missing',
                 'runtime_unlock_precommit_probe_start_handoff_missing',
+                'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing',
                 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed',
                 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid',
                 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing',
@@ -25929,6 +26076,11 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockPrecommitFallbackRecoveryHandoffSuppressedUnresolvedCount = $runtimeUnlockUncommittedTunaFallbackHandoffSuppressionProof.UnresolvedCount
         RuntimeUnlockPrecommitFallbackRecoveryHandoffSuppressionVerdict = $runtimeUnlockUncommittedTunaFallbackHandoffSuppressionProof.Verdict
         RuntimeUnlockPrecommitFallbackRecoveryHandoffDownstreamProtocolMismatchSequences = @($runtimeUnlockUncommittedTunaFallbackHandoffSuppressionProof.DownstreamProtocolMismatchSequences)
+        RuntimeUnlockUncommittedTunaFallbackProofAuthorityMissingRawCount = $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.RawCount
+        RuntimeUnlockUncommittedTunaFallbackProofAuthorityMissingDistinctCount = $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.DistinctCount
+        RuntimeUnlockUncommittedTunaFallbackProofAuthorityMissingRecoveredCount = $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.RecoveredCount
+        RuntimeUnlockUncommittedTunaFallbackProofAuthorityMissingUnresolvedCount = $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.UnresolvedCount
+        RuntimeUnlockUncommittedTunaFallbackProofAuthorityVerdict = $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.Verdict
         PostFallbackRuntimeUnlockResumeBlockedCount = if ($postFallbackRuntimeUnlockResumeBlocked) { 1 } else { 0 }
         RuntimeUnlockTunaProbeSidecarFailureCount = $runtimeUnlockTunaProbeSidecarFailureEvents.Count
         RuntimeUnlockTunaProbeSidecarFreshTransactionScheduledCount = $runtimeUnlockTunaProbeSidecarFreshTransactionScheduledEvents.Count
@@ -26363,6 +26515,10 @@ function New-FileTransferInvariantLedgerObject {
         runtime_unlock_precommit_fallback_recovery_handoff_suppressed_distinct_count = [string]$recoveryClassification.RuntimeUnlockPrecommitFallbackRecoveryHandoffSuppressedDistinctCount
         runtime_unlock_precommit_fallback_recovery_handoff_suppressed_recovered_count = [string]$recoveryClassification.RuntimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRecoveredCount
         runtime_unlock_precommit_fallback_recovery_handoff_suppressed_unresolved_count = [string]$recoveryClassification.RuntimeUnlockPrecommitFallbackRecoveryHandoffSuppressedUnresolvedCount
+        runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_raw_count = [string]$recoveryClassification.RuntimeUnlockUncommittedTunaFallbackProofAuthorityMissingRawCount
+        runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_distinct_count = [string]$recoveryClassification.RuntimeUnlockUncommittedTunaFallbackProofAuthorityMissingDistinctCount
+        runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_recovered_count = [string]$recoveryClassification.RuntimeUnlockUncommittedTunaFallbackProofAuthorityMissingRecoveredCount
+        runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_unresolved_count = [string]$recoveryClassification.RuntimeUnlockUncommittedTunaFallbackProofAuthorityMissingUnresolvedCount
         runtime_unlock_precommit_fallback_recovery_handoff_suppression_verdict = $recoveryClassification.RuntimeUnlockPrecommitFallbackRecoveryHandoffSuppressionVerdict
         runtime_unlock_retry_dispatch_authority_granted_raw_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedRawCount
         runtime_unlock_retry_dispatch_authority_granted_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedCount
@@ -26827,7 +26983,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("gate_status={0}" -f $effectiveGateStatus),
         ("transfer_id={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.TransferId)) { '(none)' } else { $Summary.TransferId }))),
         ("next_artifact={0}" -f $effectiveNextArtifact),
-        ("acceptance_failure_class={0}" -f ($(if ($recoveryClassification.Class -in @('runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'runtime_unlock_precommit_probe_start_handoff_missing', 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_initial_pressure_install_missing', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery', 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) { 'incomplete_proof' } elseif ($recoveryClassification.Class -in @('runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'runtime_unlock_regular_v4_route_commit_send_drain_missing')) { 'route_runtime' } elseif ($invariantMayOwnAcceptanceFailure) { $combinedInvariant.FailureClass } else { 'none' }))),
+        ("acceptance_failure_class={0}" -f ($(if ($recoveryClassification.Class -in @('runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'runtime_unlock_precommit_probe_start_handoff_missing', 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing', 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_initial_pressure_install_missing', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery', 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) { 'incomplete_proof' } elseif ($recoveryClassification.Class -in @('runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'runtime_unlock_regular_v4_route_commit_send_drain_missing')) { 'route_runtime' } elseif ($invariantMayOwnAcceptanceFailure) { $combinedInvariant.FailureClass } else { 'none' }))),
         ("release_route_law_verdict={0}" -f $releaseRouteLaw.Verdict),
         ("terminal_lifecycle_invariant_verdict={0}" -f $terminalLifecycleInvariant.Verdict),
         ("control_priority_invariant_verdict={0}" -f $controlPriorityInvariant.Verdict),
@@ -27008,6 +27164,10 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_precommit_fallback_recovery_handoff_suppressed_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockPrecommitFallbackRecoveryHandoffSuppressedDistinctCount),
         ("runtime_unlock_precommit_fallback_recovery_handoff_suppressed_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockPrecommitFallbackRecoveryHandoffSuppressedRecoveredCount),
         ("runtime_unlock_precommit_fallback_recovery_handoff_suppressed_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockPrecommitFallbackRecoveryHandoffSuppressedUnresolvedCount),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockUncommittedTunaFallbackProofAuthorityMissingRawCount),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockUncommittedTunaFallbackProofAuthorityMissingDistinctCount),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockUncommittedTunaFallbackProofAuthorityMissingRecoveredCount),
+        ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockUncommittedTunaFallbackProofAuthorityMissingUnresolvedCount),
         ("runtime_unlock_precommit_fallback_recovery_handoff_suppression_verdict={0}" -f $recoveryClassification.RuntimeUnlockPrecommitFallbackRecoveryHandoffSuppressionVerdict),
         ("post_fallback_runtime_unlock_resume_blocked_count={0}" -f $recoveryClassification.PostFallbackRuntimeUnlockResumeBlockedCount),
         ("runtime_unlock_tuna_probe_sidecar_failure_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSidecarFailureCount),
