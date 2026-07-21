@@ -16268,10 +16268,9 @@ public sealed partial class SessionFileTransferService
 
         if (context.PendingRuntimeUnlockRegularV4RouteCommitDrain is { } pendingDrain)
         {
-            if (IsRuntimeUnlockRegularV4RouteCommitDrainSourceCurrentLocked(
+            if (IsRuntimeUnlockRegularV4RouteCommitDrainSourceScopeCurrentForSendRegistrationLocked(
                     context,
-                    pendingDrain,
-                    out _))
+                    pendingDrain))
             {
                 rejectionReason = "runtime_unlock_regular_v4_route_commit_send_drain_pending";
                 return false;
@@ -16316,6 +16315,21 @@ public sealed partial class SessionFileTransferService
         context.OutboundRegularV4PhysicalSendRegisteredCount++;
         return true;
     }
+
+    private bool IsRuntimeUnlockRegularV4RouteCommitDrainSourceScopeCurrentForSendRegistrationLocked(
+        OutboundTransferContext context,
+        RuntimeUnlockRegularV4RouteCommitDrain drain)
+        => ReferenceEquals(outboundTransfer, context) &&
+           !context.IsTerminal &&
+           context.CurrentRuntimeOwner == drain.SourceRuntimeOwner &&
+           context.CurrentRoutePublicationToken == drain.SourceRoutePublication &&
+           context.TerminalGeneration == drain.SourceTerminalGeneration &&
+           context.CurrentTransferLeg is { } leg &&
+           leg.Generation == drain.SourceLegGeneration &&
+           leg.TransportEpochId == drain.SourceTransportEpoch &&
+           leg.BridgeRecoveryGeneration == drain.SourceBridgeRecoveryGeneration &&
+           ReferenceEquals(context.DataSession, drain.SourceDataSession) &&
+           context.DataSessionGeneration == drain.SourceDataSessionGeneration;
 
     private async Task ObserveOutboundRegularV4PhysicalSendLeaseAsync(
         OutboundTransferContext context,

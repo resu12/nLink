@@ -2161,6 +2161,14 @@ public sealed class FileTransferCoordinatorTests
     public void UncommittedTunaFallback_NoPressureCommitsOwnerLegAndPublicationAtomically()
     {
         var setup = CreateUncommittedTunaFallbackHandoffState(withPressure: false);
+        Assert.Null(setup.State.CurrentRouteCommit);
+        Assert.Equal(
+            setup.Handoff.RuntimeUnlockAdmission,
+            setup.State.CurrentRuntimeUnlockAdmission);
+        Assert.Equal(
+            setup.Handoff.PendingPreCommitProbe,
+            setup.State.CurrentRuntimeUnlockPendingPreCommitProbe);
+        Assert.Equal("Acked", setup.Handoff.PreCommitSnapshot.PathProbeState, ignoreCase: true);
 
         var prepared = FileTransferCoordinator.PrepareRuntimeUnlockUncommittedTunaFallbackHandoff(
             setup.State,
@@ -2201,6 +2209,8 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(FileTransferProtocol.ProtocolVersionV6, committed.State.RouteSelection.ProtocolVersion);
         Assert.Equal(FileTransferRoute.PostTunaFallbackV6, committed.State.CurrentRuntimeOwner!.Value.Route);
         Assert.Null(committed.State.CurrentRouteCommit);
+        Assert.Null(committed.State.CurrentRuntimeUnlockAdmission);
+        Assert.Null(committed.State.CurrentRuntimeUnlockPendingPreCommitProbe);
         Assert.Equal(FileTransferLegState.CheckpointPending, committed.State.CurrentLeg!.State);
         Assert.False(committed.State.CurrentLeg.CanSendData);
         var publication = Assert.IsType<RoutePublicationToken>(committed.State.CurrentRoutePublicationToken);
@@ -2232,6 +2242,72 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(
             committed.State.LastRoutePublicationGeneration,
             duplicate.State.LastRoutePublicationGeneration);
+    }
+
+    [Theory]
+    [InlineData("admission")]
+    [InlineData("pending_precommit")]
+    [InlineData("snapshot")]
+    [InlineData("terminal")]
+    [Trait("FileTransferCoordinatorSuite", "UncommittedTunaFallback")]
+    public void UncommittedTunaFallback_MismatchedPreCommitAuthorityFailsClosed(
+        string invalidation)
+    {
+        var setup = CreateUncommittedTunaFallbackHandoffState(withPressure: false);
+        var state = setup.State;
+        var handoff = invalidation switch
+        {
+            "admission" => setup.Handoff with
+            {
+                RuntimeUnlockAdmission = setup.Handoff.RuntimeUnlockAdmission with
+                {
+                    AdmissionGeneration =
+                        setup.Handoff.RuntimeUnlockAdmission.AdmissionGeneration + 1,
+                },
+            },
+            "pending_precommit" => setup.Handoff with
+            {
+                PendingPreCommitProbe = setup.Handoff.PendingPreCommitProbe with
+                {
+                    PendingGeneration =
+                        setup.Handoff.PendingPreCommitProbe.PendingGeneration + 1,
+                },
+            },
+            "snapshot" => setup.Handoff with
+            {
+                PreCommitSnapshot = setup.Handoff.PreCommitSnapshot with
+                {
+                    OfferGeneration = setup.Handoff.PreCommitSnapshot.OfferGeneration + 1,
+                },
+            },
+            "terminal" => setup.Handoff,
+            _ => throw new ArgumentOutOfRangeException(nameof(invalidation)),
+        };
+        if (string.Equals(invalidation, "terminal", StringComparison.Ordinal))
+        {
+            state = state with { IsTerminal = true };
+        }
+
+        var rejected = FileTransferCoordinator.PrepareRuntimeUnlockUncommittedTunaFallbackHandoff(
+            state,
+            setup.CoordinatorEvent with
+            {
+                RuntimeUnlockUncommittedTunaFallbackHandoff = handoff,
+            });
+
+        Assert.Equal(
+            RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus.Rejected,
+            rejected.Status);
+        Assert.Same(state, rejected.State);
+        Assert.Null(rejected.Transition);
+        Assert.Null(rejected.RouteDecision);
+        Assert.Equal(FileTransferRoute.RegularNknV4Fast, rejected.State.RouteSelection.Route);
+        Assert.Equal(setup.State.CurrentRuntimeOwner, rejected.State.CurrentRuntimeOwner);
+        Assert.Equal(
+            setup.State.CurrentRoutePublicationToken,
+            rejected.State.CurrentRoutePublicationToken);
+        Assert.Null(rejected.State.CurrentRouteCommit);
+        Assert.Null(rejected.State.LastRuntimeUnlockUncommittedTunaFallbackHandoff);
     }
 
     [Fact]
@@ -8517,29 +8593,21 @@ public sealed class FileTransferCoordinatorTests
             state = publication.State;
         }
 
+        var admitted = RequestRuntimeUnlockAdmission(state, state.CurrentRuntimeOwner);
+        var admission = Assert.IsType<RuntimeUnlockAdmissionToken>(
+            admitted.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken);
+        var pendingDecision = RecordPendingPreCommitProbe(admitted.State, admission);
+        var pendingPreCommit = Assert.IsType<RuntimeUnlockPendingPreCommitProbeRequest>(
+            pendingDecision.State.CurrentRuntimeUnlockPendingPreCommitProbe);
+        state = pendingDecision.State;
         var sourceOwner = state.CurrentRuntimeOwner!.Value;
         var sourcePublication = state.CurrentRoutePublicationToken!.Value;
         var sourceLeg = state.CurrentLeg!;
-        var admission = new RuntimeUnlockAdmissionToken(
-            state.SessionId,
-            state.TransferId,
-            state.Direction,
-            sourceOwner,
-            regular.Route,
-            regular.TelemetryToken,
-            regular.ProtocolVersion,
-            sourceLeg.LiveRouteEpochId,
-            sourceOwner.RuntimeGeneration,
-            state.TerminalGeneration,
-            sourceLeg.Generation,
-            AdmissionGeneration: 7,
-            Reason: "uncommitted_tuna_fallback_test",
-            RuntimeUnlockFallbackSurvivalState.Empty);
         var snapshot = new RuntimeUnlockRouteCommitSnapshot(
             state.SessionId,
             state.TransferId,
-            TransactionGeneration: 11,
-            OfferGeneration: 13,
+            TransactionGeneration: pendingPreCommit.TransactionGeneration,
+            OfferGeneration: pendingPreCommit.OfferGeneration,
             PeerVisibleProof: true,
             PeerReceived: true,
             AnswerReceived: true,
@@ -8554,39 +8622,12 @@ public sealed class FileTransferCoordinatorTests
             PathProbeTransport: FileTransferTransportKind.Tuna,
             PathProbeAckedUtcMs: 101,
             TunaPathLeaseRequired: true,
-            TunaPathLeaseGeneration: 17,
+            TunaPathLeaseGeneration: pendingPreCommit.TunaPathLeaseGeneration,
             TunaPathLeaseState: "ListenerReady",
-            TunaPathLeaseListenerRunId: "listener-uncommitted-fallback",
+            TunaPathLeaseListenerRunId: pendingPreCommit.TunaPathLeaseListenerRunId,
             TunaPathLeaseCurrent: true,
             LaunchGeneration: 19);
-        var routeCommit = new RouteCommitToken(
-            state.SessionId,
-            state.TransferId,
-            state.Direction,
-            sourceOwner,
-            admission,
-            regular.Route,
-            regular.TelemetryToken,
-            regular.ProtocolVersion,
-            sourceLeg.LiveRouteEpochId,
-            sourceOwner.RuntimeGeneration,
-            state.TerminalGeneration,
-            sourceLeg.Generation,
-            snapshot.TransactionGeneration,
-            snapshot.OfferGeneration,
-            snapshot.TunaPathLeaseGeneration,
-            snapshot.TunaPathLeaseListenerRunId,
-            snapshot.PathProbeId!,
-            snapshot.TargetRoute,
-            snapshot.ProtocolVersion,
-            snapshot.TargetTransport,
-            CommitGeneration: Math.Max(1, state.LastRouteCommitGeneration + 1),
-            Reason: "uncommitted_tuna_fallback_test");
-        state = state with
-        {
-            CurrentRouteCommit = routeCommit,
-            LastRouteCommitGeneration = routeCommit.CommitGeneration,
-        };
+        Assert.Null(state.CurrentRouteCommit);
         const long proofTransportEpoch = 2;
         var proofFrame = new FileTransferReceiverStateFrameV6
         {
@@ -8621,7 +8662,8 @@ public sealed class FileTransferCoordinatorTests
         var handoff = new RuntimeUnlockUncommittedTunaFallbackHandoff(
             sourceOwner,
             sourcePublication,
-            routeCommit,
+            admission,
+            pendingPreCommit,
             snapshot,
             state.TerminalGeneration,
             sourceLeg.Generation,
@@ -8669,7 +8711,8 @@ public sealed class FileTransferCoordinatorTests
             setup.Handoff.SourceDataSessionGeneration,
             setup.Handoff.SourceRuntimeOwner,
             setup.Handoff.SourceRoutePublication,
-            setup.Handoff.PendingTunaRouteCommit,
+            setup.Handoff.RuntimeUnlockAdmission,
+            setup.Handoff.PendingPreCommitProbe,
             setup.Handoff.PreCommitSnapshot,
             setup.Handoff.SourceLegGeneration,
             setup.Handoff.SourceTransportEpoch,

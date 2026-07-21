@@ -646,6 +646,8 @@ internal sealed record RuntimeUnlockUncommittedTunaFallbackProofBoundary(
         PreCommitSnapshot.AnswerReceived &&
         PreCommitSnapshot.TunaPathLeaseRequired &&
         PreCommitSnapshot.TunaPathLeaseCurrent &&
+        !string.IsNullOrWhiteSpace(PreCommitSnapshot.PathProbeId) &&
+        PreCommitSnapshot.PathProbeTransport == FileTransferTransportKind.Tuna &&
         string.Equals(
             PeerProofEvidence.SessionId,
             PreCommitSnapshot.SessionId,
@@ -726,7 +728,8 @@ internal sealed record RuntimeUnlockUncommittedTunaFallbackAdoptionStage(
     long DataSessionGeneration,
     RuntimeOwnerToken SourceRuntimeOwner,
     RoutePublicationToken SourceRoutePublication,
-    RouteCommitToken PendingTunaRouteCommit,
+    RuntimeUnlockAdmissionToken RuntimeUnlockAdmission,
+    RuntimeUnlockPendingPreCommitProbeRequest PendingPreCommitProbe,
     RuntimeUnlockRouteCommitSnapshot PreCommitSnapshot,
     long SourceLegGeneration,
     long SourceTransportEpoch,

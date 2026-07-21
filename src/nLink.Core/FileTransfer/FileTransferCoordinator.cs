@@ -234,7 +234,8 @@ internal readonly record struct RuntimeUnlockPendingPreCommitProbeDecision(
 internal readonly record struct RuntimeUnlockUncommittedTunaFallbackHandoff(
     RuntimeOwnerToken SourceRuntimeOwner,
     RoutePublicationToken SourceRoutePublication,
-    RouteCommitToken PendingTunaRouteCommit,
+    RuntimeUnlockAdmissionToken RuntimeUnlockAdmission,
+    RuntimeUnlockPendingPreCommitProbeRequest PendingPreCommitProbe,
     RuntimeUnlockRouteCommitSnapshot PreCommitSnapshot,
     int SourceTerminalGeneration,
     long SourceLegGeneration,
@@ -7610,7 +7611,8 @@ internal static class FileTransferCoordinator
                stage.DataSessionGeneration == handoff.SourceDataSessionGeneration &&
                stage.SourceRuntimeOwner == handoff.SourceRuntimeOwner &&
                stage.SourceRoutePublication == handoff.SourceRoutePublication &&
-               stage.PendingTunaRouteCommit == handoff.PendingTunaRouteCommit &&
+               stage.RuntimeUnlockAdmission == handoff.RuntimeUnlockAdmission &&
+               stage.PendingPreCommitProbe == handoff.PendingPreCommitProbe &&
                stage.PreCommitSnapshot == handoff.PreCommitSnapshot &&
                stage.SourceLegGeneration == handoff.SourceLegGeneration &&
                stage.SourceTransportEpoch == handoff.SourceTransportEpoch &&
@@ -7783,6 +7785,8 @@ internal static class FileTransferCoordinator
             state.RouteSelection.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
             state.CurrentRuntimeOwner is not { Route: FileTransferRoute.PostTunaFallbackV6 } ||
             state.CurrentRouteCommit is not null ||
+            state.CurrentRuntimeUnlockAdmission is not null ||
+            state.CurrentRuntimeUnlockPendingPreCommitProbe is not null ||
             state.CurrentRoutePublicationToken is not { } publication ||
             !IsRoutePublicationTokenCurrent(state, publication, out _) ||
             state.PendingRegularV4FrontierRepairPressureBinding is not null ||
@@ -7943,10 +7947,16 @@ internal static class FileTransferCoordinator
             state.RouteSelection.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
             state.CurrentRuntimeOwner != handoff.SourceRuntimeOwner ||
             state.CurrentRoutePublicationToken != handoff.SourceRoutePublication ||
-            state.CurrentRouteCommit != handoff.PendingTunaRouteCommit ||
+            state.CurrentRuntimeUnlockAdmission != handoff.RuntimeUnlockAdmission ||
+            state.CurrentRuntimeUnlockPendingPreCommitProbe != handoff.PendingPreCommitProbe ||
+            state.CurrentRouteCommit is not null ||
             !IsRuntimeOwnerCurrent(state, handoff.SourceRuntimeOwner, out _) ||
             !IsRoutePublicationTokenCurrent(state, handoff.SourceRoutePublication, out _) ||
-            !IsRouteCommitTokenCurrent(state, handoff.PendingTunaRouteCommit, out _) ||
+            !IsRuntimeUnlockAdmissionTokenCurrent(state, handoff.RuntimeUnlockAdmission, out _) ||
+            !IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(
+                state,
+                handoff.PendingPreCommitProbe,
+                out _) ||
             state.TerminalGeneration != handoff.SourceTerminalGeneration ||
             state.CurrentLeg is not { } leg ||
             leg.Generation != handoff.SourceLegGeneration ||
@@ -7958,7 +7968,8 @@ internal static class FileTransferCoordinator
         }
 
         var snapshot = handoff.PreCommitSnapshot;
-        var commit = handoff.PendingTunaRouteCommit;
+        var admission = handoff.RuntimeUnlockAdmission;
+        var pendingPreCommit = handoff.PendingPreCommitProbe;
         var peerProof = handoff.PeerProofEvidence;
         if (handoff.HandoffGeneration <= 0 ||
             handoff.SourceDataSessionGeneration <= 0 ||
@@ -7983,15 +7994,18 @@ internal static class FileTransferCoordinator
             coordinatorEvent.BridgeRecoveryGeneration <= handoff.SourceBridgeRecoveryGeneration ||
             !string.Equals(snapshot.SessionId, state.SessionId, StringComparison.Ordinal) ||
             !string.Equals(snapshot.TransferId, state.TransferId, StringComparison.Ordinal) ||
-            snapshot.TransactionGeneration != commit.TransactionGeneration ||
-            snapshot.OfferGeneration != commit.OfferGeneration ||
-            snapshot.TunaPathLeaseGeneration != commit.TunaPathLeaseGeneration ||
+            admission != pendingPreCommit.AdmissionToken ||
+            pendingPreCommit.RuntimeOwner != handoff.SourceRuntimeOwner ||
+            snapshot.TransactionGeneration != pendingPreCommit.TransactionGeneration ||
+            snapshot.OfferGeneration != pendingPreCommit.OfferGeneration ||
+            snapshot.TunaPathLeaseGeneration != pendingPreCommit.TunaPathLeaseGeneration ||
             !string.Equals(
                 snapshot.TunaPathLeaseListenerRunId,
-                commit.TunaPathLeaseListenerRunId,
+                pendingPreCommit.TunaPathLeaseListenerRunId,
                 StringComparison.Ordinal) ||
-            !string.Equals(snapshot.PathProbeId, commit.SamePathTunaProbeAckId, StringComparison.Ordinal) ||
             !string.Equals(snapshot.PathProbeState, "Acked", StringComparison.OrdinalIgnoreCase) ||
+            string.IsNullOrWhiteSpace(snapshot.PathProbeId) ||
+            snapshot.PathProbeTransport != FileTransferTransportKind.Tuna ||
             snapshot.TargetRoute != FileTransferRoute.FileTunaV4 ||
             snapshot.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
             snapshot.TargetTransport != FileTransferTransportKind.Tuna ||

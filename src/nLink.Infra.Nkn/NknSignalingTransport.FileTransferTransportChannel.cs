@@ -1899,7 +1899,8 @@ public sealed partial class NknSignalingTransport
             stage.TargetBridgeRecoveryGeneration <= 0 ||
             stage.SourceRuntimeOwner.IsDefault ||
             stage.SourceRoutePublication.IsDefault ||
-            stage.PendingTunaRouteCommit.IsDefault ||
+            stage.RuntimeUnlockAdmission.IsDefault ||
+            stage.PendingPreCommitProbe.IsDefault ||
             stage.TargetRuntimeOwner.IsDefault ||
             stage.TargetRoutePublication.IsDefault ||
             stage.PeerProofEvidence is not { IsComplete: true })
@@ -1910,40 +1911,68 @@ public sealed partial class NknSignalingTransport
 
         var owner = stage.SourceRuntimeOwner;
         var publication = stage.SourceRoutePublication;
-        var commit = stage.PendingTunaRouteCommit;
+        var admission = stage.RuntimeUnlockAdmission;
+        var pendingPreCommit = stage.PendingPreCommitProbe;
         var targetOwner = stage.TargetRuntimeOwner;
         var targetPublication = stage.TargetRoutePublication;
+        if (!string.Equals(admission.SessionId, owner.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(admission.TransferId, owner.TransferId, StringComparison.Ordinal) ||
+            admission.Direction != owner.Direction)
+        {
+            rejectionReason = "uncommitted_tuna_fallback_adoption_admission_identity_mismatch";
+            return false;
+        }
+
         if (owner.Direction != FileTransferDirection.Outbound ||
             owner.Route != FileTransferRoute.RegularNknV4Fast ||
             owner.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
             publication.RuntimeOwner != owner ||
             !IsRuntimeUnlockUncommittedTunaFallbackPublicationTupleConsistent(publication, owner) ||
             publication.LegGeneration != stage.SourceLegGeneration ||
-            commit.RuntimeOwner != owner ||
-            !string.Equals(commit.SessionId, owner.SessionId, StringComparison.Ordinal) ||
-            !string.Equals(commit.TransferId, owner.TransferId, StringComparison.Ordinal) ||
-            commit.Direction != owner.Direction ||
-            commit.TargetRoute != FileTransferRoute.FileTunaV4 ||
-            commit.TargetProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
-            commit.TargetTransport != FileTransferTransportKind.Tuna ||
+            admission.RuntimeOwner != owner ||
+            admission.Route != owner.Route ||
+            !string.Equals(admission.RouteToken, owner.RouteToken, StringComparison.Ordinal) ||
+            admission.ProtocolVersion != owner.ProtocolVersion ||
+            admission.LiveRouteEpoch != owner.LiveRouteEpoch ||
+            admission.RuntimeGeneration != owner.RuntimeGeneration ||
+            admission.TerminalGeneration != owner.TerminalGeneration ||
+            admission.LegGeneration != stage.SourceLegGeneration ||
+            pendingPreCommit.RuntimeOwner != owner ||
+            pendingPreCommit.AdmissionToken != admission ||
+            !string.Equals(pendingPreCommit.SessionId, owner.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(pendingPreCommit.TransferId, owner.TransferId, StringComparison.Ordinal) ||
+            pendingPreCommit.Direction != owner.Direction ||
+            pendingPreCommit.Route != owner.Route ||
+            !string.Equals(pendingPreCommit.RouteToken, owner.RouteToken, StringComparison.Ordinal) ||
+            pendingPreCommit.ProtocolVersion != owner.ProtocolVersion ||
+            pendingPreCommit.LiveRouteEpoch != owner.LiveRouteEpoch ||
+            pendingPreCommit.RuntimeGeneration != owner.RuntimeGeneration ||
+            pendingPreCommit.TerminalGeneration != owner.TerminalGeneration ||
+            pendingPreCommit.LegGeneration != stage.SourceLegGeneration ||
+            pendingPreCommit.TargetRoute != FileTransferRoute.FileTunaV4 ||
+            pendingPreCommit.TargetProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            pendingPreCommit.TargetTransport != FileTransferTransportKind.Tuna ||
+            pendingPreCommit.HandoffKind != FileTransferTransportHandoffKind.NormalToTunaActivation ||
             !string.Equals(stage.PreCommitSnapshot.SessionId, owner.SessionId, StringComparison.Ordinal) ||
             !string.Equals(stage.PreCommitSnapshot.TransferId, owner.TransferId, StringComparison.Ordinal) ||
-            stage.PreCommitSnapshot.TransactionGeneration != commit.TransactionGeneration ||
-            stage.PreCommitSnapshot.OfferGeneration != commit.OfferGeneration ||
-            stage.PreCommitSnapshot.TunaPathLeaseGeneration != commit.TunaPathLeaseGeneration ||
+            stage.PreCommitSnapshot.TransactionGeneration != pendingPreCommit.TransactionGeneration ||
+            stage.PreCommitSnapshot.OfferGeneration != pendingPreCommit.OfferGeneration ||
+            stage.PreCommitSnapshot.TunaPathLeaseGeneration != pendingPreCommit.TunaPathLeaseGeneration ||
             !string.Equals(
                 stage.PreCommitSnapshot.TunaPathLeaseListenerRunId,
-                commit.TunaPathLeaseListenerRunId,
+                pendingPreCommit.TunaPathLeaseListenerRunId,
                 StringComparison.Ordinal) ||
-            !string.Equals(
-                stage.PreCommitSnapshot.PathProbeId,
-                commit.SamePathTunaProbeAckId,
-                StringComparison.Ordinal) ||
+            stage.PreCommitSnapshot.TargetRoute != pendingPreCommit.TargetRoute ||
+            stage.PreCommitSnapshot.ProtocolVersion != pendingPreCommit.TargetProtocolVersion ||
+            stage.PreCommitSnapshot.TargetTransport != pendingPreCommit.TargetTransport ||
+            stage.PreCommitSnapshot.HandoffKind != pendingPreCommit.HandoffKind ||
             !stage.PreCommitSnapshot.PeerVisibleProof ||
             !stage.PreCommitSnapshot.PeerReceived ||
             !stage.PreCommitSnapshot.AnswerReceived ||
             !stage.PreCommitSnapshot.TunaPathLeaseCurrent ||
             !string.Equals(stage.PreCommitSnapshot.PathProbeState, "Acked", StringComparison.OrdinalIgnoreCase) ||
+            string.IsNullOrWhiteSpace(stage.PreCommitSnapshot.PathProbeId) ||
+            stage.PreCommitSnapshot.PathProbeTransport != FileTransferTransportKind.Tuna ||
             targetOwner.Direction != owner.Direction ||
             targetOwner.Route != FileTransferRoute.PostTunaFallbackV6 ||
             !string.Equals(
@@ -8734,6 +8763,23 @@ public sealed partial class NknSignalingTransport
                         stage,
                         RuntimeUnlockUncommittedTunaFallbackAdoptionStageStatus.Rejected,
                         "uncommitted_tuna_fallback_adoption_data_session_disposed",
+                        lastRuntimeUnlockUncommittedTunaFallbackAdoptionStageGeneration);
+                }
+
+                if (!string.Equals(
+                        stage.RuntimeUnlockAdmission.SessionId,
+                        stage.SourceRuntimeOwner.SessionId,
+                        StringComparison.Ordinal) ||
+                    !string.Equals(
+                        stage.RuntimeUnlockAdmission.TransferId,
+                        stage.SourceRuntimeOwner.TransferId,
+                        StringComparison.Ordinal) ||
+                    stage.RuntimeUnlockAdmission.Direction != stage.SourceRuntimeOwner.Direction)
+                {
+                    return new RuntimeUnlockUncommittedTunaFallbackAdoptionStageReceipt(
+                        stage,
+                        RuntimeUnlockUncommittedTunaFallbackAdoptionStageStatus.Rejected,
+                        "uncommitted_tuna_fallback_adoption_admission_identity_mismatch",
                         lastRuntimeUnlockUncommittedTunaFallbackAdoptionStageGeneration);
                 }
 

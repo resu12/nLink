@@ -2505,11 +2505,102 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (!TryBindRuntimeUnlockRegularV4RouteCommitDrainToLaunchSnapshotLocked(
+                context,
+                snapshot,
+                out var bindingRejectionReason))
+        {
+            RecordRuntimeUnlockPreCommitProbeLaunchDispositionLocked(
+                context,
+                snapshot,
+                context.IsTerminal ? "Invalidated" : "Rejected",
+                bindingRejectionReason,
+                context.PendingRuntimeUnlockRegularV4RouteCommitDrain?.DrainGeneration ?? 0);
+            return false;
+        }
+
         return TryStartOutboundRuntimeUnlockPreCommitProbeOrWaitForFallbackCoreLocked(
             context,
             reason,
             "runtime_unlock_probe_missing",
             snapshot);
+    }
+
+    private bool TryBindRuntimeUnlockRegularV4RouteCommitDrainToLaunchSnapshotLocked(
+        OutboundTransferContext context,
+        RuntimeUnlockRouteCommitSnapshot launchSnapshot,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (context.PendingRuntimeUnlockRegularV4RouteCommitDrain is not { } drain)
+        {
+            return true;
+        }
+
+        if (drain.RouteCommitSnapshot.LaunchGeneration == launchSnapshot.LaunchGeneration)
+        {
+            return IsRuntimeUnlockRegularV4RouteCommitDrainSourceCurrentForSnapshotLocked(
+                context,
+                drain,
+                launchSnapshot,
+                out rejectionReason);
+        }
+
+        if (drain.RouteCommitSnapshot.LaunchGeneration > 0 ||
+            launchSnapshot.LaunchGeneration <= 0)
+        {
+            rejectionReason = "launch_generation_tuple_mutation";
+            return false;
+        }
+
+        if (!IsRuntimeUnlockRegularV4RouteCommitDrainSourceScopeCurrentForSendRegistrationLocked(
+                context,
+                drain))
+        {
+            rejectionReason = "source_scope_replaced";
+            return false;
+        }
+
+        var state = CreateCoordinatorStateLocked(context);
+        if (!FileTransferCoordinator.IsRuntimeOwnerCurrent(
+                state,
+                drain.SourceRuntimeOwner,
+                out rejectionReason) ||
+            !FileTransferCoordinator.IsRoutePublicationTokenCurrent(
+                state,
+                drain.SourceRoutePublication,
+                out rejectionReason) ||
+            context.RuntimeUnlockAdmissionToken != drain.RuntimeUnlockAdmission ||
+            !FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(
+                state,
+                drain.RuntimeUnlockAdmission,
+                out rejectionReason) ||
+            context.RuntimeUnlockPendingPreCommitProbe != drain.PendingPreCommitProbe ||
+            !FileTransferCoordinator.IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(
+                state,
+                drain.PendingPreCommitProbe,
+                out rejectionReason) ||
+            !RuntimeUnlockPreCommitProbeSnapshotMatchesPending(
+                launchSnapshot,
+                drain.PendingPreCommitProbe,
+                out rejectionReason))
+        {
+            return false;
+        }
+
+        if (!IsSameRuntimeUnlockRegularV4RouteCommitLaunchBindingBoundary(
+                drain.RouteCommitSnapshot,
+                launchSnapshot))
+        {
+            rejectionReason = "launch_generation_tuple_mutation";
+            return false;
+        }
+
+        context.PendingRuntimeUnlockRegularV4RouteCommitDrain = drain with
+        {
+            RouteCommitSnapshot = launchSnapshot,
+        };
+        return true;
     }
 
     private bool TryStartOutboundRuntimeUnlockPreCommitProbeOrWaitForFallbackLocked(
@@ -2539,7 +2630,14 @@ public sealed partial class SessionFileTransferService
         string rejectionReason,
         RuntimeUnlockRouteCommitSnapshot? snapshot)
     {
-        var admission = RequestRuntimeUnlockAdmissionLocked(context, "precommit_probe_start", reason);
+        var admission = TryReuseRuntimeUnlockRegularV4RouteCommitAdmissionLocked(
+                context,
+                snapshot,
+                "precommit_probe_start",
+                reason,
+                out var existingAdmission)
+            ? existingAdmission
+            : RequestRuntimeUnlockAdmissionLocked(context, "precommit_probe_start", reason);
         if (!admission.Granted)
         {
             if (context.RouteRuntime.UsesPostTunaFallbackV6Runtime)
@@ -2613,6 +2711,49 @@ public sealed partial class SessionFileTransferService
                 drainGeneration);
         }
 
+        return true;
+    }
+
+    private bool TryReuseRuntimeUnlockRegularV4RouteCommitAdmissionLocked(
+        OutboundTransferContext context,
+        RuntimeUnlockRouteCommitSnapshot? snapshot,
+        string source,
+        string reason,
+        out RuntimeUnlockAdmissionDecision admission)
+    {
+        admission = default;
+        if (snapshot is not { } currentSnapshot ||
+            context.PendingRuntimeUnlockRegularV4RouteCommitDrain is not { } drain ||
+            context.RuntimeUnlockAdmissionToken != drain.RuntimeUnlockAdmission ||
+            context.RuntimeUnlockPendingPreCommitProbe != drain.PendingPreCommitProbe ||
+            !IsRuntimeUnlockRegularV4RouteCommitDrainSourceCurrentForSnapshotLocked(
+                context,
+                drain,
+                currentSnapshot,
+                out _))
+        {
+            return false;
+        }
+
+        var token = drain.RuntimeUnlockAdmission;
+        admission = new RuntimeUnlockAdmissionDecision(
+            RuntimeUnlockAdmissionStatus.Granted,
+            token.Reason,
+            token,
+            token.Route,
+            token.ProtocolVersion,
+            token.LiveRouteEpoch,
+            token.RuntimeGeneration,
+            token.TerminalGeneration,
+            token.LegGeneration,
+            token.FallbackSurvivalState);
+        LogRuntimeUnlockAdmissionDecision(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            source,
+            reason,
+            admission);
         return true;
     }
 
@@ -3965,6 +4106,15 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (!TryCaptureRuntimeUnlockPreCommitAuthoritiesLocked(
+                context,
+                snapshot,
+                out var runtimeUnlockAdmission,
+                out var pendingPreCommitProbe))
+        {
+            return false;
+        }
+
         if (!context.PullTransportPaused &&
             TryPauseOutboundTransportLocked(
                 context,
@@ -3989,6 +4139,8 @@ public sealed partial class SessionFileTransferService
             leg.BridgeRecoveryGeneration,
             dataSession,
             context.DataSessionGeneration,
+            runtimeUnlockAdmission,
+            pendingPreCommitProbe,
             context.LastOutboundRegularV4PhysicalSendLeaseGeneration,
             0,
             snapshot,
@@ -4040,6 +4192,88 @@ public sealed partial class SessionFileTransferService
             candidate,
             CountActiveOutboundRegularV4PhysicalSendLeasesForDrainLocked(context, candidate),
             "route_commit_boundary_staged");
+        return true;
+    }
+
+    private bool TryCaptureRuntimeUnlockPreCommitAuthoritiesLocked(
+        OutboundTransferContext context,
+        RuntimeUnlockRouteCommitSnapshot snapshot,
+        out RuntimeUnlockAdmissionToken admission,
+        out RuntimeUnlockPendingPreCommitProbeRequest pendingPreCommitProbe)
+    {
+        admission = default;
+        pendingPreCommitProbe = default;
+        var state = CreateCoordinatorStateLocked(context);
+        if (context.RuntimeUnlockAdmissionToken is not { IsDefault: false } currentAdmission ||
+            !FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(
+                state,
+                currentAdmission,
+                out _))
+        {
+            return false;
+        }
+
+        RuntimeUnlockPendingPreCommitProbeRequest currentPending;
+        if (context.RuntimeUnlockPendingPreCommitProbe is { } existingPending)
+        {
+            if (existingPending.AdmissionToken != currentAdmission ||
+                !FileTransferCoordinator.IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(
+                    state,
+                    existingPending,
+                    out _) ||
+                !RuntimeUnlockPreCommitProbeSnapshotMatchesPending(
+                    snapshot,
+                    existingPending,
+                    out _))
+            {
+                return false;
+            }
+
+            currentPending = existingPending;
+        }
+        else
+        {
+            if (!IsRuntimeUnlockRegularV4PreCommitAuthorityCreationSnapshot(
+                    snapshot,
+                    context))
+            {
+                return false;
+            }
+
+            if (!TryRecordRuntimeUnlockPendingPreCommitProbeLocked(
+                    FileTransferDirection.Outbound,
+                    context.SessionId,
+                    context.TransferId,
+                    currentAdmission.RuntimeOwner,
+                    currentAdmission,
+                    snapshot,
+                    "runtime_unlock_route_commit_send_drain"))
+            {
+                return false;
+            }
+
+            state = CreateCoordinatorStateLocked(context);
+            if (context.RuntimeUnlockAdmissionToken != currentAdmission ||
+                context.RuntimeUnlockPendingPreCommitProbe is not { } acceptedPending ||
+                acceptedPending.AdmissionToken != currentAdmission ||
+                !FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(
+                    state,
+                    currentAdmission,
+                    out _) ||
+                !FileTransferCoordinator.IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(
+                    state,
+                    acceptedPending,
+                    out _) ||
+                !RuntimeUnlockPreCommitProbeSnapshotMatchesPending(snapshot, acceptedPending, out _))
+            {
+                return false;
+            }
+
+            currentPending = acceptedPending;
+        }
+
+        admission = currentAdmission;
+        pendingPreCommitProbe = currentPending;
         return true;
     }
 
@@ -4170,6 +4404,16 @@ public sealed partial class SessionFileTransferService
             !FileTransferCoordinator.IsRoutePublicationTokenCurrent(
                 state,
                 drain.SourceRoutePublication,
+                out rejectionReason) ||
+            context.RuntimeUnlockAdmissionToken != drain.RuntimeUnlockAdmission ||
+            !FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(
+                state,
+                drain.RuntimeUnlockAdmission,
+                out rejectionReason) ||
+            context.RuntimeUnlockPendingPreCommitProbe != drain.PendingPreCommitProbe ||
+            !FileTransferCoordinator.IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(
+                state,
+                drain.PendingPreCommitProbe,
                 out rejectionReason))
         {
             return false;
@@ -4190,8 +4434,15 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        if (
-            !IsAllowedRuntimeUnlockRegularV4RouteCommitProbeProgression(
+        if (!RuntimeUnlockPreCommitProbeSnapshotMatchesPending(
+                currentSnapshot,
+                drain.PendingPreCommitProbe,
+                out rejectionReason))
+        {
+            return false;
+        }
+
+        if (!IsAllowedRuntimeUnlockRegularV4RouteCommitProbeProgression(
                 drain.RouteCommitSnapshot,
                 currentSnapshot))
         {
@@ -4249,14 +4500,62 @@ public sealed partial class SessionFileTransferService
            left.ProtocolVersion == right.ProtocolVersion &&
            left.HandoffKind == right.HandoffKind &&
            left.TargetTransport == right.TargetTransport &&
-           (left.LaunchGeneration <= 0 ||
-            (left.PeerVisibleProof == right.PeerVisibleProof &&
-             left.PeerReceived == right.PeerReceived &&
-             left.AnswerReceived == right.AnswerReceived &&
-             left.TunaPathLeaseRequired == right.TunaPathLeaseRequired &&
-             string.Equals(left.TunaPathLeaseState, right.TunaPathLeaseState, StringComparison.Ordinal) &&
-             left.TunaPathLeaseCurrent == right.TunaPathLeaseCurrent &&
-             string.Equals(left.TunaPathLeaseFailureReason, right.TunaPathLeaseFailureReason, StringComparison.Ordinal)));
+           left.PeerVisibleProof == right.PeerVisibleProof &&
+           left.PeerReceived == right.PeerReceived &&
+           left.AnswerReceived == right.AnswerReceived &&
+           left.TunaPathLeaseRequired == right.TunaPathLeaseRequired &&
+           string.Equals(left.TunaPathLeaseState, right.TunaPathLeaseState, StringComparison.Ordinal) &&
+           left.TunaPathLeaseCurrent == right.TunaPathLeaseCurrent &&
+           string.Equals(left.TunaPathLeaseFailureReason, right.TunaPathLeaseFailureReason, StringComparison.Ordinal);
+
+    private static bool IsSameRuntimeUnlockRegularV4RouteCommitLaunchBindingBoundary(
+        RuntimeUnlockRouteCommitSnapshot pending,
+        RuntimeUnlockRouteCommitSnapshot launch)
+        => pending.LaunchGeneration <= 0 &&
+           launch.LaunchGeneration > 0 &&
+           string.Equals(pending.SessionId, launch.SessionId, StringComparison.Ordinal) &&
+           string.Equals(pending.TransferId, launch.TransferId, StringComparison.Ordinal) &&
+           pending.TransactionGeneration == launch.TransactionGeneration &&
+           pending.OfferGeneration == launch.OfferGeneration &&
+           pending.TunaPathLeaseGeneration == launch.TunaPathLeaseGeneration &&
+           string.Equals(
+               pending.TunaPathLeaseListenerRunId,
+               launch.TunaPathLeaseListenerRunId,
+               StringComparison.Ordinal) &&
+           pending.TargetRoute == launch.TargetRoute &&
+           pending.ProtocolVersion == launch.ProtocolVersion &&
+           pending.HandoffKind == launch.HandoffKind &&
+           pending.TargetTransport == launch.TargetTransport &&
+           pending.PeerVisibleProof == launch.PeerVisibleProof &&
+           pending.PeerReceived == launch.PeerReceived &&
+           pending.AnswerReceived == launch.AnswerReceived &&
+           pending.TunaPathLeaseRequired == launch.TunaPathLeaseRequired &&
+           string.Equals(
+               pending.TunaPathLeaseState,
+               launch.TunaPathLeaseState,
+               StringComparison.Ordinal) &&
+           pending.TunaPathLeaseCurrent == launch.TunaPathLeaseCurrent &&
+           string.Equals(
+               pending.TunaPathLeaseFailureReason,
+               launch.TunaPathLeaseFailureReason,
+               StringComparison.Ordinal) &&
+           ResolveRuntimeUnlockRegularV4RouteCommitProbeStateRank(pending.PathProbeState) == 0 &&
+           ResolveRuntimeUnlockRegularV4RouteCommitProbeStateRank(launch.PathProbeState) == 0 &&
+           string.IsNullOrWhiteSpace(pending.PathProbeId) &&
+           string.IsNullOrWhiteSpace(launch.PathProbeId) &&
+           pending.PathProbeTransport == launch.PathProbeTransport &&
+           pending.PathProbeAckedUtcMs == launch.PathProbeAckedUtcMs &&
+           string.Equals(
+               pending.PathProbeFailureReason,
+               launch.PathProbeFailureReason,
+               StringComparison.Ordinal);
+
+    private static bool IsRuntimeUnlockRegularV4PreCommitAuthorityCreationSnapshot(
+        RuntimeUnlockRouteCommitSnapshot snapshot,
+        OutboundTransferContext context)
+        => IsRuntimeUnlockRegularV4RouteCommitBoundarySnapshot(snapshot, context) &&
+           ResolveRuntimeUnlockRegularV4RouteCommitProbeStateRank(snapshot.PathProbeState) == 0 &&
+           string.IsNullOrWhiteSpace(snapshot.PathProbeId);
 
     private static bool IsAllowedRuntimeUnlockRegularV4RouteCommitProbeProgression(
         RuntimeUnlockRouteCommitSnapshot previous,
@@ -4317,6 +4616,8 @@ public sealed partial class SessionFileTransferService
            left.SourceBridgeRecoveryGeneration == right.SourceBridgeRecoveryGeneration &&
            ReferenceEquals(left.SourceDataSession, right.SourceDataSession) &&
            left.SourceDataSessionGeneration == right.SourceDataSessionGeneration &&
+           left.RuntimeUnlockAdmission == right.RuntimeUnlockAdmission &&
+           left.PendingPreCommitProbe == right.PendingPreCommitProbe &&
            IsSameRuntimeUnlockRegularV4RouteCommitSnapshotBoundary(
                left.RouteCommitSnapshot,
                right.RouteCommitSnapshot);
@@ -4435,7 +4736,7 @@ public sealed partial class SessionFileTransferService
             drain.CapturedSendCount - activeSendCount);
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event={eventName}; direction=outbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; drain_generation={drain.DrainGeneration}; source_route={FormatProtocolLogValue(drain.SourceRuntimeOwner.RouteToken)}; source_protocol_version={drain.SourceRuntimeOwner.ProtocolVersion}; source_live_route_epoch={drain.SourceRuntimeOwner.LiveRouteEpoch}; source_runtime_generation={drain.SourceRuntimeOwner.RuntimeGeneration}; source_terminal_generation={drain.SourceTerminalGeneration}; source_leg_generation={drain.SourceLegGeneration}; source_transport_epoch={drain.SourceTransportEpoch}; source_bridge_recovery_generation={drain.SourceBridgeRecoveryGeneration}; source_route_publication_generation={drain.SourceRoutePublication.PublicationGeneration}; source_route_commit_generation={drain.SourceRoutePublication.RouteCommitGeneration ?? 0}; source_data_session_generation={drain.SourceDataSessionGeneration}; transaction_generation={snapshot.TransactionGeneration}; offer_generation={snapshot.OfferGeneration}; tuna_path_lease_generation={snapshot.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={FormatProtocolLogValue(snapshot.TunaPathLeaseListenerRunId ?? "(none)")}; launch_generation={snapshot.LaunchGeneration}; probe_id={FormatProtocolLogValue(snapshot.PathProbeId ?? "(none)")}; probe_state={FormatProtocolLogValue(snapshot.PathProbeState)}; target_route={FormatProtocolLogValue(FormatRuntimeUnlockCallbackRouteToken(snapshot.TargetRoute))}; target_protocol_version={snapshot.ProtocolVersion}; target_transport={FormatProtocolLogValue(FormatFileTransferTransportKind(snapshot.TargetTransport))}; handoff_kind={FormatProtocolLogValue(FormatFileTransferTransportHandoffKind(snapshot.HandoffKind))}; captured_through_send_lease_generation={drain.CapturedThroughSendLeaseGeneration}; captured_send_count={drain.CapturedSendCount}; matching_retired_send_count={matchingRetiredSendCount}; active_send_count={activeSendCount}; registered_send_count={context.OutboundRegularV4PhysicalSendRegisteredCount}; retired_send_count={context.OutboundRegularV4PhysicalSendRetiredCount}; decision_reason={FormatProtocolLogValue(reason)}");
+            $"event={eventName}; direction=outbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; drain_generation={drain.DrainGeneration}; source_route={FormatProtocolLogValue(drain.SourceRuntimeOwner.RouteToken)}; source_protocol_version={drain.SourceRuntimeOwner.ProtocolVersion}; source_live_route_epoch={drain.SourceRuntimeOwner.LiveRouteEpoch}; source_runtime_generation={drain.SourceRuntimeOwner.RuntimeGeneration}; source_terminal_generation={drain.SourceTerminalGeneration}; source_leg_generation={drain.SourceLegGeneration}; source_transport_epoch={drain.SourceTransportEpoch}; source_bridge_recovery_generation={drain.SourceBridgeRecoveryGeneration}; source_route_publication_generation={drain.SourceRoutePublication.PublicationGeneration}; source_route_commit_generation={drain.SourceRoutePublication.RouteCommitGeneration ?? 0}; source_data_session_generation={drain.SourceDataSessionGeneration}; admission_generation={drain.RuntimeUnlockAdmission.AdmissionGeneration}; pending_precommit_generation={drain.PendingPreCommitProbe.PendingGeneration}; transaction_generation={snapshot.TransactionGeneration}; offer_generation={snapshot.OfferGeneration}; tuna_path_lease_generation={snapshot.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={FormatProtocolLogValue(snapshot.TunaPathLeaseListenerRunId ?? "(none)")}; launch_generation={snapshot.LaunchGeneration}; probe_id={FormatProtocolLogValue(snapshot.PathProbeId ?? "(none)")}; probe_state={FormatProtocolLogValue(snapshot.PathProbeState)}; target_route={FormatProtocolLogValue(FormatRuntimeUnlockCallbackRouteToken(snapshot.TargetRoute))}; target_protocol_version={snapshot.ProtocolVersion}; target_transport={FormatProtocolLogValue(FormatFileTransferTransportKind(snapshot.TargetTransport))}; handoff_kind={FormatProtocolLogValue(FormatFileTransferTransportHandoffKind(snapshot.HandoffKind))}; captured_through_send_lease_generation={drain.CapturedThroughSendLeaseGeneration}; captured_send_count={drain.CapturedSendCount}; matching_retired_send_count={matchingRetiredSendCount}; active_send_count={activeSendCount}; registered_send_count={context.OutboundRegularV4PhysicalSendRegisteredCount}; retired_send_count={context.OutboundRegularV4PhysicalSendRetiredCount}; decision_reason={FormatProtocolLogValue(reason)}");
     }
 
     private bool TryRetainRuntimeUnlockUncommittedTunaFallbackHandoffLocked(
@@ -4463,7 +4764,7 @@ public sealed partial class SessionFileTransferService
             !string.Equals(evidence.TransferId, context.TransferId, StringComparison.Ordinal) ||
             !ReferenceEquals(context.DataSession, dataSession) ||
             context.PendingRuntimeUnlockRegularV4RouteCommitDrain is not { } drain ||
-            context.RuntimeUnlockRouteCommitToken is not { IsDefault: false } routeCommit ||
+            context.RuntimeUnlockRouteCommitToken is not null ||
             (expectedPreCommitSnapshot is not null &&
              expectedPreCommitSnapshot != drain.RouteCommitSnapshot) ||
             !IsRuntimeUnlockRegularV4RouteCommitDrainSourceCurrentForSnapshotLocked(
@@ -4500,7 +4801,8 @@ public sealed partial class SessionFileTransferService
         var pending = context.PendingRuntimeUnlockUncommittedTunaFallbackHandoff;
         if (pending is not null &&
             (!IsSameRuntimeUnlockRegularV4RouteCommitDrainBoundary(pending.RouteCommitDrain, drain) ||
-             pending.PendingTunaRouteCommit != routeCommit ||
+             pending.RuntimeUnlockAdmission != drain.RuntimeUnlockAdmission ||
+             pending.PendingPreCommitProbe != drain.PendingPreCommitProbe ||
              !ReferenceEquals(pending.SourceDataSession, dataSession) ||
              pending.SourceDataSessionGeneration != context.DataSessionGeneration))
         {
@@ -4522,7 +4824,8 @@ public sealed partial class SessionFileTransferService
                 generation,
                 drain.SourceRuntimeOwner,
                 drain.SourceRoutePublication,
-                routeCommit,
+                drain.RuntimeUnlockAdmission,
+                drain.PendingPreCommitProbe,
                 drain,
                 dataSession,
                 context.DataSessionGeneration,
@@ -4619,7 +4922,8 @@ public sealed partial class SessionFileTransferService
                     replacementGeneration,
                     drain.SourceRuntimeOwner,
                     drain.SourceRoutePublication,
-                    routeCommit,
+                    drain.RuntimeUnlockAdmission,
+                    drain.PendingPreCommitProbe,
                     drain,
                     dataSession,
                     context.DataSessionGeneration,
@@ -4679,7 +4983,7 @@ public sealed partial class SessionFileTransferService
             !context.RouteRuntime.UsesRegularNknV4FastRuntime ||
             context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
             context.PendingRuntimeUnlockRegularV4RouteCommitDrain is not { } drain ||
-            context.RuntimeUnlockRouteCommitToken is not { IsDefault: false } routeCommit ||
+            context.RuntimeUnlockRouteCommitToken is not null ||
             context.DataSession is not { } dataSession ||
             !IsRuntimeUnlockRegularV4RouteCommitDrainSourceCurrentForSnapshotLocked(
                 context,
@@ -4720,7 +5024,8 @@ public sealed partial class SessionFileTransferService
         var pending = context.PendingRuntimeUnlockUncommittedTunaFallbackHandoff;
         if (pending is not null &&
             (!IsSameRuntimeUnlockRegularV4RouteCommitDrainBoundary(pending.RouteCommitDrain, drain) ||
-             pending.PendingTunaRouteCommit != routeCommit ||
+             pending.RuntimeUnlockAdmission != drain.RuntimeUnlockAdmission ||
+             pending.PendingPreCommitProbe != drain.PendingPreCommitProbe ||
              !ReferenceEquals(pending.SourceDataSession, dataSession) ||
              pending.SourceDataSessionGeneration != context.DataSessionGeneration))
         {
@@ -4742,7 +5047,8 @@ public sealed partial class SessionFileTransferService
                 generation,
                 drain.SourceRuntimeOwner,
                 drain.SourceRoutePublication,
-                routeCommit,
+                drain.RuntimeUnlockAdmission,
+                drain.PendingPreCommitProbe,
                 drain,
                 dataSession,
                 context.DataSessionGeneration,
@@ -4839,7 +5145,8 @@ public sealed partial class SessionFileTransferService
                     replacementGeneration,
                     drain.SourceRuntimeOwner,
                     drain.SourceRoutePublication,
-                    routeCommit,
+                    drain.RuntimeUnlockAdmission,
+                    drain.PendingPreCommitProbe,
                     drain,
                     dataSession,
                     context.DataSessionGeneration,
@@ -4975,7 +5282,8 @@ public sealed partial class SessionFileTransferService
         var coordinatorHandoff = new RuntimeUnlockUncommittedTunaFallbackHandoff(
             intent.SourceRuntimeOwner,
             intent.SourceRoutePublication,
-            intent.PendingTunaRouteCommit,
+            intent.RuntimeUnlockAdmission,
+            intent.PendingPreCommitProbe,
             intent.RouteCommitDrain.RouteCommitSnapshot,
             intent.RouteCommitDrain.SourceTerminalGeneration,
             intent.RouteCommitDrain.SourceLegGeneration,
@@ -5084,7 +5392,8 @@ public sealed partial class SessionFileTransferService
             intent.SourceDataSessionGeneration,
             intent.SourceRuntimeOwner,
             intent.SourceRoutePublication,
-            intent.PendingTunaRouteCommit,
+            intent.RuntimeUnlockAdmission,
+            intent.PendingPreCommitProbe,
             intent.RouteCommitDrain.RouteCommitSnapshot,
             intent.RouteCommitDrain.SourceLegGeneration,
             intent.RouteCommitDrain.SourceTransportEpoch,
@@ -5657,7 +5966,9 @@ public sealed partial class SessionFileTransferService
             context.PendingRuntimeUnlockRegularV4RouteCommitDrain != intent.RouteCommitDrain ||
             context.CurrentRuntimeOwner != intent.SourceRuntimeOwner ||
             context.CurrentRoutePublicationToken != intent.SourceRoutePublication ||
-            context.RuntimeUnlockRouteCommitToken != intent.PendingTunaRouteCommit ||
+            context.RuntimeUnlockRouteCommitToken is not null ||
+            context.RuntimeUnlockAdmissionToken != intent.RuntimeUnlockAdmission ||
+            context.RuntimeUnlockPendingPreCommitProbe != intent.PendingPreCommitProbe ||
             !ReferenceEquals(context.DataSession, intent.SourceDataSession) ||
             context.DataSessionGeneration != intent.SourceDataSessionGeneration)
         {
@@ -5680,7 +5991,8 @@ public sealed partial class SessionFileTransferService
         string reason)
     {
         var drain = intent.RouteCommitDrain;
-        var routeCommit = intent.PendingTunaRouteCommit;
+        var admission = intent.RuntimeUnlockAdmission;
+        var pendingPreCommit = intent.PendingPreCommitProbe;
         var snapshot = drain.RouteCommitSnapshot;
         var proof = intent.PeerProofEvidence;
         var continuation = context.PendingRuntimeUnlockUncommittedTunaFallbackAdoptionContinuation;
@@ -5694,7 +6006,7 @@ public sealed partial class SessionFileTransferService
             : default;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event={eventName}; direction=outbound; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; handoff_generation={intent.HandoffGeneration}; decision_status={FormatProtocolLogValue(status)}; source_route={FormatProtocolLogValue(intent.SourceRuntimeOwner.RouteToken)}; current_route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; source_protocol_version={intent.SourceRuntimeOwner.ProtocolVersion}; current_protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={intent.SourceRuntimeOwner.LiveRouteEpoch}; runtime_generation={intent.SourceRuntimeOwner.RuntimeGeneration}; terminal_generation={drain.SourceTerminalGeneration}; leg_generation={drain.SourceLegGeneration}; transport_epoch={drain.SourceTransportEpoch}; bridge_recovery_generation={drain.SourceBridgeRecoveryGeneration}; route_publication_generation={intent.SourceRoutePublication.PublicationGeneration}; route_commit_generation={intent.SourceRoutePublication.RouteCommitGeneration ?? 0}; data_session_generation={intent.SourceDataSessionGeneration}; transaction_generation={routeCommit.TransactionGeneration}; offer_generation={routeCommit.OfferGeneration}; tuna_path_lease_generation={routeCommit.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={FormatProtocolLogValue(routeCommit.TunaPathLeaseListenerRunId ?? "(none)")}; launch_generation={snapshot.LaunchGeneration}; probe_id={FormatProtocolLogValue(snapshot.PathProbeId ?? "(none)")}; drain_generation={drain.DrainGeneration}; proof_direction={FormatProtocolLogValue(proof?.Direction.ToString() ?? "(none)")}; proof_generation={proof?.ProofGeneration ?? 0}; proof_transport_epoch={intent.ProofTransportEpoch}; proof_kind={FormatProtocolLogValue(proof?.ProofKind ?? "(none)")}; proof_reason={FormatProtocolLogValue(proof?.Reason ?? "(none)")}; handoff_kind=tuna_to_normal_fallback; target_route=post_tuna_fallback_v6; target_protocol_version={FileTransferProtocol.ProtocolVersionV6}; target_transport=regular_nkn; target_runtime_generation={targetOwner.RuntimeGeneration}; target_leg_generation={targetPublication.LegGeneration}; target_route_publication_generation={targetPublication.PublicationGeneration}; adoption_stage_generation={continuation?.StageReceipt.StageGeneration ?? 0}; adoption_stage_status={FormatProtocolLogValue(continuation?.StageReceipt.Status.ToString() ?? "(none)")}; availability_proof_present={(intent.PeerProofEvidence is null ? 0 : 1)}; peer_proof_present={(intent.PeerProofFrame is null ? 0 : 1)}; decision_reason={FormatProtocolLogValue(reason)}");
+            $"event={eventName}; direction=outbound; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; handoff_generation={intent.HandoffGeneration}; decision_status={FormatProtocolLogValue(status)}; source_route={FormatProtocolLogValue(intent.SourceRuntimeOwner.RouteToken)}; current_route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; source_protocol_version={intent.SourceRuntimeOwner.ProtocolVersion}; current_protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={intent.SourceRuntimeOwner.LiveRouteEpoch}; runtime_generation={intent.SourceRuntimeOwner.RuntimeGeneration}; terminal_generation={drain.SourceTerminalGeneration}; leg_generation={drain.SourceLegGeneration}; transport_epoch={drain.SourceTransportEpoch}; bridge_recovery_generation={drain.SourceBridgeRecoveryGeneration}; route_publication_generation={intent.SourceRoutePublication.PublicationGeneration}; route_commit_generation={intent.SourceRoutePublication.RouteCommitGeneration ?? 0}; data_session_generation={intent.SourceDataSessionGeneration}; admission_generation={admission.AdmissionGeneration}; pending_precommit_generation={pendingPreCommit.PendingGeneration}; transaction_generation={pendingPreCommit.TransactionGeneration}; offer_generation={pendingPreCommit.OfferGeneration}; tuna_path_lease_generation={pendingPreCommit.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={FormatProtocolLogValue(pendingPreCommit.TunaPathLeaseListenerRunId ?? "(none)")}; launch_generation={snapshot.LaunchGeneration}; probe_id={FormatProtocolLogValue(snapshot.PathProbeId ?? "(none)")}; probe_state={FormatProtocolLogValue(snapshot.PathProbeState)}; drain_generation={drain.DrainGeneration}; completed_drain_generation={context.LastCompletedRuntimeUnlockRegularV4RouteCommitDrainGeneration}; proof_direction={FormatProtocolLogValue(proof?.Direction.ToString() ?? "(none)")}; proof_generation={proof?.ProofGeneration ?? 0}; proof_transport_epoch={intent.ProofTransportEpoch}; proof_kind={FormatProtocolLogValue(proof?.ProofKind ?? "(none)")}; proof_reason={FormatProtocolLogValue(proof?.Reason ?? "(none)")}; handoff_kind=tuna_to_normal_fallback; target_route=post_tuna_fallback_v6; target_protocol_version={FileTransferProtocol.ProtocolVersionV6}; target_transport=regular_nkn; target_runtime_generation={targetOwner.RuntimeGeneration}; target_leg_generation={targetPublication.LegGeneration}; target_route_publication_generation={targetPublication.PublicationGeneration}; adoption_stage_generation={continuation?.StageReceipt.StageGeneration ?? 0}; adoption_stage_status={FormatProtocolLogValue(continuation?.StageReceipt.Status.ToString() ?? "(none)")}; availability_proof_present={(intent.PeerProofEvidence is null ? 0 : 1)}; peer_proof_present={(intent.PeerProofFrame is null ? 0 : 1)}; decision_reason={FormatProtocolLogValue(reason)}");
     }
 
     private async Task RecheckRuntimeUnlockRegularV4RouteCommitAfterSendDrainAsync(
@@ -5777,6 +6089,15 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
+        LogTransportResumed(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            drain.Reason,
+            requiresResumeRequest: true);
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_transport_rebind_skipped_for_tuna_activation; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(drain.Reason)}; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}");
         var snapshot = drain.RouteCommitSnapshot;
         NotifyRuntimeUnlockPairedRouteCommitConfirmed(
             FileTransferDirection.Outbound,

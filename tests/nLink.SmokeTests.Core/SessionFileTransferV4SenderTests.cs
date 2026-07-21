@@ -6141,6 +6141,16 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
         senderTransport.IsFileTunaActiveForRouteSelection = true;
         receiverTransport.IsFileTunaActiveForRouteSelection = true;
+        var senderContext = typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(sender)!;
+        senderTransport.SeedRuntimeUnlockRouteCommitProofForTests(
+            transferId,
+            "tuna_activation_answer_ack");
+        EnsureRuntimeUnlockPreCommitAuthoritiesForDrainForTest(
+            sender,
+            senderContext,
+            "tuna_activation_answer_ack");
         senderTransport.SetConnectedDataSessionsAvailableForTests("tuna_activation_negotiated_transport_ready");
         senderTransport.RequestAllDataSessionHandoffs(
             "tuna_activation_answer_ack",
@@ -6351,6 +6361,13 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
         senderTransport.IsFileTunaActiveForRouteSelection = true;
         receiverTransport.IsFileTunaActiveForRouteSelection = true;
+        senderTransport.SeedRuntimeUnlockRouteCommitProofForTests(
+            transferId,
+            "tuna_activation_answer_ack");
+        EnsureRuntimeUnlockPreCommitAuthoritiesForDrainForTest(
+            sender,
+            senderContext,
+            "tuna_activation_answer_ack");
         senderTransport.SetConnectedDataSessionsAvailableForTests("tuna_activation_negotiated_transport_ready");
         senderTransport.RequestAllDataSessionHandoffs(
             "tuna_activation_answer_ack",
@@ -7220,6 +7237,13 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
             senderTransport.IsFileTunaActiveForRouteSelection = true;
             receiverTransport.IsFileTunaActiveForRouteSelection = true;
+            senderTransport.SeedRuntimeUnlockRouteCommitProofForTests(
+                transferId,
+                "tuna_activation_answer_ack");
+            EnsureRuntimeUnlockPreCommitAuthoritiesForDrainForTest(
+                sender,
+                preTransitionOutboundContext,
+                "tuna_activation_answer_ack");
             senderTransport.RequestAllDataSessionHandoffs(
                 "tuna_activation_answer_ack",
                 FileTransferTransportHandoffKind.NormalToTunaActivation,
@@ -18498,7 +18522,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             context,
             FileTransferDirection.Outbound,
             "test_drain_before_probe_progression");
-        SeedRuntimeUnlockAdmissionForTest(
+        var admission = SeedRuntimeUnlockAdmissionForTest(
             context,
             FileTransferDirection.Outbound,
             "test_drain_before_probe_progression");
@@ -18532,7 +18556,23 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var probe = Assert.Single(dataSession.SentFrames.OfType<FileTransferRuntimeUnlockPreCommitProbeFrame>());
         Assert.Equal(RuntimeUnlockPathProbeState.Started.ToString(), transport.RuntimeUnlockRouteCommitSnapshot?.PathProbeState);
         Assert.True(GetPrivateProperty<bool>(context, "PullTransportPaused"));
-        Assert.NotNull(GetPrivatePropertyValue(context, "PendingRuntimeUnlockRegularV4RouteCommitDrain"));
+        var drain = GetPrivatePropertyValue(context, "PendingRuntimeUnlockRegularV4RouteCommitDrain");
+        Assert.NotNull(drain);
+        Assert.Equal(
+            admission,
+            GetPrivateProperty<RuntimeUnlockAdmissionToken>(drain!, "RuntimeUnlockAdmission"));
+        Assert.Equal(
+            admission,
+            GetPrivateProperty<RuntimeUnlockAdmissionToken>(context, "RuntimeUnlockAdmissionToken"));
+        Assert.Equal(
+            GetPrivateProperty<RuntimeUnlockPendingPreCommitProbeRequest>(drain!, "PendingPreCommitProbe"),
+            GetPrivateProperty<RuntimeUnlockPendingPreCommitProbeRequest>(
+                context,
+                "RuntimeUnlockPendingPreCommitProbe"));
+        Assert.Equal(
+            admission.AdmissionGeneration,
+            GetPrivateProperty<int>(context, "LastRuntimeUnlockAdmissionGeneration"));
+        Assert.Equal(1L, GetPrivateProperty<long>(drain!, "DrainGeneration"));
         Assert.Equal(
             FileTransferRoute.RegularNknV4Fast,
             GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner").Route);
@@ -18540,7 +18580,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var beforeAckLog = ReadOperationalLogTail(logStart);
         var stagedLine = beforeAckLog
             .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
-            .Single(line =>
+            .Last(line =>
                 line.Contains("event=runtime_unlock_regular_v4_route_commit_send_drain_staged; direction=outbound;", StringComparison.Ordinal) &&
                 line.Contains($"transfer_id={transferId};", StringComparison.Ordinal));
         Assert.Contains("captured_send_count=0;", stagedLine, StringComparison.Ordinal);
@@ -18649,10 +18689,18 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             remoteGrantedUntilExclusive: 128,
             lastGrantReceivedUtc: DateTimeOffset.UtcNow);
         SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Outbound, "test_probe_failure_drain");
+        SeedRuntimeUnlockAdmissionForTest(
+            context,
+            FileTransferDirection.Outbound,
+            "test_probe_failure_drain");
         serviceType
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         ReplaceOutboundDataSession(service, context, new RecordingDataSession(sessionId, transferId));
+        EnsureRuntimeUnlockPreCommitAuthoritiesForDrainForTest(
+            service,
+            context,
+            "test_probe_failure_drain");
 
         var stageMethod = serviceType.GetMethod(
             "TryStageRuntimeUnlockRegularV4RouteCommitSendDrainLocked",
@@ -18685,6 +18733,10 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             offerGeneration: 12,
             leaseGeneration: 14,
             successorProbeId);
+        EnsureRuntimeUnlockPreCommitAuthoritiesForDrainForTest(
+            service,
+            context,
+            "test_successor_probe");
         var successorStageArguments = new object?[] { context, "test_successor_probe", null };
         Assert.True(Assert.IsType<bool>(stageMethod.Invoke(service, successorStageArguments)));
         var successorDrain = Assert.IsAssignableFrom<object>(successorStageArguments[2]);
@@ -18763,6 +18815,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 TunaPathLeaseRequired: true,
                 TunaPathLeaseGeneration: leaseGeneration,
                 TunaPathLeaseState: RuntimeUnlockTunaPathLeaseState.ListenerReady.ToString(),
+                TunaPathLeaseListenerRunId: $"listener-probe-failure-{leaseGeneration}",
                 TunaPathLeaseCurrent: true);
     }
 

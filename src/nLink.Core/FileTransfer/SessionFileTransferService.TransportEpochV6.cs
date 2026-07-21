@@ -3742,6 +3742,20 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
+            var retiredPending = FileTransferCoordinator.Apply(
+                RuntimeUnlockPendingPreCommitProbeCoordinatorEvent(
+                    FileTransferCoordinatorEventKind.RuntimeUnlockPreCommitProbeRetired,
+                    outbound.RouteSelection,
+                    outbound.CurrentTransferLeg,
+                    reason,
+                    drain.PendingPreCommitProbe),
+                CreateCoordinatorStateLocked(outbound));
+            if (retiredPending.RuntimeUnlockPendingPreCommitProbeDecision?.Accepted != true)
+            {
+                return;
+            }
+
+            ApplyCoordinatorDecisionToContextLocked(outbound, retiredPending);
             InvalidateRuntimeUnlockRegularV4RouteCommitDrainLocked(
                 outbound,
                 drain,

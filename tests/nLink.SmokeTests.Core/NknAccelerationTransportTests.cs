@@ -29630,7 +29630,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 TunaPathLeaseListenerRunId: "listener-uncommitted-fallback",
                 TunaPathLeaseCurrent: true,
                 LaunchGeneration: 19);
-            var pendingTunaRouteCommit = new RouteCommitToken(
+            var pendingPreCommit = new RuntimeUnlockPendingPreCommitProbeRequest(
                 sessionId,
                 transferId,
                 FileTransferDirection.Outbound,
@@ -29647,11 +29647,11 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 snapshot.OfferGeneration,
                 snapshot.TunaPathLeaseGeneration,
                 snapshot.TunaPathLeaseListenerRunId,
-                snapshot.PathProbeId!,
                 FileTransferRoute.FileTunaV4,
                 FileTransferProtocol.ProtocolVersionV4,
                 FileTransferTransportKind.Tuna,
-                CommitGeneration: 1,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                PendingGeneration: 1,
                 Reason: "uncommitted_tuna_fallback_test");
 
             var bridge = Assert.IsAssignableFrom<IRuntimeUnlockUncommittedTunaFallbackAdoptionBridge>(helper);
@@ -29660,7 +29660,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 11,
                 sourceOwner,
                 sourcePublication,
-                pendingTunaRouteCommit,
+                admission,
+                pendingPreCommit,
                 snapshot,
                 SourceLegGeneration: sourceAuthority.LegGeneration,
                 SourceTransportEpoch: 0,
@@ -29674,6 +29675,24 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 PressureSettlementCommand: null,
                 TargetRuntimeOwner: owner,
                 TargetRoutePublication: publication);
+            foreach (var mismatchedAdmission in new[]
+                     {
+                         admission with { SessionId = $"{admission.SessionId}-mismatch" },
+                         admission with { TransferId = $"{admission.TransferId}-mismatch" },
+                         admission with { Direction = FileTransferDirection.Inbound },
+                     })
+            {
+                var mismatchedReceipt = bridge.StageRuntimeUnlockUncommittedTunaFallbackAdoption(
+                    stage with { RuntimeUnlockAdmission = mismatchedAdmission });
+                Assert.Equal(
+                    RuntimeUnlockUncommittedTunaFallbackAdoptionStageStatus.Rejected,
+                    mismatchedReceipt.Status);
+                Assert.Equal(
+                    "uncommitted_tuna_fallback_adoption_admission_identity_mismatch",
+                    mismatchedReceipt.Reason);
+                Assert.False(dataSession.IsAvailable);
+            }
+
             var stageReceipt = bridge.StageRuntimeUnlockUncommittedTunaFallbackAdoption(stage);
             Assert.Equal(RuntimeUnlockUncommittedTunaFallbackAdoptionStageStatus.Staged, stageReceipt.Status);
             Assert.True(stageReceipt.StageGeneration > 0);
