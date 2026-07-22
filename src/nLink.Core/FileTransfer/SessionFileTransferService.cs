@@ -8814,6 +8814,17 @@ public sealed partial class SessionFileTransferService : IDisposable
         }
 
         context.CurrentRegularV4FrontierRepairContract = null;
+        var detachedRepairStateCount = 0;
+        foreach (var repairState in context.V4ReceiverRepairRequests.Values)
+        {
+            if (!ReferenceEquals(repairState.RegularV4RepairContract, contract))
+            {
+                continue;
+            }
+
+            repairState.RegularV4RepairContract = null;
+            detachedRepairStateCount++;
+        }
         if (context.V4RegularFrontierRepairSettledStalledAuthorityId ==
             transition.PressureBinding.Authority.AuthorityId)
         {
@@ -8821,6 +8832,10 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.V4RegularFrontierRepairSettledStalledAuthorityId = null;
         }
         ClearPendingRegularV4FrontierRepairPressureInstall(contract!);
+        var authority = transition.PressureBinding.Authority;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_contract_detached; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(authority.AuthorityId.ToString())}; direction={authority.Direction.ToString().ToLowerInvariant()}; session_id={FormatProtocolLogValue(authority.SessionId)}; transfer_id={FormatProtocolLogValue(authority.TransferId)}; repair_request_key={FormatProtocolLogValue(authority.RepairKey)}; route={FormatProtocolLogValue(authority.RouteToken)}; protocol_version={authority.ProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.LegGeneration}; transport_epoch={authority.TransportEpoch}; bridge_recovery_generation={authority.BridgeRecoveryGeneration}; source_bridge_decision_generation={authority.BridgeDecisionGeneration}; target_bridge_decision_generation={transition.BridgeRecoveryDecision.BridgeDecisionGeneration}; route_publication_generation={authority.RoutePublicationGeneration}; route_commit_generation={authority.RouteCommitGeneration}; data_session_generation={context.DataSessionGeneration}; detached_repair_state_count={detachedRepairStateCount}; decision_reason=coordinator_recovery_contract_detached");
     }
 
     private bool FinalizeRegularV4FrontierRepairPressureRecoveryHandoffContractLocked(

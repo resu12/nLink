@@ -432,6 +432,113 @@ public sealed partial class SessionFileTransferV4SenderTests
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public void RegularV4FrontierRepairPressure_InboundRecoveryDetachesUnmaterializedProjectionContractAndAuthorizesFreshGap()
+    {
+        const string transferId = "transfer_regular_v4_pressure_inbound_unmaterialized_projection_handoff";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4InboundContext(
+            transferId,
+            chunkCount: 1024,
+            nextChunkIndex: 489,
+            durableHighestChunkIndex: 488,
+            creditUntilChunkIndexExclusive: 501);
+        SetPrivateProperty(
+            context,
+            "DataSession",
+            new RecordingDataSession($"session_{transferId}", transferId));
+        var written = Assert.IsType<System.Collections.BitArray>(
+            GetPrivatePropertyValue(context, "ReceiverSparseChunksWritten"));
+        for (var chunkIndex = 489; chunkIndex < 501; chunkIndex++)
+        {
+            written[chunkIndex] = false;
+        }
+        typeof(SessionFileTransferService)
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        SeedCurrentRuntimeOwnerForTest(
+            context,
+            FileTransferDirection.Inbound,
+            "pressure_inbound_unmaterialized_projection_handoff");
+
+        _ = CreateInboundState(service, context, "frontier_stall_repair_due", forceMissingRange: true);
+        Assert.Null(GetPrivatePropertyValue(context, "V4RegularFrontierRepairProjection"));
+        var originalContract = GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract");
+        Assert.NotNull(originalContract);
+        var originalAuthority = GetPrivateProperty<FileTransferRegularV4FrontierRepairAuthority>(
+            originalContract!,
+            "Authority");
+        var repairState = GetSingleInboundRepairState(context);
+        var originalAttemptCount = GetPrivateProperty<int>(repairState, "AttemptCount");
+        Assert.Same(
+            originalContract,
+            GetPrivatePropertyValue(repairState, "RegularV4RepairContract"));
+
+        var requested = InvokeReceiveRecovery(
+            service,
+            new FileTransferReceiveRecoveryRequest(
+                $"session_{transferId}",
+                transferId,
+                FileTransferDirection.Inbound,
+                "session_liveness_timeout_pending"));
+
+        Assert.True(requested);
+        Assert.Null(GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
+        Assert.Null(GetPrivatePropertyValue(repairState, "RegularV4RepairContract"));
+        Assert.Equal(originalAttemptCount, GetPrivateProperty<int>(repairState, "AttemptCount"));
+        Assert.Equal("489:12:489:12", GetPrivateProperty<string>(repairState, "RepairRequestKey"));
+        var recoveryRequest = Assert.Single(transport.ReceiveRecoveryRequests);
+        var recoveryAuthority = Assert.IsType<RuntimeUnlockRegularV4RecoveryAuthority>(
+            recoveryRequest.RegularV4RecoveryAuthority);
+        var lifecycleDecision = ObserveRegularV4RecoveryLifecycleForTest(
+            context,
+            new RuntimeUnlockRegularV4RecoveryLifecycleReport(
+                recoveryAuthority,
+                RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed,
+                "unit_test_unmaterialized_projection_recovery_completed"));
+        Assert.Equal(
+            RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted,
+            lifecycleDecision.Status);
+
+        SetPrivateProperty(context, "PullHighestReceivedChunkIndex", 581);
+        var reboundState = CreateInboundState(
+            service,
+            context,
+            "frontier_stall_repair_due",
+            forceMissingRange: true);
+        var freshContract = GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract");
+        Assert.True(freshContract is not null, ReadOperationalLogTail(logStart));
+        var freshAuthority = GetPrivateProperty<FileTransferRegularV4FrontierRepairAuthority>(
+            freshContract!,
+            "Authority");
+        Assert.NotSame(originalContract, freshContract);
+        Assert.NotEqual(originalAuthority.AuthorityId, freshAuthority.AuthorityId);
+        Assert.Null(freshAuthority.PredecessorAuthorityId);
+        Assert.Equal(1, freshAuthority.BridgeDecisionGeneration);
+        Assert.Equal("489:12:489:12", freshAuthority.RepairKey);
+        var missingRange = Assert.Single(reboundState.MissingRanges);
+        Assert.Equal(489, missingRange.StartChunkIndex);
+        Assert.Equal(12, missingRange.ChunkCount);
+        Assert.Equal(501, reboundState.CreditUntilChunkIndexExclusive);
+
+        _ = CreateInboundState(service, context, "chunk_batch_committed");
+        Assert.Same(
+            freshContract,
+            GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains(
+            "event=filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_contract_detached;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains("detached_repair_state_count=1", log, StringComparison.Ordinal);
+        Assert.Contains("decision_reason=coordinator_recovery_contract_detached", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
     public void RegularV4FrontierRepairPressure_OutboundReceiveRecoveryUsesTheSameAtomicHandoff()
     {
         const string transferId = "transfer_regular_v4_pressure_outbound_recovery_handoff";
@@ -494,6 +601,8 @@ public sealed partial class SessionFileTransferV4SenderTests
         _ = CreateInboundState(service, context, "frontier_stall_repair_due", forceMissingRange: true);
         var binding = GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding");
         var contract = GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract");
+        var repairState = GetSingleInboundRepairState(context);
+        Assert.Same(contract, GetPrivatePropertyValue(repairState, "RegularV4RepairContract"));
         transport.RegularV4PressureSettlementApplyOverride = command => new(
             command,
             FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
@@ -512,6 +621,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.False(requested);
         Assert.Equal(binding, GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
         Assert.Same(contract, GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
+        Assert.Same(contract, GetPrivatePropertyValue(repairState, "RegularV4RepairContract"));
         Assert.Empty(transport.ReceiveRecoveryRequests);
         Assert.Null(GetPrivatePropertyValue(context, "CurrentRecoveryLivenessLease"));
     }
@@ -532,6 +642,8 @@ public sealed partial class SessionFileTransferV4SenderTests
         _ = CreateInboundState(service, context, "frontier_stall_repair_due", forceMissingRange: true);
         var binding = GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding");
         var contract = GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract");
+        var repairState = GetSingleInboundRepairState(context);
+        Assert.Same(contract, GetPrivatePropertyValue(repairState, "RegularV4RepairContract"));
         transport.RegularV4PressureSettlementApplyOverride = _ =>
             throw new InvalidOperationException("unit_test_pressure_apply_throw");
 
@@ -546,6 +658,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.False(requested);
         Assert.Equal(binding, GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
         Assert.Same(contract, GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
+        Assert.Same(contract, GetPrivatePropertyValue(repairState, "RegularV4RepairContract"));
         Assert.Empty(transport.ReceiveRecoveryRequests);
         Assert.Null(GetPrivatePropertyValue(context, "CurrentRecoveryLivenessLease"));
     }
@@ -566,6 +679,8 @@ public sealed partial class SessionFileTransferV4SenderTests
         _ = CreateInboundState(service, context, "frontier_stall_repair_due", forceMissingRange: true);
         var binding = GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding");
         var contract = GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract");
+        var repairState = GetSingleInboundRepairState(context);
+        Assert.Same(contract, GetPrivatePropertyValue(repairState, "RegularV4RepairContract"));
         var recoveryOnlyTransport = new RecoveryControllerWithoutPressureBridgeTransport(installTransport);
         typeof(SessionFileTransferService)
             .GetField("transport", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -582,6 +697,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.False(requested);
         Assert.Equal(binding, GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
         Assert.Same(contract, GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
+        Assert.Same(contract, GetPrivatePropertyValue(repairState, "RegularV4RepairContract"));
         Assert.Empty(recoveryOnlyTransport.ReceiveRecoveryRequests);
         Assert.Null(GetPrivatePropertyValue(context, "CurrentRecoveryLivenessLease"));
     }
@@ -641,6 +757,15 @@ public sealed partial class SessionFileTransferV4SenderTests
         => Assert.IsType<bool>(typeof(SessionFileTransferService)
             .GetMethod("TryRequestFileTransferReceiveRecovery", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [request]));
+
+    private static object GetSingleInboundRepairState(object context)
+    {
+        var requests = GetPrivatePropertyValue(context, "V4ReceiverRepairRequests");
+        Assert.NotNull(requests);
+        var values = Assert.IsAssignableFrom<System.Collections.IEnumerable>(
+            requests!.GetType().GetProperty("Values")!.GetValue(requests));
+        return Assert.Single(values.Cast<object>());
+    }
 
     private sealed class RecoveryControllerWithoutPressureBridgeTransport(
         IFileTransferSignalingTransport inner) :
