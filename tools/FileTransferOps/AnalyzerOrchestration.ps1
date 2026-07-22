@@ -1714,7 +1714,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery'
             Event = $candidateEvent
-            Reason = 'fresh_projection_required_before_unrestricted_state'
+            Reason = Get-FileTransferEventField `
+                -Event $candidateEvent `
+                -Name 'decision_reason' `
+                -Default 'fresh_projection_required_before_unrestricted_state'
         }) | Out-Null
     }
     foreach ($candidateEvent in @($regularV4PeerSilenceReplayMissingDispatchRangeProof.UnresolvedCandidateEvents)) {
@@ -1969,6 +1972,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound',
             'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid',
             'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing',
+            'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery',
             'regular_v4_frontier_repair_pressure_authority_lifecycle_split',
             'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
         'route_runtime'

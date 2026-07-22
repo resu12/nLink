@@ -3303,6 +3303,103 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
         Assert.Equal("fail", fullVerdict["regular_v4_frontier_repair_projection_reauthorization_verdict"]);
     }
 
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RegularV4ProjectionReauthorizationAfterPressureRecovery_CurrentArtifactFullAndCompactAgree()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRegularV4PressureRecoveryProjectionReauthorizationFixture(
+            "transfer_regular_v4_pressure_recovery_projection_missing",
+            rejectionCount: 1796,
+            padToCurrentArtifactSequence: true);
+        var full = await RunAnalyzeFixtureAsync(lines);
+        var compact = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: new Dictionary<string, string>
+            {
+                ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+            });
+
+        Assert.Equal(0, full.Script.ExitCode);
+        Assert.Equal(0, compact.Script.ExitCode);
+        var fullVerdict = ReadArtifactReport(full.ArtifactDir, "filetransfer-operator-verdict.txt");
+        var compactVerdict = ReadArtifactReport(compact.ArtifactDir, "filetransfer-operator-verdict.txt");
+        foreach (var field in new[]
+                 {
+                     "acceptance_failure_class",
+                     "semantic_failure_domain",
+                     "recovery_failure_class",
+                     "first_proof_chain_failure_class",
+                     "first_proof_chain_failure_event",
+                     "first_proof_chain_failure_reason",
+                     "first_proof_chain_failure_sequence",
+                     "first_proof_chain_failure_writer_sequence",
+                     "regular_v4_frontier_repair_projection_reauthorization_missing_raw_count",
+                     "regular_v4_frontier_repair_projection_reauthorization_missing_distinct_count",
+                     "regular_v4_frontier_repair_projection_reauthorization_missing_recovered_count",
+                     "regular_v4_frontier_repair_projection_reauthorization_missing_unresolved_count",
+                     "regular_v4_frontier_repair_projection_reauthorization_verdict"
+                 })
+        {
+            Assert.Equal(fullVerdict[field], compactVerdict[field]);
+        }
+
+        Assert.Equal("incomplete_proof", fullVerdict["acceptance_failure_class"]);
+        Assert.Equal("route_runtime", fullVerdict["semantic_failure_domain"]);
+        Assert.Equal("regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery", fullVerdict["first_proof_chain_failure_class"]);
+        Assert.Equal("filetransfer_regular_v4_frontier_repair_projection_rejected", fullVerdict["first_proof_chain_failure_event"]);
+        Assert.Equal("coordinator_projection_authority_missing", fullVerdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("3537", fullVerdict["first_proof_chain_failure_sequence"]);
+        Assert.Equal("2388", fullVerdict["first_proof_chain_failure_writer_sequence"]);
+        Assert.Equal("1796", fullVerdict["regular_v4_frontier_repair_projection_reauthorization_missing_raw_count"]);
+        Assert.Equal("1", fullVerdict["regular_v4_frontier_repair_projection_reauthorization_missing_distinct_count"]);
+        Assert.Equal("0", fullVerdict["regular_v4_frontier_repair_projection_reauthorization_missing_recovered_count"]);
+        Assert.Equal("1", fullVerdict["regular_v4_frontier_repair_projection_reauthorization_missing_unresolved_count"]);
+        Assert.Equal("fail", fullVerdict["regular_v4_frontier_repair_projection_reauthorization_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RegularV4ProjectionReauthorizationAfterPressureRecovery_FreshProjectionDispatchRecovers(bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_regular_v4_pressure_recovery_projection_recovered";
+        var lines = BuildRegularV4PressureRecoveryProjectionReauthorizationFixture(
+            transferId,
+            rejectionCount: 1,
+            padToCurrentArtifactSequence: false);
+        const string scope = "route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=2; data_session_generation=1; route_publication_generation=1; route_commit_generation=0";
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_projection_retained; authority_schema=2; authority_id=repair-fresh; predecessor_authority_id=(none); direction=inbound; transfer_id={transferId}; session_id=sess_a; {scope}; source_repair_request_key=489:12:489:12; projected_repair_request_key=489:12:489:12; source_ranges=489:12; projected_ranges=489:12; projection_generation=2; projection_kind=initial_due; source_authority_lifecycle=active; source_authority_settlement=(none); frontier_chunk_index=489; durable_received_highest_chunk_index=581; decision_reason=coordinator_authority_projection_staged"));
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_projection_published; authority_schema=2; authority_id=repair-fresh; predecessor_authority_id=(none); direction=inbound; transfer_id={transferId}; session_id=sess_a; {scope}; source_repair_request_key=489:12:489:12; projected_repair_request_key=489:12:489:12; source_ranges=489:12; projected_ranges=489:12; projection_generation=2; projection_kind=initial_due; source_authority_lifecycle=active; source_authority_settlement=(none); frontier_chunk_index=489; durable_received_highest_chunk_index=581; decision_reason=state_send_completed_current"));
+        lines.Add(LogLine($"event=filetransfer_v4_state_sent; direction=inbound; transfer_id={transferId}; session_id=sess_a; {scope}; epoch=626; contiguous_committed_chunk_index=489; durable_received_highest_chunk_index=581; credit_until_chunk_index_exclusive=501; missing_range_count=1; terminal_ready=0; repair_projection_authority_id=repair-fresh; repair_projection_projected_ranges=489:12"));
+        lines.Add(LogLine($"event=filetransfer_v4_state_received; direction=outbound; transfer_id={transferId}; session_id=sess_a; epoch=626; applied=1; contiguous_committed_chunk_index=489; durable_received_highest_chunk_index=581; missing_range_count=1; projected_ranges=489:12"));
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_authority_granted; authority_id=repair-peer; direction=outbound; transfer_id={transferId}; session_id=sess_a; {scope}; repair_request_key=489:12:489:12; start_chunk_index=489; end_chunk_exclusive=501; frontier_chunk_index=489; durable_received_highest_chunk_index=581; requested_chunk_count=12; decision_generation=1"));
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_dispatched; authority_id=repair-peer; direction=outbound; transfer_id={transferId}; session_id=sess_a; {scope}; repair_request_key=489:12:489:12; start_chunk_index=489; end_chunk_exclusive=501; frontier_chunk_index=489; durable_received_highest_chunk_index=581; requested_chunk_count=12; decision_generation=1"));
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string> { ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1" }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_projection_reauthorization_missing_distinct_count"]);
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_projection_reauthorization_missing_recovered_count"]);
+        Assert.Equal("0", verdict["regular_v4_frontier_repair_projection_reauthorization_missing_unresolved_count"]);
+        Assert.Equal("pass", verdict["regular_v4_frontier_repair_projection_reauthorization_verdict"]);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -4496,6 +4593,41 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
         for (var index = 0; index < 1438; index++)
         {
             lines.Add(LogLine(RegularV4ProjectionReauthorizationRejectedLine(transferId, stateEpoch: 928 + index)));
+        }
+
+        return lines;
+    }
+
+    private static List<string> BuildRegularV4PressureRecoveryProjectionReauthorizationFixture(
+        string transferId,
+        int rejectionCount,
+        bool padToCurrentArtifactSequence)
+    {
+        const string scope = "route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; route_publication_generation=1; route_commit_generation=0";
+        var lines = new List<string>
+        {
+            LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_a; {scope}"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_binding_committed; authority_schema=2; authority_id=repair-old; predecessor_authority_id=(none); direction=inbound; transfer_id={transferId}; session_id=sess_a; {scope}; bridge_decision_generation=0; repair_request_key=489:12:489:12; frontier_chunk_index=489; durable_received_highest_chunk_index=488; pending_repair_count=12; repair_generation=3; install_generation=3; binding_state=Installed"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_projection_rejected; authority_schema=2; authority_id=(none); predecessor_authority_id=(none); direction=inbound; transfer_id={transferId}; session_id=sess_a; {scope}; bridge_decision_generation=0; data_session_generation=1; required_ranges=489:12; required_range_fingerprint=frng-gap; source_repair_request_key=489:12:489:12; projected_repair_request_key=489:12:489:12; source_ranges=489:12; projected_ranges=489:12; frontier_chunk_index=489; durable_received_highest_chunk_index=488; decision_reason=coordinator_projection_authority_missing"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_committed; authority_schema=2; authority_id=repair-old; direction=inbound; session_id=sess_a; transfer_id={transferId}; repair_request_key=489:12:489:12; {scope}; source_bridge_decision_generation=0; install_generation=3; settlement_outcome=StaleRejected; settlement_reason=bridge_receive_stall_recovery_pressure_handoff; recovery_action=BridgeReceiveStallRecovery; bridge_decision_generation=1; recovery_liveness_lease_generation=1; apply_status=Applied; current_authority_cleared=1"),
+            LogLine("event=filetransfer_regular_v4_frontier_repair_contract_settled; authority_schema=2; authority_id=repair-old; successor_authority_id=(none); repair_request_key=489:12:489:12; settlement_outcome=StaleRejected; dispatch_observed=0; decision_reason=bridge_receive_stall_recovery_pressure_handoff"),
+            LogLine($"event=filetransfer_bridge_recovery_authority_granted; direction=inbound; transfer_id={transferId}; session_id=sess_a; action_kind=BridgeReceiveStallRecovery; {scope}; bridge_decision_generation=1; recovery_liveness_lease_generation=1"),
+            LogLine($"event=runtime_unlock_regular_v4_recovery_lifecycle_decided; direction=inbound; transfer_id={transferId}; session_id=sess_a; {scope}; bridge_decision_generation=1; regular_v4_liveness_generation=1; lifecycle_outcome=Completed; decision_status=Accepted"),
+            LogLine($"event=runtime_unlock_regular_v4_recovery_lease_closure_retained; direction=inbound; transfer_id={transferId}; session_id=sess_a; {scope}; bridge_decision_generation=1; regular_v4_liveness_generation=1; lifecycle_outcome=Completed; lifecycle_decision_status=Accepted; lease_generation=1; lease_state=Retired")
+        };
+
+        if (padToCurrentArtifactSequence)
+        {
+            while (lines.Count < 3536)
+            {
+                lines.Add(LogLine($"event=pressure_recovery_projection_fixture_noise; transfer_id={transferId}; session_id=sess_a; ordinal={lines.Count + 1}"));
+            }
+        }
+
+        for (var index = 0; index < rejectionCount; index++)
+        {
+            var bridgeDecisionGeneration = 1 + (index / 600);
+            lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_projection_rejected; authority_schema=2; authority_id=(none); predecessor_authority_id=(none); direction=inbound; transfer_id={transferId}; session_id=sess_a; {scope}; bridge_decision_generation={bridgeDecisionGeneration}; data_session_generation=1; required_ranges=489:12; required_range_fingerprint=frng-gap; source_repair_request_key=489:12:489:12; projected_repair_request_key=489:12:489:12; source_ranges=489:12; projected_ranges=489:12; frontier_chunk_index=489; durable_received_highest_chunk_index=581; decision_reason=coordinator_projection_authority_missing; log_writer_sequence={2388 + index}"));
         }
 
         return lines;
