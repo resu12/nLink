@@ -1680,7 +1680,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
-    public void RegularNknV4PeerSilenceSafetyReplay_DispatchedSweepStillRotates()
+    public async Task RegularNknV4PeerSilenceSafetyReplay_DispatchedSweepStillRotates()
     {
         const string transferId = "transfer_regular_v4_peer_silence_dispatched_rotation";
         var logStart = GetOperationalLogLength();
@@ -1689,7 +1689,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         service.AttachTransport(transport);
         var context = CreateRegularNknV4OutboundContext(
             transferId,
-            remoteNextExpectedChunkIndex: 0,
+            remoteNextExpectedChunkIndex: 9,
             chunksAcceptedForTransport: 256,
             remoteGrantedUntilExclusive: 256,
             lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
@@ -1698,6 +1698,49 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         typeof(SessionFileTransferService)
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
+        var dataSession = Assert.IsType<RecordingDataSession>(GetPrivatePropertyValue(context, "DataSession"));
+        object pumpInstall;
+        lock (GetServiceGate(service))
+        {
+            var stagedInstall = StageSparsePumpInstall(
+                service,
+                context,
+                predecessor: null,
+                "unit_test_peer_silence_rotated_dispatch");
+            Assert.True(stagedInstall.Accepted, stagedInstall.Reason);
+            Assert.NotNull(stagedInstall.Install);
+            var committedInstall = CommitSparsePumpInstall(
+                service,
+                context,
+                stagedInstall.Install!,
+                dataSession);
+            Assert.True(committedInstall.Accepted, committedInstall.Reason);
+            Assert.NotNull(committedInstall.Install);
+            pumpInstall = committedInstall.Install!;
+        }
+
+        async Task RunPumpOnceAsync()
+        {
+            var pumpLoopCount = 0;
+            var previousCompletion = SessionFileTransferService.OutboundSparseSenderPumpNormalCompletionForTests;
+            SessionFileTransferService.OutboundSparseSenderPumpNormalCompletionForTests = (observedTransferId, _) =>
+                string.Equals(observedTransferId, transferId, StringComparison.Ordinal) &&
+                Interlocked.Increment(ref pumpLoopCount) > 1;
+            try
+            {
+                using var source = new MemoryStream(new byte[512 * 21 * 1024], writable: false);
+                var pumpTask = Assert.IsAssignableFrom<Task>(typeof(SessionFileTransferService)
+                    .GetMethod("RunOutboundV4SenderPumpAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .Invoke(
+                        service,
+                        [context, source, dataSession, CancellationToken.None, pumpInstall]));
+                await pumpTask.WaitAsync(TimeSpan.FromSeconds(10));
+            }
+            finally
+            {
+                SessionFileTransferService.OutboundSparseSenderPumpNormalCompletionForTests = previousCompletion;
+            }
+        }
 
         var schedule = typeof(SessionFileTransferService)
             .GetMethod("MaybeQueueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!;
@@ -1705,16 +1748,18 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var initial = Assert.Single(GetQueuedV4RepairSends(context));
         var contract = GetPrivatePropertyValue(initial, "RegularV4RepairContract");
         Assert.NotNull(contract);
-        Assert.True((bool)typeof(SessionFileTransferService)
-            .GetMethod("TryMarkRegularV4FrontierRepairDispatched", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [contract])!);
-        Assert.True((bool)typeof(SessionFileTransferService)
-            .GetMethod("TryAdvanceOutboundRegularV4PeerSilenceReplayCursorLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, initial, contract])!);
+        await RunPumpOnceAsync();
+
+        Assert.Contains(
+            dataSession.SentFrames.OfType<FileTransferChunkBatchFrameV4>(),
+            static frame => frame.StartChunkIndex >= 9 && frame.StartChunkIndex < 73);
+        var initialLifecycle = GetPrivatePropertyValue(contract!, "Lifecycle");
+        Assert.NotNull(initialLifecycle);
+        Assert.True(GetPrivateProperty<bool>(initialLifecycle!, "DispatchObserved"));
 
         var cursor = GetPrivatePropertyValue(context, "OutboundRegularV4PeerSilenceReplayCursor");
         Assert.NotNull(cursor);
-        Assert.Equal(64, GetPrivateProperty<int>(cursor!, "DispatchProvenEndChunkIndex"));
+        Assert.Equal(73, GetPrivateProperty<int>(cursor!, "DispatchProvenEndChunkIndex"));
         var advancedCursorGeneration = GetPrivateProperty<int>(cursor, "CursorGeneration");
         Assert.False((bool)typeof(SessionFileTransferService)
             .GetMethod("TryAdvanceOutboundRegularV4PeerSilenceReplayCursorLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -1738,24 +1783,337 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                     false,
                 ])!);
 
-        var repairQueue = context.GetType()
-            .GetProperty("PullV4SenderPumpRepairQueue", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!
-            .GetValue(context)!;
-        repairQueue.GetType().GetMethod("Dequeue")!.Invoke(repairQueue, null);
-        var queuedChunkIndices = context.GetType()
-            .GetProperty("PullV4SenderPumpRepairQueuedChunkIndices", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!
-            .GetValue(context)!;
-        queuedChunkIndices.GetType().GetMethod("Clear")!.Invoke(queuedChunkIndices, null);
         SetPrivateProperty(context, "PullRegularNknV4LastPeerSilenceSafetyReplayUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
 
         Assert.True((bool)schedule.Invoke(service, [context, "unit_test_next_dispatch_proven_sweep"])!);
         var next = Assert.Single(GetQueuedV4RepairSends(context));
-        Assert.Equal(64, GetIntProperty(next, "FirstStartChunkIndex"));
-        Assert.Equal(128, GetIntProperty(next, "LastEndChunkExclusive"));
+        Assert.Equal(73, GetIntProperty(next, "FirstStartChunkIndex"));
+        Assert.Equal(137, GetIntProperty(next, "LastEndChunkExclusive"));
+        Assert.True(GetPrivateProperty<bool>(next, "CoordinatorBackedRegularV4PeerSilenceReplay"));
+        SetPrivateProperty(next, "DeliveryEscalationReason", "first_send");
+        var nextContract = GetPrivatePropertyValue(next, "RegularV4RepairContract");
+        Assert.NotNull(nextContract);
+        var nextAuthority = GetPrivatePropertyValue(nextContract!, "Authority");
+        Assert.NotNull(nextAuthority);
+        var expectedAuthorityId = GetPrivatePropertyValue(nextAuthority!, "AuthorityId");
+        var expectedInstallGeneration = GetPrivateProperty<long>(
+            GetPrivatePropertyValue(nextContract, "PressureBinding")!,
+            "InstallGeneration");
+
+        await RunPumpOnceAsync();
+
         Assert.Contains(
-            "event=filetransfer_regular_v4_peer_silence_replay_cursor_advanced;",
-            ReadOperationalLogTail(logStart),
-            StringComparison.Ordinal);
+            dataSession.SentFrames.OfType<FileTransferChunkBatchFrameV4>(),
+            static frame => frame.StartChunkIndex >= 73 && frame.StartChunkIndex < 137);
+        var dispatchedLifecycle = GetPrivatePropertyValue(nextContract, "Lifecycle");
+        Assert.NotNull(dispatchedLifecycle);
+        Assert.True(GetPrivateProperty<bool>(dispatchedLifecycle!, "DispatchObserved"));
+        cursor = GetPrivatePropertyValue(context, "OutboundRegularV4PeerSilenceReplayCursor");
+        Assert.NotNull(cursor);
+        Assert.Equal(137, GetPrivateProperty<int>(cursor!, "DispatchProvenEndChunkIndex"));
+        var currentContract = GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract");
+        Assert.NotNull(currentContract);
+        var currentAuthority = GetPrivatePropertyValue(currentContract!, "Authority");
+        Assert.NotNull(currentAuthority);
+        Assert.Equal(expectedAuthorityId, GetPrivatePropertyValue(currentAuthority!, "AuthorityId"));
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_regular_v4_peer_silence_replay_cursor_advanced;", log, StringComparison.Ordinal);
+        Assert.Contains($"install_generation={expectedInstallGeneration}", log, StringComparison.Ordinal);
+        Assert.Contains("dispatch_authority_source=attached_installed_contract", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_recovery_authority_rejected;", log, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("missing", "repair_authority_missing")]
+    [InlineData("missing_relabelled", "repair_authority_missing")]
+    [InlineData("replaced", "repair_contract_replaced")]
+    [InlineData("dual", "repair_dispatch_contract_ambiguous")]
+    [InlineData("range_mutation", "scheduled_repair_range_mismatch")]
+    [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
+    public async Task RegularNknV4PeerSilenceSafetyReplay_InvalidAttachedDispatchContractFailsClosed(
+        string invalidation,
+        string expectedReason)
+    {
+        using var scenario = CreateRotatedPeerSilencePumpScenario(
+            $"transfer_regular_v4_peer_silence_dispatch_{invalidation}");
+        switch (invalidation)
+        {
+            case "missing":
+                SetPrivateProperty(scenario.RotatedRepair, "RegularV4RepairContract", null);
+                break;
+
+            case "missing_relabelled":
+                SetPrivateProperty(scenario.RotatedRepair, "RegularV4RepairContract", null);
+                SetPrivateProperty(scenario.RotatedRepair, "DeliveryEscalationReason", "first_send");
+                break;
+
+            case "replaced":
+                SetPrivateProperty(scenario.Context, "CurrentRegularV4FrontierRepairContract", null);
+                break;
+
+            case "dual":
+                SetPrivateProperty(
+                    scenario.RotatedRepair,
+                    "FallbackFrontierRepairContract",
+                    CreateDiagnosticFallbackFrontierRepairContract(
+                        scenario.Context,
+                        scenario.RotatedContract));
+                break;
+
+            case "range_mutation":
+                var mutatedChunks = Assert.IsType<List<int>>(
+                    GetPrivatePropertyValue(scenario.RotatedRepair, "ChunkIndices"));
+                for (var index = 0; index < mutatedChunks.Count; index++)
+                {
+                    mutatedChunks[index]++;
+                }
+
+                SetPrivateProperty(scenario.RotatedRepair, "FirstStartChunkIndex", 74);
+                SetPrivateProperty(scenario.RotatedRepair, "LastEndChunkExclusive", 138);
+                break;
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(invalidation), invalidation, "Unknown contract invalidation.");
+        }
+
+        await RunRotatedPeerSilencePumpOnceAsync(scenario);
+
+        Assert.Empty(scenario.DataSession.SentFrames);
+        var cursor = GetPrivatePropertyValue(scenario.Context, "OutboundRegularV4PeerSilenceReplayCursor");
+        Assert.NotNull(cursor);
+        Assert.Equal(73, GetPrivateProperty<int>(cursor!, "DispatchProvenEndChunkIndex"));
+        var log = ReadOperationalLogTail(scenario.LogStart);
+        Assert.Contains($"decision_reason={expectedReason}", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_recovery_authority_rejected;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_regular_v4_frontier_repair_dispatched;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_regular_v4_peer_silence_replay_cursor_advanced;", log, StringComparison.Ordinal);
+        if (invalidation.StartsWith("missing", StringComparison.Ordinal))
+        {
+            var lifecycle = GetPrivatePropertyValue(scenario.RotatedContract, "Lifecycle");
+            Assert.NotNull(lifecycle);
+            Assert.True(GetPrivateProperty<bool>(lifecycle!, "IsSettled"));
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairSettlementOutcome.StaleRejected,
+                GetPrivatePropertyValue(lifecycle, "SettlementOutcome"));
+            Assert.Null(GetPrivatePropertyValue(
+                scenario.Context,
+                "InstalledRegularV4FrontierRepairPressureBinding"));
+        }
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
+    public async Task RegularNknV4PeerSilenceSafetyReplay_ContractlessLegacyRepairUsesExistingAuthorizationPath()
+    {
+        using var scenario = CreateRotatedPeerSilencePumpScenario(
+            "transfer_regular_v4_contractless_legacy_repair");
+        var settle = typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Single(method =>
+                method.Name == "TrySettleRegularV4FrontierRepairContract" &&
+                method.GetParameters().Length == 6);
+        Assert.True((bool)settle.Invoke(
+            scenario.Service,
+            [
+                scenario.RotatedContract,
+                FileTransferRegularV4FrontierRepairSettlementOutcome.StaleRejected,
+                GetIntProperty(scenario.RotatedRepair, "RequestedChunkCount"),
+                "unit_test_contractless_legacy_repair",
+                null,
+                false,
+            ])!);
+        SetPrivateProperty(scenario.RotatedRepair, "RegularV4RepairContract", null);
+        SetPrivateProperty(
+            scenario.RotatedRepair,
+            "RepairRequestKey",
+            "test_contractless_legacy_repair:73:64");
+        SetPrivateProperty(scenario.RotatedRepair, "DeliveryEscalationReason", "first_send");
+        SetPrivateProperty(
+            scenario.RotatedRepair,
+            "CoordinatorBackedRegularV4PeerSilenceReplay",
+            false);
+
+        await RunRotatedPeerSilencePumpOnceAsync(scenario);
+
+        Assert.NotEmpty(scenario.DataSession.SentFrames);
+        var log = ReadOperationalLogTail(scenario.LogStart);
+        Assert.DoesNotContain("decision_reason=repair_authority_missing", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v4_repair_sent;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
+    public async Task RegularNknV4PeerSilenceSafetyReplay_ContractReplacementBeforePhysicalReservationSendsNothing()
+    {
+        const string transferId = "transfer_regular_v4_peer_silence_pre_reservation_replacement";
+        using var scenario = CreateRotatedPeerSilencePumpScenario(transferId);
+        var barrierEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseBarrier = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var previousBarrier = SessionFileTransferService.OutboundRegularV4PhysicalSendPreReservationBarrierForTests;
+        SessionFileTransferService.OutboundRegularV4PhysicalSendPreReservationBarrierForTests = async (observedTransferId, _) =>
+        {
+            if (!string.Equals(observedTransferId, transferId, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            barrierEntered.TrySetResult();
+            await releaseBarrier.Task;
+        };
+        try
+        {
+            var pumpTask = RunRotatedPeerSilencePumpOnceAsync(scenario);
+            await barrierEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            lock (GetServiceGate(scenario.Service))
+            {
+                SetPrivateProperty(scenario.Context, "CurrentRegularV4FrontierRepairContract", null);
+            }
+
+            releaseBarrier.TrySetResult();
+            await pumpTask.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            releaseBarrier.TrySetResult();
+            SessionFileTransferService.OutboundRegularV4PhysicalSendPreReservationBarrierForTests = previousBarrier;
+        }
+
+        Assert.Empty(scenario.DataSession.SentFrames);
+        var cursor = GetPrivatePropertyValue(scenario.Context, "OutboundRegularV4PeerSilenceReplayCursor");
+        Assert.NotNull(cursor);
+        Assert.Equal(73, GetPrivateProperty<int>(cursor!, "DispatchProvenEndChunkIndex"));
+        Assert.False(GetPrivateProperty<bool>(
+            GetPrivatePropertyValue(scenario.RotatedContract, "Lifecycle")!,
+            "DispatchObserved"));
+        var log = ReadOperationalLogTail(scenario.LogStart);
+        Assert.Contains("stage=physical_submission", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_regular_v4_frontier_repair_dispatched;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_regular_v4_peer_silence_replay_cursor_advanced;", log, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("authority")]
+    [InlineData("pump")]
+    [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
+    public async Task RegularNknV4PeerSilenceSafetyReplay_CompletionReplacementCannotMutateProgress(
+        string replacement)
+    {
+        var transferId = $"transfer_regular_v4_peer_silence_completion_{replacement}";
+        using var scenario = CreateRotatedPeerSilencePumpScenario(transferId);
+        var barrierEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseBarrier = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var previousBarrier = SessionFileTransferService.OutboundSparseSendCompletionBarrierForTests;
+        SessionFileTransferService.OutboundSparseSendCompletionBarrierForTests = async (observedTransferId, _) =>
+        {
+            if (!string.Equals(observedTransferId, transferId, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            barrierEntered.TrySetResult();
+            await releaseBarrier.Task;
+        };
+        try
+        {
+            var pumpTask = RunRotatedPeerSilencePumpOnceAsync(scenario);
+            await barrierEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.NotEmpty(scenario.DataSession.SentFrames);
+            lock (GetServiceGate(scenario.Service))
+            {
+                if (string.Equals(replacement, "authority", StringComparison.Ordinal))
+                {
+                    SetPrivateProperty(scenario.Context, "CurrentRegularV4FrontierRepairContract", null);
+                }
+                else
+                {
+                    var successorStage = StageSparsePumpInstall(
+                        scenario.Service,
+                        scenario.Context,
+                        scenario.PumpInstall,
+                        "unit_test_physical_completion_pump_replacement");
+                    Assert.True(successorStage.Accepted, successorStage.Reason);
+                    Assert.NotNull(successorStage.Install);
+                    var successorCommit = CommitSparsePumpInstall(
+                        scenario.Service,
+                        scenario.Context,
+                        successorStage.Install!,
+                        scenario.DataSession);
+                    Assert.True(successorCommit.Accepted, successorCommit.Reason);
+                }
+            }
+
+            releaseBarrier.TrySetResult();
+            await pumpTask.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            releaseBarrier.TrySetResult();
+            SessionFileTransferService.OutboundSparseSendCompletionBarrierForTests = previousBarrier;
+        }
+
+        var sentAwaitingAck = Assert.IsAssignableFrom<System.Collections.IDictionary>(
+            GetPrivatePropertyValue(scenario.Context, "SentAwaitingAck"));
+        Assert.Empty(sentAwaitingAck.Keys.Cast<object>());
+        Assert.Equal(0L, GetPrivateProperty<long>(scenario.Context, "PullSenderRepairRawBytesTotal"));
+        Assert.Equal(0, GetPrivateProperty<int>(scenario.Context, "PullSenderPipelineCurrentInFlightFrames"));
+        Assert.Equal(0L, GetPrivateProperty<long>(scenario.Context, "PullSenderPipelineCurrentInFlightBytes"));
+        Assert.False(GetPrivateProperty<bool>(
+            GetPrivatePropertyValue(scenario.RotatedContract, "Lifecycle")!,
+            "DispatchObserved"));
+        var cursor = GetPrivatePropertyValue(scenario.Context, "OutboundRegularV4PeerSilenceReplayCursor");
+        Assert.NotNull(cursor);
+        Assert.Equal(73, GetPrivateProperty<int>(cursor!, "DispatchProvenEndChunkIndex"));
+        var log = ReadOperationalLogTail(scenario.LogStart);
+        if (string.Equals(replacement, "authority", StringComparison.Ordinal))
+        {
+            Assert.Contains("stage=physical_completion", log, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_outbound_sparse_worker_handoff_rejected;", log, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Contains("event=filetransfer_outbound_sparse_worker_handoff_rejected;", log, StringComparison.Ordinal);
+            Assert.Contains("stage=send_completion", log, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_regular_v4_repair_transport_callback_rejected;", log, StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotContain("event=filetransfer_regular_v4_frontier_repair_dispatched;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_regular_v4_peer_silence_replay_cursor_advanced;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
+    public async Task RegularNknV4PeerSilenceSafetyReplay_ActivationPauseBlocksUntilReleasedAndDuplicatePumpIsIdempotent()
+    {
+        using var scenario = CreateRotatedPeerSilencePumpScenario(
+            "transfer_regular_v4_peer_silence_activation_pause_release");
+        SetPrivateProperty(scenario.Context, "PullTransportPaused", true);
+        SetPrivateProperty(scenario.Context, "PullTransportPauseReason", "tuna_activation_negotiating");
+
+        await RunRotatedPeerSilencePumpOnceAsync(scenario);
+
+        Assert.Empty(scenario.DataSession.SentFrames);
+        Assert.Single(GetQueuedV4RepairSends(scenario.Context));
+        Assert.False(GetPrivateProperty<bool>(
+            GetPrivatePropertyValue(scenario.RotatedContract, "Lifecycle")!,
+            "DispatchObserved"));
+
+        SetPrivateProperty(scenario.Context, "PullTransportPaused", false);
+        SetPrivateProperty(scenario.Context, "PullTransportPauseReason", null);
+        await RunRotatedPeerSilencePumpOnceAsync(scenario);
+
+        var sentFrameCount = scenario.DataSession.SentFrames.Count;
+        Assert.True(sentFrameCount > 0);
+        var cursor = GetPrivatePropertyValue(scenario.Context, "OutboundRegularV4PeerSilenceReplayCursor");
+        Assert.NotNull(cursor);
+        Assert.Equal(137, GetPrivateProperty<int>(cursor!, "DispatchProvenEndChunkIndex"));
+        var cursorGeneration = GetPrivateProperty<int>(cursor, "CursorGeneration");
+
+        await RunRotatedPeerSilencePumpOnceAsync(scenario);
+
+        Assert.Equal(sentFrameCount, scenario.DataSession.SentFrames.Count);
+        cursor = GetPrivatePropertyValue(scenario.Context, "OutboundRegularV4PeerSilenceReplayCursor");
+        Assert.NotNull(cursor);
+        Assert.Equal(cursorGeneration, GetPrivateProperty<int>(cursor!, "CursorGeneration"));
     }
 
     [Fact]
@@ -3710,6 +4068,211 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             () => GetPrivateProperty<bool>(senderContext, "PairedFallbackTailYieldGranted") &&
                   GetPrivateProperty<bool>(receiverContext, "PairedFallbackTailYieldGranted"),
             timeoutMs: 5000);
+    }
+
+    private static RotatedPeerSilencePumpScenario CreateRotatedPeerSilencePumpScenario(string transferId)
+    {
+        var service = new SessionFileTransferService();
+        var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 9,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        SetPrivateProperty(context, "PullSourceCanSeek", true);
+        SetPrivateProperty(context, "PullV4LastPeerFrameReceivedUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        var dataSession = Assert.IsType<RecordingDataSession>(GetPrivatePropertyValue(context, "DataSession"));
+        object pumpInstall;
+        lock (GetServiceGate(service))
+        {
+            var stagedInstall = StageSparsePumpInstall(
+                service,
+                context,
+                predecessor: null,
+                "unit_test_peer_silence_invalid_contract");
+            Assert.True(stagedInstall.Accepted, stagedInstall.Reason);
+            Assert.NotNull(stagedInstall.Install);
+            var committedInstall = CommitSparsePumpInstall(
+                service,
+                context,
+                stagedInstall.Install!,
+                dataSession);
+            Assert.True(committedInstall.Accepted, committedInstall.Reason);
+            Assert.NotNull(committedInstall.Install);
+            pumpInstall = committedInstall.Install!;
+        }
+
+        var schedule = typeof(SessionFileTransferService)
+            .GetMethod("MaybeQueueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        Assert.True((bool)schedule.Invoke(service, [context, "unit_test_initial_replay"])!);
+        var initial = Assert.Single(GetQueuedV4RepairSends(context));
+        var initialContract = GetPrivatePropertyValue(initial, "RegularV4RepairContract");
+        Assert.NotNull(initialContract);
+        Assert.True((bool)typeof(SessionFileTransferService)
+            .GetMethod("TryMarkRegularV4FrontierRepairDispatched", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [initialContract])!);
+        Assert.True((bool)typeof(SessionFileTransferService)
+            .GetMethod("TryAdvanceOutboundRegularV4PeerSilenceReplayCursorLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, initial, initialContract])!);
+        Assert.True((bool)typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Single(method =>
+                method.Name == "TrySettleRegularV4FrontierRepairContract" &&
+                method.GetParameters().Length == 6)
+            .Invoke(
+                service,
+                [
+                    initialContract,
+                    FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved,
+                    64,
+                    "unit_test_dispatch_observed",
+                    null,
+                    false,
+                ])!);
+        var repairQueue = context.GetType()
+            .GetProperty("PullV4SenderPumpRepairQueue", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!
+            .GetValue(context)!;
+        repairQueue.GetType().GetMethod("Dequeue")!.Invoke(repairQueue, null);
+        var queuedChunkIndices = context.GetType()
+            .GetProperty("PullV4SenderPumpRepairQueuedChunkIndices", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!
+            .GetValue(context)!;
+        queuedChunkIndices.GetType().GetMethod("Clear")!.Invoke(queuedChunkIndices, null);
+        SetPrivateProperty(
+            context,
+            "PullRegularNknV4LastPeerSilenceSafetyReplayUtc",
+            DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        Assert.True((bool)schedule.Invoke(service, [context, "unit_test_rotated_replay"])!);
+        var rotatedRepair = Assert.Single(GetQueuedV4RepairSends(context));
+        Assert.Equal(73, GetIntProperty(rotatedRepair, "FirstStartChunkIndex"));
+        Assert.Equal(137, GetIntProperty(rotatedRepair, "LastEndChunkExclusive"));
+        var rotatedContract = GetPrivatePropertyValue(rotatedRepair, "RegularV4RepairContract");
+        Assert.NotNull(rotatedContract);
+        return new RotatedPeerSilencePumpScenario(
+            service,
+            transport,
+            context,
+            dataSession,
+            pumpInstall,
+            rotatedRepair,
+            rotatedContract!,
+            GetOperationalLogLength());
+    }
+
+    private static async Task RunRotatedPeerSilencePumpOnceAsync(RotatedPeerSilencePumpScenario scenario)
+    {
+        var pumpLoopCount = 0;
+        var previousCompletion = SessionFileTransferService.OutboundSparseSenderPumpNormalCompletionForTests;
+        SessionFileTransferService.OutboundSparseSenderPumpNormalCompletionForTests = (observedTransferId, _) =>
+            string.Equals(
+                observedTransferId,
+                GetPrivateProperty<string>(scenario.Context, "TransferId"),
+                StringComparison.Ordinal) &&
+            Interlocked.Increment(ref pumpLoopCount) > 1;
+        try
+        {
+            using var source = new MemoryStream(new byte[512 * 21 * 1024], writable: false);
+            var pumpTask = Assert.IsAssignableFrom<Task>(typeof(SessionFileTransferService)
+                .GetMethod("RunOutboundV4SenderPumpAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(
+                    scenario.Service,
+                    [scenario.Context, source, scenario.DataSession, CancellationToken.None, scenario.PumpInstall]));
+            await pumpTask.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            SessionFileTransferService.OutboundSparseSenderPumpNormalCompletionForTests = previousCompletion;
+        }
+    }
+
+    private static object CreateDiagnosticFallbackFrontierRepairContract(
+        object context,
+        object regularContract)
+    {
+        var regularAuthority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(
+            GetPrivatePropertyValue(regularContract, "Authority"));
+        var runtimeOwner = Assert.IsType<RuntimeOwnerToken>(
+            GetPrivatePropertyValue(context, "CurrentRuntimeOwner"));
+        var fallbackAuthorityId = new FileTransferAuthorityId(
+            $"fta{FileTransferAuthoritySchema.Current}-fallback_frontier_repair-000000000000000000000001");
+        var fallbackAuthority = new FallbackFrontierRepairAuthority(
+            regularAuthority.SessionId,
+            regularAuthority.TransferId,
+            regularAuthority.Direction,
+            runtimeOwner,
+            FileTransferRoute.RegularNknV4Fast,
+            regularAuthority.RouteToken,
+            regularAuthority.ProtocolVersion,
+            regularAuthority.LiveRouteEpoch,
+            regularAuthority.RuntimeGeneration,
+            regularAuthority.TerminalGeneration,
+            (int)regularAuthority.LegGeneration,
+            regularAuthority.TransportEpoch,
+            regularAuthority.BridgeRecoveryGeneration,
+            regularAuthority.BridgeDecisionGeneration,
+            regularAuthority.RoutePublicationGeneration,
+            regularAuthority.RouteCommitGeneration,
+            "(none)",
+            "diagnostic_dual_contract",
+            "diagnostic_dual_contract_range",
+            regularAuthority.FrontierChunkIndex,
+            regularAuthority.DurableReceivedHighestChunkIndex,
+            RangeCount: 1,
+            regularAuthority.PendingRepairCount,
+            FallbackFrontierRepairSourceKind.PeerRequest,
+            "diagnostic_dual_contract",
+            "diagnostic_dual_contract",
+            "repair",
+            "diagnostic",
+            regularAuthority.DecisionGeneration,
+            "unit_test_dual_contract",
+            regularAuthority.TargetTransport,
+            fallbackAuthorityId,
+            PredecessorAuthorityId: null);
+        var identity = typeof(SessionFileTransferService)
+            .GetMethod("CreateFallbackFrontierRepairIdentity", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(
+                null,
+                [
+                    new List<FileTransferRangeV4>
+                    {
+                        new()
+                        {
+                            StartChunkIndex = 73,
+                            ChunkCount = regularAuthority.PendingRepairCount,
+                        },
+                    },
+                    512,
+                    regularAuthority.DurableReceivedHighestChunkIndex,
+                ]);
+        Assert.NotNull(identity);
+        return typeof(SessionFileTransferService)
+            .GetMethod("CreateFallbackFrontierRepairContract", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(
+                null,
+                [identity, GetPrivatePropertyValue(regularContract, "RepairDecision"), fallbackAuthority])!;
+    }
+
+    private sealed record RotatedPeerSilencePumpScenario(
+        SessionFileTransferService Service,
+        LoopbackFileTransferTransport Transport,
+        object Context,
+        RecordingDataSession DataSession,
+        object PumpInstall,
+        object RotatedRepair,
+        object RotatedContract,
+        int LogStart) : IDisposable
+    {
+        public void Dispose()
+        {
+            Service.Dispose();
+            Transport.Dispose();
+            DataSession.Dispose();
+        }
     }
 
     private static object CreateRegularNknV4OutboundContext(
@@ -12385,6 +12948,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                     FileTransferV4RepairDeliveryMode.BulkOnly,
                     "first_send",
                     forwardedContract,
+                    null,
+                    null,
                     null,
                     null,
                     CancellationToken.None,
@@ -22603,6 +23168,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                     null,
                     FileTransferV4RepairDeliveryMode.BulkOnly,
                     "test_repair_obsolete_frontier",
+                    null,
+                    null,
                     null,
                     null,
                     null,

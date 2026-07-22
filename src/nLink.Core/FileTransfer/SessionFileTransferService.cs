@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Collections;
+using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -10022,12 +10023,16 @@ public sealed partial class SessionFileTransferService : IDisposable
         string stage,
         int rangeCount,
         int requestedChunkCount,
-        int scheduledChunkCount)
+        int scheduledChunkCount,
+        long installGeneration = 0,
+        int scheduledStartChunkIndex = -1,
+        int scheduledEndChunkExclusive = -1,
+        string dispatchAuthoritySource = "coordinator_issued_contract")
     {
         var eventName = FormatV4FrontierRepairProofEventName(authority.RouteToken, "authority_granted");
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event={eventName}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; source={FormatProtocolLogValue(source)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(authority.RepairKey)}; route={FormatProtocolLogValue(authority.RouteToken)}; protocol_version={authority.ProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.LegGeneration}; transport_epoch={authority.TransportEpoch}; bridge_recovery_generation={authority.BridgeRecoveryGeneration}; bridge_decision_generation={authority.BridgeDecisionGeneration}; route_publication_generation={authority.RoutePublicationGeneration}; route_commit_generation={authority.RouteCommitGeneration ?? 0}; target_transport={FormatFileTransferTransportKind(authority.TargetTransport)}; frontier_chunk_index={authority.FrontierChunkIndex}; durable_received_highest_chunk_index={authority.DurableReceivedHighestChunkIndex}; pending_repair_count={authority.PendingRepairCount}; decision_generation={authority.DecisionGeneration}; range_count={rangeCount}; requested_chunk_count={requestedChunkCount}; scheduled_chunk_count={scheduledChunkCount}; decision_reason={FormatProtocolLogValue(authority.DecisionReason)}");
+            $"event={eventName}; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(authority.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(authority.PredecessorAuthorityId?.ToString() ?? "(none)")}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; source={FormatProtocolLogValue(source)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(authority.RepairKey)}; route={FormatProtocolLogValue(authority.RouteToken)}; protocol_version={authority.ProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.LegGeneration}; transport_epoch={authority.TransportEpoch}; bridge_recovery_generation={authority.BridgeRecoveryGeneration}; bridge_decision_generation={authority.BridgeDecisionGeneration}; route_publication_generation={authority.RoutePublicationGeneration}; route_commit_generation={authority.RouteCommitGeneration ?? 0}; target_transport={FormatFileTransferTransportKind(authority.TargetTransport)}; frontier_chunk_index={authority.FrontierChunkIndex}; durable_received_highest_chunk_index={authority.DurableReceivedHighestChunkIndex}; pending_repair_count={authority.PendingRepairCount}; decision_generation={authority.DecisionGeneration}; install_generation={installGeneration}; range_count={rangeCount}; requested_chunk_count={requestedChunkCount}; scheduled_chunk_count={scheduledChunkCount}; scheduled_start_chunk_index={scheduledStartChunkIndex}; scheduled_end_chunk_exclusive={scheduledEndChunkExclusive}; dispatch_authority_source={FormatProtocolLogValue(dispatchAuthoritySource)}; decision_reason={FormatProtocolLogValue(authority.DecisionReason)}");
     }
 
     private static void LogFileTransferRegularV4FrontierRepairAuthorityRejected(
@@ -10041,13 +10046,18 @@ public sealed partial class SessionFileTransferService : IDisposable
         string rejectionReason,
         int frontierChunkIndex,
         int durableReceivedHighestChunkIndex,
-        int pendingRepairCount)
+        int pendingRepairCount,
+        FileTransferRegularV4FrontierRepairAuthority? authority = null,
+        long installGeneration = 0,
+        int scheduledStartChunkIndex = -1,
+        int scheduledEndChunkExclusive = -1,
+        string dispatchAuthoritySource = "(none)")
     {
         var routeToken = leg?.RouteSelection.TelemetryToken ?? "(none)";
         var eventName = FormatV4FrontierRepairProofEventName(routeToken, "authority_rejected");
         LocalOperationalLog.Warn(
             "FileTransferService",
-            $"event={eventName}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; source={FormatProtocolLogValue(source)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; route={FormatProtocolLogValue(routeToken)}; protocol_version={leg?.ProtocolVersion ?? 0}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; leg_generation={leg?.Generation ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; target_transport={FormatFileTransferTransportKind(ResolveV4FrontierRepairTargetTransport(routeToken))}; frontier_chunk_index={frontierChunkIndex}; durable_received_highest_chunk_index={durableReceivedHighestChunkIndex}; pending_repair_count={pendingRepairCount}; rejection_reason={FormatProtocolLogValue(rejectionReason)}; decision_reason={FormatProtocolLogValue(rejectionReason)}");
+            $"event={eventName}; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(authority?.AuthorityId.ToString() ?? "(none)")}; predecessor_authority_id={FormatProtocolLogValue(authority?.PredecessorAuthorityId?.ToString() ?? "(none)")}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; source={FormatProtocolLogValue(source)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; route={FormatProtocolLogValue(routeToken)}; protocol_version={leg?.ProtocolVersion ?? 0}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; leg_generation={leg?.Generation ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; target_transport={FormatFileTransferTransportKind(ResolveV4FrontierRepairTargetTransport(routeToken))}; frontier_chunk_index={frontierChunkIndex}; durable_received_highest_chunk_index={durableReceivedHighestChunkIndex}; pending_repair_count={pendingRepairCount}; install_generation={installGeneration}; scheduled_start_chunk_index={scheduledStartChunkIndex}; scheduled_end_chunk_exclusive={scheduledEndChunkExclusive}; dispatch_authority_source={FormatProtocolLogValue(dispatchAuthoritySource)}; rejection_reason={FormatProtocolLogValue(rejectionReason)}; decision_reason={FormatProtocolLogValue(rejectionReason)}");
     }
 
     private static void LogFileTransferRegularV4FrontierRepairDispatched(
@@ -10059,12 +10069,16 @@ public sealed partial class SessionFileTransferService : IDisposable
         string stage,
         int sentChunkCount,
         int remoteNextExpectedChunkIndex,
-        int chunksAcceptedForTransport)
+        int chunksAcceptedForTransport,
+        long installGeneration = 0,
+        int scheduledStartChunkIndex = -1,
+        int scheduledEndChunkExclusive = -1,
+        string dispatchAuthoritySource = "attached_installed_contract")
     {
         var eventName = FormatV4FrontierRepairProofEventName(authority.RouteToken, "dispatched");
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event={eventName}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(authority.RepairKey)}; protocol_repair_request_id={FormatProtocolLogValue(protocolRepairRequestId)}; route={FormatProtocolLogValue(authority.RouteToken)}; protocol_version={authority.ProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.LegGeneration}; transport_epoch={authority.TransportEpoch}; bridge_recovery_generation={authority.BridgeRecoveryGeneration}; bridge_decision_generation={authority.BridgeDecisionGeneration}; route_publication_generation={authority.RoutePublicationGeneration}; route_commit_generation={authority.RouteCommitGeneration ?? 0}; target_transport={FormatFileTransferTransportKind(authority.TargetTransport)}; decision_generation={authority.DecisionGeneration}; sent_chunk_count={sentChunkCount}; remote_next_expected_chunk_index={remoteNextExpectedChunkIndex}; chunks_accepted_for_transport={chunksAcceptedForTransport}");
+            $"event={eventName}; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(authority.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(authority.PredecessorAuthorityId?.ToString() ?? "(none)")}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(authority.RepairKey)}; protocol_repair_request_id={FormatProtocolLogValue(protocolRepairRequestId)}; route={FormatProtocolLogValue(authority.RouteToken)}; protocol_version={authority.ProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.LegGeneration}; transport_epoch={authority.TransportEpoch}; bridge_recovery_generation={authority.BridgeRecoveryGeneration}; bridge_decision_generation={authority.BridgeDecisionGeneration}; route_publication_generation={authority.RoutePublicationGeneration}; route_commit_generation={authority.RouteCommitGeneration ?? 0}; target_transport={FormatFileTransferTransportKind(authority.TargetTransport)}; decision_generation={authority.DecisionGeneration}; install_generation={installGeneration}; scheduled_start_chunk_index={scheduledStartChunkIndex}; scheduled_end_chunk_exclusive={scheduledEndChunkExclusive}; dispatch_authority_source={FormatProtocolLogValue(dispatchAuthoritySource)}; sent_chunk_count={sentChunkCount}; remote_next_expected_chunk_index={remoteNextExpectedChunkIndex}; chunks_accepted_for_transport={chunksAcceptedForTransport}");
     }
 
     private static void LogFileTransferRegularV4FrontierRepairSuccessorAuthorized(
@@ -22196,7 +22210,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         RuntimeOwnerToken? RuntimeOwner = null,
         RegularV4FrontierRepairContract? RegularV4RepairContract = null,
         FallbackFrontierRepairContract? FallbackFrontierRepairContract = null,
-        bool PeerSilenceReplayWrappedToFrontier = false);
+        bool PeerSilenceReplayWrappedToFrontier = false,
+        bool CoordinatorBackedRegularV4PeerSilenceReplay = false);
 
     private sealed class RegularV4FrontierRepairContract
     {
@@ -22223,7 +22238,16 @@ public sealed partial class SessionFileTransferService : IDisposable
         public FileTransferRegularV4FrontierRepairPressureInstallReceipt? PressureInstallReceipt { get; set; }
 
         public RegularV4FrontierRepairPressureBinding? PressureBinding { get; set; }
+
+        public RegularV4FrontierRepairScheduledDispatch? ScheduledDispatch { get; set; }
     }
+
+    private sealed record RegularV4FrontierRepairScheduledDispatch(
+        string RepairKey,
+        RepairReplayKind RepairReplayKind,
+        int StartChunkIndex,
+        int EndChunkExclusive,
+        ImmutableArray<int> ChunkIndices);
 
     private enum InboundRegularV4FrontierRepairProjectionKind
     {
