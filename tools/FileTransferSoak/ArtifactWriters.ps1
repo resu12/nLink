@@ -9152,6 +9152,11 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count={0}" -f $RecoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRecoveredCount)) | Out-Null
     $lines.Add(("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_unresolved_count={0}" -f $RecoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedUnresolvedCount)) | Out-Null
     $lines.Add(("regular_v4_peer_silence_replay_missing_dispatch_range_preservation_verdict={0}" -f $RecoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangePreservationVerdict)) | Out-Null
+    $lines.Add(("regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_raw_count={0}" -f $RecoveryClassification.RegularV4PeerSilenceReplayInstalledAuthorityNotCarriedToDispatchRawCount)) | Out-Null
+    $lines.Add(("regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_distinct_count={0}" -f $RecoveryClassification.RegularV4PeerSilenceReplayInstalledAuthorityNotCarriedToDispatchDistinctCount)) | Out-Null
+    $lines.Add(("regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_recovered_count={0}" -f $RecoveryClassification.RegularV4PeerSilenceReplayInstalledAuthorityNotCarriedToDispatchRecoveredCount)) | Out-Null
+    $lines.Add(("regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_unresolved_count={0}" -f $RecoveryClassification.RegularV4PeerSilenceReplayInstalledAuthorityNotCarriedToDispatchUnresolvedCount)) | Out-Null
+    $lines.Add(("regular_v4_peer_silence_replay_installed_authority_dispatch_verdict={0}" -f $RecoveryClassification.RegularV4PeerSilenceReplayInstalledAuthorityDispatchVerdict)) | Out-Null
     $lines.Add(("regular_v4_frontier_repair_successor_pressure_install_missing_raw_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingRawCount)) | Out-Null
     $lines.Add(("regular_v4_frontier_repair_successor_pressure_install_missing_distinct_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingDistinctCount)) | Out-Null
     $lines.Add(("regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount)) | Out-Null
@@ -10964,6 +10969,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRecoveredCount),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_unresolved_count={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedUnresolvedCount),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_preservation_verdict={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangePreservationVerdict),
+        ("regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_raw_count={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayInstalledAuthorityNotCarriedToDispatchRawCount),
+        ("regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_distinct_count={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayInstalledAuthorityNotCarriedToDispatchDistinctCount),
+        ("regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_recovered_count={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayInstalledAuthorityNotCarriedToDispatchRecoveredCount),
+        ("regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_unresolved_count={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayInstalledAuthorityNotCarriedToDispatchUnresolvedCount),
+        ("regular_v4_peer_silence_replay_installed_authority_dispatch_verdict={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayInstalledAuthorityDispatchVerdict),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_raw_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingRawCount),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_distinct_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingDistinctCount),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount),
@@ -20956,6 +20966,461 @@ function Test-FileTransferRegularV4FrontierRepairLifecycleMatch {
     return $true
 }
 
+function Get-FileTransferRegularV4PeerSilenceReplayInstalledAuthorityDispatchProof {
+    param([AllowEmptyCollection()][object[]]$Events = @())
+
+    [object[]]$orderedEvents = @($Events | Where-Object { $null -ne $_ } | Sort-Object Sequence, LineNumber)
+    [object[]]$rejections = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_recovery_authority_rejected' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'action_kind' -Default '') -eq 'RepairReplay' -and
+        (Get-FileTransferEventField -Event $_ -Name 'source' -Default '') -eq 'v4_repair_send' -and
+        (Get-FileTransferEventField -Event $_ -Name 'attempted_action' -Default '') -eq 'regular_v4_peer_silence_safety_replay' -and
+        (Get-FileTransferEventField -Event $_ -Name 'repair_replay_kind' -Default '') -eq 'PeerSilenceReplay'
+    })
+    [object[]]$stagedBindings = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_pressure_binding_staged' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'pressure_reason' -Default '') -eq 'regular_v4_peer_silence_safety_replay'
+    })
+    [object[]]$committedBindings = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_pressure_binding_committed'
+    })
+    [object[]]$authorityGrants = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_authority_granted' -and
+        (Get-FileTransferEventField -Event $_ -Name 'source' -Default '') -eq 'regular_v4_peer_silence_safety_replay'
+    })
+    [object[]]$cursorRetainedEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_peer_silence_replay_cursor_retained'
+    })
+    [object[]]$replayStartedEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_peer_silence_safety_replay_started'
+    })
+    [object[]]$dispatchEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_dispatched'
+    })
+    [object[]]$cursorAdvancedEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_peer_silence_replay_cursor_advanced'
+    })
+    [object[]]$bindingEndEvents = @($orderedEvents | Where-Object {
+        $_.EventName -in @(
+            'filetransfer_regular_v4_frontier_repair_pressure_binding_retired',
+            'filetransfer_regular_v4_frontier_repair_pressure_binding_invalidated',
+            'filetransfer_regular_v4_frontier_repair_contract_settled')
+    })
+    [object[]]$scopeBoundaryEvents = @($orderedEvents | Where-Object {
+        $_.EventName -in @(
+            'transfer_terminal',
+            'file_transfer_inbound_terminal',
+            'file_transfer_outbound_terminal',
+            'filetransfer_runtime_terminalized',
+            'filetransfer_manifest_received',
+            'filetransfer_manifest_replaced',
+            'filetransfer_session_replaced',
+            'filetransfer_data_session_recreated',
+            'filetransfer_route_selected',
+            'filetransfer_route_transitioned',
+            'filetransfer_live_route_epoch_started',
+            'filetransfer_runtime_started',
+            'filetransfer_runtime_owner_changed')
+    })
+
+    function Test-PeerSilenceDispatchWriterTransferMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Anchor,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        foreach ($field in @('log_writer_id', 'session_id', 'transfer_id')) {
+            $left = Get-FileTransferEventField -Event $Anchor -Name $field -Default ''
+            $right = Get-FileTransferEventField -Event $Candidate -Name $field -Default ''
+            if ([string]::IsNullOrWhiteSpace($left) -or
+                [string]::IsNullOrWhiteSpace($right) -or
+                -not [string]::Equals($left, $right, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    function Test-PeerSilenceDispatchRejectionScopeMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Binding,
+            [Parameter(Mandatory = $true)]$Rejection
+        )
+
+        if (-not (Test-FileTransferRegularV4RepairProjectionTransferMatch -Anchor $Binding -Candidate $Rejection) -or
+            (Get-FileTransferEventField -Event $Rejection -Name 'direction' -Default '') -ne
+                (Get-FileTransferEventField -Event $Binding -Name 'direction' -Default '')) {
+            return $false
+        }
+
+        foreach ($aliases in @(
+                [pscustomobject]@{ Binding = 'route'; Rejection = @('attempted_route', 'current_route') },
+                [pscustomobject]@{ Binding = 'protocol_version'; Rejection = @('attempted_protocol_version', 'current_protocol_version') },
+                [pscustomobject]@{ Binding = 'live_route_epoch'; Rejection = @('attempted_live_route_epoch', 'current_live_route_epoch') },
+                [pscustomobject]@{ Binding = 'runtime_generation'; Rejection = @('attempted_runtime_generation', 'current_runtime_generation') },
+                [pscustomobject]@{ Binding = 'terminal_generation'; Rejection = @('attempted_terminal_generation', 'current_terminal_generation') },
+                [pscustomobject]@{ Binding = 'leg_generation'; Rejection = @('attempted_leg_generation') },
+                [pscustomobject]@{ Binding = 'transport_epoch'; Rejection = @('attempted_transport_epoch') },
+                [pscustomobject]@{ Binding = 'bridge_recovery_generation'; Rejection = @('attempted_bridge_recovery_generation') })) {
+            $bindingValue = Get-FileTransferEventField -Event $Binding -Name $aliases.Binding -Default ''
+            if ([string]::IsNullOrWhiteSpace($bindingValue)) {
+                continue
+            }
+            $matched = $false
+            foreach ($name in $aliases.Rejection) {
+                $rejectionValue = Get-FileTransferEventField -Event $Rejection -Name $name -Default ''
+                if (-not [string]::IsNullOrWhiteSpace($rejectionValue)) {
+                    if (-not [string]::Equals($bindingValue, $rejectionValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                        return $false
+                    }
+                    $matched = $true
+                    break
+                }
+            }
+            if (-not $matched) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    function Test-PeerSilenceDispatchAuthorityMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Binding,
+            [Parameter(Mandatory = $true)]$Candidate,
+            [bool]$AllowLegacyIdentity = $false
+        )
+
+        if (-not (Test-FileTransferRegularV4PeerSilenceReplayScopeMatch -Anchor $Binding -Candidate $Candidate)) {
+            return $false
+        }
+        $bindingAuthority = Get-FileTransferRegularV4FrontierRepairIdentityField -Event $Binding -Names @('authority_id')
+        $bindingInstallGeneration = Get-FileTransferEventInt64Field -Event $Binding -Name 'install_generation' -Default 0
+        $candidateAuthority = Get-FileTransferRegularV4FrontierRepairIdentityField `
+            -Event $Candidate `
+            -Names @('authority_id', 'repair_authority_id', 'frontier_repair_authority_id')
+        $candidateInstallGeneration = Get-FileTransferEventInt64Field -Event $Candidate -Name 'install_generation' -Default 0
+        if ($bindingInstallGeneration -le 0) {
+            return $false
+        }
+        if (-not [string]::IsNullOrWhiteSpace($candidateAuthority) -and $candidateInstallGeneration -gt 0) {
+            if (-not [string]::Equals($bindingAuthority, $candidateAuthority, [System.StringComparison]::OrdinalIgnoreCase) -or
+                $bindingInstallGeneration -ne $candidateInstallGeneration) {
+                return $false
+            }
+        }
+        elseif (-not $AllowLegacyIdentity) {
+            return $false
+        }
+        elseif ((-not [string]::IsNullOrWhiteSpace($candidateAuthority) -and
+                -not [string]::Equals($bindingAuthority, $candidateAuthority, [System.StringComparison]::OrdinalIgnoreCase)) -or
+            ($candidateInstallGeneration -gt 0 -and $bindingInstallGeneration -ne $candidateInstallGeneration)) {
+            return $false
+        }
+
+        $bindingRepairKey = Get-FileTransferRegularV4FrontierRepairIdentityField -Event $Binding -Names @('repair_request_key')
+        $candidateRepairKey = Get-FileTransferRegularV4FrontierRepairIdentityField -Event $Candidate -Names @('repair_request_key')
+        return -not [string]::IsNullOrWhiteSpace($bindingRepairKey) -and
+            -not [string]::IsNullOrWhiteSpace($candidateRepairKey) -and
+            [string]::Equals($bindingRepairKey, $candidateRepairKey, [System.StringComparison]::Ordinal)
+    }
+
+    function Test-PeerSilenceDispatchSameBindingScope {
+        param(
+            [Parameter(Mandatory = $true)]$Binding,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        if (-not (Test-FileTransferRegularV4PeerSilenceReplayScopeMatch -Anchor $Binding -Candidate $Candidate)) {
+            return $false
+        }
+        $bindingDirection = Get-FileTransferEventField -Event $Binding -Name 'direction' -Default ''
+        $candidateDirection = Get-FileTransferEventField -Event $Candidate -Name 'direction' -Default ''
+        return -not [string]::IsNullOrWhiteSpace($bindingDirection) -and
+            -not [string]::IsNullOrWhiteSpace($candidateDirection) -and
+            [string]::Equals($bindingDirection, $candidateDirection, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+
+    function Get-PeerSilenceDispatchBoundarySequence {
+        param(
+            [Parameter(Mandatory = $true)]$Record,
+            [int64]$AfterSequence
+        )
+
+        [int64]$boundarySequence = [int64]::MaxValue
+        foreach ($event in $bindingEndEvents) {
+            if ([int64]$event.Sequence -le $AfterSequence -or
+                -not (Test-FileTransferRegularV4RepairProjectionTransferMatch -Anchor $Record.Binding -Candidate $event)) {
+                continue
+            }
+            $eventAuthority = Get-FileTransferRegularV4FrontierRepairIdentityField -Event $event -Names @('authority_id')
+            $eventInstallGeneration = Get-FileTransferEventInt64Field -Event $event -Name 'install_generation' -Default 0
+            $eventRepairKey = Get-FileTransferRegularV4FrontierRepairIdentityField -Event $event -Names @('repair_request_key')
+            if ((-not [string]::IsNullOrWhiteSpace($eventAuthority) -and
+                    [string]::Equals($eventAuthority, $Record.Authority, [System.StringComparison]::OrdinalIgnoreCase)) -or
+                ($eventInstallGeneration -gt 0 -and $eventInstallGeneration -eq [int64]$Record.InstallGeneration) -or
+                (-not [string]::IsNullOrWhiteSpace($eventRepairKey) -and
+                    [string]::Equals($eventRepairKey, $Record.Range.RepairKey, [System.StringComparison]::Ordinal))) {
+                $boundarySequence = [Math]::Min($boundarySequence, [int64]$event.Sequence)
+            }
+        }
+        foreach ($event in $committedBindings) {
+            if ([int64]$event.Sequence -le $AfterSequence -or
+                -not (Test-PeerSilenceDispatchSameBindingScope -Binding $Record.Binding -Candidate $event)) {
+                continue
+            }
+            $eventAuthority = Get-FileTransferRegularV4FrontierRepairIdentityField -Event $event -Names @('authority_id')
+            $eventInstallGeneration = Get-FileTransferEventInt64Field -Event $event -Name 'install_generation' -Default 0
+            if (-not [string]::Equals($eventAuthority, $Record.Authority, [System.StringComparison]::OrdinalIgnoreCase) -or
+                $eventInstallGeneration -ne [int64]$Record.InstallGeneration) {
+                $boundarySequence = [Math]::Min($boundarySequence, [int64]$event.Sequence)
+            }
+        }
+        foreach ($event in $scopeBoundaryEvents) {
+            if ([int64]$event.Sequence -le $AfterSequence -or
+                -not (Test-FileTransferRegularV4RepairProjectionTransferMatch -Anchor $Record.Binding -Candidate $event)) {
+                continue
+            }
+            $isUnconditionalBoundary = $event.EventName -in @(
+                'transfer_terminal',
+                'file_transfer_inbound_terminal',
+                'file_transfer_outbound_terminal',
+                'filetransfer_runtime_terminalized',
+                'filetransfer_manifest_received',
+                'filetransfer_manifest_replaced',
+                'filetransfer_session_replaced',
+                'filetransfer_data_session_recreated')
+            if ($isUnconditionalBoundary -or
+                (Test-FileTransferRegularV4RepairProjectionScopeReplacement -Anchor $Record.Binding -Candidate $event)) {
+                $boundarySequence = [Math]::Min($boundarySequence, [int64]$event.Sequence)
+            }
+        }
+        return $boundarySequence
+    }
+
+    $rawCandidates = New-Object System.Collections.Generic.List[object]
+    $distinctRecords = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    foreach ($rejection in $rejections) {
+        [object[]]$matchingRecords = @(
+            foreach ($binding in $stagedBindings) {
+                if ([int64]$binding.Sequence -ge [int64]$rejection.Sequence -or
+                    -not (Test-PeerSilenceDispatchRejectionScopeMatch -Binding $binding -Rejection $rejection)) {
+                    continue
+                }
+                $range = Get-FileTransferRegularV4PeerSilenceReplayRange -Event $binding
+                if (-not $range.Valid -or $range.Start -le $range.Frontier) {
+                    continue
+                }
+                $authority = Get-FileTransferRegularV4FrontierRepairIdentityField -Event $binding -Names @('authority_id')
+                $installGeneration = Get-FileTransferRegularV4FrontierRepairIdentityField -Event $binding -Names @('install_generation')
+                $decisionGeneration = Get-FileTransferRegularV4FrontierRepairIdentityField -Event $binding -Names @('repair_generation', 'decision_generation')
+                if ([string]::IsNullOrWhiteSpace($authority) -or
+                    $authority -in @('[redacted]', 'redacted') -or
+                    [string]::IsNullOrWhiteSpace($installGeneration)) {
+                    continue
+                }
+
+                $rejectionAuthority = Get-FileTransferRegularV4FrontierRepairIdentityField `
+                    -Event $rejection `
+                    -Names @('authority_id', 'repair_authority_id', 'frontier_repair_authority_id', 'attempted_authority_id')
+                $rejectionInstallGeneration = Get-FileTransferEventInt64Field `
+                    -Event $rejection `
+                    -Name 'install_generation' `
+                    -Default 0
+                if ($rejectionInstallGeneration -le 0) {
+                    $rejectionInstallGeneration = Get-FileTransferEventInt64Field `
+                        -Event $rejection `
+                        -Name 'attempted_install_generation' `
+                        -Default 0
+                }
+                $legacyIdentity = [string]::IsNullOrWhiteSpace($rejectionAuthority) -and
+                    $rejectionInstallGeneration -le 0
+                if (-not $legacyIdentity -and
+                    ([string]::IsNullOrWhiteSpace($rejectionAuthority) -or
+                        $rejectionInstallGeneration -le 0 -or
+                        -not [string]::Equals($authority, $rejectionAuthority, [System.StringComparison]::OrdinalIgnoreCase) -or
+                        [int64]$installGeneration -ne $rejectionInstallGeneration)) {
+                    continue
+                }
+                if ($legacyIdentity -and
+                    -not (Test-PeerSilenceDispatchWriterTransferMatch -Anchor $binding -Candidate $rejection)) {
+                    continue
+                }
+
+                $commit = @($committedBindings | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$binding.Sequence -and
+                    [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
+                    (Get-FileTransferRegularV4FrontierRepairIdentityField -Event $_ -Names @('authority_id')) -eq $authority -and
+                    (Get-FileTransferRegularV4FrontierRepairIdentityField -Event $_ -Names @('install_generation')) -eq $installGeneration -and
+                    (Test-PeerSilenceDispatchAuthorityMatch -Binding $binding -Candidate $_)
+                } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+                if ($commit.Count -eq 0) {
+                    continue
+                }
+                $latestSameScopeCommit = @($committedBindings | Where-Object {
+                    [int64]$_.Sequence -ge [int64]$commit[0].Sequence -and
+                    [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
+                    (Test-PeerSilenceDispatchSameBindingScope -Binding $binding -Candidate $_)
+                } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+                if ($latestSameScopeCommit.Count -ne 1 -or
+                    -not [string]::Equals(
+                        (Get-FileTransferRegularV4FrontierRepairIdentityField -Event $latestSameScopeCommit[0] -Names @('authority_id')),
+                        $authority,
+                        [System.StringComparison]::OrdinalIgnoreCase) -or
+                    (Get-FileTransferEventInt64Field -Event $latestSameScopeCommit[0] -Name 'install_generation' -Default 0) -ne [int64]$installGeneration) {
+                    continue
+                }
+                $grant = @($authorityGrants | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$commit[0].Sequence -and
+                    [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
+                    (Get-FileTransferRegularV4FrontierRepairIdentityField -Event $_ -Names @('repair_request_key')) -eq $range.RepairKey -and
+                    (Get-FileTransferRegularV4FrontierRepairIdentityField -Event $_ -Names @('decision_generation')) -eq $decisionGeneration -and
+                    (Test-PeerSilenceDispatchAuthorityMatch `
+                        -Binding $binding `
+                        -Candidate $_ `
+                        -AllowLegacyIdentity $legacyIdentity)
+                } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+                if ($grant.Count -eq 0) {
+                    continue
+                }
+                $cursor = @($cursorRetainedEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$grant[0].Sequence -and
+                    [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'scheduled_start_chunk_index' -Default -1) -eq $range.Start -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'scheduled_end_chunk_exclusive' -Default -1) -eq $range.End -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'peer_frontier_chunk_index' -Default -1) -eq $range.Frontier -and
+                    (Get-FileTransferEventField -Event $_ -Name 'dispatch_observed' -Default '0') -eq '0' -and
+                    (Test-PeerSilenceDispatchAuthorityMatch `
+                        -Binding $binding `
+                        -Candidate $_ `
+                        -AllowLegacyIdentity $legacyIdentity)
+                } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+                if ($cursor.Count -eq 0) {
+                    continue
+                }
+                $started = @($replayStartedEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$cursor[0].Sequence -and
+                    [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'remote_next_expected_chunk_index' -Default -1) -eq $range.Frontier -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'replay_start_chunk_index' -Default -1) -eq $range.Start -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'replay_end_chunk_exclusive' -Default -1) -eq $range.End -and
+                    (Test-PeerSilenceDispatchWriterTransferMatch -Anchor $binding -Candidate $_)
+                } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+                if ($started.Count -eq 0) {
+                    continue
+                }
+                $ended = @($bindingEndEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$commit[0].Sequence -and
+                    [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
+                    (Test-FileTransferRegularV4RepairProjectionTransferMatch -Anchor $binding -Candidate $_) -and
+                    ((Get-FileTransferRegularV4FrontierRepairIdentityField -Event $_ -Names @('authority_id')) -eq $authority -or
+                        (Get-FileTransferRegularV4FrontierRepairIdentityField -Event $_ -Names @('repair_request_key')) -eq $range.RepairKey)
+                } | Select-Object -First 1)
+                $alreadyDispatched = @($dispatchEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$commit[0].Sequence -and
+                    [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
+                    (Test-PeerSilenceDispatchAuthorityMatch `
+                        -Binding $binding `
+                        -Candidate $_ `
+                        -AllowLegacyIdentity $legacyIdentity)
+                } | Select-Object -First 1)
+                if ($ended.Count -gt 0 -or $alreadyDispatched.Count -gt 0) {
+                    continue
+                }
+                $recordForBoundary = [pscustomobject]@{
+                    Binding = $binding
+                    Authority = $authority
+                    InstallGeneration = [int64]$installGeneration
+                    Range = $range
+                }
+                if ((Get-PeerSilenceDispatchBoundarySequence `
+                        -Record $recordForBoundary `
+                        -AfterSequence ([int64]$commit[0].Sequence)) -lt [int64]$rejection.Sequence) {
+                    continue
+                }
+                [pscustomobject]@{
+                    Binding = $binding
+                    Rejection = $rejection
+                    Authority = $authority
+                    InstallGeneration = [int64]$installGeneration
+                    DecisionGeneration = $decisionGeneration
+                    Range = $range
+                    LegacyIdentity = $legacyIdentity
+                }
+            }
+        )
+        # The legacy rejection omits the authority and repair key.  It is safe
+        # to correlate only when the complete same-writer interval is unique.
+        if ($matchingRecords.Count -ne 1) {
+            continue
+        }
+        $record = $matchingRecords[0]
+        $rawCandidates.Add($rejection) | Out-Null
+        $key = [string]::Join('|', @(
+                $record.Authority,
+                $record.InstallGeneration,
+                $record.Range.RepairKey,
+                (Get-FileTransferRegularV4RepairProjectionScopeKey -Event $record.Binding -Frontier $record.Range.Frontier)))
+        if ($seen.ContainsKey($key)) {
+            continue
+        }
+        $seen[$key] = $true
+        $record | Add-Member -NotePropertyName LogicalKey -NotePropertyValue $key
+        $distinctRecords.Add($record) | Out-Null
+    }
+
+    $recovered = New-Object System.Collections.Generic.List[object]
+    $unresolved = New-Object System.Collections.Generic.List[object]
+    foreach ($record in $distinctRecords.ToArray()) {
+        [int64]$boundarySequence = Get-PeerSilenceDispatchBoundarySequence `
+            -Record $record `
+            -AfterSequence ([int64]$record.Rejection.Sequence)
+        $dispatch = @($dispatchEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$record.Rejection.Sequence -and
+            [int64]$_.Sequence -lt $boundarySequence -and
+            (Get-FileTransferRegularV4FrontierRepairIdentityField -Event $_ -Names @('decision_generation')) -eq $record.DecisionGeneration -and
+            (Get-FileTransferEventField -Event $_ -Name 'dispatch_authority_source' -Default '') -eq 'attached_installed_contract' -and
+            (Test-PeerSilenceDispatchAuthorityMatch `
+                -Binding $record.Binding `
+                -Candidate $_ `
+                -AllowLegacyIdentity ([bool]$record.LegacyIdentity))
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        $advanced = @()
+        if ($dispatch.Count -gt 0) {
+            $advanced = @($cursorAdvancedEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$dispatch[0].Sequence -and
+                [int64]$_.Sequence -lt $boundarySequence -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'dispatch_proven_end_chunk_exclusive' -Default -1) -ge $record.Range.End -and
+                (Test-PeerSilenceDispatchAuthorityMatch `
+                    -Binding $record.Binding `
+                    -Candidate $_ `
+                    -AllowLegacyIdentity ([bool]$record.LegacyIdentity))
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        }
+        if ($dispatch.Count -gt 0 -and $advanced.Count -gt 0) {
+            $recovered.Add($record.Rejection) | Out-Null
+        }
+        else {
+            $unresolved.Add($record.Rejection) | Out-Null
+        }
+    }
+
+    return [pscustomobject]@{
+        RawCount = $rawCandidates.Count
+        DistinctCount = $distinctRecords.Count
+        RecoveredCount = $recovered.Count
+        UnresolvedCount = $unresolved.Count
+        Verdict = if ($unresolved.Count -gt 0) { 'fail' } elseif ($distinctRecords.Count -gt 0) { 'pass' } else { 'none' }
+        RawCandidateEvents = @($rawCandidates.ToArray())
+        DistinctCandidateEvents = @($distinctRecords.ToArray() | ForEach-Object { $_.Rejection })
+        RecoveredCandidateEvents = @($recovered.ToArray())
+        UnresolvedCandidateEvents = @($unresolved.ToArray())
+    }
+}
+
 function Get-FileTransferRegularV4FrontierRepairLifecycleProof {
     param(
         [AllowEmptyCollection()][object[]]$Events = @(),
@@ -21007,6 +21472,15 @@ function Get-FileTransferRegularV4FrontierRepairLifecycleProof {
     })
     [object[]]$peerPressureBindingCommittedEvents = @($orderedEvents | Where-Object {
         $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_pressure_binding_committed'
+    })
+    [object[]]$pressureSettlementApplyEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided'
+    })
+    [object[]]$pressureBindingRetiredEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_pressure_binding_retired'
+    })
+    [object[]]$contractSettledEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_contract_settled'
     })
 
     function Test-RegularV4RepairPeerProjectionIdentityMatch {
@@ -21100,6 +21574,72 @@ function Get-FileTransferRegularV4FrontierRepairLifecycleProof {
     }
     [object[]]$resolvedSettledStalledEvents = @(
         foreach ($accepted in $acceptedSettledStalledEvents) {
+            $acceptedAuthority = Get-FileTransferRegularV4FrontierRepairIdentityField -Event $accepted -Names @('authority_id')
+            $acceptedRepairKey = Get-FileTransferRegularV4FrontierRepairIdentityField -Event $accepted -Names @('repair_request_key')
+            $acceptedInstallGeneration = Get-FileTransferRegularV4FrontierRepairIdentityField `
+                -Event $accepted `
+                -Names @('successor_install_generation', 'install_generation')
+
+            # A dispatch-proven attempt has completed its repair lifecycle when
+            # the coordinator accepts SettledStalled, Infra applies that exact
+            # settlement, the binding is retired, and Core records the final
+            # contract with dispatch_observed=1.  The Infra apply authority may
+            # be redacted, so require one unique scope/outcome/install interval.
+            $dispatchProvenDispositionResolved = $false
+            [object[]]$retirements = @($pressureBindingRetiredEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$accepted.Sequence -and
+                (Get-FileTransferRegularV4FrontierRepairIdentityField -Event $_ -Names @('authority_id')) -eq $acceptedAuthority -and
+                (Get-FileTransferRegularV4FrontierRepairIdentityField -Event $_ -Names @('repair_request_key')) -eq $acceptedRepairKey -and
+                (Get-FileTransferRegularV4FrontierRepairIdentityField -Event $_ -Names @('install_generation')) -eq $acceptedInstallGeneration -and
+                (Get-FileTransferEventField -Event $_ -Name 'install_boundary' -Default '') -eq 'settlement' -and
+                (Test-FileTransferRegularV4FrontierRepairLifecycleMatch -Source $accepted -Candidate $_)
+            } | Sort-Object Sequence, LineNumber)
+            foreach ($retirement in $retirements) {
+                [object[]]$applies = @($pressureSettlementApplyEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$accepted.Sequence -and
+                    [int64]$_.Sequence -lt [int64]$retirement.Sequence -and
+                    (Get-FileTransferRegularV4FrontierRepairIdentityField -Event $_ -Names @('install_generation')) -eq $acceptedInstallGeneration -and
+                    (Get-FileTransferRegularV4FrontierRepairIdentityField -Event $_ -Names @('settlement_outcome')).Replace('_', '').ToLowerInvariant() -eq 'settledstalled' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'apply_status' -Default '').ToLowerInvariant() -in @('applied', 'idempotent') -and
+                    (Get-FileTransferEventField -Event $_ -Name 'current_authority_cleared' -Default '0') -eq '1' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'retained_predecessor_cleared' -Default '1') -eq '0' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq
+                        (Get-FileTransferEventField -Event $accepted -Name 'session_id' -Default '') -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq
+                        (Get-FileTransferEventField -Event $accepted -Name 'transfer_id' -Default '') -and
+                    (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq
+                        (Get-FileTransferEventField -Event $accepted -Name 'direction' -Default '')
+                } | Sort-Object Sequence, LineNumber)
+                if ($applies.Count -ne 1) {
+                    continue
+                }
+
+                $applyAuthority = Get-FileTransferRegularV4FrontierRepairIdentityField -Event $applies[0] -Names @('authority_id')
+                if (-not [string]::IsNullOrWhiteSpace($applyAuthority) -and
+                    $applyAuthority -notin @('[redacted]', 'redacted') -and
+                    -not [string]::Equals($applyAuthority, $acceptedAuthority, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    continue
+                }
+
+                $contract = @($contractSettledEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$retirement.Sequence -and
+                    (Get-FileTransferRegularV4FrontierRepairIdentityField -Event $_ -Names @('authority_id')) -eq $acceptedAuthority -and
+                    (Get-FileTransferRegularV4FrontierRepairIdentityField -Event $_ -Names @('repair_request_key')) -eq $acceptedRepairKey -and
+                    (Get-FileTransferRegularV4FrontierRepairIdentityField -Event $_ -Names @('settlement_outcome')).Replace('_', '').ToLowerInvariant() -eq 'settledstalled' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'dispatch_observed' -Default '0') -eq '1'
+                } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+                if ($contract.Count -gt 0) {
+                    # Return the accepted event because it carries the complete
+                    # immutable scope needed to match the original stall.
+                    $accepted
+                    $dispatchProvenDispositionResolved = $true
+                    break
+                }
+            }
+            if ($dispatchProvenDispositionResolved) {
+                continue
+            }
+
             $adoption = @($adoptionEvents | Where-Object {
                 [int64]$_.Sequence -gt [int64]$accepted.Sequence -and
                 (Test-FileTransferRegularV4FrontierRepairLifecycleMatch -Source $accepted -Candidate $_)
@@ -21109,8 +21649,6 @@ function Get-FileTransferRegularV4FrontierRepairLifecycleProof {
                 continue
             }
 
-            $acceptedAuthority = Get-FileTransferRegularV4FrontierRepairIdentityField -Event $accepted -Names @('authority_id')
-            $acceptedRepairKey = Get-FileTransferRegularV4FrontierRepairIdentityField -Event $accepted -Names @('repair_request_key')
             $projection = @($retainedProjectionEvents | Where-Object {
                 [int64]$_.Sequence -gt [int64]$accepted.Sequence -and
                 (Get-FileTransferRegularV4FrontierRepairIdentityField -Event $_ -Names @('authority_id')) -eq $acceptedAuthority -and
@@ -23935,6 +24473,8 @@ function Get-FileTransferRecoveryFailureClassification {
         Get-FileTransferRegularV4RepairProjectionReauthorizationProof -Events $events
     $regularV4PeerSilenceReplayMissingDispatchRangeProof =
         Get-FileTransferRegularV4PeerSilenceReplayMissingDispatchRangeProof -Events $events
+    $regularV4PeerSilenceReplayInstalledAuthorityDispatchProof =
+        Get-FileTransferRegularV4PeerSilenceReplayInstalledAuthorityDispatchProof -Events $events
     $regularV4FrontierRepairLifecycleProof =
         Get-FileTransferRegularV4FrontierRepairLifecycleProof `
             -Events $events `
@@ -26951,6 +27491,12 @@ function Get-FileTransferRecoveryFailureClassification {
         -UseDefaultReason
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
+        -Class 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch' `
+        -Events @($regularV4PeerSilenceReplayInstalledAuthorityDispatchProof.UnresolvedCandidateEvents) `
+        -DefaultReason 'installed_peer_silence_repair_authority_not_carried_to_dispatch' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
         -Class 'regular_v4_frontier_repair_initial_pressure_install_missing' `
         -Events @($regularV4FrontierRepairInitialPressureInstallProof.UnresolvedCandidateEvents) `
         -DefaultReason 'regular_v4_frontier_repair_pressure_missing' `
@@ -27374,6 +27920,9 @@ function Get-FileTransferRecoveryFailureClassification {
     elseif ($regularV4PeerSilenceReplayMissingDispatchRangeProof.UnresolvedCount -gt 0) {
         $class = 'regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved'
     }
+    elseif ($regularV4PeerSilenceReplayInstalledAuthorityDispatchProof.UnresolvedCount -gt 0) {
+        $class = 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch'
+    }
     elseif ($regularV4FrontierRepairInitialPressureInstallProof.UnresolvedCount -gt 0) {
         $class = 'regular_v4_frontier_repair_initial_pressure_install_missing'
     }
@@ -27791,6 +28340,7 @@ function Get-FileTransferRecoveryFailureClassification {
                 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing',
                 'regular_v4_frontier_tail_repair_state_publication_missing',
                 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery',
+                'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch',
                 'regular_v4_frontier_repair_pressure_authority_lifecycle_split',
                 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
             'route_runtime'
@@ -28079,6 +28629,11 @@ function Get-FileTransferRecoveryFailureClassification {
         RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRecoveredCount = $regularV4PeerSilenceReplayMissingDispatchRangeProof.RecoveredCount
         RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedUnresolvedCount = $regularV4PeerSilenceReplayMissingDispatchRangeProof.UnresolvedCount
         RegularV4PeerSilenceReplayMissingDispatchRangePreservationVerdict = $regularV4PeerSilenceReplayMissingDispatchRangeProof.Verdict
+        RegularV4PeerSilenceReplayInstalledAuthorityNotCarriedToDispatchRawCount = $regularV4PeerSilenceReplayInstalledAuthorityDispatchProof.RawCount
+        RegularV4PeerSilenceReplayInstalledAuthorityNotCarriedToDispatchDistinctCount = $regularV4PeerSilenceReplayInstalledAuthorityDispatchProof.DistinctCount
+        RegularV4PeerSilenceReplayInstalledAuthorityNotCarriedToDispatchRecoveredCount = $regularV4PeerSilenceReplayInstalledAuthorityDispatchProof.RecoveredCount
+        RegularV4PeerSilenceReplayInstalledAuthorityNotCarriedToDispatchUnresolvedCount = $regularV4PeerSilenceReplayInstalledAuthorityDispatchProof.UnresolvedCount
+        RegularV4PeerSilenceReplayInstalledAuthorityDispatchVerdict = $regularV4PeerSilenceReplayInstalledAuthorityDispatchProof.Verdict
         RegularV4FrontierRepairSuccessorPressureInstallMissingRawCount = $regularV4FrontierRepairSuccessorPressureInstallProof.RawCount
         RegularV4FrontierRepairSuccessorPressureInstallMissingDistinctCount = $regularV4FrontierRepairSuccessorPressureInstallProof.DistinctCount
         RegularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount = $regularV4FrontierRepairSuccessorPressureInstallProof.RecoveredCount
@@ -28481,6 +29036,11 @@ function New-FileTransferInvariantLedgerObject {
         regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count = [string]$recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRecoveredCount
         regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_unresolved_count = [string]$recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedUnresolvedCount
         regular_v4_peer_silence_replay_missing_dispatch_range_preservation_verdict = $recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangePreservationVerdict
+        regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_raw_count = [string]$recoveryClassification.RegularV4PeerSilenceReplayInstalledAuthorityNotCarriedToDispatchRawCount
+        regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_distinct_count = [string]$recoveryClassification.RegularV4PeerSilenceReplayInstalledAuthorityNotCarriedToDispatchDistinctCount
+        regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_recovered_count = [string]$recoveryClassification.RegularV4PeerSilenceReplayInstalledAuthorityNotCarriedToDispatchRecoveredCount
+        regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_unresolved_count = [string]$recoveryClassification.RegularV4PeerSilenceReplayInstalledAuthorityNotCarriedToDispatchUnresolvedCount
+        regular_v4_peer_silence_replay_installed_authority_dispatch_verdict = $recoveryClassification.RegularV4PeerSilenceReplayInstalledAuthorityDispatchVerdict
         regular_v4_frontier_repair_successor_pressure_install_missing_raw_count = [string]$recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingRawCount
         regular_v4_frontier_repair_successor_pressure_install_missing_distinct_count = [string]$recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingDistinctCount
         regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count = [string]$recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount
@@ -28848,6 +29408,28 @@ function Write-FileTransferDiagnosticsArtifacts {
         $effectiveNextArtifact = 'filetransfer-operator-verdict.txt'
     }
 
+    $operatorAcceptanceFailureClass = if ($recoveryClassification.Class -in @('runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'runtime_unlock_precommit_probe_start_handoff_missing', 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing', 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_initial_pressure_install_missing', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery', 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
+        'incomplete_proof'
+    }
+    elseif ($recoveryClassification.Class -in @('runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
+        'route_runtime'
+    }
+    elseif ($invariantMayOwnAcceptanceFailure) {
+        $combinedInvariant.FailureClass
+    }
+    else {
+        'none'
+    }
+    $operatorRuntimeCorrectnessVerdict = if ([string]::Equals($operatorAcceptanceFailureClass, 'route_runtime', [System.StringComparison]::Ordinal)) {
+        'fail'
+    }
+    elseif ([string]::Equals($operatorAcceptanceFailureClass, 'incomplete_proof', [System.StringComparison]::Ordinal)) {
+        'incomplete_proof'
+    }
+    else {
+        'pass'
+    }
+
     $verdictLines = @(
         ("runtime_unlock_retry_dispatch_post_grant_hold_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldRawCount),
         ("runtime_unlock_retry_dispatch_post_grant_hold_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldDistinctCount),
@@ -28912,7 +29494,8 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("gate_status={0}" -f $effectiveGateStatus),
         ("transfer_id={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.TransferId)) { '(none)' } else { $Summary.TransferId }))),
         ("next_artifact={0}" -f $effectiveNextArtifact),
-        ("acceptance_failure_class={0}" -f ($(if ($recoveryClassification.Class -in @('runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'runtime_unlock_precommit_probe_start_handoff_missing', 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing', 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_initial_pressure_install_missing', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery', 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) { 'incomplete_proof' } elseif ($recoveryClassification.Class -in @('runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) { 'route_runtime' } elseif ($invariantMayOwnAcceptanceFailure) { $combinedInvariant.FailureClass } else { 'none' }))),
+        ("acceptance_failure_class={0}" -f $operatorAcceptanceFailureClass),
+        ("runtime_correctness_verdict={0}" -f $operatorRuntimeCorrectnessVerdict),
         ("release_route_law_verdict={0}" -f $releaseRouteLaw.Verdict),
         ("terminal_lifecycle_invariant_verdict={0}" -f $terminalLifecycleInvariant.Verdict),
         ("control_priority_invariant_verdict={0}" -f $controlPriorityInvariant.Verdict),
@@ -29173,6 +29756,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedRecoveredCount),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_unresolved_count={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangeNotPreservedUnresolvedCount),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_preservation_verdict={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayMissingDispatchRangePreservationVerdict),
+        ("regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_raw_count={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayInstalledAuthorityNotCarriedToDispatchRawCount),
+        ("regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_distinct_count={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayInstalledAuthorityNotCarriedToDispatchDistinctCount),
+        ("regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_recovered_count={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayInstalledAuthorityNotCarriedToDispatchRecoveredCount),
+        ("regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_unresolved_count={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayInstalledAuthorityNotCarriedToDispatchUnresolvedCount),
+        ("regular_v4_peer_silence_replay_installed_authority_dispatch_verdict={0}" -f $recoveryClassification.RegularV4PeerSilenceReplayInstalledAuthorityDispatchVerdict),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_raw_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingRawCount),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_distinct_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingDistinctCount),
         ("regular_v4_frontier_repair_successor_pressure_install_missing_recovered_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSuccessorPressureInstallMissingRecoveredCount),

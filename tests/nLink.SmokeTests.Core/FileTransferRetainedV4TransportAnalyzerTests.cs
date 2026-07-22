@@ -3587,6 +3587,116 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
         Assert.NotEqual("regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery", verdict["first_proof_chain_failure_class"]);
     }
 
+    [Fact]
+    [Trait("Category", "Smoke")]
+    [Trait("RetainedV4Suite", "PeerSilenceReplayDispatchAuthority")]
+    public async Task AnalyzeRetained_RegularV4PeerSilenceInstalledAuthorityLostAtDispatch_CurrentArtifactFullCompactAgree()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRegularV4PeerSilenceInstalledAuthorityDispatchFixture(
+            "transfer_peer_silence_installed_authority_lost",
+            padToCurrentArtifactSequence: true);
+
+        var full = await RunAnalyzeFixtureAsync(lines);
+        var compact = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: new Dictionary<string, string>
+            {
+                ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+            });
+
+        Assert.True(full.Script.ExitCode == 0, full.Script.Stdout + Environment.NewLine + full.Script.Stderr);
+        Assert.True(compact.Script.ExitCode == 0, compact.Script.Stdout + Environment.NewLine + compact.Script.Stderr);
+        var fullVerdict = ReadArtifactReport(full.ArtifactDir, "filetransfer-operator-verdict.txt");
+        var compactVerdict = ReadArtifactReport(compact.ArtifactDir, "filetransfer-operator-verdict.txt");
+        foreach (var key in new[]
+                 {
+                     "acceptance_failure_class",
+                     "runtime_correctness_verdict",
+                     "semantic_failure_domain",
+                     "recovery_failure_class",
+                     "first_proof_chain_failure_class",
+                     "first_proof_chain_failure_event",
+                     "first_proof_chain_failure_reason",
+                     "first_proof_chain_failure_sequence",
+                     "first_proof_chain_failure_writer_sequence",
+                     "regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_raw_count",
+                     "regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_distinct_count",
+                     "regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_recovered_count",
+                     "regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_unresolved_count",
+                     "regular_v4_peer_silence_replay_installed_authority_dispatch_verdict"
+                 })
+        {
+            Assert.Equal(fullVerdict[key], compactVerdict[key]);
+        }
+
+        Assert.Equal("route_runtime", fullVerdict["acceptance_failure_class"]);
+        Assert.Equal("fail", fullVerdict["runtime_correctness_verdict"]);
+        Assert.Equal("route_runtime", fullVerdict["semantic_failure_domain"]);
+        Assert.Equal(
+            "regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch",
+            fullVerdict["recovery_failure_class"]);
+        Assert.Equal(
+            "regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch",
+            fullVerdict["first_proof_chain_failure_class"]);
+        Assert.Equal("filetransfer_recovery_authority_rejected", fullVerdict["first_proof_chain_failure_event"]);
+        Assert.Equal(
+            "installed_peer_silence_repair_authority_not_carried_to_dispatch",
+            fullVerdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("6139", fullVerdict["first_proof_chain_failure_sequence"]);
+        Assert.Equal("2168", fullVerdict["first_proof_chain_failure_writer_sequence"]);
+        Assert.Equal("1", fullVerdict["regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_raw_count"]);
+        Assert.Equal("1", fullVerdict["regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_distinct_count"]);
+        Assert.Equal("0", fullVerdict["regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_recovered_count"]);
+        Assert.Equal("1", fullVerdict["regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_unresolved_count"]);
+        Assert.Equal("fail", fullVerdict["regular_v4_peer_silence_replay_installed_authority_dispatch_verdict"]);
+        Assert.NotEqual("regular_v4_frontier_repair_stalled", fullVerdict["first_proof_chain_failure_class"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Smoke")]
+    [Trait("RetainedV4Suite", "PeerSilenceReplayDispatchAuthority")]
+    public async Task AnalyzeRetained_RegularV4PeerSilenceInstalledAuthorityExactDispatchAndCursorAdvance_Recovers(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_peer_silence_installed_authority_recovered";
+        var lines = BuildRegularV4PeerSilenceInstalledAuthorityDispatchFixture(
+            transferId,
+            padToCurrentArtifactSequence: false,
+            exactDispatchTelemetry: true);
+        lines.Add(RegularV4PeerSilenceInstalledAuthorityDispatchLine(transferId));
+        lines.Add(RegularV4PeerSilenceInstalledAuthorityCursorAdvancedLine(transferId));
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string> { ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1" }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_raw_count"]);
+        Assert.Equal("1", verdict["regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_distinct_count"]);
+        Assert.Equal("1", verdict["regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_recovered_count"]);
+        Assert.Equal("0", verdict["regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_unresolved_count"]);
+        Assert.Equal("pass", verdict["regular_v4_peer_silence_replay_installed_authority_dispatch_verdict"]);
+        Assert.NotEqual(
+            "regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch",
+            verdict["first_proof_chain_failure_class"]);
+        Assert.NotEqual("regular_v4_frontier_repair_stalled", verdict["first_proof_chain_failure_class"]);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -4689,6 +4799,85 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
         }
         lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_settlement_rejected; source=nkn_bridge_pressure; stage=settlement; session_id=sess_a; transfer_id={transferId}; direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=3; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn; repair_request_key={repairKey}; frontier_chunk_index=372; durable_received_highest_chunk_index=725; requested_chunk_count=12; decision_generation=3; authority_id={successorAuthorityId}; predecessor_authority_id={predecessorAuthorityId}; retained_predecessor_authority_id={predecessorAuthorityId}; outcome=settled_stalled; pressure_pending_repair_count=0; pressure_reason=none; cleared_pressure=0; rejection_reason=regular_v4_frontier_repair_pressure_missing; decision_reason=regular_v4_frontier_repair_pressure_missing"));
         return lines;
+    }
+
+    private static List<string> BuildRegularV4PeerSilenceInstalledAuthorityDispatchFixture(
+        string transferId,
+        bool padToCurrentArtifactSequence,
+        bool exactDispatchTelemetry = false)
+    {
+        const string writerId = "writer_peer_silence_dispatch";
+        const string firstAuthority = "repair-peer-silence-first";
+        const string rotatedAuthority = "repair-peer-silence-rotated";
+        const string firstKey = "regular_v4_peer_silence_safety_replay:9:9:64:3";
+        const string rotatedKey = "regular_v4_peer_silence_safety_replay:9:73:64:4";
+        const string scope = "direction=outbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=1; route_commit_generation=0; data_session_generation=2";
+        var exactInstallIdentity = exactDispatchTelemetry ? "install_generation=4; " : string.Empty;
+        var lines = new List<string>
+        {
+            LogLine($"event=filetransfer_route_selected; session_id=sess_a; transfer_id={transferId}; {scope}; runtime_profile=regular_nkn_v4_fast; frame_family=v4; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_binding_staged; authority_schema=2; authority_id={firstAuthority}; predecessor_authority_id=(none); session_id=sess_a; transfer_id={transferId}; {scope}; target_transport=regular_nkn; repair_request_key={firstKey}; frontier_chunk_index=9; durable_received_highest_chunk_index=72; pending_repair_count=64; repair_generation=3; install_generation=3; binding_state=Pending; pressure_reason=regular_v4_peer_silence_safety_replay; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_binding_committed; authority_schema=2; authority_id={firstAuthority}; predecessor_authority_id=(none); session_id=sess_a; transfer_id={transferId}; {scope}; target_transport=regular_nkn; repair_request_key={firstKey}; frontier_chunk_index=9; durable_received_highest_chunk_index=72; pending_repair_count=64; repair_generation=3; install_generation=3; binding_state=Installed; pressure_reason=regular_v4_peer_silence_safety_replay; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_authority_granted; authority_schema=2; authority_id={firstAuthority}; predecessor_authority_id=(none); session_id=sess_a; transfer_id={transferId}; {scope}; target_transport=regular_nkn; source=regular_v4_peer_silence_safety_replay; stage=schedule; repair_request_key={firstKey}; frontier_chunk_index=9; durable_received_highest_chunk_index=72; pending_repair_count=64; decision_generation=3; range_count=1; requested_chunk_count=64; scheduled_chunk_count=64; decision_reason=session_liveness_timeout_pending; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_dispatched; authority_schema=2; authority_id={firstAuthority}; predecessor_authority_id=(none); session_id=sess_a; transfer_id={transferId}; {scope}; target_transport=regular_nkn; repair_request_key={firstKey}; frontier_chunk_index=9; start_chunk_index=9; end_chunk_exclusive=73; requested_chunk_count=64; sent_chunk_count=64; decision_generation=3; dispatch_authority_source=attached_installed_contract; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_regular_v4_peer_silence_replay_cursor_advanced; authority_schema=2; authority_id={firstAuthority}; session_id=sess_a; transfer_id={transferId}; {scope}; repair_request_key={firstKey}; cursor_generation=3; peer_frontier_chunk_index=9; scheduled_start_chunk_index=9; scheduled_end_chunk_exclusive=73; dispatch_proven_end_chunk_exclusive=73; dispatch_observed=1; decision_reason=repair_dispatch_observed; log_writer_id={writerId}")
+        };
+
+        if (padToCurrentArtifactSequence)
+        {
+            while (lines.Count < 6123)
+            {
+                lines.Add(LogLine($"event=peer_silence_dispatch_fixture_noise; session_id=sess_a; transfer_id={transferId}; ordinal={lines.Count + 1}"));
+            }
+        }
+
+        lines.AddRange(
+        [
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_stalled; authority_schema=2; authority_id={firstAuthority}; session_id=sess_a; transfer_id={transferId}; {scope}; target_transport=regular_nkn; repair_request_key={firstKey}; frontier_chunk_index=9; durable_received_highest_chunk_index=137; requested_chunk_count=64; decision_generation=3; attempt_count=3; reason=retry_interval_without_frontier_progress; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_settlement_accepted; authority_schema=2; authority_id={firstAuthority}; successor_authority_id=(none); session_id=sess_a; transfer_id={transferId}; {scope}; target_transport=regular_nkn; repair_request_key={firstKey}; frontier_chunk_index=9; durable_received_highest_chunk_index=141; requested_chunk_count=64; decision_generation=3; install_generation=3; outcome=SettledStalled; settlement_reason=regular_v4_frontier_repair_settled_stalled; decision_reason=regular_v4_frontier_repair_settlement_accepted; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided; authority_schema=2; authority_id=[redacted]; successor_authority_id=(none); current_authority_id=[redacted]; retained_predecessor_authority_id=(none); session_id=sess_a; transfer_id={transferId}; direction=outbound; install_generation=3; settlement_outcome=SettledStalled; apply_status=Applied; current_authority_cleared=1; retained_predecessor_cleared=0; decision_reason=settlement_applied; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_binding_retired; authority_schema=2; authority_id={firstAuthority}; predecessor_authority_id=(none); session_id=sess_a; transfer_id={transferId}; {scope}; target_transport=regular_nkn; repair_request_key={firstKey}; frontier_chunk_index=9; durable_received_highest_chunk_index=143; pending_repair_count=64; repair_generation=3; install_generation=3; binding_state=Installed; install_boundary=settlement; decision_reason=settlement_committed; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_contract_settled; authority_schema=2; authority_id={firstAuthority}; successor_authority_id=(none); session_id=sess_a; transfer_id={transferId}; direction=outbound; repair_request_key={firstKey}; settlement_outcome=SettledStalled; dispatch_observed=1; decision_reason=regular_v4_frontier_repair_settled_stalled; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_binding_staged; authority_schema=2; authority_id={rotatedAuthority}; predecessor_authority_id=(none); session_id=sess_a; transfer_id={transferId}; {scope}; target_transport=regular_nkn; repair_request_key={rotatedKey}; frontier_chunk_index=9; durable_received_highest_chunk_index=136; pending_repair_count=64; repair_generation=4; install_generation=4; binding_state=Pending; pressure_reason=regular_v4_peer_silence_safety_replay; log_writer_id={writerId}"),
+            LogLine($"event=peer_silence_dispatch_fixture_noise; session_id=sess_a; transfer_id={transferId}; boundary=pressure_install_staged"),
+            LogLine($"event=runtime_unlock_regular_v4_frontier_repair_settlement_held; authority_schema=2; authority_id={firstAuthority}; successor_authority_id=(none); session_id=sess_a; transfer_id={transferId}; {scope}; target_transport=regular_nkn; repair_request_key={firstKey}; frontier_chunk_index=9; durable_received_highest_chunk_index=141; requested_chunk_count=64; settlement_decision_generation=3; settlement_outcome=SettledStalled; settlement_reason=regular_v4_frontier_repair_settled_stalled; decision_reason=no_pending_runtime_unlock_activation; log_writer_id={writerId}"),
+            LogLine($"event=peer_silence_dispatch_fixture_noise; session_id=sess_a; transfer_id={transferId}; boundary=pressure_install_decided"),
+            LogLine($"event=runtime_unlock_regular_v4_frontier_repair_precontract_settlement_cached; authority_schema=2; authority_id={firstAuthority}; successor_authority_id=(none); session_id=sess_a; transfer_id={transferId}; {scope}; target_transport=regular_nkn; repair_request_key={firstKey}; frontier_chunk_index=9; durable_received_highest_chunk_index=141; requested_chunk_count=64; settlement_decision_generation=3; settlement_outcome=SettledStalled; settlement_reason=regular_v4_frontier_repair_settled_stalled; decision_reason=no_pending_runtime_unlock_activation; log_writer_id={writerId}"),
+            LogLine($"event=peer_silence_dispatch_fixture_noise; session_id=sess_a; transfer_id={transferId}; boundary=pressure_install_receipt"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_binding_committed; authority_schema=2; authority_id={rotatedAuthority}; predecessor_authority_id=(none); session_id=sess_a; transfer_id={transferId}; {scope}; target_transport=regular_nkn; repair_request_key={rotatedKey}; frontier_chunk_index=9; durable_received_highest_chunk_index=136; pending_repair_count=64; repair_generation=4; install_generation=4; binding_state=Installed; pressure_reason=regular_v4_peer_silence_safety_replay; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_authority_granted; authority_schema=2; authority_id={rotatedAuthority}; {exactInstallIdentity}predecessor_authority_id=(none); session_id=sess_a; transfer_id={transferId}; {scope}; target_transport=regular_nkn; source=regular_v4_peer_silence_safety_replay; stage=schedule; repair_request_key={rotatedKey}; frontier_chunk_index=9; durable_received_highest_chunk_index=136; pending_repair_count=64; decision_generation=4; range_count=1; requested_chunk_count=64; scheduled_chunk_count=64; decision_reason=session_liveness_timeout_pending; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_regular_v4_peer_silence_replay_cursor_retained; authority_schema=2; authority_id={rotatedAuthority}; {exactInstallIdentity}session_id=sess_a; transfer_id={transferId}; {scope}; repair_request_key={rotatedKey}; cursor_generation=4; peer_frontier_chunk_index=9; scheduled_start_chunk_index=73; scheduled_end_chunk_exclusive=137; dispatch_proven_end_chunk_exclusive=73; dispatch_observed=0; decision_reason=peer_silence_replay_scheduled; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_regular_v4_peer_silence_safety_replay_started; session_id=sess_a; transfer_id={transferId}; direction=outbound; reason=session_liveness_timeout_pending; route=regular_nkn_v4_fast; protocol_version=4; replay_ordinal=4; remote_next_expected_chunk_index=9; replay_start_chunk_index=73; replay_end_chunk_exclusive=137; requested_chunk_count=64; scheduled_chunk_count=64; frontier_lag_chunks=406; wrapped_to_frontier=0; log_writer_id={writerId}"),
+            RegularV4PeerSilenceInstalledAuthorityRejectionLine(
+                transferId,
+                writerSequence: 2168,
+                exactDispatchTelemetry: exactDispatchTelemetry)
+        ]);
+
+        return lines;
+    }
+
+    private static string RegularV4PeerSilenceInstalledAuthorityRejectionLine(
+        string transferId,
+        int writerSequence,
+        bool exactDispatchTelemetry = false)
+    {
+        var identity = exactDispatchTelemetry
+            ? "authority_id=repair-peer-silence-rotated; install_generation=4; repair_request_key=regular_v4_peer_silence_safety_replay:9:73:64:4; "
+            : string.Empty;
+        return LogLine($"event=filetransfer_recovery_authority_rejected; {identity}session_id=sess_a; transfer_id={transferId}; direction=outbound; action_kind=RepairReplay; source=v4_repair_send; attempted_action=regular_v4_peer_silence_safety_replay; repair_replay_kind=PeerSilenceReplay; attempted_route=regular_nkn_v4_fast; attempted_protocol_version=4; attempted_live_route_epoch=0; attempted_runtime_generation=1; attempted_terminal_generation=0; attempted_leg_generation=1; attempted_transport_epoch=0; attempted_bridge_recovery_generation=0; current_route=regular_nkn_v4_fast; current_protocol_version=4; current_live_route_epoch=0; current_runtime_generation=1; current_terminal_generation=0; reason=regular_v4_frontier_repair_authority_current; log_writer_id=writer_peer_silence_dispatch; log_writer_sequence={writerSequence}");
+    }
+
+    private static string RegularV4PeerSilenceInstalledAuthorityDispatchLine(string transferId)
+    {
+        const string scope = "direction=outbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=1; route_commit_generation=0; data_session_generation=2";
+        return LogLine($"event=filetransfer_regular_v4_frontier_repair_dispatched; authority_schema=2; authority_id=repair-peer-silence-rotated; install_generation=4; predecessor_authority_id=(none); session_id=sess_a; transfer_id={transferId}; {scope}; target_transport=regular_nkn; repair_request_key=regular_v4_peer_silence_safety_replay:9:73:64:4; frontier_chunk_index=9; start_chunk_index=73; end_chunk_exclusive=137; requested_chunk_count=64; sent_chunk_count=64; decision_generation=4; dispatch_authority_source=attached_installed_contract; log_writer_id=writer_peer_silence_dispatch");
+    }
+
+    private static string RegularV4PeerSilenceInstalledAuthorityCursorAdvancedLine(string transferId)
+    {
+        const string scope = "direction=outbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=1; route_commit_generation=0; data_session_generation=2";
+        return LogLine($"event=filetransfer_regular_v4_peer_silence_replay_cursor_advanced; authority_schema=2; authority_id=repair-peer-silence-rotated; install_generation=4; session_id=sess_a; transfer_id={transferId}; {scope}; repair_request_key=regular_v4_peer_silence_safety_replay:9:73:64:4; cursor_generation=4; peer_frontier_chunk_index=9; scheduled_start_chunk_index=73; scheduled_end_chunk_exclusive=137; dispatch_proven_end_chunk_exclusive=137; dispatch_observed=1; decision_reason=repair_dispatch_observed; log_writer_id=writer_peer_silence_dispatch");
     }
 
     private static List<string> BuildRegularV4PeerSilenceReplaySettledMissingDispatchFixture(string transferId)

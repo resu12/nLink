@@ -1155,6 +1155,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_missing_dispatch') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_settled_stalled') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_contract_settled') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_peer_silence_replay_cursor_retained') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_peer_silence_replay_cursor_advanced') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_peer_silence_safety_replay_started') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_settlement_accepted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_settlement_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_projection_retained') +
@@ -1233,6 +1236,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             -Events $regularV4FrontierRepairProjectionEvents
     $regularV4PeerSilenceReplayMissingDispatchRangeProof =
         Get-FileTransferRegularV4PeerSilenceReplayMissingDispatchRangeProof `
+            -Events $regularV4FrontierRepairProjectionEvents
+    $regularV4PeerSilenceReplayInstalledAuthorityDispatchProof =
+        Get-FileTransferRegularV4PeerSilenceReplayInstalledAuthorityDispatchProof `
             -Events $regularV4FrontierRepairProjectionEvents
     $regularV4FrontierRepairSettlementDispositionProof =
         Get-FileTransferRegularV4FrontierRepairSettlementDispositionProof `
@@ -1739,6 +1745,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Reason = 'peer_silence_replay_range_rotated_after_missing_dispatch'
         }) | Out-Null
     }
+    foreach ($candidateEvent in @($regularV4PeerSilenceReplayInstalledAuthorityDispatchProof.UnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch'
+            Event = $candidateEvent
+            Reason = 'installed_peer_silence_repair_authority_not_carried_to_dispatch'
+        }) | Out-Null
+    }
     foreach ($candidateEvent in @($regularV4FrontierRepairSettlementDispositionProof.UnresolvedCandidateEvents)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'regular_v4_frontier_repair_settlement_disposition_unverifiable'
@@ -1921,6 +1934,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'regular_v4_frontier_tail_repair_state_publication_missing',
                 'regular_v4_frontier_repair_missing_range_not_preserved',
                 'regular_v4_frontier_repair_pressure_authority_lifecycle_split',
+                'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch',
                 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing',
                 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound',
                 'runtime_unlock_regular_v4_route_commit_send_drain_missing')) {
@@ -1988,6 +2002,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing',
             'regular_v4_frontier_tail_repair_state_publication_missing',
             'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery',
+            'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch',
             'regular_v4_frontier_repair_pressure_authority_lifecycle_split',
             'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
         'route_runtime'
@@ -2029,6 +2044,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("gate_status={0}" -f $gateStatus),
         'next_artifact=filetransfer-route-consistency-summary.txt',
         ("acceptance_failure_class={0}" -f $acceptanceFailureClass),
+        ("runtime_correctness_verdict={0}" -f ($(if ([string]::Equals($semanticFailureDomain, 'route_runtime', [System.StringComparison]::Ordinal)) { 'fail' } elseif ([string]::Equals($acceptanceFailureClass, 'incomplete_proof', [System.StringComparison]::Ordinal)) { 'incomplete_proof' } else { 'pass' }))),
         ("hard_failure_count={0}" -f $hardFailureCount),
         ("warning_count={0}" -f $warningKinds.Count),
         ("warning_kinds={0}" -f ($(if ($warningKinds.Count -gt 0) { $warningKinds -join ',' } else { '(none)' }))),
@@ -2092,6 +2108,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count={0}" -f $regularV4PeerSilenceReplayMissingDispatchRangeProof.RecoveredCount),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_unresolved_count={0}" -f $regularV4PeerSilenceReplayMissingDispatchRangeProof.UnresolvedCount),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_preservation_verdict={0}" -f $regularV4PeerSilenceReplayMissingDispatchRangeProof.Verdict),
+        ("regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_raw_count={0}" -f $regularV4PeerSilenceReplayInstalledAuthorityDispatchProof.RawCount),
+        ("regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_distinct_count={0}" -f $regularV4PeerSilenceReplayInstalledAuthorityDispatchProof.DistinctCount),
+        ("regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_recovered_count={0}" -f $regularV4PeerSilenceReplayInstalledAuthorityDispatchProof.RecoveredCount),
+        ("regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_unresolved_count={0}" -f $regularV4PeerSilenceReplayInstalledAuthorityDispatchProof.UnresolvedCount),
+        ("regular_v4_peer_silence_replay_installed_authority_dispatch_verdict={0}" -f $regularV4PeerSilenceReplayInstalledAuthorityDispatchProof.Verdict),
         ("regular_v4_frontier_repair_settlement_disposition_unverifiable_raw_count={0}" -f $regularV4FrontierRepairSettlementDispositionProof.RawCount),
         ("regular_v4_frontier_repair_settlement_disposition_unverifiable_distinct_count={0}" -f $regularV4FrontierRepairSettlementDispositionProof.DistinctCount),
         ("regular_v4_frontier_repair_settlement_disposition_unverifiable_recovered_count={0}" -f $regularV4FrontierRepairSettlementDispositionProof.RecoveredCount),
@@ -2835,6 +2856,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count = $regularV4PeerSilenceReplayMissingDispatchRangeProof.RecoveredCount
         regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_unresolved_count = $regularV4PeerSilenceReplayMissingDispatchRangeProof.UnresolvedCount
         regular_v4_peer_silence_replay_missing_dispatch_range_preservation_verdict = $regularV4PeerSilenceReplayMissingDispatchRangeProof.Verdict
+        regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_raw_count = $regularV4PeerSilenceReplayInstalledAuthorityDispatchProof.RawCount
+        regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_distinct_count = $regularV4PeerSilenceReplayInstalledAuthorityDispatchProof.DistinctCount
+        regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_recovered_count = $regularV4PeerSilenceReplayInstalledAuthorityDispatchProof.RecoveredCount
+        regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch_unresolved_count = $regularV4PeerSilenceReplayInstalledAuthorityDispatchProof.UnresolvedCount
+        regular_v4_peer_silence_replay_installed_authority_dispatch_verdict = $regularV4PeerSilenceReplayInstalledAuthorityDispatchProof.Verdict
         regular_v4_frontier_repair_settlement_disposition_unverifiable_raw_count = $regularV4FrontierRepairSettlementDispositionProof.RawCount
         regular_v4_frontier_repair_settlement_disposition_unverifiable_distinct_count = $regularV4FrontierRepairSettlementDispositionProof.DistinctCount
         regular_v4_frontier_repair_settlement_disposition_unverifiable_recovered_count = $regularV4FrontierRepairSettlementDispositionProof.RecoveredCount
