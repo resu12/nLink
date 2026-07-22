@@ -9137,6 +9137,11 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairMissingRangeNotPreservedRecoveredCount)) | Out-Null
     $lines.Add(("regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount)) | Out-Null
     $lines.Add(("regular_v4_frontier_repair_missing_range_preservation_verdict={0}" -f $RecoveryClassification.RegularV4FrontierRepairMissingRangePreservationVerdict)) | Out-Null
+    $lines.Add(("regular_v4_frontier_tail_repair_state_publication_missing_raw_count={0}" -f $RecoveryClassification.RegularV4FrontierTailRepairStatePublicationMissingRawCount)) | Out-Null
+    $lines.Add(("regular_v4_frontier_tail_repair_state_publication_missing_distinct_count={0}" -f $RecoveryClassification.RegularV4FrontierTailRepairStatePublicationMissingDistinctCount)) | Out-Null
+    $lines.Add(("regular_v4_frontier_tail_repair_state_publication_missing_recovered_count={0}" -f $RecoveryClassification.RegularV4FrontierTailRepairStatePublicationMissingRecoveredCount)) | Out-Null
+    $lines.Add(("regular_v4_frontier_tail_repair_state_publication_missing_unresolved_count={0}" -f $RecoveryClassification.RegularV4FrontierTailRepairStatePublicationMissingUnresolvedCount)) | Out-Null
+    $lines.Add(("regular_v4_frontier_tail_repair_state_publication_verdict={0}" -f $RecoveryClassification.RegularV4FrontierTailRepairStatePublicationVerdict)) | Out-Null
     $lines.Add(("regular_v4_frontier_repair_projection_reauthorization_missing_raw_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairProjectionReauthorizationMissingRawCount)) | Out-Null
     $lines.Add(("regular_v4_frontier_repair_projection_reauthorization_missing_distinct_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairProjectionReauthorizationMissingDistinctCount)) | Out-Null
     $lines.Add(("regular_v4_frontier_repair_projection_reauthorization_missing_recovered_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairProjectionReauthorizationMissingRecoveredCount)) | Out-Null
@@ -10944,6 +10949,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={0}" -f $recoveryClassification.RegularV4FrontierRepairMissingRangeNotPreservedRecoveredCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count={0}" -f $recoveryClassification.RegularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount),
         ("regular_v4_frontier_repair_missing_range_preservation_verdict={0}" -f $recoveryClassification.RegularV4FrontierRepairMissingRangePreservationVerdict),
+        ("regular_v4_frontier_tail_repair_state_publication_missing_raw_count={0}" -f $recoveryClassification.RegularV4FrontierTailRepairStatePublicationMissingRawCount),
+        ("regular_v4_frontier_tail_repair_state_publication_missing_distinct_count={0}" -f $recoveryClassification.RegularV4FrontierTailRepairStatePublicationMissingDistinctCount),
+        ("regular_v4_frontier_tail_repair_state_publication_missing_recovered_count={0}" -f $recoveryClassification.RegularV4FrontierTailRepairStatePublicationMissingRecoveredCount),
+        ("regular_v4_frontier_tail_repair_state_publication_missing_unresolved_count={0}" -f $recoveryClassification.RegularV4FrontierTailRepairStatePublicationMissingUnresolvedCount),
+        ("regular_v4_frontier_tail_repair_state_publication_verdict={0}" -f $recoveryClassification.RegularV4FrontierTailRepairStatePublicationVerdict),
         ("regular_v4_frontier_repair_projection_reauthorization_missing_raw_count={0}" -f $recoveryClassification.RegularV4FrontierRepairProjectionReauthorizationMissingRawCount),
         ("regular_v4_frontier_repair_projection_reauthorization_missing_distinct_count={0}" -f $recoveryClassification.RegularV4FrontierRepairProjectionReauthorizationMissingDistinctCount),
         ("regular_v4_frontier_repair_projection_reauthorization_missing_recovered_count={0}" -f $recoveryClassification.RegularV4FrontierRepairProjectionReauthorizationMissingRecoveredCount),
@@ -15666,6 +15676,7 @@ function Get-FileTransferRegularV4RepairProjectionRange {
 
     $rangesText = ''
     foreach ($name in @(
+            'repair_attempt_ranges',
             'projected_ranges',
             'repair_projection_projected_ranges',
             'source_ranges',
@@ -15709,6 +15720,7 @@ function Get-FileTransferRegularV4RepairProjectionRange {
 
     $repairKey = ''
     foreach ($name in @(
+            'repair_attempt_request_key',
             'projected_repair_request_key',
             'repair_projection_projected_key',
             'source_repair_request_key',
@@ -15964,6 +15976,489 @@ function Test-FileTransferRegularV4RepairProjectionReauthorizationBaseScopeMatch
     }
 
     return $true
+}
+
+function Get-FileTransferRegularV4FrontierTailRepairRange {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    $range = Get-FileTransferRegularV4RepairProjectionRange -Event $Event
+    if ($range.Valid) {
+        return $range
+    }
+
+    if ($Event.EventName -notin @(
+            'filetransfer_regular_v4_frontier_tail_repair_state_authorized',
+            'filetransfer_regular_v4_frontier_tail_repair_state_rejected')) {
+        return $range
+    }
+
+    $rangesText = Get-FileTransferEventField -Event $Event -Name 'ranges' -Default ''
+    if ($rangesText -notmatch '^(?<start>\d+):(?<count>\d+)$' -or [int64]$Matches['count'] -le 0) {
+        return $range
+    }
+
+    $start = [int64]$Matches['start']
+    $end = $start + [int64]$Matches['count']
+    return [pscustomobject]@{
+        Valid = $true
+        Start = $start
+        End = $end
+        RepairKey = Get-FileTransferEventField -Event $Event -Name 'repair_request_key' -Default '(none)'
+        Ranges = @([pscustomobject]@{
+                Valid = $true
+                Start = $start
+                End = $end
+                RepairKey = Get-FileTransferEventField -Event $Event -Name 'repair_request_key' -Default '(none)'
+            })
+    }
+}
+
+function Get-FileTransferRegularV4FrontierTailRepairStatePublicationProof {
+    param([AllowEmptyCollection()][object[]]$Events = @())
+
+    [object[]]$orderedEvents = @($Events | Where-Object { $null -ne $_ } | Sort-Object Sequence, LineNumber)
+    [object[]]$bindingEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_pressure_binding_committed' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'binding_state' -Default '') -eq 'Installed' -and
+        (Get-FileTransferEventInt64Field -Event $_ -Name 'install_generation' -Default 0) -gt 0 -and
+        -not [string]::IsNullOrWhiteSpace(
+            (Get-FileTransferRegularV4RepairProjectionScopeField -Event $_ -Name 'authority_id'))
+    })
+    [object[]]$rejectionEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_projection_rejected' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq
+            'coordinator_projection_authority_missing'
+    })
+    [object[]]$authorizedEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_tail_repair_state_authorized' -and
+        (Get-FileTransferEventField -Event $_ -Name 'repair_publication_kind' -Default '') -eq
+            'attempt_scoped_frontier_tail'
+    })
+    [object[]]$stateSentEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_v4_state_sent' -and
+        (Get-FileTransferEventField -Event $_ -Name 'repair_publication_kind' -Default '') -eq
+            'attempt_scoped_frontier_tail'
+    })
+    [object[]]$stateReceivedEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_v4_state_received' -and
+        (Get-FileTransferEventField -Event $_ -Name 'applied' -Default '0') -eq '1' -and
+        (Get-FileTransferEventInt64Field -Event $_ -Name 'missing_range_count' -Default 0) -gt 0
+    })
+    [object[]]$peerAuthorityEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_authority_granted' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound'
+    })
+    [object[]]$dispatchEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_dispatched' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound'
+    })
+    [object[]]$pressureRecoveryHandoffEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_committed' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq 'StaleRejected' -and
+        (Get-FileTransferEventField -Event $_ -Name 'settlement_reason' -Default '') -eq
+            'bridge_receive_stall_recovery_pressure_handoff' -and
+        (Get-FileTransferEventField -Event $_ -Name 'apply_status' -Default '') -in @('Applied', 'Idempotent') -and
+        (Get-FileTransferEventField -Event $_ -Name 'current_authority_cleared' -Default '0') -eq '1'
+    })
+
+    $rawCandidates = New-Object System.Collections.Generic.List[object]
+    $distinctCandidates = New-Object System.Collections.Generic.List[object]
+    $recoveredCandidates = New-Object System.Collections.Generic.List[object]
+    $unresolvedCandidates = New-Object System.Collections.Generic.List[object]
+    $metadataBySequence = @{}
+    $seenTuples = @{}
+
+    foreach ($rejection in $rejectionEvents) {
+        $rejectionSequence = [int64]$rejection.Sequence
+        $rejectionRange = Get-FileTransferRegularV4FrontierTailRepairRange -Event $rejection
+        $frontier = Get-FileTransferEventInt64Field -Event $rejection -Name 'frontier_chunk_index' -Default -1
+        $durableHighest = Get-FileTransferEventInt64Field `
+            -Event $rejection `
+            -Name 'durable_received_highest_chunk_index' `
+            -Default -1
+        $repairKey = Get-FileTransferEventField `
+            -Event $rejection `
+            -Name 'source_repair_request_key' `
+            -Default ''
+        if (-not $rejectionRange.Valid -or
+            $frontier -lt 0 -or
+            $durableHighest -ge $frontier -or
+            [string]::IsNullOrWhiteSpace($repairKey)) {
+            continue
+        }
+
+        [object[]]$matchingBindings = @($bindingEvents | Where-Object {
+            $candidateRange = Get-FileTransferRegularV4FrontierTailRepairRange -Event $_
+            [int64]$_.Sequence -lt $rejectionSequence -and
+            (Test-FileTransferRegularV4RepairProjectionScopeMatch -Anchor $rejection -Candidate $_) -and
+            (Get-FileTransferEventField -Event $_ -Name 'repair_request_key' -Default '') -eq $repairKey -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'frontier_chunk_index' -Default -1) -eq $frontier -and
+            $candidateRange.Valid -and
+            [int64]$candidateRange.Start -eq [int64]$rejectionRange.Start -and
+            [int64]$candidateRange.End -eq [int64]$rejectionRange.End
+        } | Sort-Object Sequence, LineNumber)
+        $activeBindings = New-Object System.Collections.Generic.List[object]
+        foreach ($candidateBinding in $matchingBindings) {
+            $candidateAuthorityId = Get-FileTransferRegularV4RepairProjectionScopeField `
+                -Event $candidateBinding `
+                -Name 'authority_id'
+            $candidateInstallGeneration = Get-FileTransferEventInt64Field `
+                -Event $candidateBinding `
+                -Name 'install_generation' `
+                -Default 0
+            $retiredBeforeRejection = @($orderedEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$candidateBinding.Sequence -and
+                [int64]$_.Sequence -lt $rejectionSequence -and
+                $_.EventName -in @(
+                    'filetransfer_regular_v4_frontier_repair_pressure_binding_retired',
+                    'filetransfer_regular_v4_frontier_repair_pressure_binding_invalidated') -and
+                (Get-FileTransferRegularV4RepairProjectionScopeField -Event $_ -Name 'authority_id') -eq
+                    $candidateAuthorityId -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'install_generation' -Default 0) -eq
+                    $candidateInstallGeneration
+            }).Count -gt 0
+            if (-not $retiredBeforeRejection) {
+                $activeBindings.Add($candidateBinding) | Out-Null
+            }
+        }
+        [object[]]$bindingTuples = @($activeBindings.ToArray() | Group-Object {
+            (Get-FileTransferRegularV4RepairProjectionScopeField -Event $_ -Name 'authority_id') + '|' +
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'install_generation' -Default 0)
+        })
+        if ($bindingTuples.Count -ne 1) {
+            continue
+        }
+        $binding = @($bindingTuples[0].Group | Sort-Object Sequence, LineNumber -Descending | Select-Object -First 1)[0]
+        $authorityId = Get-FileTransferRegularV4RepairProjectionScopeField `
+            -Event $binding `
+            -Name 'authority_id'
+        $installGeneration = Get-FileTransferEventInt64Field `
+            -Event $binding `
+            -Name 'install_generation' `
+            -Default 0
+        $rangeFingerprint = Get-FileTransferEventField `
+            -Event $rejection `
+            -Name 'required_range_fingerprint' `
+            -Default '(none)'
+
+        $priorAuthorization = @($authorizedEvents | Where-Object {
+            $candidateRange = Get-FileTransferRegularV4FrontierTailRepairRange -Event $_
+            [int64]$_.Sequence -gt [int64]$binding.Sequence -and
+            [int64]$_.Sequence -lt $rejectionSequence -and
+            (Test-FileTransferRegularV4RepairProjectionScopeMatch -Anchor $binding -Candidate $_) -and
+            (Get-FileTransferRegularV4RepairProjectionScopeField -Event $_ -Name 'authority_id') -eq $authorityId -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'install_generation' -Default 0) -eq $installGeneration -and
+            (Get-FileTransferEventField -Event $_ -Name 'repair_request_key' -Default '') -eq $repairKey -and
+            $candidateRange.Valid -and
+            [int64]$candidateRange.Start -eq [int64]$rejectionRange.Start -and
+            [int64]$candidateRange.End -eq [int64]$rejectionRange.End
+        } | Select-Object -First 1)
+        if ($priorAuthorization.Count -gt 0) {
+            continue
+        }
+
+        $rawCandidates.Add($rejection) | Out-Null
+        $tuple = (@(
+                (Get-FileTransferEventField -Event $binding -Name 'session_id' -Default '(none)'),
+                (Get-FileTransferEventField -Event $binding -Name 'transfer_id' -Default '(none)'),
+                (Get-FileTransferEventField -Event $binding -Name 'direction' -Default '(none)'),
+                $authorityId,
+                $installGeneration,
+                $repairKey,
+                [int64]$rejectionRange.Start,
+                [int64]$rejectionRange.End,
+                $rangeFingerprint,
+                (Get-FileTransferRegularV4RepairProjectionScopeKey -Event $rejection -Frontier $frontier)
+            ) -join '|').ToLowerInvariant()
+        if ($seenTuples.ContainsKey($tuple)) {
+            continue
+        }
+        $seenTuples[$tuple] = $true
+        $distinctCandidates.Add($rejection) | Out-Null
+        $metadataBySequence[[string]$rejectionSequence] = [pscustomobject]@{
+            Binding = $binding
+            AuthorityId = $authorityId
+            InstallGeneration = $installGeneration
+            RepairKey = $repairKey
+            Range = $rejectionRange
+            RangeFingerprint = $rangeFingerprint
+            Frontier = $frontier
+        }
+    }
+
+    foreach ($candidate in $distinctCandidates.ToArray()) {
+        $candidateSequence = [int64]$candidate.Sequence
+        $metadata = $metadataBySequence[[string]$candidateSequence]
+        $binding = $metadata.Binding
+        $range = $metadata.Range
+        $frontier = [int64]$metadata.Frontier
+        $pressureRecoveryResolution = @($pressureRecoveryHandoffEvents | Where-Object {
+            [int64]$_.Sequence -gt $candidateSequence -and
+            (Test-FileTransferRegularV4RepairProjectionReauthorizationBaseScopeMatch `
+                -Anchor $binding `
+                -Candidate $_) -and
+            (Get-FileTransferRegularV4RepairProjectionScopeField -Event $_ -Name 'authority_id') -eq
+                $metadata.AuthorityId -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'install_generation' -Default 0) -eq
+                [int64]$metadata.InstallGeneration -and
+            (Get-FileTransferEventField -Event $_ -Name 'repair_request_key' -Default '') -eq
+                $metadata.RepairKey -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'bridge_decision_generation' -Default 0) -gt 0 -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'recovery_liveness_lease_generation' -Default 0) -gt 0
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        $scopeBoundary = @($orderedEvents | Where-Object {
+            [int64]$_.Sequence -gt $candidateSequence -and
+            (Test-FileTransferRegularV4RepairProjectionTransferMatch -Anchor $binding -Candidate $_) -and
+            (
+                ($_.EventName -in @(
+                    'filetransfer_regular_v4_frontier_repair_pressure_binding_retired',
+                    'filetransfer_regular_v4_frontier_repair_pressure_binding_invalidated') -and
+                    (Get-FileTransferRegularV4RepairProjectionScopeField -Event $_ -Name 'authority_id') -eq
+                        $metadata.AuthorityId -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'install_generation' -Default 0) -eq
+                        [int64]$metadata.InstallGeneration) -or
+                $_.EventName -in @(
+                    'transfer_terminal', 'file_transfer_inbound_terminal', 'file_transfer_outbound_terminal',
+                    'filetransfer_runtime_terminalized') -or
+                (
+                    (
+                        [string]::IsNullOrWhiteSpace(
+                            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '')) -or
+                        [string]::Equals(
+                            (Get-FileTransferEventField -Event $binding -Name 'direction' -Default ''),
+                            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default ''),
+                            [System.StringComparison]::OrdinalIgnoreCase)
+                    ) -and
+                    (Test-FileTransferRegularV4RepairProjectionScopeReplacement -Anchor $binding -Candidate $_)
+                )
+            )
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        $boundarySequence = if ($scopeBoundary.Count -gt 0) {
+            [int64]$scopeBoundary[0].Sequence
+        }
+        else {
+            [int64]::MaxValue
+        }
+
+        $durableResolution = @($orderedEvents | Where-Object {
+            [int64]$_.Sequence -gt $candidateSequence -and
+            [int64]$_.Sequence -lt $boundarySequence -and
+            (Test-FileTransferRegularV4RepairProjectionScopeMatch -Anchor $binding -Candidate $_) -and
+            (
+                ($_.EventName -eq 'filetransfer_v4_state_sent' -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'contiguous_committed_chunk_index' -Default -1) -gt
+                        $frontier) -or
+                ($_.EventName -eq 'filetransfer_regular_v4_frontier_repair_progress_observed' -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'committed_frontier_after' -Default -1) -gt
+                        $frontier) -or
+                ($_.EventName -eq 'filetransfer_regular_v4_frontier_repair_projection_cleared' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -in @(
+                        'frontier_advanced', 'frontier_advanced_gap_resolved', 'frontier_complete',
+                        'range_filled', 'durable_fill', 'repair_filled'))
+            )
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+
+        $authorization = @($authorizedEvents | Where-Object {
+            $candidateRange = Get-FileTransferRegularV4FrontierTailRepairRange -Event $_
+            [int64]$_.Sequence -gt $candidateSequence -and
+            [int64]$_.Sequence -lt $boundarySequence -and
+            (Test-FileTransferRegularV4RepairProjectionScopeMatch -Anchor $binding -Candidate $_) -and
+            (Get-FileTransferRegularV4RepairProjectionScopeField -Event $_ -Name 'authority_id') -eq
+                $metadata.AuthorityId -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'install_generation' -Default 0) -eq
+                [int64]$metadata.InstallGeneration -and
+            (Get-FileTransferEventField -Event $_ -Name 'repair_request_key' -Default '') -eq
+                $metadata.RepairKey -and
+            (
+                $metadata.RangeFingerprint -in @('', '(none)', 'none') -or
+                (Get-FileTransferEventField -Event $_ -Name 'range_fingerprint' -Default '') -eq
+                    $metadata.RangeFingerprint
+            ) -and
+            $candidateRange.Valid -and
+            [int64]$candidateRange.Start -eq [int64]$range.Start -and
+            [int64]$candidateRange.End -eq [int64]$range.End
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+
+        $dispatchResolution = @()
+        if ($authorization.Count -gt 0) {
+            $authorization = $authorization[0]
+            $stateSent = @($stateSentEvents | Where-Object {
+                $candidateState = $_
+                $candidateRange = Get-FileTransferRegularV4FrontierTailRepairRange -Event $candidateState
+                $credit = Get-FileTransferEventInt64Field `
+                    -Event $candidateState `
+                    -Name 'credit_until_chunk_index_exclusive' `
+                    -Default -1
+                $copiedAuthorityId = Get-FileTransferEventField `
+                    -Event $candidateState `
+                    -Name 'repair_attempt_authority_id' `
+                    -Default ''
+                $copiedAuthorityAbsent = $copiedAuthorityId -in @(
+                    '', '(none)', 'none', '[redacted]', 'redacted', '(redacted)')
+                $authorityCorroborated = if (-not $copiedAuthorityAbsent) {
+                    $copiedAuthorityId -eq $metadata.AuthorityId
+                }
+                else {
+                    [object[]]$matchingCanonicalAuthorizations = @($authorizedEvents | Where-Object {
+                        $candidateAuthorization = $_
+                        $authorizationRange = Get-FileTransferRegularV4FrontierTailRepairRange `
+                            -Event $candidateAuthorization
+                        [int64]$candidateAuthorization.Sequence -gt $candidateSequence -and
+                        [int64]$candidateAuthorization.Sequence -lt [int64]$candidateState.Sequence -and
+                        (Test-FileTransferRegularV4RepairProjectionScopeMatch `
+                            -Anchor $candidateState `
+                            -Candidate $candidateAuthorization) -and
+                        (Get-FileTransferEventInt64Field `
+                            -Event $candidateAuthorization `
+                            -Name 'install_generation' `
+                            -Default 0) -eq [int64]$metadata.InstallGeneration -and
+                        (Get-FileTransferEventField `
+                            -Event $candidateAuthorization `
+                            -Name 'repair_request_key' `
+                            -Default '') -eq $metadata.RepairKey -and
+                        (
+                            $metadata.RangeFingerprint -in @('', '(none)', 'none') -or
+                            (Get-FileTransferEventField `
+                                -Event $candidateAuthorization `
+                                -Name 'range_fingerprint' `
+                                -Default '') -eq $metadata.RangeFingerprint
+                        ) -and
+                        $authorizationRange.Valid -and
+                        [int64]$authorizationRange.Start -eq [int64]$range.Start -and
+                        [int64]$authorizationRange.End -eq [int64]$range.End
+                    })
+                    [object[]]$canonicalAuthorityTuples = @($matchingCanonicalAuthorizations | Group-Object {
+                        (@(
+                                (Get-FileTransferRegularV4RepairProjectionScopeField `
+                                    -Event $_ `
+                                    -Name 'authority_id'),
+                                (Get-FileTransferEventInt64Field `
+                                    -Event $_ `
+                                    -Name 'install_generation' `
+                                    -Default 0),
+                                (Get-FileTransferEventField `
+                                    -Event $_ `
+                                    -Name 'repair_request_key' `
+                                    -Default ''),
+                                (Get-FileTransferRegularV4RepairProjectionScopeKey `
+                                    -Event $_ `
+                                    -Frontier $frontier)
+                            ) -join '|').ToLowerInvariant()
+                    })
+                    $canonicalAuthorityTuples.Count -eq 1 -and
+                        (Get-FileTransferRegularV4RepairProjectionScopeField `
+                            -Event $canonicalAuthorityTuples[0].Group[0] `
+                            -Name 'authority_id') -eq $metadata.AuthorityId
+                }
+                [int64]$candidateState.Sequence -gt [int64]$authorization.Sequence -and
+                [int64]$candidateState.Sequence -lt $boundarySequence -and
+                (Test-FileTransferRegularV4RepairProjectionScopeMatch `
+                    -Anchor $binding `
+                    -Candidate $candidateState) -and
+                $authorityCorroborated -and
+                (Get-FileTransferEventInt64Field `
+                    -Event $candidateState `
+                    -Name 'repair_attempt_install_generation' `
+                    -Default 0) -eq
+                    [int64]$metadata.InstallGeneration -and
+                (Get-FileTransferEventField `
+                    -Event $candidateState `
+                    -Name 'repair_attempt_request_key' `
+                    -Default '') -eq
+                    $metadata.RepairKey -and
+                (
+                    $metadata.RangeFingerprint -in @('', '(none)', 'none') -or
+                    (Get-FileTransferEventField `
+                        -Event $candidateState `
+                        -Name 'repair_attempt_range_fingerprint' `
+                        -Default '') -eq
+                        $metadata.RangeFingerprint
+                ) -and
+                (Get-FileTransferEventInt64Field `
+                    -Event $candidateState `
+                    -Name 'missing_range_count' `
+                    -Default 0) -gt 0 -and
+                $credit -eq [int64]$range.End -and
+                $candidateRange.Valid -and
+                [int64]$candidateRange.Start -eq [int64]$range.Start -and
+                [int64]$candidateRange.End -eq [int64]$range.End
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            if ($stateSent.Count -gt 0) {
+                $stateSent = $stateSent[0]
+                $stateEpoch = Get-FileTransferEventField -Event $stateSent -Name 'epoch' -Default ''
+                $stateReceived = @($stateReceivedEvents | Where-Object {
+                    $candidateRange = Get-FileTransferRegularV4FrontierTailRepairRange -Event $_
+                    [int64]$_.Sequence -gt [int64]$stateSent.Sequence -and
+                    [int64]$_.Sequence -lt $boundarySequence -and
+                    (Test-FileTransferRegularV4RepairProjectionScopeMatch -Anchor $stateSent -Candidate $_) -and
+                    -not [string]::IsNullOrWhiteSpace($stateEpoch) -and
+                    (Get-FileTransferEventField -Event $_ -Name 'epoch' -Default '') -eq $stateEpoch -and
+                    $candidateRange.Valid -and
+                    [int64]$candidateRange.Start -eq [int64]$range.Start -and
+                    [int64]$candidateRange.End -eq [int64]$range.End
+                } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+                if ($stateReceived.Count -gt 0) {
+                    $stateReceived = $stateReceived[0]
+                    $peerAuthority = @($peerAuthorityEvents | Where-Object {
+                        $candidateRange = Get-FileTransferRegularV4FrontierTailRepairRange -Event $_
+                        [int64]$_.Sequence -gt [int64]$stateReceived.Sequence -and
+                        [int64]$_.Sequence -lt $boundarySequence -and
+                        (Test-FileTransferRegularV4RepairProjectionScopeMatch -Anchor $stateReceived -Candidate $_) -and
+                        (Get-FileTransferEventField -Event $_ -Name 'repair_request_key' -Default '') -eq
+                            $metadata.RepairKey -and
+                        $candidateRange.Valid -and
+                        [int64]$candidateRange.Start -eq [int64]$range.Start -and
+                        [int64]$candidateRange.End -eq [int64]$range.End -and
+                        -not [string]::IsNullOrWhiteSpace(
+                            (Get-FileTransferRegularV4RepairProjectionScopeField -Event $_ -Name 'authority_id'))
+                    } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+                    if ($peerAuthority.Count -gt 0) {
+                        $peerAuthority = $peerAuthority[0]
+                        $peerAuthorityId = Get-FileTransferRegularV4RepairProjectionScopeField `
+                            -Event $peerAuthority `
+                            -Name 'authority_id'
+                        $dispatchResolution = @($dispatchEvents | Where-Object {
+                            $candidateRange = Get-FileTransferRegularV4FrontierTailRepairRange -Event $_
+                            [int64]$_.Sequence -gt [int64]$peerAuthority.Sequence -and
+                            [int64]$_.Sequence -lt $boundarySequence -and
+                            (Test-FileTransferRegularV4RepairProjectionScopeMatch -Anchor $peerAuthority -Candidate $_) -and
+                            (Get-FileTransferRegularV4RepairProjectionScopeField -Event $_ -Name 'authority_id') -eq
+                                $peerAuthorityId -and
+                            (Get-FileTransferEventField -Event $_ -Name 'repair_request_key' -Default '') -eq
+                                $metadata.RepairKey -and
+                            $candidateRange.Valid -and
+                            [int64]$candidateRange.Start -eq [int64]$range.Start -and
+                            [int64]$candidateRange.End -eq [int64]$range.End
+                        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+                    }
+                }
+            }
+        }
+
+        if ($pressureRecoveryResolution.Count -gt 0 -or
+            $durableResolution.Count -gt 0 -or
+            $dispatchResolution.Count -gt 0) {
+            $recoveredCandidates.Add($candidate) | Out-Null
+        }
+        else {
+            $unresolvedCandidates.Add($candidate) | Out-Null
+        }
+    }
+
+    return [pscustomobject]@{
+        RawCount = $rawCandidates.Count
+        DistinctCount = $distinctCandidates.Count
+        RecoveredCount = $recoveredCandidates.Count
+        UnresolvedCount = $unresolvedCandidates.Count
+        Verdict = if ($unresolvedCandidates.Count -gt 0) { 'fail' } elseif ($distinctCandidates.Count -gt 0) { 'pass' } else { 'none' }
+        RawCandidateEvents = @($rawCandidates.ToArray())
+        DistinctCandidateEvents = @($distinctCandidates.ToArray())
+        RecoveredCandidateEvents = @($recoveredCandidates.ToArray())
+        UnresolvedCandidateEvents = @($unresolvedCandidates.ToArray())
+    }
 }
 
 function Get-FileTransferRegularV4RepairProjectionReauthorizationProof {
@@ -23434,6 +23929,8 @@ function Get-FileTransferRecoveryFailureClassification {
             -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents
     $regularV4FrontierRepairMissingRangePreservationProof =
         Get-FileTransferRegularV4MissingRangePreservationProof -Events $events
+    $regularV4FrontierTailRepairStatePublicationProof =
+        Get-FileTransferRegularV4FrontierTailRepairStatePublicationProof -Events $events
     $regularV4FrontierRepairProjectionReauthorizationProof =
         Get-FileTransferRegularV4RepairProjectionReauthorizationProof -Events $events
     $regularV4PeerSilenceReplayMissingDispatchRangeProof =
@@ -26472,6 +26969,12 @@ function Get-FileTransferRecoveryFailureClassification {
         -UseDefaultReason
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
+        -Class 'regular_v4_frontier_tail_repair_state_publication_missing' `
+        -Events @($regularV4FrontierTailRepairStatePublicationProof.UnresolvedCandidateEvents) `
+        -DefaultReason 'coordinator_projection_authority_missing' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
         -Class 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery' `
         -Events @($regularV4FrontierRepairProjectionReauthorizationProof.UnresolvedCandidateEvents) `
         -DefaultReason 'fresh_projection_required_before_unrestricted_state'
@@ -27286,6 +27789,7 @@ function Get-FileTransferRecoveryFailureClassification {
                 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound',
                 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid',
                 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing',
+                'regular_v4_frontier_tail_repair_state_publication_missing',
                 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery',
                 'regular_v4_frontier_repair_pressure_authority_lifecycle_split',
                 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
@@ -27560,6 +28064,11 @@ function Get-FileTransferRecoveryFailureClassification {
         RegularV4FrontierRepairMissingRangeNotPreservedRecoveredCount = $regularV4FrontierRepairMissingRangePreservationProof.RecoveredCount
         RegularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount = $regularV4FrontierRepairMissingRangePreservationProof.UnresolvedCount
         RegularV4FrontierRepairMissingRangePreservationVerdict = $regularV4FrontierRepairMissingRangePreservationProof.Verdict
+        RegularV4FrontierTailRepairStatePublicationMissingRawCount = $regularV4FrontierTailRepairStatePublicationProof.RawCount
+        RegularV4FrontierTailRepairStatePublicationMissingDistinctCount = $regularV4FrontierTailRepairStatePublicationProof.DistinctCount
+        RegularV4FrontierTailRepairStatePublicationMissingRecoveredCount = $regularV4FrontierTailRepairStatePublicationProof.RecoveredCount
+        RegularV4FrontierTailRepairStatePublicationMissingUnresolvedCount = $regularV4FrontierTailRepairStatePublicationProof.UnresolvedCount
+        RegularV4FrontierTailRepairStatePublicationVerdict = $regularV4FrontierTailRepairStatePublicationProof.Verdict
         RegularV4FrontierRepairProjectionReauthorizationMissingRawCount = $regularV4FrontierRepairProjectionReauthorizationProof.RawCount
         RegularV4FrontierRepairProjectionReauthorizationMissingDistinctCount = $regularV4FrontierRepairProjectionReauthorizationProof.DistinctCount
         RegularV4FrontierRepairProjectionReauthorizationMissingRecoveredCount = $regularV4FrontierRepairProjectionReauthorizationProof.RecoveredCount
@@ -27957,6 +28466,11 @@ function New-FileTransferInvariantLedgerObject {
         regular_v4_frontier_repair_missing_range_not_preserved_recovered_count = [string]$recoveryClassification.RegularV4FrontierRepairMissingRangeNotPreservedRecoveredCount
         regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count = [string]$recoveryClassification.RegularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount
         regular_v4_frontier_repair_missing_range_preservation_verdict = $recoveryClassification.RegularV4FrontierRepairMissingRangePreservationVerdict
+        regular_v4_frontier_tail_repair_state_publication_missing_raw_count = [string]$recoveryClassification.RegularV4FrontierTailRepairStatePublicationMissingRawCount
+        regular_v4_frontier_tail_repair_state_publication_missing_distinct_count = [string]$recoveryClassification.RegularV4FrontierTailRepairStatePublicationMissingDistinctCount
+        regular_v4_frontier_tail_repair_state_publication_missing_recovered_count = [string]$recoveryClassification.RegularV4FrontierTailRepairStatePublicationMissingRecoveredCount
+        regular_v4_frontier_tail_repair_state_publication_missing_unresolved_count = [string]$recoveryClassification.RegularV4FrontierTailRepairStatePublicationMissingUnresolvedCount
+        regular_v4_frontier_tail_repair_state_publication_verdict = $recoveryClassification.RegularV4FrontierTailRepairStatePublicationVerdict
         regular_v4_frontier_repair_projection_reauthorization_missing_raw_count = [string]$recoveryClassification.RegularV4FrontierRepairProjectionReauthorizationMissingRawCount
         regular_v4_frontier_repair_projection_reauthorization_missing_distinct_count = [string]$recoveryClassification.RegularV4FrontierRepairProjectionReauthorizationMissingDistinctCount
         regular_v4_frontier_repair_projection_reauthorization_missing_recovered_count = [string]$recoveryClassification.RegularV4FrontierRepairProjectionReauthorizationMissingRecoveredCount
@@ -28210,6 +28724,7 @@ function Write-FileTransferDiagnosticsArtifacts {
             'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved',
             'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing',
             'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
+            'regular_v4_frontier_tail_repair_state_publication_missing',
             'regular_v4_frontier_repair_missing_range_not_preserved',
             'regular_v4_frontier_repair_settlement_disposition_unverifiable',
             'regular_v4_frontier_repair_pressure_authority_lifecycle_split',
@@ -28287,6 +28802,10 @@ function Write-FileTransferDiagnosticsArtifacts {
             }
             'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing' {
                 'recovery: coordinator-held runtime unlock retry was not rechecked after fallback-tail recovery'
+                break
+            }
+            'regular_v4_frontier_tail_repair_state_publication_missing' {
+                'recovery: coordinator-authorized regular-V4 frontier-tail repair was not published to the peer'
                 break
             }
             'regular_v4_frontier_repair_missing_range_not_preserved' {
@@ -28393,7 +28912,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("gate_status={0}" -f $effectiveGateStatus),
         ("transfer_id={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.TransferId)) { '(none)' } else { $Summary.TransferId }))),
         ("next_artifact={0}" -f $effectiveNextArtifact),
-        ("acceptance_failure_class={0}" -f ($(if ($recoveryClassification.Class -in @('runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'runtime_unlock_precommit_probe_start_handoff_missing', 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing', 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_initial_pressure_install_missing', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery', 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) { 'incomplete_proof' } elseif ($recoveryClassification.Class -in @('runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) { 'route_runtime' } elseif ($invariantMayOwnAcceptanceFailure) { $combinedInvariant.FailureClass } else { 'none' }))),
+        ("acceptance_failure_class={0}" -f ($(if ($recoveryClassification.Class -in @('runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'runtime_unlock_precommit_probe_start_handoff_missing', 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing', 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_initial_pressure_install_missing', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery', 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) { 'incomplete_proof' } elseif ($recoveryClassification.Class -in @('runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) { 'route_runtime' } elseif ($invariantMayOwnAcceptanceFailure) { $combinedInvariant.FailureClass } else { 'none' }))),
         ("release_route_law_verdict={0}" -f $releaseRouteLaw.Verdict),
         ("terminal_lifecycle_invariant_verdict={0}" -f $terminalLifecycleInvariant.Verdict),
         ("control_priority_invariant_verdict={0}" -f $controlPriorityInvariant.Verdict),
@@ -28639,6 +29158,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={0}" -f $recoveryClassification.RegularV4FrontierRepairMissingRangeNotPreservedRecoveredCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count={0}" -f $recoveryClassification.RegularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount),
         ("regular_v4_frontier_repair_missing_range_preservation_verdict={0}" -f $recoveryClassification.RegularV4FrontierRepairMissingRangePreservationVerdict),
+        ("regular_v4_frontier_tail_repair_state_publication_missing_raw_count={0}" -f $recoveryClassification.RegularV4FrontierTailRepairStatePublicationMissingRawCount),
+        ("regular_v4_frontier_tail_repair_state_publication_missing_distinct_count={0}" -f $recoveryClassification.RegularV4FrontierTailRepairStatePublicationMissingDistinctCount),
+        ("regular_v4_frontier_tail_repair_state_publication_missing_recovered_count={0}" -f $recoveryClassification.RegularV4FrontierTailRepairStatePublicationMissingRecoveredCount),
+        ("regular_v4_frontier_tail_repair_state_publication_missing_unresolved_count={0}" -f $recoveryClassification.RegularV4FrontierTailRepairStatePublicationMissingUnresolvedCount),
+        ("regular_v4_frontier_tail_repair_state_publication_verdict={0}" -f $recoveryClassification.RegularV4FrontierTailRepairStatePublicationVerdict),
         ("regular_v4_frontier_repair_projection_reauthorization_missing_raw_count={0}" -f $recoveryClassification.RegularV4FrontierRepairProjectionReauthorizationMissingRawCount),
         ("regular_v4_frontier_repair_projection_reauthorization_missing_distinct_count={0}" -f $recoveryClassification.RegularV4FrontierRepairProjectionReauthorizationMissingDistinctCount),
         ("regular_v4_frontier_repair_projection_reauthorization_missing_recovered_count={0}" -f $recoveryClassification.RegularV4FrontierRepairProjectionReauthorizationMissingRecoveredCount),

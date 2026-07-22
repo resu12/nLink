@@ -1161,6 +1161,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_projection_published') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_projection_cleared') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_projection_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_tail_repair_state_authorized') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_tail_repair_state_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_initial_pressure_install_staged') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_initial_pressure_install_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_initial_pressure_install_accepted') +
@@ -1222,6 +1224,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     )
     $regularV4FrontierRepairMissingRangePreservationProof =
         Get-FileTransferRegularV4MissingRangePreservationProof `
+            -Events $regularV4FrontierRepairProjectionEvents
+    $regularV4FrontierTailRepairStatePublicationProof =
+        Get-FileTransferRegularV4FrontierTailRepairStatePublicationProof `
             -Events $regularV4FrontierRepairProjectionEvents
     $regularV4FrontierRepairProjectionReauthorizationProof =
         Get-FileTransferRegularV4RepairProjectionReauthorizationProof `
@@ -1710,6 +1715,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Reason = 'unresolved_frontier_repair_missing_range_omitted'
         }) | Out-Null
     }
+    foreach ($candidateEvent in @($regularV4FrontierTailRepairStatePublicationProof.UnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'regular_v4_frontier_tail_repair_state_publication_missing'
+            Event = $candidateEvent
+            Reason = 'coordinator_projection_authority_missing'
+        }) | Out-Null
+    }
     foreach ($candidateEvent in @($regularV4FrontierRepairProjectionReauthorizationProof.UnresolvedCandidateEvents)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery'
@@ -1861,6 +1873,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $runtimeUnlockUncommittedTunaFallbackPrecommitAuthorityProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.UnresolvedCount -gt 0 -or
         $fallbackTailTransportEpochReauthorizationProof.UnresolvedCount -gt 0 -or
+        $regularV4FrontierTailRepairStatePublicationProof.UnresolvedCount -gt 0 -or
         $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RouteCommitSendDrainProof.UnresolvedCount -gt 0) {
         $verdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
@@ -1905,6 +1918,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
                 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected',
                 'runtime_unlock_retry_dispatch_authority_tuple_mismatch',
+                'regular_v4_frontier_tail_repair_state_publication_missing',
                 'regular_v4_frontier_repair_missing_range_not_preserved',
                 'regular_v4_frontier_repair_pressure_authority_lifecycle_split',
                 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing',
@@ -1972,6 +1986,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound',
             'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid',
             'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing',
+            'regular_v4_frontier_tail_repair_state_publication_missing',
             'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery',
             'regular_v4_frontier_repair_pressure_authority_lifecycle_split',
             'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
@@ -2062,6 +2077,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.RecoveredCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.UnresolvedCount),
         ("regular_v4_frontier_repair_missing_range_preservation_verdict={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.Verdict),
+        ("regular_v4_frontier_tail_repair_state_publication_missing_raw_count={0}" -f $regularV4FrontierTailRepairStatePublicationProof.RawCount),
+        ("regular_v4_frontier_tail_repair_state_publication_missing_distinct_count={0}" -f $regularV4FrontierTailRepairStatePublicationProof.DistinctCount),
+        ("regular_v4_frontier_tail_repair_state_publication_missing_recovered_count={0}" -f $regularV4FrontierTailRepairStatePublicationProof.RecoveredCount),
+        ("regular_v4_frontier_tail_repair_state_publication_missing_unresolved_count={0}" -f $regularV4FrontierTailRepairStatePublicationProof.UnresolvedCount),
+        ("regular_v4_frontier_tail_repair_state_publication_verdict={0}" -f $regularV4FrontierTailRepairStatePublicationProof.Verdict),
         ("regular_v4_frontier_repair_projection_reauthorization_missing_raw_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.RawCount),
         ("regular_v4_frontier_repair_projection_reauthorization_missing_distinct_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.DistinctCount),
         ("regular_v4_frontier_repair_projection_reauthorization_missing_recovered_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.RecoveredCount),
@@ -2249,6 +2269,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.RecoveredCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.UnresolvedCount),
         ("regular_v4_frontier_repair_missing_range_preservation_verdict={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.Verdict),
+        ("regular_v4_frontier_tail_repair_state_publication_missing_raw_count={0}" -f $regularV4FrontierTailRepairStatePublicationProof.RawCount),
+        ("regular_v4_frontier_tail_repair_state_publication_missing_distinct_count={0}" -f $regularV4FrontierTailRepairStatePublicationProof.DistinctCount),
+        ("regular_v4_frontier_tail_repair_state_publication_missing_recovered_count={0}" -f $regularV4FrontierTailRepairStatePublicationProof.RecoveredCount),
+        ("regular_v4_frontier_tail_repair_state_publication_missing_unresolved_count={0}" -f $regularV4FrontierTailRepairStatePublicationProof.UnresolvedCount),
+        ("regular_v4_frontier_tail_repair_state_publication_verdict={0}" -f $regularV4FrontierTailRepairStatePublicationProof.Verdict),
         ("regular_v4_frontier_repair_projection_reauthorization_missing_raw_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.RawCount),
         ("regular_v4_frontier_repair_projection_reauthorization_missing_distinct_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.DistinctCount),
         ("regular_v4_frontier_repair_projection_reauthorization_missing_recovered_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.RecoveredCount),
@@ -2432,6 +2457,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.RecoveredCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.UnresolvedCount),
         ("regular_v4_frontier_repair_missing_range_preservation_verdict={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.Verdict),
+        ("regular_v4_frontier_tail_repair_state_publication_missing_raw_count={0}" -f $regularV4FrontierTailRepairStatePublicationProof.RawCount),
+        ("regular_v4_frontier_tail_repair_state_publication_missing_distinct_count={0}" -f $regularV4FrontierTailRepairStatePublicationProof.DistinctCount),
+        ("regular_v4_frontier_tail_repair_state_publication_missing_recovered_count={0}" -f $regularV4FrontierTailRepairStatePublicationProof.RecoveredCount),
+        ("regular_v4_frontier_tail_repair_state_publication_missing_unresolved_count={0}" -f $regularV4FrontierTailRepairStatePublicationProof.UnresolvedCount),
+        ("regular_v4_frontier_tail_repair_state_publication_verdict={0}" -f $regularV4FrontierTailRepairStatePublicationProof.Verdict),
         ("regular_v4_frontier_repair_projection_reauthorization_missing_raw_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.RawCount),
         ("regular_v4_frontier_repair_projection_reauthorization_missing_distinct_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.DistinctCount),
         ("regular_v4_frontier_repair_projection_reauthorization_missing_recovered_count={0}" -f $regularV4FrontierRepairProjectionReauthorizationProof.RecoveredCount),
@@ -2790,6 +2820,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         regular_v4_frontier_repair_missing_range_not_preserved_recovered_count = $regularV4FrontierRepairMissingRangePreservationProof.RecoveredCount
         regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count = $regularV4FrontierRepairMissingRangePreservationProof.UnresolvedCount
         regular_v4_frontier_repair_missing_range_preservation_verdict = $regularV4FrontierRepairMissingRangePreservationProof.Verdict
+        regular_v4_frontier_tail_repair_state_publication_missing_raw_count = $regularV4FrontierTailRepairStatePublicationProof.RawCount
+        regular_v4_frontier_tail_repair_state_publication_missing_distinct_count = $regularV4FrontierTailRepairStatePublicationProof.DistinctCount
+        regular_v4_frontier_tail_repair_state_publication_missing_recovered_count = $regularV4FrontierTailRepairStatePublicationProof.RecoveredCount
+        regular_v4_frontier_tail_repair_state_publication_missing_unresolved_count = $regularV4FrontierTailRepairStatePublicationProof.UnresolvedCount
+        regular_v4_frontier_tail_repair_state_publication_verdict = $regularV4FrontierTailRepairStatePublicationProof.Verdict
         regular_v4_frontier_repair_projection_reauthorization_missing_raw_count = $regularV4FrontierRepairProjectionReauthorizationProof.RawCount
         regular_v4_frontier_repair_projection_reauthorization_missing_distinct_count = $regularV4FrontierRepairProjectionReauthorizationProof.DistinctCount
         regular_v4_frontier_repair_projection_reauthorization_missing_recovered_count = $regularV4FrontierRepairProjectionReauthorizationProof.RecoveredCount
