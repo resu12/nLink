@@ -32,13 +32,20 @@ public sealed partial class SessionFileTransferV4SenderTests
         }
         SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "initial_pressure_startup_race");
 
-        _ = CreateInboundState(service, context, "frontier_stall_repair_due", forceMissingRange: true);
+        var initial = CreateInboundState(service, context, "frontier_stall_repair_due", forceMissingRange: true);
 
         var initialReceipt = Assert.Single(transport.RegularV4PressureInstallReceipts);
         Assert.Null(initialReceipt.Authority.PredecessorAuthorityId);
         Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed, initialReceipt.Status);
+        var initialRange = Assert.Single(initial.MissingRanges);
+        Assert.Equal(0, initialRange.StartChunkIndex);
+        Assert.Equal(12, initialRange.ChunkCount);
+        Assert.Equal(12, initial.CreditUntilChunkIndexExclusive);
+        Assert.Null(GetPrivatePropertyValue(context, "V4RegularFrontierRepairProjection"));
         var contract = GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract");
         Assert.NotNull(contract);
+        var repairStates = Assert.IsAssignableFrom<IDictionary>(GetPrivatePropertyValue(context, "V4ReceiverRepairRequests"));
+        Assert.Equal(1, GetPrivateProperty<int>(Assert.Single(repairStates.Values.Cast<object>()), "AttemptCount"));
 
         for (var chunkIndex = 0; chunkIndex < 3; chunkIndex++)
         {
@@ -60,6 +67,187 @@ public sealed partial class SessionFileTransferV4SenderTests
             StringComparison.Ordinal);
         Assert.True(installIndex >= 0, log);
         Assert.True(settlementIndex > installIndex, log);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public async Task RegularV4FrontierTailRepair_InitialAttemptPublishesExactAuthorityAndPeerQueuesOnce()
+    {
+        const string transferId = "transfer_regular_v4_frontier_tail_attempt_publication";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4InboundContext(
+            transferId,
+            chunkCount: 4096,
+            nextChunkIndex: 0,
+            durableHighestChunkIndex: -1,
+            creditUntilChunkIndexExclusive: 3136);
+        using var dataSession = new RecordingDataSession($"session_{transferId}", transferId);
+        SetPrivateProperty(context, "DataSession", dataSession);
+        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "frontier_tail_attempt_publication");
+        typeof(SessionFileTransferService)
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var sent = await Assert.IsAssignableFrom<Task<bool>>(typeof(SessionFileTransferService)
+            .GetMethod("SendInboundV4StateAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "frontier_stall_repair_due", false, true, true, true]));
+
+        Assert.True(sent);
+        var state = Assert.IsAssignableFrom<FileTransferStateFrameV4>(Assert.Single(dataSession.SentFrames));
+        var range = Assert.Single(state.MissingRanges);
+        Assert.Equal(0, range.StartChunkIndex);
+        Assert.Equal(12, range.ChunkCount);
+        Assert.Equal(12, state.CreditUntilChunkIndexExclusive);
+        Assert.Null(GetPrivatePropertyValue(context, "V4RegularFrontierRepairProjection"));
+        var receipt = Assert.Single(transport.RegularV4PressureInstallReceipts);
+        var contract = GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract");
+        Assert.NotNull(contract);
+        var authority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(
+            GetPrivatePropertyValue(contract, "Authority"));
+        Assert.Equal(receipt.Authority.AuthorityId, authority.AuthorityId);
+
+        using var peerService = new SessionFileTransferService();
+        var peerContext = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 0,
+            chunksAcceptedForTransport: 64,
+            remoteGrantedUntilExclusive: 3136,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow);
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(peerService, peerContext);
+        InvokeEnqueueAuthorizedV4RepairsFromState(peerService, peerContext, state);
+        InvokeEnqueueAuthorizedV4RepairsFromState(peerService, peerContext, state);
+        Assert.NotNull(GetPrivatePropertyValue(peerContext, "CurrentRegularV4FrontierRepairContract"));
+        Assert.Single(GetQueuedV4RepairSends(peerContext));
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains(
+            $"event=filetransfer_regular_v4_frontier_tail_repair_state_authorized; authority_schema=2; authority_id={authority.AuthorityId}",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains("repair_publication_kind=attempt_scoped_frontier_tail", log, StringComparison.Ordinal);
+        Assert.Contains("repair_attempt_authority_id=", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("repair_attempt_authority_id=(none)", log, StringComparison.Ordinal);
+        Assert.Contains($"repair_attempt_install_generation={receipt.InstallGeneration}", log, StringComparison.Ordinal);
+        Assert.Contains("repair_attempt_ranges=0:12", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public async Task RegularV4FrontierTailRepair_ScopeReplacementAfterCaptureRejectsBeforeDelivery()
+    {
+        const string transferId = "transfer_regular_v4_frontier_tail_attempt_presend_replaced";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4InboundContext(
+            transferId,
+            chunkCount: 4096,
+            nextChunkIndex: 0,
+            durableHighestChunkIndex: -1,
+            creditUntilChunkIndexExclusive: 3136);
+        using var dataSession = new RecordingDataSession($"session_{transferId}", transferId);
+        SetPrivateProperty(context, "DataSession", dataSession);
+        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "frontier_tail_attempt_presend_replaced");
+        typeof(SessionFileTransferService)
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        var captured = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        SessionFileTransferService.InboundRegularV4FrontierTailRepairPreSendBarrierForTests = async (_, _) =>
+        {
+            captured.TrySetResult();
+            await release.Task;
+        };
+
+        try
+        {
+            var sendTask = Assert.IsAssignableFrom<Task<bool>>(typeof(SessionFileTransferService)
+                .GetMethod("SendInboundV4StateAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(service, [context, "frontier_stall_repair_due", false, true, true, true]));
+            await captured.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            var owner = Assert.IsType<RuntimeOwnerToken>(GetPrivatePropertyValue(context, "CurrentRuntimeOwner"));
+            SetPrivateProperty(context, "CurrentRuntimeOwner", owner with { RuntimeGeneration = owner.RuntimeGeneration + 1 });
+            release.TrySetResult();
+
+            Assert.False(await sendTask.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Empty(dataSession.SentFrames);
+            Assert.Contains(
+                "event=filetransfer_regular_v4_frontier_tail_repair_state_rejected",
+                ReadOperationalLogTail(logStart),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            release.TrySetResult();
+            SessionFileTransferService.InboundRegularV4FrontierTailRepairPreSendBarrierForTests = null;
+        }
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public void RegularV4FrontierTailRepair_DurableEvidenceStagesProjectionWithSameAuthority()
+    {
+        const string transferId = "transfer_regular_v4_frontier_tail_attempt_to_projection";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4InboundContext(
+            transferId,
+            chunkCount: 256,
+            nextChunkIndex: 0,
+            durableHighestChunkIndex: -1,
+            creditUntilChunkIndexExclusive: 12);
+        SetPrivateProperty(
+            context,
+            "DataSession",
+            new RecordingDataSession($"session_{transferId}", transferId));
+        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "frontier_tail_attempt_to_projection");
+
+        var written = Assert.IsType<BitArray>(GetPrivatePropertyValue(context, "ReceiverSparseChunksWritten"));
+        for (var chunkIndex = 0; chunkIndex < 12; chunkIndex++)
+        {
+            written[chunkIndex] = false;
+        }
+
+        var initial = CreateInboundState(service, context, "frontier_stall_repair_due", forceMissingRange: true);
+        Assert.Single(initial.MissingRanges);
+        var contract = GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract");
+        Assert.NotNull(contract);
+        var authority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(
+            GetPrivatePropertyValue(contract, "Authority"));
+        var repairStates = Assert.IsAssignableFrom<IDictionary>(
+            GetPrivatePropertyValue(context, "V4ReceiverRepairRequests"));
+        var repairState = Assert.Single(repairStates.Values.Cast<object>());
+        Assert.Equal(1, GetPrivateProperty<int>(repairState, "AttemptCount"));
+        Assert.Null(GetPrivatePropertyValue(context, "V4RegularFrontierRepairProjection"));
+
+        for (var chunkIndex = 12; chunkIndex <= 20; chunkIndex++)
+        {
+            written[chunkIndex] = true;
+        }
+        SetPrivateProperty(context, "PullHighestReceivedChunkIndex", 20);
+
+        var durable = CreateInboundState(service, context, "chunk_batch_committed", forceMissingRange: true);
+        Assert.Equal(0, Assert.Single(durable.MissingRanges).StartChunkIndex);
+        var projection = GetPrivatePropertyValue(context, "V4RegularFrontierRepairProjection");
+        Assert.NotNull(projection);
+        Assert.Same(contract, GetPrivatePropertyValue(projection, "SourceContract"));
+        var currentContract = GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract");
+        Assert.NotNull(currentContract);
+        Assert.Equal(
+            authority.AuthorityId,
+            Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(
+                GetPrivatePropertyValue(currentContract, "Authority")).AuthorityId);
+        Assert.Same(repairState, Assert.Single(repairStates.Values.Cast<object>()));
+        Assert.Equal(1, GetPrivateProperty<int>(repairState, "AttemptCount"));
+        Assert.Single(transport.RegularV4PressureInstallReceipts);
     }
 
     [Fact]

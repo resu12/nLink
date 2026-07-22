@@ -22247,6 +22247,18 @@ public sealed partial class SessionFileTransferService : IDisposable
         RegularV4FrontierRepairContract SourceContract,
         InboundRegularV4FrontierRepairProjectionKind Kind);
 
+    private sealed record InboundRegularV4FrontierTailRepairStateAuthority(
+        RegularV4FrontierRepairContract Contract,
+        FileTransferRegularV4FrontierRepairAuthority Authority,
+        long InstallGeneration,
+        string RepairRequestKey,
+        IReadOnlyList<FileTransferRangeV4> Ranges,
+        string RangeFingerprint,
+        int FrontierChunkIndex,
+        int DurableReceivedHighestChunkIndex,
+        IFileTransferDataSession DataSession,
+        long DataSessionGeneration);
+
     private sealed record InboundRegularV4FrontierRepairProjectionRefreshSource(
         InboundRegularV4FrontierRepairProjection Projection,
         string SessionId,
