@@ -1039,7 +1039,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $runtimeUnlockRetryDispatchObservedEvents +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_contract_settled') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_settlement_reported') +
-        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_settlement_decided')
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_settlement_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'session_recovery_contract_listener_rearm_completed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'session_recovery_contract_retry_dispatched') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'session_recovery_contract_retry_authority_offer_window_refreshed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_successor_intent_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_missing_dispatch_successor_limit_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_chain_closed')
     )
     $runtimeUnlockRetryDispatchPostGrantHoldProof =
         Get-FileTransferRuntimeUnlockRetryDispatchPostGrantHoldCorrelation `
@@ -1090,7 +1096,16 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_joined') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_retry_armed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_join_discarded') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_bounded_closure_retained') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_activation_offer_not_observed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_activation_offer_retry_not_scheduled') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_install_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_contract_settled') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_settlement_reported') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_settlement_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_successor_intent_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_missing_dispatch_successor_limit_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_chain_closed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_current_authority_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_recovery_authority_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_blocked_by_regular_v4_receive_recovery') +
@@ -1680,7 +1695,12 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing'
             Event = $candidateEvent
-            Reason = 'regular_v4_recovery_closure_window_join_missing'
+            Reason = if ($candidateEvent.EventName -eq 'tuna_acceleration_activation_offer_retry_not_scheduled') {
+                'regular_v4_recovery_closure_window_fresh_chain_not_created'
+            }
+            else {
+                'regular_v4_recovery_closure_window_join_missing'
+            }
         }) | Out-Null
     }
     foreach ($candidateEvent in @($regularV4FrontierRepairMissingRangePreservationProof.UnresolvedCandidateEvents)) {
@@ -1942,6 +1962,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     }
     $semanticFailureDomain = if ($firstProofChainFailureClass -in @(
             'runtime_unlock_regular_v4_route_commit_send_drain_missing',
+            'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing',
             'runtime_unlock_precommit_probe_start_handoff_missing',
             'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing',
             'runtime_unlock_precommit_fallback_recovery_handoff_suppressed',
