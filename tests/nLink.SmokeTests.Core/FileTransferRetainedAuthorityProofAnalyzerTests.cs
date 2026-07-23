@@ -1890,6 +1890,440 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedAuthorityProofSuite", "RouteCommitSendDrain")]
+    public async Task AnalyzeRetained_CoordinatorRouteTransition_RequiresExactOrderedDrainAndAtomicCommit(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_coordinator_route_transition_valid";
+        var lines = BuildFileTunaV4DataPathProofFixture(
+            transferId,
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_prepared",
+                transferId),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_prepared",
+                transferId),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_pause_bound",
+                transferId,
+                status: "Installed"),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_draining",
+                transferId),
+            RegularV4ToTunaPrecommitAckMessage(transferId),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_drain_receipt_decided",
+                transferId,
+                status: "Accepted"),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_drain_receipt_decided",
+                transferId,
+                status: "Idempotent"),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_committed",
+                transferId,
+                status: "Committed"),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_disposition_applied",
+                transferId,
+                status: "Committed")
+                .Replace(
+                    "status=Committed",
+                    "disposition=committed; apply_status=applied",
+                    StringComparison.Ordinal),
+            RegularV4ToTunaAtomicRouteTransitionMessage(transferId),
+            FileTunaV4DataPathActualMessage(
+                transferId,
+                actualTransport: "tuna",
+                eventName: "filetransfer_tuna_data_path_peer_visible",
+                proofDirection: "send",
+                startChunkIndex: 0));
+
+        var result = compact
+            ? await RunAnalyzeFixtureAsync(
+                lines,
+                environment: new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                })
+            : await RunAnalyzeFixtureAsync(lines);
+        Assert.Equal(0, result.Script.ExitCode);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("0", verdict["runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count"]);
+        Assert.Equal("pass", verdict["runtime_unlock_regular_v4_route_commit_send_drain_verdict"]);
+        Assert.NotEqual(
+            "runtime_unlock_regular_v4_route_commit_send_drain_missing",
+            verdict["first_proof_chain_failure_class"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedAuthorityProofSuite", "RouteCommitSendDrain")]
+    public async Task AnalyzeRetained_CoordinatorRouteTransition_RejectedCommitThenExactCommitPasses(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_coordinator_route_transition_rejected_then_committed";
+        var lines = BuildFileTunaV4DataPathProofFixture(
+            transferId,
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_prepared",
+                transferId),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_pause_bound",
+                transferId,
+                status: "Installed"),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_draining",
+                transferId),
+            RegularV4ToTunaPrecommitAckMessage(transferId),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_drain_receipt_decided",
+                transferId,
+                status: "Accepted"),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_committed",
+                transferId,
+                status: "Rejected"),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_committed",
+                transferId,
+                status: "Committed"),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_disposition_applied",
+                transferId,
+                status: "Committed")
+                .Replace(
+                    "status=Committed",
+                    "disposition=committed; apply_status=applied",
+                    StringComparison.Ordinal));
+
+        var result = compact
+            ? await RunAnalyzeFixtureAsync(
+                lines,
+                environment: new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                })
+            : await RunAnalyzeFixtureAsync(lines);
+        Assert.Equal(0, result.Script.ExitCode);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("0", verdict["runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count"]);
+        Assert.Equal("pass", verdict["runtime_unlock_regular_v4_route_commit_send_drain_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedAuthorityProofSuite", "RouteCommitSendDrain")]
+    public async Task AnalyzeRetained_CoordinatorRouteTransition_AckBeforeDrainingFailsAtCommit(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_coordinator_route_transition_ack_before_drain";
+        var lines = BuildFileTunaV4DataPathProofFixture(
+            transferId,
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_prepared",
+                transferId),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_pause_bound",
+                transferId,
+                status: "Installed"),
+            RegularV4ToTunaPrecommitAckMessage(transferId),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_draining",
+                transferId),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_drain_receipt_decided",
+                transferId,
+                status: "Accepted"),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_committed",
+                transferId,
+                status: "Committed",
+                writerSequence: 46));
+
+        var result = compact
+            ? await RunAnalyzeFixtureAsync(
+                lines,
+                environment: new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                })
+            : await RunAnalyzeFixtureAsync(lines);
+        Assert.Equal(0, result.Script.ExitCode);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count"]);
+        Assert.Equal(
+            "regular_v4_to_tuna_transition_committed_without_acked_precommit_proof",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("46", verdict["first_proof_chain_failure_writer_sequence"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedAuthorityProofSuite", "RouteCommitSendDrain")]
+    public async Task AnalyzeRetained_CoordinatorRouteTransition_MutatedCommitTupleFailsAtCommit(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_coordinator_route_transition_mutated_commit";
+        var mutatedCommit = RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_committed",
+                transferId,
+                status: "Committed",
+                writerSequence: 47)
+            .Replace(
+                "source_runtime_generation=4",
+                "source_runtime_generation=99",
+                StringComparison.Ordinal);
+        var lines = BuildFileTunaV4DataPathProofFixture(
+            transferId,
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_prepared",
+                transferId),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_pause_bound",
+                transferId,
+                status: "Installed"),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_draining",
+                transferId),
+            RegularV4ToTunaPrecommitAckMessage(transferId),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_drain_receipt_decided",
+                transferId,
+                status: "Accepted"),
+            mutatedCommit);
+
+        var result = compact
+            ? await RunAnalyzeFixtureAsync(
+                lines,
+                environment: new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                })
+            : await RunAnalyzeFixtureAsync(lines);
+        Assert.Equal(0, result.Script.ExitCode);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count"]);
+        Assert.Equal(
+            "regular_v4_to_tuna_transition_authority_tuple_mutated",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("47", verdict["first_proof_chain_failure_writer_sequence"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedAuthorityProofSuite", "RouteCommitSendDrain")]
+    public async Task AnalyzeRetained_CoordinatorRouteTransition_CommitBeforeReceiptFailsAtCommit(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_coordinator_route_transition_early_commit";
+        var lines = BuildFileTunaV4DataPathProofFixture(
+            transferId,
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_prepared",
+                transferId),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_pause_bound",
+                transferId,
+                status: "Installed"),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_draining",
+                transferId),
+            RegularV4ToTunaPrecommitAckMessage(transferId),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_committed",
+                transferId,
+                status: "Committed",
+                writerSequence: 44),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_drain_receipt_decided",
+                transferId,
+                status: "Accepted"),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_disposition_applied",
+                transferId,
+                status: "Committed"));
+
+        var result = compact
+            ? await RunAnalyzeFixtureAsync(
+                lines,
+                environment: new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                })
+            : await RunAnalyzeFixtureAsync(lines);
+        Assert.Equal(0, result.Script.ExitCode);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count"]);
+        Assert.Equal(
+            "runtime_unlock_regular_v4_route_commit_send_drain_missing",
+            verdict["first_proof_chain_failure_class"]);
+        Assert.Equal(
+            "filetransfer_regular_v4_to_tuna_route_transition_committed",
+            verdict["first_proof_chain_failure_event"]);
+        Assert.Equal(
+            "regular_v4_to_tuna_transition_committed_without_exact_physical_drain_receipt",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("44", verdict["first_proof_chain_failure_writer_sequence"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedAuthorityProofSuite", "RouteCommitSendDrain")]
+    public async Task AnalyzeRetained_CoordinatorRouteTransition_PayloadLeaseAfterDrainingFailsAtRegistration(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_coordinator_route_transition_late_lease";
+        var lines = BuildFileTunaV4DataPathProofFixture(
+            transferId,
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_prepared",
+                transferId),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_pause_bound",
+                transferId,
+                status: "Installed"),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_draining",
+                transferId),
+            RegularV4ToTunaPhysicalSendLeaseMessage(transferId, writerSequence: 51),
+            RegularV4ToTunaPrecommitAckMessage(transferId),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_drain_receipt_decided",
+                transferId,
+                status: "Accepted"),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_committed",
+                transferId,
+                status: "Committed"),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_disposition_applied",
+                transferId,
+                status: "Committed"));
+
+        var result = compact
+            ? await RunAnalyzeFixtureAsync(
+                lines,
+                environment: new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                })
+            : await RunAnalyzeFixtureAsync(lines);
+        Assert.Equal(0, result.Script.ExitCode);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count"]);
+        Assert.Equal(
+            "filetransfer_regular_v4_physical_send_lease_registered",
+            verdict["first_proof_chain_failure_event"]);
+        Assert.Equal(
+            "regular_v4_payload_lease_registered_after_transition_draining",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("51", verdict["first_proof_chain_failure_writer_sequence"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedAuthorityProofSuite", "RouteCommitSendDrain")]
+    public async Task AnalyzeRetained_CoordinatorRouteTransition_ExactInvalidationDispositionIsTerminal(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_coordinator_route_transition_invalidated";
+        var lines = BuildFileTunaV4DataPathProofFixture(
+            transferId,
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_prepared",
+                transferId),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_pause_bound",
+                transferId,
+                status: "Installed"),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_draining",
+                transferId),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_invalidated",
+                transferId,
+                status: "Invalidated"),
+            RegularV4ToTunaTransitionMessage(
+                "filetransfer_regular_v4_to_tuna_route_transition_disposition_applied",
+                transferId,
+                status: "Invalidated")
+                .Replace(
+                    "status=Invalidated",
+                    "disposition=rolledback; apply_status=applied",
+                    StringComparison.Ordinal));
+
+        var result = compact
+            ? await RunAnalyzeFixtureAsync(
+                lines,
+                environment: new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                })
+            : await RunAnalyzeFixtureAsync(lines);
+        Assert.Equal(0, result.Script.ExitCode);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("0", verdict["runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count"]);
+        Assert.Equal("pass", verdict["runtime_unlock_regular_v4_route_commit_send_drain_verdict"]);
+    }
+
+    [Theory]
     [InlineData("runtime_generation")]
     [InlineData("range")]
     [Trait("RetainedAuthorityProofSuite", "FileTunaV4DataPathProof")]
@@ -2674,6 +3108,60 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
            "route_publication_generation=3; route_commit_generation=1; target_route=file_tuna_v4; " +
            "target_protocol_version=4; target_transport=tuna; route_publication_action_kind=RouteCommitPublication; " +
            $"coordinator_decision_reason=accepted; completed_send_drain_generation={completedDrainGeneration}";
+
+    private static string RegularV4ToTunaTransitionMessage(
+        string eventName,
+        string transferId,
+        string? status = null,
+        int? writerSequence = null)
+    {
+        status ??= eventName switch
+        {
+            "filetransfer_regular_v4_to_tuna_route_transition_draining" => "Draining",
+            "filetransfer_regular_v4_to_tuna_route_transition_committed" => "Committed",
+            "filetransfer_regular_v4_to_tuna_route_transition_invalidated" => "Invalidated",
+            _ => "Prepared"
+        };
+        return $"event={eventName}; direction=outbound; transfer_id={transferId}; session_id=sess_a; " +
+               "transition_generation=3; authority_id=transition-authority-3; " +
+               "source_route=regular_nkn_v4_fast; source_protocol_version=4; source_live_route_epoch=1; " +
+               "source_runtime_generation=4; source_terminal_generation=0; source_leg_generation=2; " +
+               "source_transport_epoch=1; source_bridge_recovery_generation=1; " +
+               "source_route_publication_generation=6; source_data_session_generation=3; " +
+               "transaction_generation=7; offer_generation=8; launch_generation=9; " +
+               "tuna_path_lease_generation=10; checkpoint_generation=3; checkpoint_state_epoch=12; " +
+               "checkpoint_contiguous_frontier=24; checkpoint_durable_highest=31; " +
+               "target_route=FileTunaV4; target_protocol_version=4; " +
+               "target_transport=tuna; probe_state=Acked; captured_send_count=2; completed_send_count=2; " +
+               "captured_send_fingerprint=lease-fingerprint-3; completed_send_fingerprint=lease-fingerprint-3; " +
+               "target_runtime_generation=5; target_leg_generation=3; target_route_publication_generation=7; " +
+               $"outcome=Completed; status={status}; decision_reason=fixture" +
+               (writerSequence.HasValue ? $"; log_writer_sequence={writerSequence.Value}" : string.Empty);
+    }
+
+    private static string RegularV4ToTunaPrecommitAckMessage(string transferId)
+        => $"event=runtime_unlock_precommit_probe_acked; direction=outbound; transfer_id={transferId}; " +
+           "session_id=sess_a; transaction_generation=7; offer_generation=8; launch_generation=9; " +
+           "tuna_path_lease_generation=10; probe_state=Acked; decision_reason=fixture";
+
+    private static string RegularV4ToTunaPhysicalSendLeaseMessage(string transferId, int writerSequence)
+        => $"event=filetransfer_regular_v4_physical_send_lease_registered; direction=outbound; " +
+           $"transfer_id={transferId}; session_id=sess_a; transition_generation=3; send_lease_generation=11; " +
+           "source_route=regular_nkn_v4_fast; source_protocol_version=4; source_live_route_epoch=1; " +
+           "source_runtime_generation=4; source_terminal_generation=0; source_leg_generation=2; " +
+           "source_transport_epoch=1; source_bridge_recovery_generation=1; " +
+           "source_route_publication_generation=6; source_data_session_generation=3; " +
+           $"start_chunk_index=24; chunk_count=4; repair_send=0; repair_request_key=(none); log_writer_sequence={writerSequence}";
+
+    private static string RegularV4ToTunaAtomicRouteTransitionMessage(string transferId)
+        => $"event=filetransfer_route_transitioned; direction=outbound; transfer_id={transferId}; session_id=sess_a; " +
+           "transition_generation=3; authority_id=transition-authority-3; route=file_tuna_v4; protocol_version=4; " +
+           "previous_route=regular_nkn_v4_fast; new_route=file_tuna_v4; previous_protocol_version=4; " +
+           "new_protocol_version=4; handoff_kind=normal_to_tuna_activation; live_route_epoch=2; " +
+           "runtime_generation=5; terminal_generation=0; leg_generation=3; route_publication_generation=7; " +
+           "route_commit_generation=1; target_route=file_tuna_v4; target_protocol_version=4; " +
+           "target_transport=tuna; route_publication_action_kind=RouteCommitPublication; " +
+           "coordinator_decision_reason=regular_v4_to_tuna_transition_committed; completed_send_drain_generation=3";
 
     private static string FileTunaV4DataPathAuthoritySuffix(string transferId)
         => $"direction=outbound; transfer_id={transferId}; session_id=sess_a; route=file_tuna_v4; protocol_version=4; live_route_epoch=3; runtime_generation=7; terminal_generation=0; leg_generation=4; route_publication_generation=9; route_commit_generation=0; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; intended_target_transport=tuna; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted";

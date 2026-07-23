@@ -370,6 +370,8 @@ public sealed partial class SessionFileTransferV4SenderTests
         transport.SeedRuntimeUnlockRouteCommitProofForTests(transferId, "pressure_route_commit_rejected");
         service.AttachTransport(transport);
         var context = CreateProjectionInboundContext(transferId);
+        SetPrivateProperty(context, "HighestBufferedChunkIndex", 8);
+        SetPrivateProperty(context, "DataSessionGeneration", 1L);
         typeof(SessionFileTransferService)
             .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
@@ -381,12 +383,17 @@ public sealed partial class SessionFileTransferV4SenderTests
             context,
             "InstalledRegularV4FrontierRepairPressureBinding");
         Assert.NotNull(installedBinding);
-        transport.RegularV4PressureSettlementApplyOverride = command => new(
-            command,
-            FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
-            "unit_test_route_commit_retirement_rejected",
-            CurrentAuthorityCleared: false,
-            RetainedPredecessorCleared: false);
+        var applyCount = 0;
+        transport.RegularV4PressureSettlementApplyOverride = command =>
+        {
+            Interlocked.Increment(ref applyCount);
+            return new(
+                command,
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+                "unit_test_route_commit_retirement_rejected",
+                CurrentAuthorityCleared: false,
+                RetainedPredecessorCleared: false);
+        };
 
         var promoted = Assert.IsType<bool>(typeof(SessionFileTransferService)
             .GetMethod("TryPromoteInboundRegularNknV4ToFileTunaV4Locked", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -399,7 +406,7 @@ public sealed partial class SessionFileTransferV4SenderTests
                     FileTransferTransportKind.Tuna,
                 ]));
 
-        Assert.False(promoted);
+        Assert.True(promoted);
         Assert.Equal(
             FileTransferRoute.RegularNknV4Fast,
             GetPrivateProperty<FileTransferRouteSelection>(context, "RouteSelection").Route);
@@ -407,7 +414,16 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Equal(
             installedBinding,
             GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
+        Assert.True(GetPrivateProperty<bool>(context, "PullTransportPaused"));
         Assert.Null(GetPrivatePropertyValue(context, "RuntimeUnlockRouteCommitToken"));
+        Assert.Equal(1, Volatile.Read(ref applyCount));
+        var transition = GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+            context,
+            "CoordinatorPersistentState").RegularV4ToTunaRouteTransition;
+        Assert.True(transition.CurrentOperation.HasValue);
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionState.Draining,
+            transition.CurrentOperation.Value.State);
     }
 
     [Fact]
@@ -465,6 +481,8 @@ public sealed partial class SessionFileTransferV4SenderTests
         transport.SeedRuntimeUnlockRouteCommitProofForTests(transferId, "pressure_route_commit");
         service.AttachTransport(transport);
         var context = CreateProjectionInboundContext(transferId);
+        SetPrivateProperty(context, "HighestBufferedChunkIndex", 8);
+        SetPrivateProperty(context, "DataSessionGeneration", 1L);
         typeof(SessionFileTransferService)
             .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);

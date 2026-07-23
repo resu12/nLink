@@ -2348,6 +2348,16 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(FileTransferRoute.PostTunaFallbackV6, publication.TargetRoute);
         Assert.Equal(FileTransferTransportKind.RegularNkn, publication.TargetTransport);
         Assert.Equal(transition, committed.State.LastRuntimeUnlockUncommittedTunaFallbackHandoff);
+        var supersededTransition =
+            FileTransferCoordinator.GetRegularV4ToTunaRouteTransitionSubstate(
+                committed.State);
+        Assert.Null(supersededTransition.CurrentOperation);
+        Assert.Equal(
+            setup.Handoff.RouteTransitionAuthority,
+            supersededTransition.LastTerminalOperation!.Value.Authority);
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionDispositionKind.Superseded,
+            supersededTransition.LastTerminalOperation.Value.DispositionCommand!.Value.Kind);
 
         var duplicate = FileTransferCoordinator.CommitRuntimeUnlockUncommittedTunaFallbackHandoff(
             committed.State,
@@ -8302,6 +8312,852 @@ public sealed class FileTransferCoordinatorTests
         Assert.Same(checkpointLeg, rejected.State.CurrentLeg);
     }
 
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4ToTunaRouteTransition")]
+    public void RegularV4ToTunaRouteTransition_PrepareIsIdempotentAndRejectsConflict()
+    {
+        var setup = CreateRegularV4ToTunaRouteTransitionSetup();
+        var prepared = FileTransferCoordinator.PrepareRegularV4ToTunaRouteTransition(
+            setup.State,
+            setup.Request);
+        Assert.True(
+            prepared.Status == RegularV4ToTunaRouteTransitionDecisionStatus.Prepared,
+            $"prepare failed: {prepared.Status}/{prepared.Reason}");
+
+        var duplicate = FileTransferCoordinator.PrepareRegularV4ToTunaRouteTransition(
+            prepared.State,
+            setup.Request);
+        Assert.Equal(RegularV4ToTunaRouteTransitionDecisionStatus.Idempotent, duplicate.Status);
+        Assert.Same(prepared.State, duplicate.State);
+        Assert.Equal(prepared.Authority, duplicate.Authority);
+
+        var conflict = FileTransferCoordinator.PrepareRegularV4ToTunaRouteTransition(
+            prepared.State,
+            setup.Request with { LaunchGeneration = setup.Request.LaunchGeneration + 1 });
+        Assert.Equal(RegularV4ToTunaRouteTransitionDecisionStatus.Rejected, conflict.Status);
+        Assert.Same(prepared.State, conflict.State);
+        Assert.Equal(
+            prepared.Authority,
+            FileTransferCoordinator.GetRegularV4ToTunaRouteTransitionSubstate(conflict.State)
+                .CurrentOperation!.Value.Authority);
+
+        var reasonMutation =
+            FileTransferCoordinator.PrepareRegularV4ToTunaRouteTransition(
+                prepared.State,
+                setup.Request with { Reason = "reason_mutated" });
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+            reasonMutation.Status);
+        Assert.Same(prepared.State, reasonMutation.State);
+
+        var replacement = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.StartTransfer,
+                FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast),
+                transportEpoch: 2),
+            prepared.State);
+        Assert.Equal(
+            "regular_v4_to_tuna_transition_invalidation_required",
+            replacement.MutationRejectedReason);
+        Assert.Same(prepared.State, replacement.State);
+
+        var bypass = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.TunaActivated,
+                FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4),
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna),
+            prepared.State);
+        Assert.Equal(
+            "regular_v4_to_tuna_transition_commit_required",
+            bypass.MutationRejectedReason);
+        Assert.Same(prepared.State, bypass.State);
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4ToTunaRouteTransition")]
+    public void RegularV4ToTunaRouteTransition_CommitsOwnerLegAndPublicationAfterExactDrain()
+    {
+        var setup = CreateRegularV4ToTunaRouteTransitionSetup();
+        var sourceLeg = setup.State.CurrentLeg;
+        var sourceEpoch = setup.State.CurrentLiveRouteEpoch;
+        var prepared = FileTransferCoordinator.PrepareRegularV4ToTunaRouteTransition(
+            setup.State,
+            setup.Request);
+
+        Assert.Equal(RegularV4ToTunaRouteTransitionDecisionStatus.Prepared, prepared.Status);
+        Assert.Equal(setup.State.CurrentRuntimeOwner, prepared.State.CurrentRuntimeOwner);
+        Assert.Equal(
+            setup.State.CurrentRoutePublicationToken,
+            prepared.State.CurrentRoutePublicationToken);
+        Assert.Null(prepared.State.CurrentRouteCommit);
+        var authority = Assert.IsType<RegularV4ToTunaRouteTransitionAuthority>(
+            prepared.Authority);
+        Assert.False(authority.AuthorityId.IsDefault);
+
+        long[] capturedLeaseIds = [1, 4, 7];
+        var fingerprint =
+            FileTransferCoordinator.CreateRegularV4ToTunaPhysicalDrainFingerprint(
+                capturedLeaseIds);
+        var pauseReceipt = new RegularV4ToTunaActivationPauseBindReceipt(
+            Assert.IsType<RegularV4ToTunaActivationPauseBindCommand>(
+                prepared.PauseBindCommand),
+            RegularV4ToTunaActivationPauseBindStatus.Installed,
+            "regular_v4_to_tuna_activation_pause_bound");
+        var draining = FileTransferCoordinator.BeginRegularV4ToTunaPhysicalDrain(
+            prepared.State,
+            authority,
+            pauseReceipt,
+            capturedThroughPhysicalSendGeneration: 7,
+            capturedLeaseIds,
+            fingerprint);
+
+        Assert.Equal(RegularV4ToTunaRouteTransitionDecisionStatus.Draining, draining.Status);
+        Assert.True(FileTransferCoordinator.IsRegularV4ToTunaRouteTransitionDraining(
+            draining.State,
+            out var currentAuthority));
+        Assert.Equal(authority, currentAuthority);
+        Assert.Equal(setup.State.CurrentRuntimeOwner, draining.State.CurrentRuntimeOwner);
+        Assert.Equal(
+            setup.State.CurrentRoutePublicationToken,
+            draining.State.CurrentRoutePublicationToken);
+        Assert.Null(draining.State.CurrentRouteCommit);
+
+        var command = Assert.IsType<RegularV4ToTunaPhysicalDrainCommand>(
+            draining.DrainCommand);
+        capturedLeaseIds[0] = 2;
+        Assert.Equal([1, 4, 7], command.CapturedPhysicalSendLeaseIds);
+        var incompleteReceipt = new RegularV4ToTunaPhysicalDrainReceipt(
+            command,
+            CompletedPhysicalSendLeaseIds: [1, 4],
+            CompletedPhysicalSendCount: 2,
+            fingerprint,
+            RegularV4ToTunaPhysicalDrainOutcome.Completed,
+            "physical_drain_completed");
+        var incomplete = FileTransferCoordinator.CommitRegularV4ToTunaRouteTransition(
+            draining.State,
+            authority,
+            incompleteReceipt,
+            setup.FinalProof);
+        Assert.Equal(RegularV4ToTunaRouteTransitionDecisionStatus.Rejected, incomplete.Status);
+        Assert.Same(draining.State, incomplete.State);
+        Assert.Equal(setup.State.CurrentRuntimeOwner, incomplete.State.CurrentRuntimeOwner);
+        Assert.Null(incomplete.State.CurrentRouteCommit);
+
+        var completedLeaseIds = command.CapturedPhysicalSendLeaseIds.ToArray();
+        var receipt = new RegularV4ToTunaPhysicalDrainReceipt(
+            command,
+            completedLeaseIds,
+            command.CapturedPhysicalSendCount,
+            command.CapturedPhysicalSendFingerprint,
+            RegularV4ToTunaPhysicalDrainOutcome.Completed,
+            "physical_drain_completed");
+        var committed = FileTransferCoordinator.CommitRegularV4ToTunaRouteTransition(
+            draining.State,
+            authority,
+            receipt,
+            setup.FinalProof);
+
+        Assert.Equal(RegularV4ToTunaRouteTransitionDecisionStatus.Committed, committed.Status);
+        Assert.Equal(FileTransferRoute.FileTunaV4, committed.State.RouteSelection.Route);
+        Assert.Equal(FileTransferRoute.FileTunaV4, committed.State.CurrentRuntimeOwner!.Value.Route);
+        Assert.NotEqual(setup.State.CurrentRuntimeOwner, committed.State.CurrentRuntimeOwner);
+        var routeCommit = Assert.IsType<RouteCommitToken>(committed.State.CurrentRouteCommit);
+        var publication = Assert.IsType<RoutePublicationToken>(
+            committed.State.CurrentRoutePublicationToken);
+        Assert.Equal(routeCommit.RuntimeOwner, publication.RuntimeOwner);
+        Assert.Equal(routeCommit.CommitGeneration, publication.RouteCommitGeneration);
+        Assert.Equal(FileTransferCoordinatorActionKind.RouteCommitPublication, publication.ActionKind);
+        Assert.Equal(FileTransferLegState.Active, sourceLeg!.State);
+        Assert.True(sourceLeg.CanSendData);
+        Assert.NotSame(sourceLeg, committed.State.CurrentLeg);
+        Assert.NotSame(sourceEpoch, committed.State.CurrentLiveRouteEpoch);
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionDispositionKind.Committed,
+            committed.DispositionCommand!.Value.Kind);
+        Assert.Null(
+            FileTransferCoordinator.GetRegularV4ToTunaRouteTransitionSubstate(committed.State)
+                .CurrentOperation);
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionState.Committed,
+            FileTransferCoordinator.GetRegularV4ToTunaRouteTransitionSubstate(committed.State)
+                .LastTerminalOperation!.Value.State);
+        var duplicate = FileTransferCoordinator.CommitRegularV4ToTunaRouteTransition(
+            committed.State,
+            authority,
+            receipt,
+            setup.FinalProof);
+        Assert.Equal(RegularV4ToTunaRouteTransitionDecisionStatus.Idempotent, duplicate.Status);
+        Assert.Same(committed.State, duplicate.State);
+
+        completedLeaseIds[0] = 2;
+        Assert.Equal(
+            [1, 4, 7],
+            FileTransferCoordinator.GetRegularV4ToTunaRouteTransitionSubstate(committed.State)
+                .LastTerminalOperation!.Value.DrainReceipt!.Value
+                .CompletedPhysicalSendLeaseIds);
+        var mutatedReceiptDuplicate =
+            FileTransferCoordinator.CommitRegularV4ToTunaRouteTransition(
+                committed.State,
+                authority,
+                receipt,
+                setup.FinalProof);
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+            mutatedReceiptDuplicate.Status);
+        Assert.Same(committed.State, mutatedReceiptDuplicate.State);
+
+        var mutatedDuplicate = FileTransferCoordinator.CommitRegularV4ToTunaRouteTransition(
+            committed.State,
+            authority,
+            receipt,
+            setup.FinalProof with
+            {
+                PathProbeId = "probe-mutated-after-commit",
+            });
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+            mutatedDuplicate.Status);
+        Assert.Same(committed.State, mutatedDuplicate.State);
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4ToTunaRouteTransition")]
+    public void RegularV4ToTunaRouteTransition_DispositionReceiptMustBeExactAndRemainsPendingAfterRejection()
+    {
+        var setup = CreateRegularV4ToTunaRouteTransitionSetup();
+        var prepared = FileTransferCoordinator.PrepareRegularV4ToTunaRouteTransition(
+            setup.State,
+            setup.Request);
+        var authority = prepared.Authority!.Value;
+        long[] capturedLeaseIds = [];
+        var fingerprint =
+            FileTransferCoordinator.CreateRegularV4ToTunaPhysicalDrainFingerprint(
+                capturedLeaseIds);
+        var draining = FileTransferCoordinator.BeginRegularV4ToTunaPhysicalDrain(
+            prepared.State,
+            authority,
+            new RegularV4ToTunaActivationPauseBindReceipt(
+                prepared.PauseBindCommand!.Value,
+                RegularV4ToTunaActivationPauseBindStatus.Installed,
+                "regular_v4_to_tuna_activation_pause_bound"),
+            capturedThroughPhysicalSendGeneration: 0,
+            capturedLeaseIds,
+            fingerprint);
+        var command = draining.DrainCommand!.Value;
+        var drainReceipt = new RegularV4ToTunaPhysicalDrainReceipt(
+            command,
+            command.CapturedPhysicalSendLeaseIds,
+            command.CapturedPhysicalSendCount,
+            command.CapturedPhysicalSendFingerprint,
+            RegularV4ToTunaPhysicalDrainOutcome.Completed,
+            "physical_drain_completed");
+        var committed = FileTransferCoordinator.CommitRegularV4ToTunaRouteTransition(
+            draining.State,
+            authority,
+            drainReceipt,
+            setup.FinalProof);
+        var disposition = committed.DispositionCommand!.Value;
+        Assert.True(
+            FileTransferCoordinator.TryGetPendingRegularV4ToTunaRouteTransitionDisposition(
+                committed.State,
+                out var pending));
+        Assert.Equal(disposition, pending);
+
+        var rejectedReceipt = new RegularV4ToTunaRouteTransitionDispositionReceipt(
+            disposition,
+            RegularV4ToTunaRouteTransitionDispositionApplyStatus.Rejected,
+            "regular_v4_to_tuna_activation_pause_binding_not_current");
+        var rejected =
+            FileTransferCoordinator.ApplyRegularV4ToTunaRouteTransitionDispositionReceipt(
+                committed.State,
+                rejectedReceipt);
+        Assert.Equal(RegularV4ToTunaRouteTransitionDecisionStatus.Rejected, rejected.Status);
+        Assert.Same(committed.State, rejected.State);
+        Assert.True(
+            FileTransferCoordinator.TryGetPendingRegularV4ToTunaRouteTransitionDisposition(
+                rejected.State,
+                out pending));
+        Assert.Equal(disposition, pending);
+
+        var mutatedReason =
+            FileTransferCoordinator.ApplyRegularV4ToTunaRouteTransitionDispositionReceipt(
+                committed.State,
+                new RegularV4ToTunaRouteTransitionDispositionReceipt(
+                    disposition,
+                    RegularV4ToTunaRouteTransitionDispositionApplyStatus.Applied,
+                    "mutated_applied_reason"));
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+            mutatedReason.Status);
+        Assert.Same(committed.State, mutatedReason.State);
+
+        var appliedReceipt = new RegularV4ToTunaRouteTransitionDispositionReceipt(
+            disposition,
+            RegularV4ToTunaRouteTransitionDispositionApplyStatus.Applied,
+            "regular_v4_to_tuna_route_transition_committed");
+        var applied =
+            FileTransferCoordinator.ApplyRegularV4ToTunaRouteTransitionDispositionReceipt(
+                committed.State,
+                appliedReceipt);
+        Assert.Equal(RegularV4ToTunaRouteTransitionDecisionStatus.Committed, applied.Status);
+        Assert.False(
+            FileTransferCoordinator.TryGetPendingRegularV4ToTunaRouteTransitionDisposition(
+                applied.State,
+                out _));
+        Assert.Equal(
+            appliedReceipt,
+            FileTransferCoordinator.GetRegularV4ToTunaRouteTransitionSubstate(applied.State)
+                .LastTerminalOperation!.Value.DispositionReceipt);
+
+        var duplicate =
+            FileTransferCoordinator.ApplyRegularV4ToTunaRouteTransitionDispositionReceipt(
+                applied.State,
+                appliedReceipt with
+                {
+                    Status =
+                        RegularV4ToTunaRouteTransitionDispositionApplyStatus.Idempotent,
+                    Reason =
+                        "regular_v4_to_tuna_route_transition_disposition_idempotent",
+                });
+        Assert.Equal(RegularV4ToTunaRouteTransitionDecisionStatus.Idempotent, duplicate.Status);
+        Assert.Same(applied.State, duplicate.State);
+
+        var mutatedDuplicate =
+            FileTransferCoordinator.ApplyRegularV4ToTunaRouteTransitionDispositionReceipt(
+                applied.State,
+                appliedReceipt with
+                {
+                    Status =
+                        RegularV4ToTunaRouteTransitionDispositionApplyStatus.Idempotent,
+                    Reason = "mutated_idempotent_reason",
+                });
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+            mutatedDuplicate.Status);
+        Assert.Same(applied.State, mutatedDuplicate.State);
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4ToTunaRouteTransition")]
+    public void RegularV4ToTunaRouteTransition_InboundUsesExactEmptyDrain()
+    {
+        var regular = FileTransferRouteResolver.Resolve(
+            FileTransferRoute.RegularNknV4Fast);
+        var inboundState = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.StartTransfer,
+                regular),
+            EmptyState(regular) with { Direction = FileTransferDirection.Inbound }).State;
+        var setup = CreateRegularV4ToTunaRouteTransitionSetup(inboundState);
+        var prepared = FileTransferCoordinator.PrepareRegularV4ToTunaRouteTransition(
+            setup.State,
+            setup.Request);
+        var authority = prepared.Authority!.Value;
+        long[] capturedLeaseIds = [];
+        var fingerprint =
+            FileTransferCoordinator.CreateRegularV4ToTunaPhysicalDrainFingerprint(
+                capturedLeaseIds);
+        var draining = FileTransferCoordinator.BeginRegularV4ToTunaPhysicalDrain(
+            prepared.State,
+            authority,
+            new RegularV4ToTunaActivationPauseBindReceipt(
+                prepared.PauseBindCommand!.Value,
+                RegularV4ToTunaActivationPauseBindStatus.Installed,
+                "regular_v4_to_tuna_activation_pause_bound"),
+            capturedThroughPhysicalSendGeneration: 0,
+            capturedLeaseIds,
+            fingerprint);
+
+        Assert.Equal(FileTransferDirection.Inbound, authority.Direction);
+        Assert.Equal(RegularV4ToTunaRouteTransitionDecisionStatus.Draining, draining.Status);
+        Assert.Empty(draining.DrainCommand!.Value.CapturedPhysicalSendLeaseIds);
+        Assert.Equal(0, draining.DrainCommand.Value.CapturedPhysicalSendCount);
+
+        var command = draining.DrainCommand.Value;
+        var receipt = new RegularV4ToTunaPhysicalDrainReceipt(
+            command,
+            command.CapturedPhysicalSendLeaseIds,
+            command.CapturedPhysicalSendCount,
+            command.CapturedPhysicalSendFingerprint,
+            RegularV4ToTunaPhysicalDrainOutcome.Completed,
+            "physical_drain_completed");
+        var committed = FileTransferCoordinator.CommitRegularV4ToTunaRouteTransition(
+            draining.State,
+            authority,
+            receipt,
+            setup.FinalProof);
+
+        Assert.Equal(RegularV4ToTunaRouteTransitionDecisionStatus.Committed, committed.Status);
+        Assert.Equal(FileTransferDirection.Inbound, committed.State.Direction);
+        Assert.Equal(FileTransferRoute.FileTunaV4, committed.State.RouteSelection.Route);
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4ToTunaRouteTransition")]
+    public void RegularV4ToTunaRouteTransition_RejectsMutatedDrainAndFinalProofWithoutMutation()
+    {
+        var setup = CreateRegularV4ToTunaRouteTransitionSetup();
+        var prepared = FileTransferCoordinator.PrepareRegularV4ToTunaRouteTransition(
+            setup.State,
+            setup.Request);
+        var authority = prepared.Authority!.Value;
+        long[] capturedLeaseIds = [2, 3];
+        var fingerprint =
+            FileTransferCoordinator.CreateRegularV4ToTunaPhysicalDrainFingerprint(
+                capturedLeaseIds);
+        var mutatedPauseReceipt = FileTransferCoordinator.BeginRegularV4ToTunaPhysicalDrain(
+            prepared.State,
+            authority,
+            new RegularV4ToTunaActivationPauseBindReceipt(
+                prepared.PauseBindCommand!.Value,
+                RegularV4ToTunaActivationPauseBindStatus.Installed,
+                "mutated_pause_bind_reason"),
+            capturedThroughPhysicalSendGeneration: 3,
+            capturedLeaseIds,
+            fingerprint);
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+            mutatedPauseReceipt.Status);
+        Assert.Same(prepared.State, mutatedPauseReceipt.State);
+
+        var draining = FileTransferCoordinator.BeginRegularV4ToTunaPhysicalDrain(
+            prepared.State,
+            authority,
+            new RegularV4ToTunaActivationPauseBindReceipt(
+                prepared.PauseBindCommand!.Value,
+                RegularV4ToTunaActivationPauseBindStatus.Installed,
+                "regular_v4_to_tuna_activation_pause_bound"),
+            capturedThroughPhysicalSendGeneration: 3,
+            capturedLeaseIds,
+            fingerprint);
+        var command = draining.DrainCommand!.Value;
+        var receipt = new RegularV4ToTunaPhysicalDrainReceipt(
+            command,
+            command.CapturedPhysicalSendLeaseIds,
+            command.CapturedPhysicalSendCount,
+            command.CapturedPhysicalSendFingerprint,
+            RegularV4ToTunaPhysicalDrainOutcome.Completed,
+            "physical_drain_completed");
+
+        var wrongFingerprint = FileTransferCoordinator.BeginRegularV4ToTunaPhysicalDrain(
+            prepared.State,
+            authority,
+            new RegularV4ToTunaActivationPauseBindReceipt(
+                prepared.PauseBindCommand!.Value,
+                RegularV4ToTunaActivationPauseBindStatus.Installed,
+                "regular_v4_to_tuna_activation_pause_bound"),
+            capturedThroughPhysicalSendGeneration: 3,
+            capturedLeaseIds,
+            "not_the_canonical_hash");
+        Assert.Equal(RegularV4ToTunaRouteTransitionDecisionStatus.Rejected, wrongFingerprint.Status);
+        Assert.Same(prepared.State, wrongFingerprint.State);
+
+        var mutatedIdempotentPause =
+            FileTransferCoordinator.BeginRegularV4ToTunaPhysicalDrain(
+                draining.State,
+                authority,
+                new RegularV4ToTunaActivationPauseBindReceipt(
+                    prepared.PauseBindCommand!.Value,
+                    RegularV4ToTunaActivationPauseBindStatus.Idempotent,
+                    "mutated_pause_bind_idempotent_reason"),
+                capturedThroughPhysicalSendGeneration: 3,
+                capturedLeaseIds,
+                fingerprint);
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+            mutatedIdempotentPause.Status);
+        Assert.Same(draining.State, mutatedIdempotentPause.State);
+
+        var mutatedProof = setup.FinalProof with
+        {
+            OfferGeneration = setup.FinalProof.OfferGeneration + 1,
+        };
+        var rejected = FileTransferCoordinator.CommitRegularV4ToTunaRouteTransition(
+            draining.State,
+            authority,
+            receipt,
+            mutatedProof);
+        Assert.Equal(RegularV4ToTunaRouteTransitionDecisionStatus.Rejected, rejected.Status);
+        Assert.Same(draining.State, rejected.State);
+        Assert.Equal(setup.State.CurrentRuntimeOwner, rejected.State.CurrentRuntimeOwner);
+        Assert.Equal(
+            setup.State.CurrentRoutePublicationToken,
+            rejected.State.CurrentRoutePublicationToken);
+        Assert.Null(rejected.State.CurrentRouteCommit);
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4ToTunaRouteTransition")]
+    public void RegularV4ToTunaRouteTransition_RollbackPreservesRegularV4Scope()
+    {
+        var setup = CreateRegularV4ToTunaRouteTransitionSetup();
+        var prepared = FileTransferCoordinator.PrepareRegularV4ToTunaRouteTransition(
+            setup.State,
+            setup.Request);
+        var authority = prepared.Authority!.Value;
+
+        var invalidated = FileTransferCoordinator.InvalidateRegularV4ToTunaRouteTransition(
+            prepared.State,
+            authority,
+            terminalInvalidation: false,
+            "precommit_probe_failed");
+
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionDecisionStatus.Invalidated,
+            invalidated.Status);
+        Assert.Equal(setup.State.CurrentRuntimeOwner, invalidated.State.CurrentRuntimeOwner);
+        Assert.Equal(
+            setup.State.CurrentRoutePublicationToken,
+            invalidated.State.CurrentRoutePublicationToken);
+        Assert.Null(invalidated.State.CurrentRuntimeUnlockAdmission);
+        Assert.Null(invalidated.State.CurrentRuntimeUnlockPendingPreCommitProbe);
+        Assert.Null(invalidated.State.CurrentRouteCommit);
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionDispositionKind.RolledBack,
+            invalidated.DispositionCommand!.Value.Kind);
+
+        var duplicate = FileTransferCoordinator.InvalidateRegularV4ToTunaRouteTransition(
+            invalidated.State,
+            authority,
+            terminalInvalidation: false,
+            "precommit_probe_failed");
+        Assert.Equal(RegularV4ToTunaRouteTransitionDecisionStatus.Idempotent, duplicate.Status);
+        Assert.Same(invalidated.State, duplicate.State);
+
+        var lateCommit = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested,
+                FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4),
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                runtimeUnlockCommitProof: setup.FinalProof),
+            invalidated.State);
+        Assert.False(lateCommit.RuntimeUnlockCommitAccepted);
+        Assert.NotNull(lateCommit.RuntimeUnlockCommitRejectedReason);
+        Assert.Same(invalidated.State, lateCommit.State);
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4ToTunaRouteTransition")]
+    public void RegularV4ToTunaRouteTransition_PendingRollbackDispositionBlocksNewPrepare()
+    {
+        var setup = CreateRegularV4ToTunaRouteTransitionSetup();
+        var prepared = FileTransferCoordinator.PrepareRegularV4ToTunaRouteTransition(
+            setup.State,
+            setup.Request);
+        var authority = prepared.Authority!.Value;
+        var invalidated = FileTransferCoordinator.InvalidateRegularV4ToTunaRouteTransition(
+            prepared.State,
+            authority,
+            terminalInvalidation: false,
+            "precommit_probe_failed");
+        var rollback = invalidated.DispositionCommand!.Value;
+        var rejectedReceipt =
+            new RegularV4ToTunaRouteTransitionDispositionReceipt(
+                rollback,
+                RegularV4ToTunaRouteTransitionDispositionApplyStatus.Rejected,
+                "regular_v4_to_tuna_activation_pause_binding_not_current");
+        var rejected =
+            FileTransferCoordinator.ApplyRegularV4ToTunaRouteTransitionDispositionReceipt(
+                invalidated.State,
+                rejectedReceipt);
+        Assert.Equal(RegularV4ToTunaRouteTransitionDecisionStatus.Rejected, rejected.Status);
+        Assert.Same(invalidated.State, rejected.State);
+
+        var nextSetup = CreateRegularV4ToTunaRouteTransitionSetup(rejected.State);
+        var generationBefore =
+            FileTransferCoordinator.GetRegularV4ToTunaRouteTransitionSubstate(
+                nextSetup.State).LastTransitionGeneration;
+        var blocked = FileTransferCoordinator.PrepareRegularV4ToTunaRouteTransition(
+            nextSetup.State,
+            nextSetup.Request);
+        Assert.Equal(RegularV4ToTunaRouteTransitionDecisionStatus.Rejected, blocked.Status);
+        Assert.Equal(
+            "regular_v4_to_tuna_transition_disposition_receipt_pending",
+            blocked.Reason);
+        Assert.Same(nextSetup.State, blocked.State);
+        Assert.Equal(rollback, blocked.DispositionCommand);
+        Assert.Equal(
+            generationBefore,
+            FileTransferCoordinator.GetRegularV4ToTunaRouteTransitionSubstate(
+                blocked.State).LastTransitionGeneration);
+        Assert.Null(
+            FileTransferCoordinator.GetRegularV4ToTunaRouteTransitionSubstate(
+                blocked.State).CurrentOperation);
+
+        var applied =
+            FileTransferCoordinator.ApplyRegularV4ToTunaRouteTransitionDispositionReceipt(
+                blocked.State,
+                new RegularV4ToTunaRouteTransitionDispositionReceipt(
+                    rollback,
+                    RegularV4ToTunaRouteTransitionDispositionApplyStatus.Applied,
+                    "regular_v4_to_tuna_route_transition_rolled_back"));
+        Assert.Equal(RegularV4ToTunaRouteTransitionDecisionStatus.Invalidated, applied.Status);
+        Assert.False(
+            FileTransferCoordinator.TryGetPendingRegularV4ToTunaRouteTransitionDisposition(
+                applied.State,
+                out _));
+
+        var nextPrepared = FileTransferCoordinator.PrepareRegularV4ToTunaRouteTransition(
+            applied.State,
+            nextSetup.Request);
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionDecisionStatus.Prepared,
+            nextPrepared.Status);
+        Assert.Equal(
+            generationBefore + 1,
+            nextPrepared.Authority!.Value.TransitionGeneration);
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4ToTunaRouteTransition")]
+    public void RegularV4ToTunaRouteTransition_TerminalInvalidationNeverIssuesRouteAuthority()
+    {
+        var setup = CreateRegularV4ToTunaRouteTransitionSetup();
+        var prepared = FileTransferCoordinator.PrepareRegularV4ToTunaRouteTransition(
+            setup.State,
+            setup.Request);
+        var authority = prepared.Authority!.Value;
+
+        var prematureTerminal = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.Terminalized,
+                setup.State.RouteSelection,
+                reason: "transfer_terminal"),
+            prepared.State);
+        Assert.Equal(
+            "regular_v4_to_tuna_transition_invalidation_required",
+            prematureTerminal.MutationRejectedReason);
+        Assert.Same(prepared.State, prematureTerminal.State);
+
+        var invalidated = FileTransferCoordinator.InvalidateRegularV4ToTunaRouteTransition(
+            prepared.State,
+            authority,
+            terminalInvalidation: true,
+            "transfer_terminal");
+
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionDecisionStatus.Invalidated,
+            invalidated.Status);
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionDispositionKind.TerminalInvalidated,
+            invalidated.DispositionCommand!.Value.Kind);
+        Assert.Null(invalidated.DispositionCommand.Value.RouteCommitToken);
+        Assert.Null(invalidated.DispositionCommand.Value.RoutePublicationToken);
+        Assert.Equal(setup.State.CurrentRuntimeOwner, invalidated.State.CurrentRuntimeOwner);
+        Assert.Equal(
+            setup.State.CurrentRoutePublicationToken,
+            invalidated.State.CurrentRoutePublicationToken);
+        Assert.Null(invalidated.State.CurrentRouteCommit);
+
+        var duplicatePrepare =
+            FileTransferCoordinator.PrepareRegularV4ToTunaRouteTransition(
+                invalidated.State,
+                setup.Request);
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionDecisionStatus.Idempotent,
+            duplicatePrepare.Status);
+        Assert.Same(invalidated.State, duplicatePrepare.State);
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionDispositionKind.TerminalInvalidated,
+            duplicatePrepare.DispositionCommand!.Value.Kind);
+
+        var mutatedDuplicate =
+            FileTransferCoordinator.InvalidateRegularV4ToTunaRouteTransition(
+                invalidated.State,
+                authority,
+                terminalInvalidation: false,
+                "transfer_terminal");
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+            mutatedDuplicate.Status);
+        Assert.Same(invalidated.State, mutatedDuplicate.State);
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4ToTunaRouteTransition")]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4FrontierRepairPressure")]
+    public void RegularV4ToTunaRouteTransition_ExactPressureReceiptCommitsWithRoute()
+    {
+        var setup = CreateRegularV4ToTunaRouteTransitionSetup(
+            StateWithInstalledRegularV4FrontierRepairPressure());
+        var prepared = FileTransferCoordinator.PrepareRegularV4ToTunaRouteTransition(
+            setup.State,
+            setup.Request);
+        var authority = prepared.Authority!.Value;
+        long[] capturedLeaseIds = [];
+        var fingerprint =
+            FileTransferCoordinator.CreateRegularV4ToTunaPhysicalDrainFingerprint(
+                capturedLeaseIds);
+        var draining = FileTransferCoordinator.BeginRegularV4ToTunaPhysicalDrain(
+            prepared.State,
+            authority,
+            new RegularV4ToTunaActivationPauseBindReceipt(
+                prepared.PauseBindCommand!.Value,
+                RegularV4ToTunaActivationPauseBindStatus.Installed,
+                "regular_v4_to_tuna_activation_pause_bound"),
+            capturedThroughPhysicalSendGeneration: 0,
+            capturedLeaseIds,
+            fingerprint);
+        var command = draining.DrainCommand!.Value;
+        var drainReceipt = new RegularV4ToTunaPhysicalDrainReceipt(
+            command,
+            command.CapturedPhysicalSendLeaseIds,
+            command.CapturedPhysicalSendCount,
+            command.CapturedPhysicalSendFingerprint,
+            RegularV4ToTunaPhysicalDrainOutcome.Completed,
+            "physical_drain_completed");
+        var preparedPressure =
+            FileTransferCoordinator.PrepareRegularV4ToTunaRouteTransitionPressureSettlement(
+                draining.State,
+                authority,
+                drainReceipt,
+                setup.FinalProof);
+        var pressureCommand =
+            Assert.IsType<FileTransferRegularV4FrontierRepairPressureSettlementCommand>(
+                preparedPressure.SettlementCommand);
+        var pressureReceipt =
+            new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                pressureCommand,
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+                "regular_v4_frontier_repair_pressure_settlement_applied",
+                CurrentAuthorityCleared: true,
+                RetainedPredecessorCleared: false);
+
+        var missingReceipt = FileTransferCoordinator.CommitRegularV4ToTunaRouteTransition(
+            draining.State,
+            authority,
+            drainReceipt,
+            setup.FinalProof);
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+            missingReceipt.Status);
+        Assert.Same(draining.State, missingReceipt.State);
+        Assert.NotNull(PressureState(missingReceipt.State).InstalledBinding);
+        Assert.Equal(setup.State.CurrentRuntimeOwner, missingReceipt.State.CurrentRuntimeOwner);
+        Assert.Equal(
+            setup.State.CurrentRoutePublicationToken,
+            missingReceipt.State.CurrentRoutePublicationToken);
+
+        var mutatedPressureReceipt =
+            FileTransferCoordinator.CommitRegularV4ToTunaRouteTransition(
+                draining.State,
+                authority,
+                drainReceipt,
+                setup.FinalProof,
+                pressureReceipt with { Reason = "mutated_pressure_receipt_reason" });
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+            mutatedPressureReceipt.Status);
+        Assert.Same(draining.State, mutatedPressureReceipt.State);
+        Assert.NotNull(PressureState(mutatedPressureReceipt.State).InstalledBinding);
+
+        var committed = FileTransferCoordinator.CommitRegularV4ToTunaRouteTransition(
+            draining.State,
+            authority,
+            drainReceipt,
+            setup.FinalProof,
+            pressureReceipt);
+
+        Assert.Equal(RegularV4ToTunaRouteTransitionDecisionStatus.Committed, committed.Status);
+        Assert.Null(PressureState(committed.State).InstalledBinding);
+        Assert.Equal(
+            pressureReceipt,
+            PressureState(committed.State).LastSettlementApplyReceipt);
+        Assert.NotNull(committed.State.CurrentRouteCommit);
+        Assert.NotNull(committed.State.CurrentRoutePublicationToken);
+    }
+
+    private static (
+        FileTransferCoordinatorState State,
+        RegularV4ToTunaRouteTransitionPrepareRequest Request,
+        RuntimeUnlockRouteCommitProof FinalProof)
+        CreateRegularV4ToTunaRouteTransitionSetup(
+            FileTransferCoordinatorState? sourceState = null)
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var state = sourceState ?? StartRegular(regular).State;
+        if (state.CurrentRoutePublicationToken is null)
+        {
+            var owner = state.CurrentRuntimeOwner!.Value;
+            var leg = state.CurrentLeg!;
+            var publication = FileTransferCoordinator.AuthorizeAction(
+                state,
+                new FileTransferCoordinatorActionRequest(
+                    FileTransferCoordinatorActionKind.RoutePublication,
+                    Source: "test",
+                    Reason: "regular_v4_to_tuna_source_publication",
+                    RuntimeOwner: owner,
+                    Route: regular.Route,
+                    ProtocolVersion: regular.ProtocolVersion,
+                    LiveRouteEpoch: leg.LiveRouteEpochId,
+                    LegGeneration: leg.Generation,
+                    RuntimeGeneration: owner.RuntimeGeneration,
+                    TerminalGeneration: state.TerminalGeneration,
+                    TargetRoute: regular.Route,
+                    TargetProtocolVersion: regular.ProtocolVersion,
+                    TargetTransport: FileTransferTransportKind.RegularNkn));
+            Assert.True(publication.Accepted);
+            state = publication.State;
+        }
+
+        var admitted = RequestRuntimeUnlockAdmission(state, state.CurrentRuntimeOwner);
+        var admission = Assert.IsType<RuntimeUnlockAdmissionToken>(
+            admitted.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken);
+        var pendingDecision = RecordPendingPreCommitProbe(admitted.State, admission);
+        var pending = Assert.IsType<RuntimeUnlockPendingPreCommitProbeRequest>(
+            pendingDecision.State.CurrentRuntimeUnlockPendingPreCommitProbe);
+        state = pendingDecision.State;
+        var transaction = BuildCommitReadyRuntimeUnlockTransaction(
+            state,
+            pending.TransactionGeneration,
+            pending.OfferGeneration,
+            probeId: "probe-regular-v4-to-tuna");
+        var finalProof = WithCurrentTunaLease(
+            RuntimeUnlockTransaction.CreateRouteCommitProof(
+                transaction,
+                "regular_v4_to_tuna_commit",
+                admission),
+            pending.TunaPathLeaseGeneration,
+            pending.TunaPathLeaseListenerRunId!);
+        var launchBoundary = finalProof with
+        {
+            TransactionState = RuntimeUnlockTransactionState.AnswerReceived,
+            PathProbeId = null,
+            PathProbeState = RuntimeUnlockPathProbeState.None,
+            PathProbeTransport = FileTransferTransportKind.Unknown,
+            PathProbeAckedUtcMs = 0,
+            SamePathTunaProbeAckId = null,
+        };
+        var ownerToken = state.CurrentRuntimeOwner!.Value;
+        var sourcePublication = state.CurrentRoutePublicationToken!.Value;
+        var sourceLeg = state.CurrentLeg!;
+        var checkpoint = new RegularV4ToTunaDurableCheckpoint(
+            ownerToken,
+            sourcePublication,
+            state.TerminalGeneration,
+            sourceLeg.Generation,
+            sourceLeg.TransportEpochId,
+            sourceLeg.BridgeRecoveryGeneration,
+            DataSessionGeneration: 17,
+            StateEpoch: 3,
+            ContiguousCommittedChunkIndex: 4,
+            DurableHighestChunkIndex: 6,
+            ChunkCount: 128,
+            CheckpointGeneration: 1);
+        var request = new RegularV4ToTunaRouteTransitionPrepareRequest(
+            ownerToken,
+            sourcePublication,
+            admission,
+            pending,
+            launchBoundary,
+            LaunchGeneration: 29,
+            checkpoint,
+            "regular_v4_to_tuna_transition_test");
+        return (state, request, finalProof);
+    }
+
     private static FileTransferCoordinatorDecision StartRegular(FileTransferRouteSelection regular)
         => FileTransferCoordinator.Apply(
             CoordinatorEvent(
@@ -9002,7 +9858,7 @@ public sealed class FileTransferCoordinatorTests
             FileTransferProtocol.ProtocolVersionV4,
             FileTransferTransportHandoffKind.NormalToTunaActivation,
             FileTransferTransportKind.Tuna,
-            TransactionState: "PathProbeAcked",
+            TransactionState: "AnswerReceived",
             Reason: "uncommitted_tuna_fallback_test",
             PathProbeId: "probe-uncommitted-fallback",
             PathProbeState: "Acked",
@@ -9015,6 +9871,64 @@ public sealed class FileTransferCoordinatorTests
             TunaPathLeaseCurrent: true,
             LaunchGeneration: 19);
         Assert.Null(state.CurrentRouteCommit);
+        var launchProof = RuntimeUnlockTransaction.CreateRouteCommitProof(
+            snapshot,
+            admission);
+        var routeTransition = FileTransferCoordinator.PrepareRegularV4ToTunaRouteTransition(
+            state,
+            new RegularV4ToTunaRouteTransitionPrepareRequest(
+                sourceOwner,
+                sourcePublication,
+                admission,
+                pendingPreCommit,
+                launchProof,
+                snapshot.LaunchGeneration,
+                new RegularV4ToTunaDurableCheckpoint(
+                    sourceOwner,
+                    sourcePublication,
+                    state.TerminalGeneration,
+                    sourceLeg.Generation,
+                    sourceLeg.TransportEpochId,
+                    sourceLeg.BridgeRecoveryGeneration,
+                    DataSessionGeneration: 23,
+                    StateEpoch: 1,
+                    ContiguousCommittedChunkIndex: 12,
+                    DurableHighestChunkIndex: 18,
+                    ChunkCount: 128,
+                    CheckpointGeneration: 1),
+                "uncommitted_tuna_fallback_source_transition"));
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionDecisionStatus.Prepared,
+            routeTransition.Status);
+        var transitionAuthority =
+            Assert.IsType<RegularV4ToTunaRouteTransitionAuthority>(
+                routeTransition.Authority);
+        long[] capturedLeaseIds = [];
+        var drainFingerprint =
+            FileTransferCoordinator.CreateRegularV4ToTunaPhysicalDrainFingerprint(
+                capturedLeaseIds);
+        var draining = FileTransferCoordinator.BeginRegularV4ToTunaPhysicalDrain(
+            routeTransition.State,
+            transitionAuthority,
+            new RegularV4ToTunaActivationPauseBindReceipt(
+                routeTransition.PauseBindCommand!.Value,
+                RegularV4ToTunaActivationPauseBindStatus.Installed,
+                "regular_v4_to_tuna_activation_pause_bound"),
+            capturedThroughPhysicalSendGeneration: 0,
+            capturedLeaseIds,
+            drainFingerprint);
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionDecisionStatus.Draining,
+            draining.Status);
+        var drainCommand = draining.DrainCommand!.Value;
+        var drainReceipt = new RegularV4ToTunaPhysicalDrainReceipt(
+            drainCommand,
+            drainCommand.CapturedPhysicalSendLeaseIds,
+            drainCommand.CapturedPhysicalSendCount,
+            drainCommand.CapturedPhysicalSendFingerprint,
+            RegularV4ToTunaPhysicalDrainOutcome.Completed,
+            "physical_drain_completed");
+        state = draining.State;
         const long proofTransportEpoch = 2;
         var proofFrame = new FileTransferReceiverStateFrameV6
         {
@@ -9062,7 +9976,11 @@ public sealed class FileTransferCoordinatorTests
             proof.ToPeerProofEvidence(),
             proofTransportEpoch,
             HandoffGeneration: 31,
-            Reason: "uncommitted_tuna_fallback_handoff");
+            Reason: "uncommitted_tuna_fallback_handoff")
+        {
+            RouteTransitionAuthority = transitionAuthority,
+            PhysicalDrainReceipt = drainReceipt,
+        };
         var coordinatorEvent = CoordinatorEvent(
             FileTransferCoordinatorEventKind.TunaLost,
             fallback,

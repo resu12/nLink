@@ -456,6 +456,16 @@ internal interface IFileTransferRegularV4FrontierRepairPressureInstallBridge
             FileTransferRegularV4FrontierRepairPressureSettlementCommand command);
 }
 
+internal interface IRegularV4ToTunaRouteTransitionBridge
+{
+    RegularV4ToTunaActivationPauseBindReceipt BindRegularV4ToTunaActivationPause(
+        RegularV4ToTunaActivationPauseBindCommand command);
+
+    RegularV4ToTunaRouteTransitionDispositionReceipt
+        ApplyRegularV4ToTunaRouteTransitionDisposition(
+            RegularV4ToTunaRouteTransitionDispositionCommand command);
+}
+
 public interface IFileTransferRegularV4FrontierRepairSettlementObserver
 {
     void ObserveRegularV4FrontierRepairSettlement(FileTransferRegularV4FrontierRepairSettlement settlement);

@@ -16,7 +16,7 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.DevLocal;
 
 // DEV ONLY: local machine named-pipe transport for testing two app instances without real networking.
-public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IFileTransferSignalingTransport, IFileTransferSessionContextProvider, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider, IFileTransferRegularV4FrontierRepairPressureInstallBridge, IFileTransferRegularV4FrontierRepairSettlementObserver
+public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IFileTransferSignalingTransport, IFileTransferSessionContextProvider, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider, IFileTransferRegularV4FrontierRepairPressureInstallBridge, IRegularV4ToTunaRouteTransitionBridge, IFileTransferRegularV4FrontierRepairSettlementObserver
 {
     private const string HelpRequestFrameType = "help_request";
     private const string HelpRequestDecisionFrameType = "help_request_decision";
@@ -87,6 +87,16 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     private readonly Dictionary<string, TransportFileTransferDataSession> fileTransferDataSessions = new(StringComparer.Ordinal);
     private readonly object regularV4RepairPressureGate = new();
     private readonly Dictionary<string, DevLocalRegularV4RepairPressureShadow> regularV4RepairPressures = new(StringComparer.Ordinal);
+    private readonly object regularV4ToTunaTransitionGate = new();
+    private DevLocalRegularV4ToTunaActivationPauseShadow?
+        regularV4ToTunaActivationPauseShadow;
+    private RegularV4ToTunaRouteTransitionDispositionReceipt?
+        lastRegularV4ToTunaRouteTransitionDispositionReceipt;
+    private RegularV4ToTunaRouteTransitionDispositionReceipt?
+        supersededRegularV4ToTunaActivationPauseShadow;
+    private RegularV4ToTunaRouteTransitionDispositionCommand?
+        pendingRegularV4ToTunaRouteTransitionAvailabilityDisposition;
+    private long nextFileTransferDataSessionGeneration;
     private const bool LocalRemoteControlSupported = true;
     private const bool LocalScreenShareCursorOverlaySupported = true;
     private readonly DevLocalImpairmentPolicy? impairmentPolicy;
@@ -377,6 +387,245 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 LastFinalSettlement = finalReceipt,
             };
             return finalReceipt;
+        }
+    }
+
+    RegularV4ToTunaActivationPauseBindReceipt
+        IRegularV4ToTunaRouteTransitionBridge.BindRegularV4ToTunaActivationPause(
+            RegularV4ToTunaActivationPauseBindCommand command)
+    {
+        RegularV4ToTunaActivationPauseBindReceipt receipt;
+        if (command.Authority.IsDefault ||
+            !TryGetRegularV4ToTunaDataSession(
+                command.Authority,
+                out var currentSession))
+        {
+            receipt = new RegularV4ToTunaActivationPauseBindReceipt(
+                command,
+                RegularV4ToTunaActivationPauseBindStatus.Rejected,
+                command.Authority.IsDefault
+                    ? "regular_v4_to_tuna_transition_authority_invalid"
+                    : "regular_v4_to_tuna_data_session_not_current");
+        }
+        else
+        {
+            lock (regularV4ToTunaTransitionGate)
+            {
+                if (regularV4ToTunaActivationPauseShadow is { } current &&
+                    current.Command == command)
+                {
+                    receipt = current.Receipt with
+                    {
+                        Status = RegularV4ToTunaActivationPauseBindStatus.Idempotent,
+                        Reason = "regular_v4_to_tuna_activation_pause_bind_idempotent",
+                    };
+                }
+                else if (regularV4ToTunaActivationPauseShadow is not null ||
+                    pendingRegularV4ToTunaRouteTransitionAvailabilityDisposition is
+                        not null ||
+                    supersededRegularV4ToTunaActivationPauseShadow is not null)
+                {
+                    receipt = new RegularV4ToTunaActivationPauseBindReceipt(
+                        command,
+                        RegularV4ToTunaActivationPauseBindStatus.Rejected,
+                        "regular_v4_to_tuna_activation_pause_binding_conflict");
+                }
+                else if (lastRegularV4ToTunaRouteTransitionDispositionReceipt is { } terminal &&
+                    terminal.Command.Authority.AuthorityId ==
+                    command.Authority.AuthorityId)
+                {
+                    receipt = new RegularV4ToTunaActivationPauseBindReceipt(
+                        command,
+                        RegularV4ToTunaActivationPauseBindStatus.Rejected,
+                        "regular_v4_to_tuna_route_transition_terminal");
+                }
+                else
+                {
+                    receipt = new RegularV4ToTunaActivationPauseBindReceipt(
+                        command,
+                        RegularV4ToTunaActivationPauseBindStatus.Installed,
+                        "regular_v4_to_tuna_activation_pause_bound");
+                    regularV4ToTunaActivationPauseShadow =
+                        new DevLocalRegularV4ToTunaActivationPauseShadow(
+                            command,
+                            receipt);
+                    currentSession!.SetTransitionAvailability(
+                        isAvailable: false,
+                        "regular_v4_to_tuna_route_transition_prepared",
+                        FileTransferTransportKind.Tuna,
+                        notify: false);
+                }
+            }
+        }
+
+        return receipt;
+    }
+
+    RegularV4ToTunaRouteTransitionDispositionReceipt
+        IRegularV4ToTunaRouteTransitionBridge.ApplyRegularV4ToTunaRouteTransitionDisposition(
+            RegularV4ToTunaRouteTransitionDispositionCommand command)
+    {
+        RegularV4ToTunaRouteTransitionDispositionReceipt receipt;
+        var scheduleAvailability = false;
+        lock (regularV4ToTunaTransitionGate)
+        {
+            var retiresSupersededPauseShadow =
+                (command.Kind is
+                    RegularV4ToTunaRouteTransitionDispositionKind.RolledBack or
+                    RegularV4ToTunaRouteTransitionDispositionKind.TerminalInvalidated) &&
+                regularV4ToTunaActivationPauseShadow is null &&
+                supersededRegularV4ToTunaActivationPauseShadow is
+                    { } superseded &&
+                superseded.Command.Authority == command.Authority;
+            if (lastRegularV4ToTunaRouteTransitionDispositionReceipt is { } previous &&
+                previous.Command == command)
+            {
+                receipt = previous with
+                {
+                    Status = RegularV4ToTunaRouteTransitionDispositionApplyStatus.Idempotent,
+                    Reason = "regular_v4_to_tuna_route_transition_disposition_idempotent",
+                };
+            }
+            else if (command.Authority.IsDefault ||
+                string.IsNullOrWhiteSpace(command.Reason) ||
+                !FileTransferCoordinator
+                    .IsRegularV4ToTunaRouteTransitionDispositionCommandValid(
+                        command))
+            {
+                receipt = new RegularV4ToTunaRouteTransitionDispositionReceipt(
+                    command,
+                    RegularV4ToTunaRouteTransitionDispositionApplyStatus.Rejected,
+                    "regular_v4_to_tuna_route_transition_disposition_invalid");
+            }
+            else if (!retiresSupersededPauseShadow &&
+                (regularV4ToTunaActivationPauseShadow is not { } current ||
+                 current.Command.Authority != command.Authority))
+            {
+                receipt = new RegularV4ToTunaRouteTransitionDispositionReceipt(
+                    command,
+                    RegularV4ToTunaRouteTransitionDispositionApplyStatus.Rejected,
+                    "regular_v4_to_tuna_activation_pause_binding_not_current");
+            }
+            else
+            {
+                receipt = new RegularV4ToTunaRouteTransitionDispositionReceipt(
+                    command,
+                    RegularV4ToTunaRouteTransitionDispositionApplyStatus.Applied,
+                    command.Kind switch
+                    {
+                        RegularV4ToTunaRouteTransitionDispositionKind.Committed =>
+                            "regular_v4_to_tuna_route_transition_committed",
+                        RegularV4ToTunaRouteTransitionDispositionKind.RolledBack =>
+                            "regular_v4_to_tuna_route_transition_rolled_back",
+                        RegularV4ToTunaRouteTransitionDispositionKind.Superseded =>
+                            "regular_v4_to_tuna_route_transition_superseded",
+                        _ =>
+                            "regular_v4_to_tuna_route_transition_terminal_invalidated",
+                    });
+                regularV4ToTunaActivationPauseShadow = null;
+                lastRegularV4ToTunaRouteTransitionDispositionReceipt = receipt;
+                supersededRegularV4ToTunaActivationPauseShadow =
+                    command.Kind ==
+                    RegularV4ToTunaRouteTransitionDispositionKind.Superseded
+                        ? receipt
+                        : null;
+                scheduleAvailability = command.Kind is
+                    RegularV4ToTunaRouteTransitionDispositionKind.Committed or
+                    RegularV4ToTunaRouteTransitionDispositionKind.RolledBack;
+                if (scheduleAvailability)
+                {
+                    pendingRegularV4ToTunaRouteTransitionAvailabilityDisposition =
+                        command;
+                }
+            }
+        }
+
+        if (scheduleAvailability)
+        {
+            _ = Task.Run(
+                () => ApplyRegularV4ToTunaRouteTransitionAvailability(
+                    receipt.Command),
+                CancellationToken.None);
+        }
+
+        return receipt;
+    }
+
+    private bool TryGetRegularV4ToTunaDataSession(
+        RegularV4ToTunaRouteTransitionAuthority authority,
+        out TransportFileTransferDataSession? session)
+    {
+        if (fileTransferDataSessions.TryGetValue(
+                authority.TransferId,
+                out var candidate) &&
+            !candidate.IsDisposed &&
+            candidate.Generation == authority.DataSessionGeneration &&
+            string.Equals(
+                candidate.SessionId,
+                authority.SessionId,
+                StringComparison.Ordinal))
+        {
+            session = candidate;
+            return true;
+        }
+
+        session = null;
+        return false;
+    }
+
+    private void ApplyRegularV4ToTunaRouteTransitionAvailability(
+        RegularV4ToTunaRouteTransitionDispositionCommand command)
+    {
+        TransportFileTransferDataSession? session;
+        lock (regularV4ToTunaTransitionGate)
+        {
+            if (pendingRegularV4ToTunaRouteTransitionAvailabilityDisposition !=
+                    command ||
+                lastRegularV4ToTunaRouteTransitionDispositionReceipt is not
+                    { } terminal ||
+                terminal.Command != command ||
+                regularV4ToTunaActivationPauseShadow is not null ||
+                supersededRegularV4ToTunaActivationPauseShadow is not null)
+            {
+                return;
+            }
+
+            if (!TryGetRegularV4ToTunaDataSession(
+                    command.Authority,
+                    out session))
+            {
+                pendingRegularV4ToTunaRouteTransitionAvailabilityDisposition =
+                    null;
+                return;
+            }
+        }
+
+        try
+        {
+            var committed =
+                command.Kind ==
+                RegularV4ToTunaRouteTransitionDispositionKind.Committed;
+            session!.SetTransitionAvailability(
+                isAvailable: true,
+                committed
+                    ? "regular_v4_to_tuna_route_transition_committed"
+                    : "regular_v4_to_tuna_route_transition_rolled_back",
+                committed
+                    ? FileTransferTransportKind.Tuna
+                    : FileTransferTransportKind.RegularNkn,
+                notify: true);
+        }
+        finally
+        {
+            lock (regularV4ToTunaTransitionGate)
+            {
+                if (pendingRegularV4ToTunaRouteTransitionAvailabilityDisposition ==
+                    command)
+                {
+                    pendingRegularV4ToTunaRouteTransitionAvailabilityDisposition =
+                        null;
+                }
+            }
         }
     }
 
@@ -1055,7 +1304,11 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
         if (!fileTransferDataSessions.TryGetValue(normalizedTransferId, out var session))
         {
-            session = new TransportFileTransferDataSession(this, normalizedSessionId, normalizedTransferId);
+            session = new TransportFileTransferDataSession(
+                this,
+                normalizedSessionId,
+                normalizedTransferId,
+                Interlocked.Increment(ref nextFileTransferDataSessionGeneration));
             fileTransferDataSessions[normalizedTransferId] = session;
         }
         else if (!string.Equals(session.SessionId, normalizedSessionId, StringComparison.Ordinal))
@@ -4222,7 +4475,11 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     {
         if (!fileTransferDataSessions.TryGetValue(frame.TransferId, out var session))
         {
-            session = new TransportFileTransferDataSession(this, frame.SessionId, frame.TransferId);
+            session = new TransportFileTransferDataSession(
+                this,
+                frame.SessionId,
+                frame.TransferId,
+                Interlocked.Increment(ref nextFileTransferDataSessionGeneration));
             fileTransferDataSessions[frame.TransferId] = session;
         }
         else if (!string.Equals(session.SessionId, frame.SessionId, StringComparison.Ordinal))
@@ -4252,23 +4509,31 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             });
         private int disposed;
         private int activeReader;
+        private int available = 1;
 
-        public TransportFileTransferDataSession(DevLocalTransport owner, string sessionId, string transferId)
+        public TransportFileTransferDataSession(
+            DevLocalTransport owner,
+            string sessionId,
+            string transferId,
+            long generation)
         {
             this.owner = owner;
             SessionId = sessionId;
             TransferId = transferId;
+            Generation = generation;
         }
 
         public string SessionId { get; }
 
         public string TransferId { get; }
 
-        public bool IsAvailable => true;
+        public long Generation { get; }
 
-#pragma warning disable CS0067
+        public bool IsAvailable => Volatile.Read(ref available) != 0;
+
+        public bool IsDisposed => Volatile.Read(ref disposed) != 0;
+
         public event EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? AvailabilityChanged;
-#pragma warning restore CS0067
 
         public async ValueTask<FileTransferDataFrame> ReceiveAsync(CancellationToken ct)
             => (await ReceiveWithMetadataAsync(ct).ConfigureAwait(false)).Frame;
@@ -4310,6 +4575,34 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 "SessionSecurity",
                 $"event=filetransfer_data_frame_dispatched; transport=devlocal; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}");
             frames.Writer.TryWrite(new FileTransferReceivedDataFrame(frame, FileTransferTransportKind.RegularNkn, "regular_nkn", DateTimeOffset.UtcNow));
+        }
+
+        public void SetTransitionAvailability(
+            bool isAvailable,
+            string reason,
+            FileTransferTransportKind targetTransport,
+            bool notify)
+        {
+            if (disposed != 0)
+            {
+                return;
+            }
+
+            var next = isAvailable ? 1 : 0;
+            var previous = Interlocked.Exchange(ref available, next);
+            if (!notify || previous == next)
+            {
+                return;
+            }
+
+            AvailabilityChanged?.Invoke(
+                this,
+                new FileTransferDataSessionAvailabilityChangedEventArgs(
+                    isAvailable,
+                    reason,
+                    requiresResumeRequest: false,
+                    FileTransferTransportHandoffKind.None,
+                    targetTransport));
         }
 
         public void Dispose()
@@ -4821,4 +5114,8 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         public static DevLocalRegularV4RepairPressureShadow Empty { get; } =
             new(null, null, null, null);
     }
+
+    private sealed record DevLocalRegularV4ToTunaActivationPauseShadow(
+        RegularV4ToTunaActivationPauseBindCommand Command,
+        RegularV4ToTunaActivationPauseBindReceipt Receipt);
 }

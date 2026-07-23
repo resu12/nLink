@@ -1832,6 +1832,7 @@ public sealed partial class SessionFileTransferService
                         context.ChunksAcceptedForTransport = 0;
                         context.BytesAcceptedForTransport = 0;
                         context.V4LastStateEpoch = -1;
+                        context.V4LastStateDurableHighestChunkIndex = -1;
                         context.V4TerminalReady = false;
                         context.V4MixedScreenShareTransfer = context.V4MixedScreenShareTransfer || IsV4MixedScreenShareActive();
                         context.SparseSenderPumpLastWakeReason = "startup";
@@ -11971,6 +11972,12 @@ public sealed partial class SessionFileTransferService
                         !string.Equals(normalizedPauseReason, context.PeerPauseReason, StringComparison.Ordinal);
 
                     context.V4LastStateEpoch = Math.Max(context.V4LastStateEpoch, state.Epoch);
+                    context.V4LastStateDurableHighestChunkIndex = Math.Max(
+                        context.V4LastStateDurableHighestChunkIndex,
+                        Math.Clamp(
+                            state.DurableReceivedHighestChunkIndex,
+                            -1,
+                            Math.Max(-1, context.ChunkCount - 1)));
                     context.RemoteNextExpectedChunkIndex = Math.Max(context.RemoteNextExpectedChunkIndex, normalizedCommitted);
                     context.RemoteGrantedUntilExclusive = normalizedCredit;
                     if (shouldApplyPostTunaFallbackStaleTailClamp &&
@@ -16250,7 +16257,7 @@ public sealed partial class SessionFileTransferService
                 }
 
                 var scheduleStarted = Stopwatch.GetTimestamp();
-                Task sendTask;
+                Task? sendTask = null;
                 CancellationTokenSource? sendCts = null;
                 FileTransferDataPathSendAuthority? sendAuthority = null;
                 OutboundRegularV4PhysicalSendLease? physicalSendLease = null;
@@ -16315,6 +16322,38 @@ public sealed partial class SessionFileTransferService
                             {
                                 physicalSendLease = null;
                             }
+
+                            if (sendException is null &&
+                                physicalSendLease is not null)
+                            {
+                                if (dataSession is
+                                    IFileTransferPhysicalSendSubmissionSession
+                                    physicalSubmissionSession)
+                                {
+                                    var submission =
+                                        physicalSubmissionSession.SubmitPhysicalSend(
+                                            prepared.Frame,
+                                            sendAuthority,
+                                            sendToken);
+                                    sendTask = submission.DeliveryTask;
+                                    physicalCompletionTask =
+                                        submission.PhysicalCompletionTask;
+                                }
+                                else if (sendAuthority is not null &&
+                                         authoritySession is not null)
+                                {
+                                    sendTask = authoritySession.SendAsync(
+                                        prepared.Frame,
+                                        sendAuthority,
+                                        sendToken);
+                                }
+                                else
+                                {
+                                    sendTask = dataSession.SendAsync(
+                                        prepared.Frame,
+                                        sendToken);
+                                }
+                            }
                         }
                     }
 
@@ -16328,24 +16367,15 @@ public sealed partial class SessionFileTransferService
                     {
                         sendTask = Task.FromException(sendException);
                     }
-                    else if (physicalSendLease is not null &&
-                             dataSession is IFileTransferPhysicalSendSubmissionSession physicalSubmissionSession)
+                    else if (sendTask is null)
                     {
-                        var submission = physicalSubmissionSession.SubmitPhysicalSend(
-                            prepared.Frame,
-                            sendAuthority,
-                            sendToken);
-                        sendTask = submission.DeliveryTask;
-                        physicalCompletionTask = submission.PhysicalCompletionTask;
-                    }
-                    else if (sendAuthority is not null &&
-                             authoritySession is not null)
-                    {
-                        sendTask = authoritySession.SendAsync(prepared.Frame, sendAuthority, sendToken);
-                    }
-                    else
-                    {
-                        sendTask = dataSession.SendAsync(prepared.Frame, sendToken);
+                        sendTask = sendAuthority is not null &&
+                                   authoritySession is not null
+                            ? authoritySession.SendAsync(
+                                prepared.Frame,
+                                sendAuthority,
+                                sendToken)
+                            : dataSession.SendAsync(prepared.Frame, sendToken);
                     }
                 }
                 catch (Exception ex)
@@ -16354,6 +16384,10 @@ public sealed partial class SessionFileTransferService
                     sendCts = null;
                     sendTask = Task.FromException(ex);
                 }
+
+                sendTask ??= Task.FromException(
+                    new InvalidOperationException(
+                        "File-transfer physical send submission was not created."));
 
                 if (physicalSendLease is not null)
                 {
@@ -17302,6 +17336,25 @@ public sealed partial class SessionFileTransferService
             return true;
         }
 
+        var coordinatorState = CreateCoordinatorStateLocked(context);
+        if (FileTransferCoordinator.IsRegularV4ToTunaRouteTransitionDraining(
+                coordinatorState,
+                out var drainingAuthority))
+        {
+            rejectionReason = "regular_v4_to_tuna_transition_draining";
+            LogOutboundRegularV4PhysicalSendLeaseRegistration(
+                "filetransfer_regular_v4_physical_send_lease_rejected",
+                context,
+                dataSession,
+                prepared,
+                repairSend,
+                repairRequestKey,
+                leaseGeneration: 0,
+                drainingAuthority,
+                rejectionReason);
+            return false;
+        }
+
         if (context.PendingRuntimeUnlockRegularV4RouteCommitDrain is { } pendingDrain)
         {
             if (IsRuntimeUnlockRegularV4RouteCommitDrainSourceScopeCurrentForSendRegistrationLocked(
@@ -17349,7 +17402,36 @@ public sealed partial class SessionFileTransferService
             repairRequestKey);
         context.ActiveOutboundRegularV4PhysicalSendLeases[leaseGeneration] = lease;
         context.OutboundRegularV4PhysicalSendRegisteredCount++;
+        LogOutboundRegularV4PhysicalSendLeaseRegistration(
+            "filetransfer_regular_v4_physical_send_lease_registered",
+            context,
+            dataSession,
+            prepared,
+            repairSend,
+            repairRequestKey,
+            leaseGeneration,
+            transitionAuthority: null,
+            "physical_send_lease_registered");
         return true;
+    }
+
+    private static void LogOutboundRegularV4PhysicalSendLeaseRegistration(
+        string eventName,
+        OutboundTransferContext context,
+        IFileTransferDataSession dataSession,
+        PreparedV4TransportSend prepared,
+        bool repairSend,
+        string repairRequestKey,
+        long leaseGeneration,
+        RegularV4ToTunaRouteTransitionAuthority? transitionAuthority,
+        string reason)
+    {
+        var owner = context.CurrentRuntimeOwner;
+        var publication = context.CurrentRoutePublicationToken;
+        var leg = context.CurrentTransferLeg;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event={eventName}; direction=outbound; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; send_lease_generation={leaseGeneration}; transition_authority_id={FormatProtocolLogValue(transitionAuthority?.AuthorityId.ToString() ?? "(none)")}; transition_generation={transitionAuthority?.TransitionGeneration ?? 0}; source_route={FormatProtocolLogValue(owner?.RouteToken ?? "(none)")}; source_protocol_version={owner?.ProtocolVersion ?? 0}; source_live_route_epoch={owner?.LiveRouteEpoch ?? 0}; source_runtime_generation={owner?.RuntimeGeneration ?? 0}; source_route_publication_generation={publication?.PublicationGeneration ?? 0}; source_terminal_generation={context.TerminalGeneration}; source_leg_generation={leg?.Generation ?? 0}; source_transport_epoch={leg?.TransportEpochId ?? 0}; source_bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; source_data_session_generation={context.DataSessionGeneration}; data_session_current={(ReferenceEquals(context.DataSession, dataSession) ? 1 : 0)}; start_chunk_index={prepared.StartChunkIndex}; chunk_count={prepared.ChunkCount}; repair_send={(repairSend ? 1 : 0)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; decision_reason={FormatProtocolLogValue(reason)}");
     }
 
     private bool IsRuntimeUnlockRegularV4RouteCommitDrainSourceScopeCurrentForSendRegistrationLocked(

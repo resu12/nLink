@@ -247,7 +247,12 @@ internal readonly record struct RuntimeUnlockUncommittedTunaFallbackHandoff(
     PostTunaFallbackPeerProofEvidence PeerProofEvidence,
     long ProofTransportEpoch,
     int HandoffGeneration,
-    string Reason);
+    string Reason)
+{
+    public RegularV4ToTunaRouteTransitionAuthority? RouteTransitionAuthority { get; init; }
+
+    public RegularV4ToTunaPhysicalDrainReceipt? PhysicalDrainReceipt { get; init; }
+}
 
 internal enum RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus
 {
@@ -581,10 +586,223 @@ internal readonly record struct RegularV4FrontierRepairPressureSubstate(
         RetainedPredecessorBinding is not null;
 }
 
+internal enum RegularV4ToTunaRouteTransitionState
+{
+    Prepared = 1,
+    Draining = 2,
+    Committed = 3,
+    Invalidated = 4,
+}
+
+internal readonly record struct RegularV4ToTunaDurableCheckpoint(
+    RuntimeOwnerToken SourceRuntimeOwner,
+    RoutePublicationToken SourceRoutePublication,
+    int SourceTerminalGeneration,
+    int SourceLegGeneration,
+    long SourceTransportEpoch,
+    int SourceBridgeRecoveryGeneration,
+    long DataSessionGeneration,
+    int StateEpoch,
+    int ContiguousCommittedChunkIndex,
+    int DurableHighestChunkIndex,
+    int ChunkCount,
+    int CheckpointGeneration)
+{
+    public bool IsDefault =>
+        SourceRuntimeOwner.IsDefault ||
+        SourceRoutePublication.IsDefault ||
+        SourceLegGeneration <= 0 ||
+        SourceTransportEpoch < 0 ||
+        SourceBridgeRecoveryGeneration < 0 ||
+        DataSessionGeneration <= 0 ||
+        StateEpoch < 0 ||
+        ContiguousCommittedChunkIndex < 0 ||
+        DurableHighestChunkIndex < ContiguousCommittedChunkIndex - 1 ||
+        ChunkCount < 0 ||
+        ContiguousCommittedChunkIndex > ChunkCount ||
+        DurableHighestChunkIndex >= ChunkCount ||
+        CheckpointGeneration <= 0;
+}
+
+internal readonly record struct RegularV4ToTunaRouteTransitionPrepareRequest(
+    RuntimeOwnerToken SourceRuntimeOwner,
+    RoutePublicationToken SourceRoutePublication,
+    RuntimeUnlockAdmissionToken RuntimeUnlockAdmission,
+    RuntimeUnlockPendingPreCommitProbeRequest PendingPreCommitProbe,
+    RuntimeUnlockRouteCommitProof AcceptedLaunchBoundary,
+    long LaunchGeneration,
+    RegularV4ToTunaDurableCheckpoint DurableCheckpoint,
+    string Reason);
+
+internal readonly record struct RegularV4ToTunaRouteTransitionAuthority(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    RuntimeOwnerToken SourceRuntimeOwner,
+    RoutePublicationToken SourceRoutePublication,
+    int SourceTerminalGeneration,
+    int SourceLiveRouteEpoch,
+    int SourceLegGeneration,
+    long SourceTransportEpoch,
+    int SourceBridgeRecoveryGeneration,
+    long DataSessionGeneration,
+    RuntimeUnlockAdmissionToken RuntimeUnlockAdmission,
+    RuntimeUnlockPendingPreCommitProbeRequest PendingPreCommitProbe,
+    RuntimeUnlockRouteCommitProof AcceptedLaunchBoundary,
+    long LaunchGeneration,
+    RegularV4ToTunaDurableCheckpoint DurableCheckpoint,
+    FileTransferRoute TargetRoute,
+    int TargetProtocolVersion,
+    FileTransferTransportKind TargetTransport,
+    FileTransferTransportHandoffKind HandoffKind,
+    long TransitionGeneration,
+    FileTransferAuthorityId AuthorityId,
+    string Reason)
+{
+    public bool IsDefault =>
+        string.IsNullOrWhiteSpace(SessionId) ||
+        string.IsNullOrWhiteSpace(TransferId) ||
+        SourceRuntimeOwner.IsDefault ||
+        SourceRoutePublication.IsDefault ||
+        RuntimeUnlockAdmission.IsDefault ||
+        PendingPreCommitProbe.IsDefault ||
+        DurableCheckpoint.IsDefault ||
+        AuthorityId.IsDefault ||
+        AcceptedLaunchBoundary.AdmissionToken != RuntimeUnlockAdmission ||
+        AcceptedLaunchBoundary.TransactionGeneration <= 0 ||
+        AcceptedLaunchBoundary.OfferGeneration <= 0 ||
+        AcceptedLaunchBoundary.TunaPathLeaseGeneration <= 0 ||
+        AcceptedLaunchBoundary.TargetRoute != FileTransferRoute.FileTunaV4 ||
+        AcceptedLaunchBoundary.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+        AcceptedLaunchBoundary.TargetTransport != FileTransferTransportKind.Tuna ||
+        AcceptedLaunchBoundary.HandoffKind !=
+            FileTransferTransportHandoffKind.NormalToTunaActivation ||
+        SourceLegGeneration <= 0 ||
+        SourceTransportEpoch < 0 ||
+        SourceBridgeRecoveryGeneration < 0 ||
+        DataSessionGeneration <= 0 ||
+        LaunchGeneration <= 0 ||
+        TargetRoute != FileTransferRoute.FileTunaV4 ||
+        TargetProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+        TargetTransport != FileTransferTransportKind.Tuna ||
+        HandoffKind != FileTransferTransportHandoffKind.NormalToTunaActivation ||
+        TransitionGeneration <= 0;
+}
+
+internal readonly record struct RegularV4ToTunaActivationPauseBindCommand(
+    RegularV4ToTunaRouteTransitionAuthority Authority);
+
+internal enum RegularV4ToTunaActivationPauseBindStatus
+{
+    Installed,
+    Idempotent,
+    Rejected,
+}
+
+internal readonly record struct RegularV4ToTunaActivationPauseBindReceipt(
+    RegularV4ToTunaActivationPauseBindCommand Command,
+    RegularV4ToTunaActivationPauseBindStatus Status,
+    string Reason);
+
+internal readonly record struct RegularV4ToTunaPhysicalDrainCommand(
+    RegularV4ToTunaRouteTransitionAuthority Authority,
+    long CapturedThroughPhysicalSendGeneration,
+    IReadOnlyList<long> CapturedPhysicalSendLeaseIds,
+    int CapturedPhysicalSendCount,
+    string CapturedPhysicalSendFingerprint);
+
+internal enum RegularV4ToTunaPhysicalDrainOutcome
+{
+    Completed,
+}
+
+internal readonly record struct RegularV4ToTunaPhysicalDrainReceipt(
+    RegularV4ToTunaPhysicalDrainCommand Command,
+    IReadOnlyList<long> CompletedPhysicalSendLeaseIds,
+    int CompletedPhysicalSendCount,
+    string CompletedPhysicalSendFingerprint,
+    RegularV4ToTunaPhysicalDrainOutcome Outcome,
+    string Reason);
+
+internal enum RegularV4ToTunaRouteTransitionDispositionKind
+{
+    Committed,
+    RolledBack,
+    TerminalInvalidated,
+    Superseded,
+}
+
+internal readonly record struct RegularV4ToTunaRouteTransitionDispositionCommand(
+    RegularV4ToTunaRouteTransitionAuthority Authority,
+    RegularV4ToTunaRouteTransitionDispositionKind Kind,
+    RouteCommitToken? RouteCommitToken,
+    RoutePublicationToken? RoutePublicationToken,
+    string Reason)
+{
+    public RuntimeUnlockRouteCommitProof? FinalProof { get; init; }
+}
+
+internal enum RegularV4ToTunaRouteTransitionDispositionApplyStatus
+{
+    Applied,
+    Idempotent,
+    Rejected,
+}
+
+internal readonly record struct RegularV4ToTunaRouteTransitionDispositionReceipt(
+    RegularV4ToTunaRouteTransitionDispositionCommand Command,
+    RegularV4ToTunaRouteTransitionDispositionApplyStatus Status,
+    string Reason);
+
+internal readonly record struct RegularV4ToTunaRouteTransitionOperation(
+    RegularV4ToTunaRouteTransitionAuthority Authority,
+    RegularV4ToTunaRouteTransitionState State,
+    RegularV4ToTunaActivationPauseBindReceipt? PauseBindReceipt = null,
+    RegularV4ToTunaPhysicalDrainCommand? DrainCommand = null,
+    RegularV4ToTunaPhysicalDrainReceipt? DrainReceipt = null,
+    RuntimeUnlockRouteCommitProof? FinalProof = null,
+    FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
+        PressureSettlementReceipt = null,
+    RouteCommitToken? RouteCommitToken = null,
+    RoutePublicationToken? RoutePublicationToken = null,
+    RegularV4ToTunaRouteTransitionDispositionCommand? DispositionCommand = null,
+    RegularV4ToTunaRouteTransitionDispositionReceipt? DispositionReceipt = null);
+
+internal readonly record struct RegularV4ToTunaRouteTransitionSubstate(
+    RegularV4ToTunaRouteTransitionOperation? CurrentOperation = null,
+    RegularV4ToTunaRouteTransitionOperation? LastTerminalOperation = null,
+    long LastTransitionGeneration = 0)
+{
+    internal static RegularV4ToTunaRouteTransitionSubstate Empty => default;
+}
+
 internal readonly record struct FileTransferCoordinatorPersistentState(
-    RegularV4FrontierRepairPressureSubstate RegularV4FrontierRepairPressure = default)
+    RegularV4FrontierRepairPressureSubstate RegularV4FrontierRepairPressure = default,
+    RegularV4ToTunaRouteTransitionSubstate RegularV4ToTunaRouteTransition = default)
 {
     internal static FileTransferCoordinatorPersistentState Empty => default;
+}
+
+internal enum RegularV4ToTunaRouteTransitionDecisionStatus
+{
+    Prepared,
+    Draining,
+    Committed,
+    Invalidated,
+    Idempotent,
+    Rejected,
+}
+
+internal readonly record struct RegularV4ToTunaRouteTransitionDecision(
+    RegularV4ToTunaRouteTransitionDecisionStatus Status,
+    string Reason,
+    RegularV4ToTunaRouteTransitionAuthority? Authority = null,
+    RegularV4ToTunaActivationPauseBindCommand? PauseBindCommand = null,
+    RegularV4ToTunaPhysicalDrainCommand? DrainCommand = null,
+    RegularV4ToTunaRouteTransitionDispositionCommand? DispositionCommand = null,
+    FileTransferCoordinatorDecision? RouteDecision = null)
+{
+    public FileTransferCoordinatorState State { get; init; } = null!;
 }
 
 internal enum RegularV4FrontierRepairPressureRecoveryHandoffStatus
@@ -1064,6 +1282,989 @@ internal static class FileTransferCoordinator
 
     private static readonly TimeSpan InitialTunaReadinessEvidenceMaxAge = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan SessionReactivationInitialTunaReadinessEvidenceMaxAge = TimeSpan.FromMinutes(30);
+
+    internal static RegularV4ToTunaRouteTransitionSubstate
+        GetRegularV4ToTunaRouteTransitionSubstate(FileTransferCoordinatorState state)
+        => state.PersistentState.RegularV4ToTunaRouteTransition;
+
+    internal static bool IsRegularV4ToTunaRouteTransitionDispositionCommandValid(
+        RegularV4ToTunaRouteTransitionDispositionCommand command)
+    {
+        var authority = command.Authority;
+        if (authority.IsDefault ||
+            string.IsNullOrWhiteSpace(command.Reason) ||
+            !string.Equals(
+                command.Reason,
+                NormalizeReason(command.Reason),
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (command.Kind is
+            RegularV4ToTunaRouteTransitionDispositionKind.RolledBack or
+            RegularV4ToTunaRouteTransitionDispositionKind.TerminalInvalidated)
+        {
+            return command.RouteCommitToken is null &&
+                   command.RoutePublicationToken is null &&
+                   command.FinalProof is null;
+        }
+
+        if (command.Kind == RegularV4ToTunaRouteTransitionDispositionKind.Superseded)
+        {
+            return command.RouteCommitToken is null &&
+                   command.FinalProof is null &&
+                   command.RoutePublicationToken is { IsDefault: false } fallback &&
+                   string.Equals(
+                       fallback.SessionId,
+                       authority.SessionId,
+                       StringComparison.Ordinal) &&
+                   string.Equals(
+                       fallback.TransferId,
+                       authority.TransferId,
+                       StringComparison.Ordinal) &&
+                   fallback.Direction == authority.Direction &&
+                   fallback.RuntimeOwner.SessionId == fallback.SessionId &&
+                   fallback.RuntimeOwner.TransferId == fallback.TransferId &&
+                   fallback.RuntimeOwner.Direction == fallback.Direction &&
+                   fallback.RuntimeOwner.Route == fallback.Route &&
+                   string.Equals(
+                       fallback.RuntimeOwner.RouteToken,
+                       fallback.RouteToken,
+                       StringComparison.Ordinal) &&
+                   fallback.RuntimeOwner.ProtocolVersion == fallback.ProtocolVersion &&
+                   fallback.RuntimeOwner.LiveRouteEpoch == fallback.LiveRouteEpoch &&
+                   fallback.RuntimeOwner.RuntimeGeneration == fallback.RuntimeGeneration &&
+                   fallback.RuntimeOwner.TerminalGeneration == fallback.TerminalGeneration &&
+                   fallback.TerminalGeneration == authority.SourceTerminalGeneration &&
+                   fallback.Route == FileTransferRoute.PostTunaFallbackV6 &&
+                   fallback.ProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+                   fallback.TargetRoute == FileTransferRoute.PostTunaFallbackV6 &&
+                   fallback.TargetProtocolVersion ==
+                       FileTransferProtocol.ProtocolVersionV6 &&
+                   fallback.TargetTransport == FileTransferTransportKind.RegularNkn &&
+                   fallback.ActionKind ==
+                       FileTransferCoordinatorActionKind.RoutePublication &&
+                   fallback.RouteCommitGeneration is null;
+        }
+
+        if (command.Kind != RegularV4ToTunaRouteTransitionDispositionKind.Committed ||
+            command.RouteCommitToken is not { IsDefault: false } commit ||
+            command.RoutePublicationToken is not { IsDefault: false } publication ||
+            command.FinalProof is not { } finalProof ||
+            !RegularV4ToTunaProofMatchesTarget(finalProof) ||
+            finalProof.PathProbeState != RuntimeUnlockPathProbeState.Acked)
+        {
+            return false;
+        }
+
+        var expectedProbeId =
+            finalProof.SamePathTunaProbeAckId ??
+            finalProof.PathProbeId ??
+            string.Empty;
+        return finalProof.AdmissionToken == authority.RuntimeUnlockAdmission &&
+               finalProof.TransactionGeneration ==
+                   authority.AcceptedLaunchBoundary.TransactionGeneration &&
+               finalProof.OfferGeneration ==
+                   authority.AcceptedLaunchBoundary.OfferGeneration &&
+               finalProof.TunaPathLeaseGeneration ==
+                   authority.AcceptedLaunchBoundary.TunaPathLeaseGeneration &&
+               string.Equals(
+                   finalProof.TunaPathLeaseListenerRunId,
+                   authority.AcceptedLaunchBoundary.TunaPathLeaseListenerRunId,
+                   StringComparison.Ordinal) &&
+               string.Equals(commit.SessionId, authority.SessionId, StringComparison.Ordinal) &&
+               string.Equals(commit.TransferId, authority.TransferId, StringComparison.Ordinal) &&
+               commit.Direction == authority.Direction &&
+               commit.RuntimeOwner.SessionId == commit.SessionId &&
+               commit.RuntimeOwner.TransferId == commit.TransferId &&
+               commit.RuntimeOwner.Direction == commit.Direction &&
+               commit.RuntimeOwner.Route == commit.Route &&
+               string.Equals(
+                   commit.RuntimeOwner.RouteToken,
+                   commit.RouteToken,
+                   StringComparison.Ordinal) &&
+               commit.RuntimeOwner.ProtocolVersion == commit.ProtocolVersion &&
+               commit.RuntimeOwner.LiveRouteEpoch == commit.LiveRouteEpoch &&
+               commit.RuntimeOwner.RuntimeGeneration == commit.RuntimeGeneration &&
+               commit.RuntimeOwner.TerminalGeneration == commit.TerminalGeneration &&
+               commit.RuntimeUnlockAdmission == authority.RuntimeUnlockAdmission &&
+               commit.TransactionGeneration == finalProof.TransactionGeneration &&
+               commit.OfferGeneration == finalProof.OfferGeneration &&
+               commit.TunaPathLeaseGeneration == finalProof.TunaPathLeaseGeneration &&
+               string.Equals(
+                   commit.TunaPathLeaseListenerRunId,
+                   finalProof.TunaPathLeaseListenerRunId,
+                   StringComparison.Ordinal) &&
+               string.Equals(
+                   commit.SamePathTunaProbeAckId,
+                   expectedProbeId,
+                   StringComparison.Ordinal) &&
+               commit.TerminalGeneration == authority.SourceTerminalGeneration &&
+               commit.Route == authority.TargetRoute &&
+               commit.ProtocolVersion == authority.TargetProtocolVersion &&
+               commit.TargetRoute == authority.TargetRoute &&
+               commit.TargetProtocolVersion == authority.TargetProtocolVersion &&
+               commit.TargetTransport == authority.TargetTransport &&
+               publication.RuntimeOwner == commit.RuntimeOwner &&
+               string.Equals(
+                   publication.SessionId,
+                   commit.SessionId,
+                   StringComparison.Ordinal) &&
+               string.Equals(
+                   publication.TransferId,
+                   commit.TransferId,
+                   StringComparison.Ordinal) &&
+               publication.Direction == commit.Direction &&
+               publication.Route == commit.Route &&
+               publication.ProtocolVersion == commit.ProtocolVersion &&
+               publication.LiveRouteEpoch == commit.LiveRouteEpoch &&
+               publication.RuntimeGeneration == commit.RuntimeGeneration &&
+               publication.TerminalGeneration == commit.TerminalGeneration &&
+               publication.LegGeneration == commit.LegGeneration &&
+               publication.RouteCommitGeneration == commit.CommitGeneration &&
+               publication.TargetRoute == authority.TargetRoute &&
+               publication.TargetProtocolVersion == authority.TargetProtocolVersion &&
+               publication.TargetTransport == authority.TargetTransport &&
+               publication.ActionKind ==
+                   FileTransferCoordinatorActionKind.RouteCommitPublication;
+    }
+
+    internal static bool IsRegularV4ToTunaRouteTransitionCurrent(
+        FileTransferCoordinatorState state,
+        RegularV4ToTunaRouteTransitionAuthority authority,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        var operation = state.PersistentState.RegularV4ToTunaRouteTransition.CurrentOperation;
+        if (operation is null || operation.Value.Authority != authority)
+        {
+            rejectionReason = "regular_v4_to_tuna_transition_authority_not_current";
+            return false;
+        }
+
+        return IsRegularV4ToTunaRouteTransitionSourceScopeCurrent(
+            state,
+            authority,
+            out rejectionReason);
+    }
+
+    internal static bool IsRegularV4ToTunaRouteTransitionDraining(
+        FileTransferCoordinatorState state,
+        out RegularV4ToTunaRouteTransitionAuthority authority)
+    {
+        if (state.PersistentState.RegularV4ToTunaRouteTransition.CurrentOperation is
+            {
+                State: RegularV4ToTunaRouteTransitionState.Draining,
+            } operation &&
+            IsRegularV4ToTunaRouteTransitionSourceScopeCurrent(
+                state,
+                operation.Authority,
+                out _))
+        {
+            authority = operation.Authority;
+            return true;
+        }
+
+        authority = default;
+        return false;
+    }
+
+    internal static bool TryGetPendingRegularV4ToTunaRouteTransitionDisposition(
+        FileTransferCoordinatorState state,
+        out RegularV4ToTunaRouteTransitionDispositionCommand command)
+    {
+        if (state.PersistentState.RegularV4ToTunaRouteTransition.LastTerminalOperation is
+            {
+                DispositionCommand: { } pending,
+                DispositionReceipt: null,
+            })
+        {
+            command = pending;
+            return true;
+        }
+
+        command = default;
+        return false;
+    }
+
+    internal static string CreateRegularV4ToTunaPhysicalDrainFingerprint(
+        IReadOnlyList<long> capturedPhysicalSendLeaseIds)
+    {
+        ArgumentNullException.ThrowIfNull(capturedPhysicalSendLeaseIds);
+        var canonical = string.Join(
+            ",",
+            capturedPhysicalSendLeaseIds.Select(id =>
+                id.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        var hash = System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(canonical));
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    internal static RegularV4ToTunaRouteTransitionDecision
+        PrepareRegularV4ToTunaRouteTransition(
+            FileTransferCoordinatorState state,
+            RegularV4ToTunaRouteTransitionPrepareRequest request)
+    {
+        var transitionState = state.PersistentState.RegularV4ToTunaRouteTransition;
+        if (transitionState.CurrentOperation is { } current)
+        {
+            if (RegularV4ToTunaPrepareRequestMatchesAuthority(request, current.Authority) &&
+                IsRegularV4ToTunaRouteTransitionSourceScopeCurrent(
+                    state,
+                    current.Authority,
+                    out _))
+            {
+                return RegularV4ToTunaDecision(
+                    state,
+                    RegularV4ToTunaRouteTransitionDecisionStatus.Idempotent,
+                    "regular_v4_to_tuna_transition_already_prepared",
+                    current.Authority,
+                    new RegularV4ToTunaActivationPauseBindCommand(current.Authority),
+                    current.DrainCommand);
+            }
+
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+                "regular_v4_to_tuna_transition_conflict");
+        }
+
+        if (transitionState.LastTerminalOperation is
+            {
+                State: RegularV4ToTunaRouteTransitionState.Committed,
+            } terminal &&
+            RegularV4ToTunaPrepareRequestMatchesAuthority(request, terminal.Authority))
+        {
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Idempotent,
+                "regular_v4_to_tuna_transition_already_committed",
+                terminal.Authority,
+                dispositionCommand: terminal.DispositionCommand,
+                routeDecision: null);
+        }
+
+        if (transitionState.LastTerminalOperation is
+            {
+                State: RegularV4ToTunaRouteTransitionState.Invalidated,
+                DispositionCommand:
+                {
+                    Kind:
+                        RegularV4ToTunaRouteTransitionDispositionKind.TerminalInvalidated,
+                },
+            } terminalInvalidated &&
+            RegularV4ToTunaPrepareRequestMatchesAuthority(
+                request,
+                terminalInvalidated.Authority))
+        {
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Idempotent,
+                "regular_v4_to_tuna_transition_terminally_invalidated",
+                terminalInvalidated.Authority,
+                dispositionCommand: terminalInvalidated.DispositionCommand);
+        }
+
+        if (transitionState.LastTerminalOperation is
+            {
+                DispositionCommand: { } pendingDisposition,
+                DispositionReceipt: null,
+            } pendingTerminal)
+        {
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+                "regular_v4_to_tuna_transition_disposition_receipt_pending",
+                pendingTerminal.Authority,
+                drainCommand: pendingTerminal.DrainCommand,
+                dispositionCommand: pendingDisposition);
+        }
+
+        if (!TryValidateRegularV4ToTunaPrepareRequest(
+                state,
+                request,
+                out var rejectionReason))
+        {
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+                rejectionReason);
+        }
+
+        var owner = state.CurrentRuntimeOwner!.Value;
+        var leg = state.CurrentLeg!;
+        var transitionGeneration = Math.Max(
+            1,
+            transitionState.LastTransitionGeneration + 1);
+        var authority = new RegularV4ToTunaRouteTransitionAuthority(
+            state.SessionId,
+            state.TransferId,
+            state.Direction,
+            owner,
+            request.SourceRoutePublication,
+            state.TerminalGeneration,
+            state.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            leg.Generation,
+            leg.TransportEpochId,
+            leg.BridgeRecoveryGeneration,
+            request.DurableCheckpoint.DataSessionGeneration,
+            request.RuntimeUnlockAdmission,
+            request.PendingPreCommitProbe,
+            request.AcceptedLaunchBoundary,
+            request.LaunchGeneration,
+            request.DurableCheckpoint,
+            FileTransferRoute.FileTunaV4,
+            FileTransferProtocol.ProtocolVersionV4,
+            FileTransferTransportKind.Tuna,
+            FileTransferTransportHandoffKind.NormalToTunaActivation,
+            transitionGeneration,
+            IssueAuthorityId(
+                "regular_v4_to_tuna_transition",
+                state,
+                checked((int)Math.Min(int.MaxValue, transitionGeneration))),
+            NormalizeReason(request.Reason));
+        var operation = new RegularV4ToTunaRouteTransitionOperation(
+            authority,
+            RegularV4ToTunaRouteTransitionState.Prepared);
+        var nextState = state with
+        {
+            PersistentState = state.PersistentState with
+            {
+                RegularV4ToTunaRouteTransition = transitionState with
+                {
+                    CurrentOperation = operation,
+                    LastTransitionGeneration = transitionGeneration,
+                },
+            },
+        };
+        return RegularV4ToTunaDecision(
+            nextState,
+            RegularV4ToTunaRouteTransitionDecisionStatus.Prepared,
+            "regular_v4_to_tuna_transition_prepared",
+            authority,
+            new RegularV4ToTunaActivationPauseBindCommand(authority));
+    }
+
+    internal static RegularV4ToTunaRouteTransitionDecision
+        BeginRegularV4ToTunaPhysicalDrain(
+            FileTransferCoordinatorState state,
+            RegularV4ToTunaRouteTransitionAuthority authority,
+            RegularV4ToTunaActivationPauseBindReceipt pauseBindReceipt,
+            long capturedThroughPhysicalSendGeneration,
+            IReadOnlyList<long> capturedPhysicalSendLeaseIds,
+            string capturedPhysicalSendFingerprint)
+    {
+        var transitionState = state.PersistentState.RegularV4ToTunaRouteTransition;
+        if (transitionState.CurrentOperation is not { } current ||
+            current.Authority != authority)
+        {
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+                "regular_v4_to_tuna_transition_authority_not_current");
+        }
+
+        if (current.State == RegularV4ToTunaRouteTransitionState.Draining &&
+            current.DrainCommand is { } existingCommand &&
+            current.PauseBindReceipt is { } existingPauseReceipt &&
+            IsExactOrCanonicalIdempotentRegularV4ToTunaPauseBindReceipt(
+                existingPauseReceipt,
+                pauseBindReceipt) &&
+            existingCommand.CapturedThroughPhysicalSendGeneration ==
+                capturedThroughPhysicalSendGeneration &&
+            existingCommand.CapturedPhysicalSendCount ==
+                capturedPhysicalSendLeaseIds.Count &&
+            CapturedLeaseSetsEqual(
+                existingCommand.CapturedPhysicalSendLeaseIds,
+                capturedPhysicalSendLeaseIds) &&
+            string.Equals(
+                existingCommand.CapturedPhysicalSendFingerprint,
+                capturedPhysicalSendFingerprint,
+                StringComparison.Ordinal))
+        {
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Idempotent,
+                "regular_v4_to_tuna_transition_drain_already_started",
+                authority,
+                pauseBindReceipt.Command,
+                existingCommand);
+        }
+
+        if (current.State != RegularV4ToTunaRouteTransitionState.Prepared)
+        {
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+                "regular_v4_to_tuna_transition_not_prepared");
+        }
+
+        if (!IsRegularV4ToTunaRouteTransitionSourceScopeCurrent(
+                state,
+                authority,
+                out var rejectionReason))
+        {
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+                rejectionReason);
+        }
+
+        var expectedPauseCommand = new RegularV4ToTunaActivationPauseBindCommand(authority);
+        if (pauseBindReceipt.Command != expectedPauseCommand ||
+            pauseBindReceipt.Status is not (
+                RegularV4ToTunaActivationPauseBindStatus.Installed or
+                RegularV4ToTunaActivationPauseBindStatus.Idempotent) ||
+            !IsCanonicalRegularV4ToTunaPauseBindReceipt(pauseBindReceipt))
+        {
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+                "regular_v4_to_tuna_transition_pause_bind_receipt_mismatch");
+        }
+
+        if (!TryValidateCapturedPhysicalSendLeaseSet(
+                capturedThroughPhysicalSendGeneration,
+                capturedPhysicalSendLeaseIds,
+                capturedPhysicalSendFingerprint,
+                out rejectionReason))
+        {
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+                rejectionReason);
+        }
+
+        var capturedLeaseSnapshot = Array.AsReadOnly(
+            capturedPhysicalSendLeaseIds.ToArray());
+        var drainCommand = new RegularV4ToTunaPhysicalDrainCommand(
+            authority,
+            capturedThroughPhysicalSendGeneration,
+            capturedLeaseSnapshot,
+            capturedLeaseSnapshot.Count,
+            capturedPhysicalSendFingerprint);
+        var drainingOperation = current with
+        {
+            State = RegularV4ToTunaRouteTransitionState.Draining,
+            PauseBindReceipt = pauseBindReceipt,
+            DrainCommand = drainCommand,
+        };
+        var nextState = state with
+        {
+            PersistentState = state.PersistentState with
+            {
+                RegularV4ToTunaRouteTransition = transitionState with
+                {
+                    CurrentOperation = drainingOperation,
+                },
+            },
+        };
+        return RegularV4ToTunaDecision(
+            nextState,
+            RegularV4ToTunaRouteTransitionDecisionStatus.Draining,
+            "regular_v4_to_tuna_transition_draining",
+            authority,
+            expectedPauseCommand,
+            drainCommand);
+    }
+
+    internal static RegularV4FrontierRepairPressureBindingDecision
+        PrepareRegularV4ToTunaRouteTransitionPressureSettlement(
+            FileTransferCoordinatorState state,
+            RegularV4ToTunaRouteTransitionAuthority authority,
+            RegularV4ToTunaPhysicalDrainReceipt drainReceipt,
+            RuntimeUnlockRouteCommitProof finalProof)
+    {
+        if (!TryValidateRegularV4ToTunaDrainReceipt(
+                state,
+                authority,
+                drainReceipt,
+                out var rejectionReason) ||
+            !TryValidateRegularV4ToTunaFinalProof(
+                state,
+                authority,
+                finalProof,
+                out rejectionReason))
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                rejectionReason);
+        }
+
+        var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
+        if (pressureState.PendingBinding is not null ||
+            pressureState.RetainedPredecessorBinding is not null)
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                "regular_v4_to_tuna_transition_pressure_lineage_pending");
+        }
+
+        if (pressureState.InstalledBinding is not { } installed)
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Idempotent,
+                "regular_v4_to_tuna_transition_pressure_not_installed");
+        }
+
+        return PrepareRegularV4FrontierRepairPressureSettlement(
+            state,
+            CreateRegularV4ToTunaTransitionPressureSettlement(installed.Authority));
+    }
+
+    internal static RegularV4ToTunaRouteTransitionDecision
+        CommitRegularV4ToTunaRouteTransition(
+            FileTransferCoordinatorState state,
+            RegularV4ToTunaRouteTransitionAuthority authority,
+            RegularV4ToTunaPhysicalDrainReceipt drainReceipt,
+            RuntimeUnlockRouteCommitProof finalProof,
+            FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
+                pressureSettlementReceipt = null)
+    {
+        var transitionState = state.PersistentState.RegularV4ToTunaRouteTransition;
+        if (transitionState.LastTerminalOperation is
+            {
+                State: RegularV4ToTunaRouteTransitionState.Committed,
+            } terminal &&
+            terminal.Authority == authority &&
+            terminal.DrainReceipt is { } committedDrainReceipt &&
+            IsExactOrCanonicalIdempotentRegularV4ToTunaDrainReceipt(
+                committedDrainReceipt,
+                drainReceipt) &&
+            terminal.FinalProof == finalProof &&
+            IsExactRegularV4ToTunaPressureReceiptDuplicate(
+                terminal.PressureSettlementReceipt,
+                pressureSettlementReceipt))
+        {
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Idempotent,
+                "regular_v4_to_tuna_transition_already_committed",
+                authority,
+                drainCommand: terminal.DrainCommand,
+                dispositionCommand: terminal.DispositionCommand);
+        }
+
+        if (!TryValidateRegularV4ToTunaDrainReceipt(
+                state,
+                authority,
+                drainReceipt,
+                out var rejectionReason) ||
+            !TryValidateRegularV4ToTunaFinalProof(
+                state,
+                authority,
+                finalProof,
+                out rejectionReason))
+        {
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+                rejectionReason);
+        }
+
+        var projectedState = state;
+        var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
+        if (pressureState.PendingBinding is not null ||
+            pressureState.RetainedPredecessorBinding is not null)
+        {
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+                "regular_v4_to_tuna_transition_pressure_lineage_pending");
+        }
+
+        if (pressureState.InstalledBinding is { } installed)
+        {
+            var expectedSettlement =
+                CreateRegularV4ToTunaTransitionPressureSettlement(installed.Authority);
+            var preparedPressure =
+                PrepareRegularV4FrontierRepairPressureSettlement(state, expectedSettlement);
+            if (pressureSettlementReceipt is null ||
+                preparedPressure.Status !=
+                    RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted ||
+                preparedPressure.SettlementCommand is not { } expectedCommand ||
+                pressureSettlementReceipt.Command != expectedCommand ||
+                !IsCanonicalRegularV4ToTunaPressureSettlementReceipt(
+                    pressureSettlementReceipt))
+            {
+                return RegularV4ToTunaDecision(
+                    state,
+                    RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+                    "regular_v4_to_tuna_transition_pressure_apply_receipt_missing");
+            }
+
+            var pressureCommit = CommitRegularV4FrontierRepairPressureSettlement(
+                state,
+                pressureSettlementReceipt);
+            if (pressureCommit.Status !=
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted)
+            {
+                return RegularV4ToTunaDecision(
+                    state,
+                    RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+                    pressureCommit.Reason);
+            }
+
+            projectedState =
+                pressureCommit.State.CurrentRepairReplayDecision is { } currentRepair &&
+                currentRepair.AuthorityId == installed.Authority.AuthorityId
+                    ? pressureCommit.State with { CurrentRepairReplayDecision = null }
+                    : pressureCommit.State;
+        }
+        else if (pressureSettlementReceipt is not null)
+        {
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+                "regular_v4_to_tuna_transition_pressure_apply_receipt_unexpected");
+        }
+
+        var targetSelection = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var coordinatorEvent = new FileTransferCoordinatorEvent(
+            FileTransferCoordinatorEventKind.TunaActivated,
+            targetSelection,
+            FileTransferTransportHandoffKind.NormalToTunaActivation,
+            FileTransferTransportKind.Tuna,
+            NormalizeReason(authority.Reason),
+            FileTransferLegState.Active,
+            CanSendData: true,
+            authority.DurableCheckpoint.ContiguousCommittedChunkIndex,
+            authority.DurableCheckpoint.DurableHighestChunkIndex,
+            TransportEpochId: 0,
+            BridgeRecoveryGeneration: 0);
+        projectedState = CloneCoordinatorStateGraph(projectedState);
+        projectedState = projectedState with
+        {
+            PersistentState = projectedState.PersistentState with
+            {
+                RegularV4ToTunaRouteTransition = transitionState with
+                {
+                    CurrentOperation = null,
+                },
+            },
+        };
+        var routeDecision = TransitionToRoute(
+            coordinatorEvent,
+            projectedState,
+            NormalizeReason(authority.Reason),
+            recoverEpoch: true);
+        if (routeDecision.MutationRejectedReason is { } routeRejectionReason)
+        {
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+                routeRejectionReason);
+        }
+
+        if (routeDecision.State.CurrentRuntimeOwner is not { } runtimeOwner ||
+            routeDecision.State.CurrentLeg is not { } targetLeg)
+        {
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+                "regular_v4_to_tuna_transition_target_scope_missing");
+        }
+
+        var commitGeneration = Math.Max(1, state.LastRouteCommitGeneration + 1);
+        var routeCommitToken = new RouteCommitToken(
+            routeDecision.State.SessionId,
+            routeDecision.State.TransferId,
+            routeDecision.State.Direction,
+            runtimeOwner,
+            authority.RuntimeUnlockAdmission,
+            routeDecision.State.RouteSelection.Route,
+            routeDecision.State.RouteSelection.TelemetryToken,
+            routeDecision.State.RouteSelection.ProtocolVersion,
+            routeDecision.State.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            runtimeOwner.RuntimeGeneration,
+            routeDecision.State.TerminalGeneration,
+            targetLeg.Generation,
+            finalProof.TransactionGeneration,
+            finalProof.OfferGeneration,
+            finalProof.TunaPathLeaseGeneration,
+            finalProof.TunaPathLeaseListenerRunId,
+            finalProof.SamePathTunaProbeAckId ?? finalProof.PathProbeId ?? string.Empty,
+            finalProof.TargetRoute,
+            finalProof.ProtocolVersion,
+            finalProof.TargetTransport,
+            commitGeneration,
+            NormalizeReason(authority.Reason));
+        var committedRouteState = routeDecision.State with
+        {
+            CurrentRouteCommit = routeCommitToken,
+            LastRouteCommitGeneration = commitGeneration,
+            CurrentRuntimeUnlockAdmission = null,
+            CurrentRuntimeUnlockPendingPreCommitProbe = null,
+        };
+        var publicationRequest = new FileTransferCoordinatorActionRequest(
+            FileTransferCoordinatorActionKind.RouteCommitPublication,
+            Source: "regular_v4_to_tuna_transition",
+            Reason: authority.Reason,
+            RuntimeOwner: runtimeOwner,
+            Route: committedRouteState.RouteSelection.Route,
+            ProtocolVersion: committedRouteState.RouteSelection.ProtocolVersion,
+            LiveRouteEpoch: committedRouteState.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            LegGeneration: targetLeg.Generation,
+            RuntimeGeneration: runtimeOwner.RuntimeGeneration,
+            TerminalGeneration: committedRouteState.TerminalGeneration,
+            RuntimeUnlockAdmissionToken: authority.RuntimeUnlockAdmission,
+            RouteCommitToken: routeCommitToken,
+            RuntimeUnlockTransactionGeneration: finalProof.TransactionGeneration,
+            RuntimeUnlockOfferGeneration: finalProof.OfferGeneration,
+            RuntimeUnlockTunaPathLeaseGeneration: finalProof.TunaPathLeaseGeneration,
+            RuntimeUnlockTunaPathLeaseListenerRunId: finalProof.TunaPathLeaseListenerRunId,
+            RuntimeUnlockProbeId: finalProof.PathProbeId,
+            RuntimeUnlockSamePathTunaProbeAckId: finalProof.SamePathTunaProbeAckId,
+            RouteCommitGeneration: commitGeneration,
+            TargetRoute: FileTransferRoute.FileTunaV4,
+            TargetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+            TargetTransport: FileTransferTransportKind.Tuna);
+        var publicationToken = IssueRoutePublicationToken(
+            committedRouteState,
+            publicationRequest,
+            Math.Max(1, state.LastRoutePublicationGeneration + 1))!.Value;
+        committedRouteState = ApplyIssuedRoutePublicationAuthority(
+            committedRouteState,
+            CreateRoutePublicationDecision(
+                committedRouteState,
+                FileTransferCoordinatorActionKind.RouteCommitPublication,
+                accepted: true,
+                rejectionReason: "accepted",
+                publicationToken));
+        var dispositionCommand = new RegularV4ToTunaRouteTransitionDispositionCommand(
+            authority,
+            RegularV4ToTunaRouteTransitionDispositionKind.Committed,
+            routeCommitToken,
+            publicationToken,
+            "regular_v4_to_tuna_transition_committed")
+        {
+            FinalProof = finalProof,
+        };
+        if (!IsRegularV4ToTunaRouteTransitionDispositionCommandValid(
+                dispositionCommand))
+        {
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+                "regular_v4_to_tuna_transition_disposition_invalid");
+        }
+
+        var retainedDrainReceipt = SnapshotRegularV4ToTunaDrainReceipt(drainReceipt);
+        var terminalOperation =
+            transitionState.CurrentOperation!.Value with
+            {
+                State = RegularV4ToTunaRouteTransitionState.Committed,
+                DrainReceipt = retainedDrainReceipt,
+                FinalProof = finalProof,
+                PressureSettlementReceipt = pressureSettlementReceipt,
+                RouteCommitToken = routeCommitToken,
+                RoutePublicationToken = publicationToken,
+                DispositionCommand = dispositionCommand,
+            };
+        committedRouteState = committedRouteState with
+        {
+            PersistentState = committedRouteState.PersistentState with
+            {
+                RegularV4ToTunaRouteTransition = transitionState with
+                {
+                    CurrentOperation = null,
+                    LastTerminalOperation = terminalOperation,
+                },
+            },
+        };
+        routeDecision = routeDecision with
+        {
+            State = committedRouteState,
+            RuntimeUnlockCommitAccepted = true,
+            RuntimeUnlockCommitRejectedReason = null,
+            RouteCommitToken = routeCommitToken,
+        };
+        return RegularV4ToTunaDecision(
+            committedRouteState,
+            RegularV4ToTunaRouteTransitionDecisionStatus.Committed,
+            "regular_v4_to_tuna_transition_committed",
+            authority,
+            drainCommand: terminalOperation.DrainCommand,
+            dispositionCommand: dispositionCommand,
+            routeDecision: routeDecision);
+    }
+
+    internal static RegularV4ToTunaRouteTransitionDecision
+        InvalidateRegularV4ToTunaRouteTransition(
+            FileTransferCoordinatorState state,
+            RegularV4ToTunaRouteTransitionAuthority authority,
+            bool terminalInvalidation,
+            string reason)
+    {
+        var transitionState = state.PersistentState.RegularV4ToTunaRouteTransition;
+        var normalizedReason = NormalizeReason(reason);
+        var expectedDispositionKind = terminalInvalidation
+            ? RegularV4ToTunaRouteTransitionDispositionKind.TerminalInvalidated
+            : RegularV4ToTunaRouteTransitionDispositionKind.RolledBack;
+        if (transitionState.LastTerminalOperation is
+            {
+                State: RegularV4ToTunaRouteTransitionState.Invalidated,
+            } terminal &&
+            terminal.Authority == authority &&
+            terminal.DispositionCommand is { } terminalDisposition)
+        {
+            if (terminalDisposition.Kind != expectedDispositionKind ||
+                !string.Equals(
+                    terminalDisposition.Reason,
+                    normalizedReason,
+                    StringComparison.Ordinal))
+            {
+                return RegularV4ToTunaDecision(
+                    state,
+                    RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+                    "regular_v4_to_tuna_transition_invalidation_duplicate_mismatch");
+            }
+
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Idempotent,
+                "regular_v4_to_tuna_transition_already_invalidated",
+                authority,
+                drainCommand: terminal.DrainCommand,
+                dispositionCommand: terminal.DispositionCommand);
+        }
+
+        if (transitionState.CurrentOperation is not { } current ||
+            current.Authority != authority)
+        {
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+                "regular_v4_to_tuna_transition_authority_not_current");
+        }
+
+        if (!terminalInvalidation &&
+            !IsRegularV4ToTunaRouteTransitionSourceScopeCurrent(
+                state,
+                authority,
+                out var rejectionReason))
+        {
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+                rejectionReason);
+        }
+
+        var dispositionCommand = new RegularV4ToTunaRouteTransitionDispositionCommand(
+            authority,
+            expectedDispositionKind,
+            RouteCommitToken: null,
+            RoutePublicationToken: null,
+            normalizedReason);
+        if (!IsRegularV4ToTunaRouteTransitionDispositionCommandValid(
+                dispositionCommand))
+        {
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+                "regular_v4_to_tuna_transition_disposition_invalid");
+        }
+
+        var invalidated = current with
+        {
+            State = RegularV4ToTunaRouteTransitionState.Invalidated,
+            DispositionCommand = dispositionCommand,
+        };
+        var nextState = state with
+        {
+            CurrentRuntimeUnlockAdmission = null,
+            CurrentRuntimeUnlockPendingPreCommitProbe = null,
+            PersistentState = state.PersistentState with
+            {
+                RegularV4ToTunaRouteTransition = transitionState with
+                {
+                    CurrentOperation = null,
+                    LastTerminalOperation = invalidated,
+                },
+            },
+        };
+        return RegularV4ToTunaDecision(
+            nextState,
+            RegularV4ToTunaRouteTransitionDecisionStatus.Invalidated,
+            normalizedReason,
+            authority,
+            drainCommand: invalidated.DrainCommand,
+            dispositionCommand: dispositionCommand);
+    }
+
+    internal static RegularV4ToTunaRouteTransitionDecision
+        ApplyRegularV4ToTunaRouteTransitionDispositionReceipt(
+            FileTransferCoordinatorState state,
+            RegularV4ToTunaRouteTransitionDispositionReceipt receipt)
+    {
+        var transitionState = state.PersistentState.RegularV4ToTunaRouteTransition;
+        if (transitionState.LastTerminalOperation is not
+            {
+                DispositionCommand: { } expectedCommand,
+            } terminal ||
+            receipt.Command != expectedCommand)
+        {
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+                "regular_v4_to_tuna_transition_disposition_receipt_not_current");
+        }
+
+        if (terminal.DispositionReceipt is { } appliedReceipt)
+        {
+            if (receipt == appliedReceipt ||
+                IsCanonicalIdempotentRegularV4ToTunaDispositionReceipt(
+                    appliedReceipt,
+                    receipt))
+            {
+                return RegularV4ToTunaDecision(
+                    state,
+                    RegularV4ToTunaRouteTransitionDecisionStatus.Idempotent,
+                    "regular_v4_to_tuna_transition_disposition_receipt_already_applied",
+                    terminal.Authority,
+                    drainCommand: terminal.DrainCommand,
+                    dispositionCommand: expectedCommand);
+            }
+
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+                "regular_v4_to_tuna_transition_disposition_receipt_duplicate_mismatch");
+        }
+
+        if (!IsCanonicalAcceptedRegularV4ToTunaDispositionReceipt(receipt))
+        {
+            return RegularV4ToTunaDecision(
+                state,
+                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
+                "regular_v4_to_tuna_transition_disposition_receipt_rejected");
+        }
+
+        var terminalWithReceipt = terminal with { DispositionReceipt = receipt };
+        var nextState = state with
+        {
+            PersistentState = state.PersistentState with
+            {
+                RegularV4ToTunaRouteTransition = transitionState with
+                {
+                    LastTerminalOperation = terminalWithReceipt,
+                },
+            },
+        };
+        return RegularV4ToTunaDecision(
+            nextState,
+            terminal.State == RegularV4ToTunaRouteTransitionState.Committed
+                ? RegularV4ToTunaRouteTransitionDecisionStatus.Committed
+                : RegularV4ToTunaRouteTransitionDecisionStatus.Invalidated,
+            "regular_v4_to_tuna_transition_disposition_receipt_applied",
+            terminal.Authority,
+            drainCommand: terminal.DrainCommand,
+            dispositionCommand: expectedCommand);
+    }
 
     public static FileTransferCoordinatorDecision Apply(
         FileTransferCoordinatorEvent coordinatorEvent,
@@ -3325,6 +4526,16 @@ internal static class FileTransferCoordinator
         out string rejectionReason)
     {
         rejectionReason = "accepted";
+        if (string.IsNullOrWhiteSpace(request.Reason) ||
+            !string.Equals(
+                request.Reason,
+                NormalizeReason(request.Reason),
+                StringComparison.Ordinal))
+        {
+            rejectionReason = "regular_v4_to_tuna_transition_reason_invalid";
+            return false;
+        }
+
         if (state.IsTerminal)
         {
             rejectionReason = "transfer_terminal";
@@ -7660,6 +8871,15 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         string reason)
     {
+        if (state.PersistentState.RegularV4ToTunaRouteTransition.CurrentOperation
+            is not null)
+        {
+            return MutationRejected(
+                state,
+                reason,
+                "regular_v4_to_tuna_transition_invalidation_required");
+        }
+
         var reauthorizationRequest =
             coordinatorEvent.FallbackTailYieldTransportEpochReauthorizationRequest;
         if (reauthorizationRequest is { } requestedReauthorization &&
@@ -8126,6 +9346,33 @@ internal static class FileTransferCoordinator
         out FileTransferCoordinatorDecision routeDecision,
         out string rejectionReason)
     {
+        rejectionReason = "accepted";
+        var routeTransitionState =
+            projectedState.PersistentState.RegularV4ToTunaRouteTransition;
+        if (transition.Handoff.RouteTransitionAuthority is not { } transitionAuthority ||
+            transition.Handoff.PhysicalDrainReceipt is not { } drainReceipt ||
+            routeTransitionState.CurrentOperation is not
+            {
+                State: RegularV4ToTunaRouteTransitionState.Draining,
+            } currentOperation ||
+            currentOperation.Authority != transitionAuthority ||
+            !TryValidateRegularV4ToTunaDrainReceipt(
+                projectedState,
+                transitionAuthority,
+                drainReceipt,
+                out rejectionReason))
+        {
+            routeDecision = Decision(projectedState, transition.CoordinatorEvent.Reason);
+            if (string.Equals(rejectionReason, "accepted", StringComparison.Ordinal))
+            {
+                rejectionReason =
+                    "uncommitted_tuna_fallback_route_transition_authority_mismatch";
+            }
+
+            return false;
+        }
+
+        projectedState = CloneCoordinatorStateGraph(projectedState);
         routeDecision = TransitionToRoute(
             transition.CoordinatorEvent,
             projectedState,
@@ -8168,6 +9415,38 @@ internal static class FileTransferCoordinator
                 publicationToken)) with
         {
             LastRuntimeUnlockUncommittedTunaFallbackHandoff = transition,
+        };
+        var supersededDisposition =
+            new RegularV4ToTunaRouteTransitionDispositionCommand(
+                transitionAuthority,
+                RegularV4ToTunaRouteTransitionDispositionKind.Superseded,
+                RouteCommitToken: null,
+                RoutePublicationToken: publicationToken,
+                "regular_v4_to_tuna_transition_superseded_by_fallback");
+        if (!IsRegularV4ToTunaRouteTransitionDispositionCommandValid(
+                supersededDisposition))
+        {
+            rejectionReason =
+                "uncommitted_tuna_fallback_route_transition_disposition_invalid";
+            return false;
+        }
+
+        var supersededOperation = currentOperation with
+        {
+            State = RegularV4ToTunaRouteTransitionState.Invalidated,
+            DrainReceipt = SnapshotRegularV4ToTunaDrainReceipt(drainReceipt),
+            DispositionCommand = supersededDisposition,
+        };
+        committedState = committedState with
+        {
+            PersistentState = committedState.PersistentState with
+            {
+                RegularV4ToTunaRouteTransition = routeTransitionState with
+                {
+                    CurrentOperation = null,
+                    LastTerminalOperation = supersededOperation,
+                },
+            },
         };
         routeDecision = routeDecision with { State = committedState };
         rejectionReason = "accepted";
@@ -8360,6 +9639,8 @@ internal static class FileTransferCoordinator
         FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt? pressureReceipt)
     {
         var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
+        var routeTransitionState =
+            state.PersistentState.RegularV4ToTunaRouteTransition;
         if (state.IsTerminal ||
             state.RouteSelection.Route != FileTransferRoute.PostTunaFallbackV6 ||
             state.RouteSelection.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
@@ -8371,7 +9652,23 @@ internal static class FileTransferCoordinator
             !IsRoutePublicationTokenCurrent(state, publication, out _) ||
             pressureState.PendingBinding is not null ||
             pressureState.InstalledBinding is not null ||
-            pressureState.RetainedPredecessorBinding is not null)
+            pressureState.RetainedPredecessorBinding is not null ||
+            transition.Handoff.RouteTransitionAuthority is not { } transitionAuthority ||
+            transition.Handoff.PhysicalDrainReceipt is not { } drainReceipt ||
+            routeTransitionState.CurrentOperation is not null ||
+            routeTransitionState.LastTerminalOperation is not
+            {
+                State: RegularV4ToTunaRouteTransitionState.Invalidated,
+                DispositionCommand:
+                {
+                    Kind: RegularV4ToTunaRouteTransitionDispositionKind.Superseded,
+                },
+            } terminalTransition ||
+            terminalTransition.Authority != transitionAuthority ||
+            terminalTransition.DrainReceipt is not { } committedDrainReceipt ||
+            !IsExactOrCanonicalIdempotentRegularV4ToTunaDrainReceipt(
+                committedDrainReceipt,
+                drainReceipt))
         {
             return false;
         }
@@ -8407,6 +9704,16 @@ internal static class FileTransferCoordinator
         string reason,
         bool recoverEpoch)
     {
+        if (state.PersistentState.RegularV4ToTunaRouteTransition.CurrentOperation
+                is not null &&
+            coordinatorEvent.RuntimeUnlockUncommittedTunaFallbackHandoff is null)
+        {
+            return MutationRejected(
+                state,
+                reason,
+                "regular_v4_to_tuna_transition_commit_required");
+        }
+
         if (coordinatorEvent.RuntimeUnlockUncommittedTunaFallbackHandoff is { } fallbackHandoff &&
             !IsRuntimeUnlockUncommittedTunaFallbackHandoffCurrent(
                 state,
@@ -8548,10 +9855,38 @@ internal static class FileTransferCoordinator
         var admission = handoff.RuntimeUnlockAdmission;
         var pendingPreCommit = handoff.PendingPreCommitProbe;
         var peerProof = handoff.PeerProofEvidence;
+        if (handoff.RouteTransitionAuthority is not { } transitionAuthority ||
+            handoff.PhysicalDrainReceipt is not { } physicalDrainReceipt ||
+            transitionAuthority.SourceRuntimeOwner != handoff.SourceRuntimeOwner ||
+            transitionAuthority.SourceRoutePublication != handoff.SourceRoutePublication ||
+            transitionAuthority.RuntimeUnlockAdmission != admission ||
+            transitionAuthority.PendingPreCommitProbe != pendingPreCommit ||
+            transitionAuthority.DataSessionGeneration !=
+                handoff.SourceDataSessionGeneration ||
+            transitionAuthority.SourceTerminalGeneration !=
+                handoff.SourceTerminalGeneration ||
+            transitionAuthority.SourceLegGeneration != handoff.SourceLegGeneration ||
+            transitionAuthority.SourceTransportEpoch != handoff.SourceTransportEpoch ||
+            transitionAuthority.SourceBridgeRecoveryGeneration !=
+                handoff.SourceBridgeRecoveryGeneration ||
+            transitionAuthority.LaunchGeneration != snapshot.LaunchGeneration ||
+            !TryValidateRegularV4ToTunaDrainReceipt(
+                state,
+                transitionAuthority,
+                physicalDrainReceipt,
+                out rejectionReason))
+        {
+            if (string.Equals(rejectionReason, "accepted", StringComparison.Ordinal))
+            {
+                rejectionReason =
+                    "uncommitted_tuna_fallback_route_transition_authority_missing";
+            }
+
+            return false;
+        }
+
         if (handoff.HandoffGeneration <= 0 ||
             handoff.SourceDataSessionGeneration <= 0 ||
-            handoff.DrainGeneration <= 0 ||
-            handoff.CompletedDrainGeneration != handoff.DrainGeneration ||
             handoff.ProofTransportEpoch <= 0 ||
             !peerProof.IsComplete ||
             !peerProof.IsExactFrameBound ||
@@ -9076,6 +10411,15 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         string reason)
     {
+        if (state.PersistentState.RegularV4ToTunaRouteTransition.CurrentOperation
+            is not null)
+        {
+            return MutationRejected(
+                state,
+                reason,
+                "regular_v4_to_tuna_transition_invalidation_required");
+        }
+
         var request = coordinatorEvent.RuntimeUnlockAdmissionRequest ??
             new RuntimeUnlockAdmissionRequest("runtime_unlock_admission", reason, state.CurrentRuntimeOwner);
         var admissionGeneration = Math.Max(1, state.LastRuntimeUnlockAdmissionGeneration + 1);
@@ -9097,6 +10441,15 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         string reason)
     {
+        if (state.PersistentState.RegularV4ToTunaRouteTransition.CurrentOperation
+            is not null)
+        {
+            return MutationRejected(
+                state,
+                reason,
+                "regular_v4_to_tuna_transition_invalidation_required");
+        }
+
         if (coordinatorEvent.RuntimeUnlockPendingPreCommitProbeRequest is not { } pendingRequest)
         {
             return MutationRejected(state, reason, "runtime_unlock_pending_precommit_probe_missing");
@@ -9183,6 +10536,15 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         string reason)
     {
+        if (state.PersistentState.RegularV4ToTunaRouteTransition.CurrentOperation
+            is not null)
+        {
+            return MutationRejected(
+                state,
+                reason,
+                "regular_v4_to_tuna_transition_invalidation_required");
+        }
+
         if (coordinatorEvent.RuntimeUnlockPendingPreCommitProbeRequest is { } pendingRequest &&
             !IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(state, pendingRequest, out var rejectionReason))
         {
@@ -9213,6 +10575,15 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         string reason)
     {
+        if (state.PersistentState.RegularV4ToTunaRouteTransition.CurrentOperation
+            is not null)
+        {
+            return MutationRejected(
+                state,
+                reason,
+                "regular_v4_to_tuna_transition_invalidation_required");
+        }
+
         if (HasRegularV4FrontierRepairPressureBinding(state))
         {
             return MutationRejected(
@@ -9348,6 +10719,15 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         string reason)
     {
+        if (state.PersistentState.RegularV4ToTunaRouteTransition.CurrentOperation
+            is not null)
+        {
+            return MutationRejected(
+                state,
+                reason,
+                "regular_v4_to_tuna_transition_invalidation_required");
+        }
+
         if (HasRegularV4FrontierRepairPressureBinding(state))
         {
             return MutationRejected(
@@ -10585,6 +11965,544 @@ internal static class FileTransferCoordinator
                publication.ActionKind == FileTransferCoordinatorActionKind.RoutePublication &&
                publication.PublicationGeneration == authority.RoutePublicationGeneration;
     }
+
+    private static bool TryValidateRegularV4ToTunaPrepareRequest(
+        FileTransferCoordinatorState state,
+        RegularV4ToTunaRouteTransitionPrepareRequest request,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (state.IsTerminal)
+        {
+            rejectionReason = "transfer_terminal";
+            return false;
+        }
+
+        if (state.RouteSelection.Route != FileTransferRoute.RegularNknV4Fast ||
+            state.RouteSelection.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            state.CurrentRouteCommit is not null ||
+            state.CurrentRuntimeOwner is not { } owner ||
+            state.CurrentLeg is not { } leg)
+        {
+            rejectionReason = "regular_v4_to_tuna_transition_source_route_invalid";
+            return false;
+        }
+
+        if (request.SourceRuntimeOwner != owner ||
+            !IsRuntimeOwnerCurrent(state, request.SourceRuntimeOwner, out rejectionReason) ||
+            state.CurrentRoutePublicationToken != request.SourceRoutePublication ||
+            !IsRoutePublicationTokenCurrent(
+                state,
+                request.SourceRoutePublication,
+                out rejectionReason) ||
+            state.CurrentRuntimeUnlockAdmission != request.RuntimeUnlockAdmission ||
+            !IsRuntimeUnlockAdmissionTokenCurrent(
+                state,
+                request.RuntimeUnlockAdmission,
+                out rejectionReason) ||
+            state.CurrentRuntimeUnlockPendingPreCommitProbe !=
+                request.PendingPreCommitProbe ||
+            !IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(
+                state,
+                request.PendingPreCommitProbe,
+                out rejectionReason))
+        {
+            if (string.Equals(rejectionReason, "accepted", StringComparison.Ordinal))
+            {
+                rejectionReason = "regular_v4_to_tuna_transition_source_authority_mismatch";
+            }
+
+            return false;
+        }
+
+        if (request.LaunchGeneration <= 0 ||
+            !string.Equals(
+                request.AcceptedLaunchBoundary.SessionId,
+                state.SessionId,
+                StringComparison.Ordinal) ||
+            (!string.IsNullOrWhiteSpace(request.AcceptedLaunchBoundary.TransferId) &&
+             !string.Equals(
+                 request.AcceptedLaunchBoundary.TransferId,
+                 state.TransferId,
+                 StringComparison.Ordinal)) ||
+            request.PendingPreCommitProbe.RuntimeOwner != owner ||
+            request.PendingPreCommitProbe.AdmissionToken != request.RuntimeUnlockAdmission ||
+            request.PendingPreCommitProbe.TransactionGeneration !=
+                request.AcceptedLaunchBoundary.TransactionGeneration ||
+            request.PendingPreCommitProbe.OfferGeneration !=
+                request.AcceptedLaunchBoundary.OfferGeneration ||
+            request.PendingPreCommitProbe.TunaPathLeaseGeneration !=
+                request.AcceptedLaunchBoundary.TunaPathLeaseGeneration ||
+            !string.Equals(
+                request.PendingPreCommitProbe.TunaPathLeaseListenerRunId,
+                request.AcceptedLaunchBoundary.TunaPathLeaseListenerRunId,
+                StringComparison.Ordinal) ||
+            !RegularV4ToTunaProofMatchesTarget(request.AcceptedLaunchBoundary) ||
+            request.AcceptedLaunchBoundary.AdmissionToken != request.RuntimeUnlockAdmission)
+        {
+            rejectionReason = "regular_v4_to_tuna_transition_launch_boundary_mismatch";
+            return false;
+        }
+
+        var checkpoint = request.DurableCheckpoint;
+        if (checkpoint.IsDefault ||
+            checkpoint.SourceRuntimeOwner != owner ||
+            checkpoint.SourceRoutePublication != request.SourceRoutePublication ||
+            checkpoint.SourceTerminalGeneration != state.TerminalGeneration ||
+            checkpoint.SourceLegGeneration != leg.Generation ||
+            checkpoint.SourceTransportEpoch != leg.TransportEpochId ||
+            checkpoint.SourceBridgeRecoveryGeneration != leg.BridgeRecoveryGeneration)
+        {
+            rejectionReason = "regular_v4_to_tuna_transition_checkpoint_scope_mismatch";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsRegularV4ToTunaRouteTransitionSourceScopeCurrent(
+        FileTransferCoordinatorState state,
+        RegularV4ToTunaRouteTransitionAuthority authority,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (authority.IsDefault ||
+            !string.Equals(state.SessionId, authority.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(state.TransferId, authority.TransferId, StringComparison.Ordinal) ||
+            state.Direction != authority.Direction)
+        {
+            rejectionReason = "regular_v4_to_tuna_transition_identity_mismatch";
+            return false;
+        }
+
+        if (state.IsTerminal)
+        {
+            rejectionReason = "transfer_terminal";
+            return false;
+        }
+
+        if (state.RouteSelection.Route != FileTransferRoute.RegularNknV4Fast ||
+            state.RouteSelection.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            state.CurrentRouteCommit is not null ||
+            state.CurrentRuntimeOwner != authority.SourceRuntimeOwner ||
+            state.CurrentRoutePublicationToken != authority.SourceRoutePublication ||
+            state.CurrentRuntimeUnlockAdmission != authority.RuntimeUnlockAdmission ||
+            state.CurrentRuntimeUnlockPendingPreCommitProbe != authority.PendingPreCommitProbe ||
+            state.TerminalGeneration != authority.SourceTerminalGeneration ||
+            (state.CurrentLiveRouteEpoch?.EpochId ?? 0) != authority.SourceLiveRouteEpoch ||
+            state.CurrentLeg is not { } leg ||
+            leg.Generation != authority.SourceLegGeneration ||
+            leg.TransportEpochId != authority.SourceTransportEpoch ||
+            leg.BridgeRecoveryGeneration != authority.SourceBridgeRecoveryGeneration)
+        {
+            rejectionReason = "regular_v4_to_tuna_transition_source_scope_stale";
+            return false;
+        }
+
+        if (!IsRuntimeOwnerCurrent(state, authority.SourceRuntimeOwner, out rejectionReason) ||
+            !IsRoutePublicationTokenCurrent(
+                state,
+                authority.SourceRoutePublication,
+                out rejectionReason) ||
+            !IsRuntimeUnlockAdmissionTokenCurrent(
+                state,
+                authority.RuntimeUnlockAdmission,
+                out rejectionReason) ||
+            !IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(
+                state,
+                authority.PendingPreCommitProbe,
+                out rejectionReason))
+        {
+            return false;
+        }
+
+        return authority.DurableCheckpoint.SourceRuntimeOwner ==
+                   authority.SourceRuntimeOwner &&
+               authority.DurableCheckpoint.SourceRoutePublication ==
+                   authority.SourceRoutePublication &&
+               authority.DurableCheckpoint.SourceTerminalGeneration ==
+                   authority.SourceTerminalGeneration &&
+               authority.DurableCheckpoint.SourceLegGeneration ==
+                   authority.SourceLegGeneration &&
+               authority.DurableCheckpoint.SourceTransportEpoch ==
+                   authority.SourceTransportEpoch &&
+               authority.DurableCheckpoint.SourceBridgeRecoveryGeneration ==
+                   authority.SourceBridgeRecoveryGeneration &&
+               authority.DurableCheckpoint.DataSessionGeneration ==
+                   authority.DataSessionGeneration;
+    }
+
+    private static bool TryValidateRegularV4ToTunaFinalProof(
+        FileTransferCoordinatorState state,
+        RegularV4ToTunaRouteTransitionAuthority authority,
+        RuntimeUnlockRouteCommitProof proof,
+        out string rejectionReason)
+    {
+        if (!RuntimeUnlockTransaction.CanCommitRoute(proof, state, out rejectionReason))
+        {
+            return false;
+        }
+
+        var prepared = authority.AcceptedLaunchBoundary;
+        if (!RegularV4ToTunaProofMatchesTarget(proof) ||
+            proof.AdmissionToken != authority.RuntimeUnlockAdmission ||
+            proof.TransactionGeneration != prepared.TransactionGeneration ||
+            proof.OfferGeneration != prepared.OfferGeneration ||
+            proof.TunaPathLeaseGeneration != prepared.TunaPathLeaseGeneration ||
+            !string.Equals(
+                proof.TunaPathLeaseListenerRunId,
+                prepared.TunaPathLeaseListenerRunId,
+                StringComparison.Ordinal) ||
+            authority.PendingPreCommitProbe.TransactionGeneration !=
+                proof.TransactionGeneration ||
+            authority.PendingPreCommitProbe.OfferGeneration != proof.OfferGeneration ||
+            authority.PendingPreCommitProbe.TunaPathLeaseGeneration !=
+                proof.TunaPathLeaseGeneration ||
+            !string.Equals(
+                authority.PendingPreCommitProbe.TunaPathLeaseListenerRunId,
+                proof.TunaPathLeaseListenerRunId,
+                StringComparison.Ordinal))
+        {
+            rejectionReason = "regular_v4_to_tuna_transition_final_proof_mismatch";
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(prepared.PathProbeId) &&
+            !string.Equals(prepared.PathProbeId, proof.PathProbeId, StringComparison.Ordinal))
+        {
+            rejectionReason = "regular_v4_to_tuna_transition_probe_identity_mismatch";
+            return false;
+        }
+
+        rejectionReason = "accepted";
+        return true;
+    }
+
+    private static bool RegularV4ToTunaProofMatchesTarget(
+        RuntimeUnlockRouteCommitProof proof)
+        => proof.TargetRoute == FileTransferRoute.FileTunaV4 &&
+           proof.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+           proof.TargetTransport == FileTransferTransportKind.Tuna &&
+           proof.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
+           proof.TransactionGeneration > 0 &&
+           proof.OfferGeneration > 0 &&
+           proof.PeerVisibleProof &&
+           (proof.PeerReceived || proof.AnswerReceived) &&
+           proof.TransactionState is not (
+               RuntimeUnlockTransactionState.Failed or
+               RuntimeUnlockTransactionState.Retired or
+               RuntimeUnlockTransactionState.Committed) &&
+           proof.PathProbeState != RuntimeUnlockPathProbeState.Failed &&
+           proof.TunaPathLeaseGeneration > 0 &&
+           proof.TunaPathLeaseState == RuntimeUnlockTunaPathLeaseState.ListenerReady &&
+           proof.TunaPathLeaseCurrent;
+
+    private static bool RegularV4ToTunaPrepareRequestMatchesAuthority(
+        RegularV4ToTunaRouteTransitionPrepareRequest request,
+        RegularV4ToTunaRouteTransitionAuthority authority)
+        => request.SourceRuntimeOwner == authority.SourceRuntimeOwner &&
+           request.SourceRoutePublication == authority.SourceRoutePublication &&
+           request.RuntimeUnlockAdmission == authority.RuntimeUnlockAdmission &&
+           request.PendingPreCommitProbe == authority.PendingPreCommitProbe &&
+           request.AcceptedLaunchBoundary == authority.AcceptedLaunchBoundary &&
+           request.LaunchGeneration == authority.LaunchGeneration &&
+           request.DurableCheckpoint == authority.DurableCheckpoint &&
+           string.Equals(request.Reason, authority.Reason, StringComparison.Ordinal);
+
+    private static bool TryValidateCapturedPhysicalSendLeaseSet(
+        long capturedThroughPhysicalSendGeneration,
+        IReadOnlyList<long> capturedPhysicalSendLeaseIds,
+        string capturedPhysicalSendFingerprint,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (capturedThroughPhysicalSendGeneration < 0 ||
+            capturedPhysicalSendLeaseIds is null ||
+            string.IsNullOrWhiteSpace(capturedPhysicalSendFingerprint) ||
+            !string.Equals(
+                capturedPhysicalSendFingerprint,
+                CreateRegularV4ToTunaPhysicalDrainFingerprint(
+                    capturedPhysicalSendLeaseIds),
+                StringComparison.Ordinal))
+        {
+            rejectionReason = "regular_v4_to_tuna_transition_drain_boundary_invalid";
+            return false;
+        }
+
+        long previous = 0;
+        foreach (var leaseId in capturedPhysicalSendLeaseIds)
+        {
+            if (leaseId <= previous ||
+                leaseId > capturedThroughPhysicalSendGeneration)
+            {
+                rejectionReason = "regular_v4_to_tuna_transition_drain_lease_set_invalid";
+                return false;
+            }
+
+            previous = leaseId;
+        }
+
+        return true;
+    }
+
+    private static bool TryValidateRegularV4ToTunaDrainReceipt(
+        FileTransferCoordinatorState state,
+        RegularV4ToTunaRouteTransitionAuthority authority,
+        RegularV4ToTunaPhysicalDrainReceipt receipt,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        var operation =
+            state.PersistentState.RegularV4ToTunaRouteTransition.CurrentOperation;
+        if (operation is not
+            {
+                State: RegularV4ToTunaRouteTransitionState.Draining,
+                DrainCommand: { } command,
+            } ||
+            operation.Value.Authority != authority ||
+            !IsRegularV4ToTunaRouteTransitionSourceScopeCurrent(
+                state,
+                authority,
+                out rejectionReason))
+        {
+            if (string.Equals(rejectionReason, "accepted", StringComparison.Ordinal))
+            {
+                rejectionReason = "regular_v4_to_tuna_transition_not_draining";
+            }
+
+            return false;
+        }
+
+        if (receipt.Command != command ||
+            receipt.Outcome != RegularV4ToTunaPhysicalDrainOutcome.Completed ||
+            receipt.CompletedPhysicalSendCount != command.CapturedPhysicalSendCount ||
+            receipt.CompletedPhysicalSendLeaseIds is null ||
+            !CapturedLeaseSetsEqual(
+                receipt.CompletedPhysicalSendLeaseIds,
+                command.CapturedPhysicalSendLeaseIds) ||
+            !string.Equals(
+                receipt.CompletedPhysicalSendFingerprint,
+                command.CapturedPhysicalSendFingerprint,
+                StringComparison.Ordinal) ||
+            string.IsNullOrWhiteSpace(receipt.Reason) ||
+            !string.Equals(
+                receipt.Reason,
+                NormalizeReason(receipt.Reason),
+                StringComparison.Ordinal))
+        {
+            rejectionReason = "regular_v4_to_tuna_transition_drain_receipt_mismatch";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsExactOrCanonicalIdempotentRegularV4ToTunaDrainReceipt(
+        RegularV4ToTunaPhysicalDrainReceipt committed,
+        RegularV4ToTunaPhysicalDrainReceipt candidate)
+        => committed.Command == candidate.Command &&
+           candidate.Outcome == RegularV4ToTunaPhysicalDrainOutcome.Completed &&
+           committed.CompletedPhysicalSendCount == candidate.CompletedPhysicalSendCount &&
+           CapturedLeaseSetsEqual(
+               committed.CompletedPhysicalSendLeaseIds,
+               candidate.CompletedPhysicalSendLeaseIds) &&
+           string.Equals(
+               committed.CompletedPhysicalSendFingerprint,
+               candidate.CompletedPhysicalSendFingerprint,
+               StringComparison.Ordinal) &&
+           string.Equals(
+               committed.Reason,
+               candidate.Reason,
+               StringComparison.Ordinal);
+
+    private static RegularV4ToTunaPhysicalDrainReceipt
+        SnapshotRegularV4ToTunaDrainReceipt(
+            RegularV4ToTunaPhysicalDrainReceipt receipt)
+        => receipt with
+        {
+            CompletedPhysicalSendLeaseIds = Array.AsReadOnly(
+                receipt.CompletedPhysicalSendLeaseIds.ToArray()),
+            Reason = NormalizeReason(receipt.Reason),
+        };
+
+    private static bool IsExactRegularV4ToTunaPressureReceiptDuplicate(
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt? committed,
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt? candidate)
+        => committed is null
+            ? candidate is null
+            : candidate is { } receipt &&
+              (receipt == committed ||
+               (receipt.Command == committed.Command &&
+                receipt.Status ==
+                    FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent &&
+                receipt.CurrentAuthorityCleared ==
+                    committed.CurrentAuthorityCleared &&
+                receipt.RetainedPredecessorCleared ==
+                    committed.RetainedPredecessorCleared &&
+                string.Equals(
+                    receipt.Reason,
+                    "regular_v4_frontier_repair_pressure_settlement_apply_idempotent",
+                    StringComparison.Ordinal)));
+
+    private static bool IsCanonicalRegularV4ToTunaPressureSettlementReceipt(
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt receipt)
+        => receipt.Status switch
+        {
+            FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied =>
+                string.Equals(
+                    receipt.Reason,
+                    "regular_v4_frontier_repair_pressure_settlement_applied",
+                    StringComparison.Ordinal),
+            FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent =>
+                string.Equals(
+                    receipt.Reason,
+                    "regular_v4_frontier_repair_pressure_settlement_apply_idempotent",
+                    StringComparison.Ordinal),
+            _ => false,
+        };
+
+    private static bool IsExactOrCanonicalIdempotentRegularV4ToTunaPauseBindReceipt(
+        RegularV4ToTunaActivationPauseBindReceipt committed,
+        RegularV4ToTunaActivationPauseBindReceipt candidate)
+        => committed == candidate ||
+           (committed.Command == candidate.Command &&
+            candidate.Status == RegularV4ToTunaActivationPauseBindStatus.Idempotent &&
+            string.Equals(
+                candidate.Reason,
+                "regular_v4_to_tuna_activation_pause_bind_idempotent",
+                StringComparison.Ordinal));
+
+    private static bool IsCanonicalRegularV4ToTunaPauseBindReceipt(
+        RegularV4ToTunaActivationPauseBindReceipt receipt)
+        => receipt.Status switch
+        {
+            RegularV4ToTunaActivationPauseBindStatus.Installed =>
+                string.Equals(
+                    receipt.Reason,
+                    "regular_v4_to_tuna_activation_pause_bound",
+                    StringComparison.Ordinal),
+            RegularV4ToTunaActivationPauseBindStatus.Idempotent =>
+                string.Equals(
+                    receipt.Reason,
+                    "regular_v4_to_tuna_activation_pause_bind_idempotent",
+                    StringComparison.Ordinal),
+            _ => false,
+        };
+
+    private static bool IsCanonicalAppliedRegularV4ToTunaDispositionReceipt(
+        RegularV4ToTunaRouteTransitionDispositionReceipt receipt)
+        => receipt.Status ==
+               RegularV4ToTunaRouteTransitionDispositionApplyStatus.Applied &&
+           string.Equals(
+               receipt.Reason,
+               receipt.Command.Kind switch
+               {
+                   RegularV4ToTunaRouteTransitionDispositionKind.Committed =>
+                       "regular_v4_to_tuna_route_transition_committed",
+                   RegularV4ToTunaRouteTransitionDispositionKind.RolledBack =>
+                       "regular_v4_to_tuna_route_transition_rolled_back",
+                   RegularV4ToTunaRouteTransitionDispositionKind.Superseded =>
+                       "regular_v4_to_tuna_route_transition_superseded",
+                   _ => "regular_v4_to_tuna_route_transition_terminal_invalidated",
+               },
+               StringComparison.Ordinal);
+
+    private static bool IsCanonicalAcceptedRegularV4ToTunaDispositionReceipt(
+        RegularV4ToTunaRouteTransitionDispositionReceipt receipt)
+        => IsCanonicalAppliedRegularV4ToTunaDispositionReceipt(receipt) ||
+           (receipt.Status ==
+                RegularV4ToTunaRouteTransitionDispositionApplyStatus.Idempotent &&
+            string.Equals(
+                receipt.Reason,
+                "regular_v4_to_tuna_route_transition_disposition_idempotent",
+                StringComparison.Ordinal));
+
+    private static bool IsCanonicalIdempotentRegularV4ToTunaDispositionReceipt(
+        RegularV4ToTunaRouteTransitionDispositionReceipt applied,
+        RegularV4ToTunaRouteTransitionDispositionReceipt candidate)
+        => candidate.Command == applied.Command &&
+           candidate.Status ==
+               RegularV4ToTunaRouteTransitionDispositionApplyStatus.Idempotent &&
+           string.Equals(
+               candidate.Reason,
+               "regular_v4_to_tuna_route_transition_disposition_idempotent",
+               StringComparison.Ordinal);
+
+    private static bool CapturedLeaseSetsEqual(
+        IReadOnlyList<long> left,
+        IReadOnlyList<long> right)
+    {
+        if (ReferenceEquals(left, right))
+        {
+            return true;
+        }
+
+        if (left is null || right is null || left.Count != right.Count)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < left.Count; index++)
+        {
+            if (left[index] != right[index])
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static FileTransferRegularV4FrontierRepairSettlement
+        CreateRegularV4ToTunaTransitionPressureSettlement(
+            FileTransferRegularV4FrontierRepairAuthority authority)
+        => new(
+            authority.SessionId,
+            authority.TransferId,
+            authority.Direction,
+            authority.RouteToken,
+            authority.ProtocolVersion,
+            authority.LiveRouteEpoch,
+            authority.RuntimeGeneration,
+            authority.TerminalGeneration,
+            authority.LegGeneration,
+            authority.TransportEpoch,
+            authority.BridgeRecoveryGeneration,
+            authority.BridgeDecisionGeneration,
+            authority.RoutePublicationGeneration,
+            authority.RouteCommitGeneration,
+            authority.RepairKey,
+            authority.FrontierChunkIndex,
+            authority.DurableReceivedHighestChunkIndex,
+            authority.PendingRepairCount,
+            authority.DecisionGeneration,
+            "regular_v4_to_tuna_route_transition_pressure_handoff",
+            FileTransferRegularV4FrontierRepairSettlementOutcome.StaleRejected,
+            authority.TargetTransport)
+        {
+            AuthorityId = authority.AuthorityId,
+        };
+
+    private static RegularV4ToTunaRouteTransitionDecision RegularV4ToTunaDecision(
+        FileTransferCoordinatorState state,
+        RegularV4ToTunaRouteTransitionDecisionStatus status,
+        string reason,
+        RegularV4ToTunaRouteTransitionAuthority? authority = null,
+        RegularV4ToTunaActivationPauseBindCommand? pauseBindCommand = null,
+        RegularV4ToTunaPhysicalDrainCommand? drainCommand = null,
+        RegularV4ToTunaRouteTransitionDispositionCommand? dispositionCommand = null,
+        FileTransferCoordinatorDecision? routeDecision = null)
+        => new(
+            status,
+            NormalizeReason(reason),
+            authority,
+            pauseBindCommand,
+            drainCommand,
+            dispositionCommand,
+            routeDecision)
+        {
+            State = state,
+        };
 
     private static string NormalizeReason(string? reason)
         => string.IsNullOrWhiteSpace(reason)

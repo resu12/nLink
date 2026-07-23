@@ -464,7 +464,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
     }
 
     [Fact]
-    public async Task NknTransport_BridgeReceiveResumedPeerTrafficRaisesLivenessProof()
+    public async Task NknTransport_CommandBackedBridgeReceiveResumedPeerTrafficRaisesLivenessProof()
     {
         FakeNknClient.ResetNetwork();
         try
@@ -479,6 +479,50 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             var proofs = new ConcurrentQueue<SessionLivenessProofEventArgs>();
             host.SessionLivenessProofReceived += (_, e) => proofs.Enqueue(e);
 
+            const string recoveryReason = "receive_stall_recovery_receive_resumed";
+            var runtimeOwner = new RuntimeOwnerToken(
+                sessionId,
+                "transfer_bridge_liveness_proof",
+                FileTransferDirection.Outbound,
+                FileTransferRoute.RegularNknV4Fast,
+                FileTransferRouteResolver.RegularNknV4FastToken,
+                FileTransferProtocol.ProtocolVersionV4,
+                LiveRouteEpoch: 1,
+                RuntimeGeneration: 1,
+                TerminalGeneration: 0,
+                RuntimeFamily: "test_bridge_recovery_execution",
+                CreatedReason: recoveryReason);
+            var recoveryCommand = new FileTransferBridgeRecoveryExecutionCommand(
+                new BridgeRecoveryDecision(
+                    Accepted: true,
+                    RecoveryKind: BridgeRecoveryKind.BridgeReceiveStallRecovery,
+                    Reason: recoveryReason,
+                    BridgeDecisionGeneration: 1,
+                    CurrentRoute: FileTransferRoute.RegularNknV4Fast,
+                    CurrentProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+                    CurrentLiveRouteEpoch: 1,
+                    CurrentRuntimeGeneration: 1,
+                    CurrentTerminalGeneration: 0,
+                    CurrentLegGeneration: 1,
+                    TransportEpoch: 0,
+                    BridgeRecoveryGeneration: 1,
+                    RuntimeOwner: runtimeOwner),
+                RecoveryLivenessLease: null,
+                CheckpointRequestId: null);
+            SetPrivateField(
+                host,
+                "fileTransferBridgeRecoveryExecutionCommand",
+                (FileTransferBridgeRecoveryExecutionCommand?)recoveryCommand);
+            Assert.IsAssignableFrom<IFileTransferBridgeRecoveryExecutionBridge>(host)
+                .ObserveBridgeRecoveryExecutionReceiptDecision(
+                    new FileTransferBridgeRecoveryExecutionReceipt(
+                        recoveryCommand,
+                        FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                        "hard",
+                        recoveryReason),
+                    accepted: true,
+                    "test_receipt_accepted");
+
             CoreSmokeTestsBase.InvokePrivateMethod(
                 host,
                 "OnBridgeLifecycle",
@@ -492,11 +536,12 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                     UptimeMs: null,
                     ExitCode: null,
                     ExitReasonKind: null,
-                    ExitReasonText: "receive_stall_recovery_receive_resumed",
+                    ExitReasonText: recoveryReason,
                     TotalMessagesReceivedSinceLast: 1,
                     ControlMessagesReceivedSinceLast: 0,
                     MediaMessagesReceivedSinceLast: 0,
-                    BulkMessagesReceivedSinceLast: 1));
+                    BulkMessagesReceivedSinceLast: 1,
+                    RecoveryExecutionCommand: recoveryCommand));
 
             await WaitUntilAsync(
                 () => proofs.Any(e =>

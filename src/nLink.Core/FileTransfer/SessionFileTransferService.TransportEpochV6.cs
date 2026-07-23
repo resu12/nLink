@@ -2531,6 +2531,7 @@ public sealed partial class SessionFileTransferService
         RuntimeUnlockAdmissionToken? currentAdmissionToken;
         bool authorized;
         string ackAuthorizationRejectionReason;
+        long currentRouteTransitionLaunchGeneration = 0;
         lock (gate)
         {
             if (outboundSparseReceiveAuthority is { } requiredReceiveAuthority &&
@@ -2571,6 +2572,36 @@ public sealed partial class SessionFileTransferService
                         targetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
                         targetTransport: FileTransferTransportKind.Tuna,
                         out ackAuthorizationRejectionReason);
+            }
+
+            RegularV4ToTunaRouteTransitionOperation? currentTransition = null;
+            if (direction == FileTransferDirection.Outbound &&
+                IsOutboundLifecycleMessageMatchLocked(sessionId, transferId) &&
+                outboundTransfer is { IsTerminal: false } outbound)
+            {
+                currentTransition = outbound.CoordinatorPersistentState
+                    .RegularV4ToTunaRouteTransition
+                    .CurrentOperation;
+            }
+            else if (direction == FileTransferDirection.Inbound &&
+                     IsInboundLifecycleMessageMatchLocked(sessionId, transferId) &&
+                     inboundTransfer is { IsTerminal: false } inbound)
+            {
+                currentTransition = inbound.CoordinatorPersistentState
+                    .RegularV4ToTunaRouteTransition
+                    .CurrentOperation;
+            }
+
+            if (currentTransition is { } transition &&
+                transition.Authority.PendingPreCommitProbe.TransactionGeneration ==
+                    ack.TransactionGeneration &&
+                transition.Authority.PendingPreCommitProbe.OfferGeneration ==
+                    ack.OfferGeneration &&
+                transition.Authority.PendingPreCommitProbe.TunaPathLeaseGeneration ==
+                    ack.TunaPathLeaseGeneration)
+            {
+                currentRouteTransitionLaunchGeneration =
+                    transition.Authority.LaunchGeneration;
             }
         }
 
@@ -2663,7 +2694,7 @@ public sealed partial class SessionFileTransferService
             commitReason);
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=runtime_unlock_precommit_probe_acked; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(ack.ProbeId ?? "(none)")}; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}");
+            $"event=runtime_unlock_precommit_probe_acked; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; launch_generation={currentRouteTransitionLaunchGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(ack.ProbeId ?? "(none)")}; probe_state=Acked; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}");
         if (!isPeerCommitConfirmation)
         {
             if (dataSession is not IFileTransferRuntimeUnlockTunaProbeSender)
@@ -3742,6 +3773,10 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
+            InvalidateRuntimeUnlockRegularV4RouteCommitDrainLocked(
+                outbound,
+                drain,
+                $"precommit_probe_failed_{NormalizeReason(reason) ?? "unknown"}");
             var retiredPending = FileTransferCoordinator.Apply(
                 RuntimeUnlockPendingPreCommitProbeCoordinatorEvent(
                     FileTransferCoordinatorEventKind.RuntimeUnlockPreCommitProbeRetired,
@@ -3756,10 +3791,6 @@ public sealed partial class SessionFileTransferService
             }
 
             ApplyCoordinatorDecisionToContextLocked(outbound, retiredPending);
-            InvalidateRuntimeUnlockRegularV4RouteCommitDrainLocked(
-                outbound,
-                drain,
-                $"precommit_probe_failed_{NormalizeReason(reason) ?? "unknown"}");
         }
     }
 

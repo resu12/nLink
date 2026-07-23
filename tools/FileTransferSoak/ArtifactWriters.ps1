@@ -7445,10 +7445,757 @@ function Test-FileTransferFileTunaV4DataPathSendShapeMatches {
     return Test-FileTransferFileTunaV4DataPathRangeMatches -Intent $Intent -Actual $Actual
 }
 
+function Get-FileTransferRegularV4ToTunaRouteTransitionCorrelation {
+    param([object[]]$Events = @())
+
+    [object[]]$orderedEvents = @($Events | Where-Object { $null -ne $_ } | Sort-Object Sequence, LineNumber)
+    [object[]]$preparedEvents = @($orderedEvents | Where-Object {
+            $_.EventName -eq 'filetransfer_regular_v4_to_tuna_route_transition_prepared'
+        })
+
+    function Get-TransitionField {
+        param(
+            [Parameter(Mandatory = $true)]$Event,
+            [Parameter(Mandatory = $true)][string]$Name
+        )
+
+        $value = Get-FileTransferEventField -Event $Event -Name $Name -Default ''
+        if ([string]::IsNullOrWhiteSpace($value) -and
+            $Name -eq 'source_data_session_generation') {
+            $value = Get-FileTransferEventField -Event $Event -Name 'data_session_generation' -Default ''
+        }
+        elseif ([string]::IsNullOrWhiteSpace($value) -and
+            $Name -eq 'source_route_publication_generation') {
+            $value = Get-FileTransferEventField -Event $Event -Name 'route_publication_generation' -Default ''
+        }
+        elseif ([string]::IsNullOrWhiteSpace($value) -and
+            $Name -eq 'captured_lease_fingerprint') {
+            $value = Get-FileTransferEventField -Event $Event -Name 'captured_send_fingerprint' -Default ''
+        }
+        elseif ([string]::IsNullOrWhiteSpace($value) -and
+            $Name -eq 'completed_lease_fingerprint') {
+            $value = Get-FileTransferEventField -Event $Event -Name 'completed_send_fingerprint' -Default ''
+        }
+        if ($value -in @('(none)', 'none', '(missing)', '__missing__')) {
+            return ''
+        }
+        if ($Name -eq 'target_route' -and
+            [string]::Equals(
+                $value,
+                'FileTunaV4',
+                [System.StringComparison]::OrdinalIgnoreCase)) {
+            return 'file_tuna_v4'
+        }
+        return $value
+    }
+
+    function Get-TransitionIdentityKey {
+        param([Parameter(Mandatory = $true)]$Event)
+
+        $parts = New-Object System.Collections.Generic.List[string]
+        foreach ($fieldName in @(
+                'session_id',
+                'transfer_id',
+                'direction',
+                'transition_generation',
+                'authority_id')) {
+            $value = Get-TransitionField -Event $Event -Name $fieldName
+            if ([string]::IsNullOrWhiteSpace($value)) {
+                return ''
+            }
+            $parts.Add($value.ToLowerInvariant()) | Out-Null
+        }
+        return [string]::Join('|', $parts)
+    }
+
+    function Get-TransitionIdentityScopeKey {
+        param([Parameter(Mandatory = $true)]$Event)
+
+        $parts = New-Object System.Collections.Generic.List[string]
+        foreach ($fieldName in @('session_id', 'transfer_id', 'direction')) {
+            $value = Get-TransitionField -Event $Event -Name $fieldName
+            if ([string]::IsNullOrWhiteSpace($value)) {
+                return ''
+            }
+            $parts.Add($value.ToLowerInvariant()) | Out-Null
+        }
+        return [string]::Join('|', $parts)
+    }
+
+    function Test-TransitionIdentityMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Authority,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        $authorityKey = Get-TransitionIdentityKey -Event $Authority
+        return -not [string]::IsNullOrWhiteSpace($authorityKey) -and
+            $authorityKey -eq (Get-TransitionIdentityKey -Event $Candidate)
+    }
+
+    function Test-TransitionStatus {
+        param(
+            [Parameter(Mandatory = $true)]$Event,
+            [Parameter(Mandatory = $true)][string[]]$Allowed
+        )
+
+        $status = Get-TransitionField -Event $Event -Name 'status'
+        return -not [string]::IsNullOrWhiteSpace($status) -and
+            $status -in $Allowed
+    }
+
+    function Test-TransitionTransferScopeMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Authority,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        $authorityKey = Get-TransitionIdentityScopeKey -Event $Authority
+        return -not [string]::IsNullOrWhiteSpace($authorityKey) -and
+            $authorityKey -eq (Get-TransitionIdentityScopeKey -Event $Candidate)
+    }
+
+    function Test-TransitionSourceScopeMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Authority,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        if (-not (Test-TransitionTransferScopeMatch -Authority $Authority -Candidate $Candidate)) {
+            return $false
+        }
+
+        foreach ($fieldName in @(
+                'source_route',
+                'source_protocol_version',
+                'source_live_route_epoch',
+                'source_runtime_generation',
+                'source_terminal_generation',
+                'source_leg_generation',
+                'source_transport_epoch',
+                'source_bridge_recovery_generation',
+                'source_route_publication_generation',
+                'source_data_session_generation')) {
+            $authorityValue = Get-TransitionField -Event $Authority -Name $fieldName
+            $candidateValue = Get-TransitionField -Event $Candidate -Name $fieldName
+            if ([string]::IsNullOrWhiteSpace($authorityValue) -or
+                [string]::IsNullOrWhiteSpace($candidateValue) -or
+                -not [string]::Equals(
+                    $authorityValue,
+                    $candidateValue,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    function Test-TransitionPartialAuthorityTupleMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Authority,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        if (-not (Test-TransitionIdentityMatch -Authority $Authority -Candidate $Candidate)) {
+            return $false
+        }
+
+        foreach ($fieldName in @(
+                'source_runtime_generation',
+                'source_route_publication_generation',
+                'source_terminal_generation',
+                'source_leg_generation',
+                'source_transport_epoch',
+                'source_bridge_recovery_generation',
+                'source_data_session_generation')) {
+            $expected = Get-TransitionField -Event $Authority -Name $fieldName
+            $actual = Get-TransitionField -Event $Candidate -Name $fieldName
+            if ([string]::IsNullOrWhiteSpace($expected) -or
+                [string]::IsNullOrWhiteSpace($actual) -or
+                -not [string]::Equals(
+                    $expected,
+                    $actual,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-TransitionCompleteAuthorityTupleMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Authority,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        if (-not (Test-TransitionIdentityMatch -Authority $Authority -Candidate $Candidate)) {
+            return $false
+        }
+
+        foreach ($fieldName in @(
+                'source_route',
+                'source_protocol_version',
+                'source_live_route_epoch',
+                'source_runtime_generation',
+                'source_route_publication_generation',
+                'source_terminal_generation',
+                'source_leg_generation',
+                'source_transport_epoch',
+                'source_bridge_recovery_generation',
+                'source_data_session_generation',
+                'transaction_generation',
+                'offer_generation',
+                'launch_generation',
+                'tuna_path_lease_generation',
+                'checkpoint_generation',
+                'checkpoint_state_epoch',
+                'checkpoint_contiguous_frontier',
+                'checkpoint_durable_highest',
+                'target_route',
+                'target_protocol_version',
+                'target_transport')) {
+            $expected = Get-TransitionField -Event $Authority -Name $fieldName
+            $actual = Get-TransitionField -Event $Candidate -Name $fieldName
+            if ([string]::IsNullOrWhiteSpace($expected) -or
+                [string]::IsNullOrWhiteSpace($actual) -or
+                -not [string]::Equals(
+                    $expected,
+                    $actual,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Get-TransitionAuthoritySignature {
+        param([Parameter(Mandatory = $true)]$Event)
+
+        return (@(
+                'session_id',
+                'transfer_id',
+                'direction',
+                'transition_generation',
+                'authority_id',
+                'source_route',
+                'source_protocol_version',
+                'source_live_route_epoch',
+                'source_runtime_generation',
+                'source_terminal_generation',
+                'source_leg_generation',
+                'source_transport_epoch',
+                'source_bridge_recovery_generation',
+                'source_route_publication_generation',
+                'source_data_session_generation',
+                'transaction_generation',
+                'offer_generation',
+                'launch_generation',
+                'tuna_path_lease_generation',
+                'checkpoint_generation',
+                'checkpoint_state_epoch',
+                'checkpoint_contiguous_frontier',
+                'checkpoint_durable_highest',
+                'target_route',
+                'target_protocol_version',
+                'target_transport') | ForEach-Object {
+                    (Get-TransitionField -Event $Event -Name $_).ToLowerInvariant()
+                }) -join '|'
+    }
+
+    function Test-TransitionPreparedShape {
+        param([Parameter(Mandatory = $true)]$Event)
+
+        return (Test-TransitionStatus -Event $Event -Allowed @('Prepared', 'Idempotent')) -and
+            -not [string]::IsNullOrWhiteSpace((Get-TransitionIdentityKey -Event $Event)) -and
+            (Get-TransitionField -Event $Event -Name 'source_route') -eq 'regular_nkn_v4_fast' -and
+            (Get-TransitionField -Event $Event -Name 'source_protocol_version') -eq '4' -and
+            (Get-TransitionField -Event $Event -Name 'target_route') -eq 'file_tuna_v4' -and
+            (Get-TransitionField -Event $Event -Name 'target_protocol_version') -eq '4' -and
+            (Get-TransitionField -Event $Event -Name 'target_transport') -eq 'tuna'
+    }
+
+    function Test-TransitionReceiptComplete {
+        param(
+            [Parameter(Mandatory = $true)]$Prepared,
+            [Parameter(Mandatory = $true)]$Receipt
+        )
+
+        if (-not (Test-TransitionPartialAuthorityTupleMatch -Authority $Prepared -Candidate $Receipt) -or
+            (Get-TransitionField -Event $Receipt -Name 'status') -notin @('Accepted', 'Idempotent')) {
+            return $false
+        }
+
+        if ((Get-TransitionField -Event $Receipt -Name 'outcome') -ne 'Completed') {
+            return $false
+        }
+
+        $captured = Get-FileTransferEventInt64Field -Event $Receipt -Name 'captured_send_count' -Default -1
+        $completed = Get-FileTransferEventInt64Field -Event $Receipt -Name 'completed_send_count' -Default -1
+        $capturedFingerprint = Get-TransitionField -Event $Receipt -Name 'captured_lease_fingerprint'
+        $completedFingerprint = Get-TransitionField -Event $Receipt -Name 'completed_lease_fingerprint'
+        return $captured -ge 0 -and
+            $captured -eq $completed -and
+            -not [string]::IsNullOrWhiteSpace($capturedFingerprint) -and
+            [string]::Equals(
+                $capturedFingerprint,
+                $completedFingerprint,
+                [System.StringComparison]::OrdinalIgnoreCase)
+    }
+
+    function Test-TransitionPauseBound {
+        param(
+            [Parameter(Mandatory = $true)]$Prepared,
+            [Parameter(Mandatory = $true)]$PauseBound
+        )
+
+        if (-not (Test-TransitionPartialAuthorityTupleMatch -Authority $Prepared -Candidate $PauseBound)) {
+            return $false
+        }
+        $status = Get-TransitionField -Event $PauseBound -Name 'status'
+        if ([string]::IsNullOrWhiteSpace($status)) {
+            $status = Get-TransitionField -Event $PauseBound -Name 'bind_status'
+        }
+        return $status -in @('Accepted', 'Installed', 'Idempotent')
+    }
+
+    function Test-TransitionAtomicCommitShape {
+        param(
+            [Parameter(Mandatory = $true)]$Prepared,
+            [Parameter(Mandatory = $true)]$Commit
+        )
+
+        if (-not (Test-TransitionIdentityMatch -Authority $Prepared -Candidate $Commit)) {
+            return $false
+        }
+
+        $sourceRuntimeGeneration = Get-FileTransferEventInt64Field `
+            -Event $Prepared `
+            -Name 'source_runtime_generation' `
+            -Default 0
+        $sourceLegGeneration = Get-FileTransferEventInt64Field `
+            -Event $Prepared `
+            -Name 'source_leg_generation' `
+            -Default 0
+        $sourcePublicationGeneration = Get-FileTransferEventInt64Field `
+            -Event $Prepared `
+            -Name 'source_route_publication_generation' `
+            -Default 0
+        return (Get-FileTransferEventInt64Field -Event $Commit -Name 'target_runtime_generation' -Default 0) -gt
+                $sourceRuntimeGeneration -and
+            (Get-FileTransferEventInt64Field -Event $Commit -Name 'target_leg_generation' -Default 0) -gt
+                $sourceLegGeneration -and
+            (Get-FileTransferEventInt64Field -Event $Commit -Name 'target_route_publication_generation' -Default 0) -gt
+                $sourcePublicationGeneration
+    }
+
+    function Test-TransitionPrecommitAckMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Prepared,
+            [Parameter(Mandatory = $true)]$Ack
+        )
+
+        if (-not (Test-TransitionTransferScopeMatch -Authority $Prepared -Candidate $Ack)) {
+            return $false
+        }
+
+        foreach ($fieldName in @(
+                'transaction_generation',
+                'offer_generation',
+                'launch_generation',
+                'tuna_path_lease_generation')) {
+            $expected = Get-TransitionField -Event $Prepared -Name $fieldName
+            if ([string]::IsNullOrWhiteSpace($expected)) {
+                continue
+            }
+            $actual = Get-TransitionField -Event $Ack -Name $fieldName
+            if ([string]::IsNullOrWhiteSpace($actual) -or
+                -not [string]::Equals(
+                    $expected,
+                    $actual,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    function Test-TransitionTerminalDisposition {
+        param(
+            [Parameter(Mandatory = $true)]$Prepared,
+            [Parameter(Mandatory = $true)]$Disposition,
+            [Parameter(Mandatory = $true)][string]$ExpectedStatus
+        )
+
+        if (-not (Test-TransitionIdentityMatch -Authority $Prepared -Candidate $Disposition)) {
+            return $false
+        }
+        $status = Get-TransitionField -Event $Disposition -Name 'status'
+        if (-not [string]::IsNullOrWhiteSpace($status)) {
+            return [string]::Equals(
+                $status,
+                $ExpectedStatus,
+                [System.StringComparison]::OrdinalIgnoreCase)
+        }
+
+        $dispositionKind = Get-TransitionField -Event $Disposition -Name 'disposition'
+        $applyStatus = Get-TransitionField -Event $Disposition -Name 'apply_status'
+        if ($applyStatus -notin @('applied', 'idempotent')) {
+            return $false
+        }
+        if ([string]::Equals(
+                $ExpectedStatus,
+                'Committed',
+                [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $dispositionKind -eq 'committed'
+        }
+        return $dispositionKind -in @('rolledback', 'terminalinvalidated')
+    }
+
+    function Test-TransitionOwnerBoundary {
+        param(
+            [Parameter(Mandatory = $true)]$Prepared,
+            [Parameter(Mandatory = $true)]$Boundary
+        )
+
+        if (-not (Test-TransitionTransferScopeMatch -Authority $Prepared -Candidate $Boundary)) {
+            return $false
+        }
+
+        if ($Boundary.EventName -eq 'filetransfer_leg_started') {
+            return (Get-TransitionField -Event $Boundary -Name 'route') -eq 'file_tuna_v4'
+        }
+        if ($Boundary.EventName -eq 'filetransfer_runtime_owner_workers_retired') {
+            return (Get-TransitionField -Event $Boundary -Name 'current_route') -eq 'file_tuna_v4'
+        }
+        return $Boundary.EventName -eq 'filetransfer_route_transitioned' -and
+            (Get-TransitionField -Event $Boundary -Name 'new_route') -eq 'file_tuna_v4'
+    }
+
+    $rawCandidateRecords = New-Object System.Collections.Generic.List[object]
+    $distinctCandidateRecords = New-Object System.Collections.Generic.List[object]
+    $distinctKeys = New-Object 'System.Collections.Generic.HashSet[string]'
+    $identityKeys = New-Object 'System.Collections.Generic.HashSet[string]'
+    $firstPreparedByKey = @{}
+    $preparedSignaturesByKey = @{}
+
+    function Add-TransitionCandidate {
+        param(
+            [Parameter(Mandatory = $true)]$Event,
+            [Parameter(Mandatory = $true)][string]$Key,
+            [Parameter(Mandatory = $true)][string]$Reason
+        )
+
+        $record = [pscustomobject]@{
+            Event = $Event
+            Reason = $Reason
+            DistinctKey = $Key
+        }
+        $rawCandidateRecords.Add($record) | Out-Null
+        if ($distinctKeys.Add($Key)) {
+            $distinctCandidateRecords.Add($record) | Out-Null
+        }
+    }
+
+    foreach ($prepared in @($preparedEvents | Sort-Object Sequence, LineNumber)) {
+        if (-not (Test-TransitionPreparedShape -Event $prepared)) {
+            continue
+        }
+
+        $identityKey = Get-TransitionIdentityKey -Event $prepared
+        $scopeKey = Get-TransitionIdentityScopeKey -Event $prepared
+        [void]$identityKeys.Add($scopeKey)
+        $signature = Get-TransitionAuthoritySignature -Event $prepared
+        if ($firstPreparedByKey.ContainsKey($identityKey)) {
+            if ($preparedSignaturesByKey[$identityKey] -ne $signature) {
+                Add-TransitionCandidate `
+                    -Event $prepared `
+                    -Key ("transition|{0}" -f $identityKey) `
+                    -Reason 'regular_v4_to_tuna_transition_authority_tuple_mutated'
+            }
+            continue
+        }
+        $firstPreparedByKey[$identityKey] = $prepared
+        $preparedSignaturesByKey[$identityKey] = $signature
+    }
+
+    [object[]]$pauseBoundEvents = @($orderedEvents | Where-Object {
+            $_.EventName -eq 'filetransfer_regular_v4_to_tuna_route_transition_pause_bound'
+        })
+    [object[]]$drainingEvents = @($orderedEvents | Where-Object {
+            $_.EventName -eq 'filetransfer_regular_v4_to_tuna_route_transition_draining'
+        })
+    [object[]]$receiptEvents = @($orderedEvents | Where-Object {
+            $_.EventName -eq 'filetransfer_regular_v4_to_tuna_route_transition_drain_receipt_decided'
+        })
+    [object[]]$committedEvents = @($orderedEvents | Where-Object {
+            $_.EventName -eq 'filetransfer_regular_v4_to_tuna_route_transition_committed'
+        })
+    [object[]]$invalidatedEvents = @($orderedEvents | Where-Object {
+            $_.EventName -eq 'filetransfer_regular_v4_to_tuna_route_transition_invalidated'
+        })
+    [object[]]$dispositionEvents = @($orderedEvents | Where-Object {
+            $_.EventName -eq 'filetransfer_regular_v4_to_tuna_route_transition_disposition_applied'
+        })
+    [object[]]$registeredLeaseEvents = @($orderedEvents | Where-Object {
+            $_.EventName -eq 'filetransfer_regular_v4_physical_send_lease_registered'
+        })
+    [object[]]$precommitAckEvents = @($orderedEvents | Where-Object {
+            $_.EventName -eq 'runtime_unlock_precommit_probe_acked'
+        })
+    [object[]]$ownerBoundaryEvents = @($orderedEvents | Where-Object {
+            $_.EventName -in @(
+                'filetransfer_leg_started',
+                'filetransfer_runtime_owner_workers_retired',
+                'filetransfer_route_transitioned')
+        })
+    [object[]]$terminalEvents = @($orderedEvents | Where-Object {
+            $_.EventName -in @(
+                'file_transfer_outbound_terminal',
+                'file_transfer_inbound_terminal',
+                'transfer_terminal',
+                'filetransfer_runtime_terminalized')
+        })
+
+    foreach ($identityKey in @($firstPreparedByKey.Keys)) {
+        $prepared = $firstPreparedByKey[$identityKey]
+        $preparedSequence = [int64]$prepared.Sequence
+        $candidateKey = "transition|$identityKey"
+
+        [object[]]$mutatedLifecycleEvents = @(
+            @($pauseBoundEvents | Where-Object {
+                    [int64]$_.Sequence -gt $preparedSequence -and
+                    (Test-TransitionIdentityMatch -Authority $prepared -Candidate $_) -and
+                    (Test-TransitionStatus -Event $_ -Allowed @('Accepted', 'Installed', 'Idempotent')) -and
+                    -not (Test-TransitionPartialAuthorityTupleMatch -Authority $prepared -Candidate $_)
+                }) +
+            @($drainingEvents | Where-Object {
+                    [int64]$_.Sequence -gt $preparedSequence -and
+                    (Test-TransitionIdentityMatch -Authority $prepared -Candidate $_) -and
+                    (Test-TransitionStatus -Event $_ -Allowed @('Draining', 'Idempotent')) -and
+                    -not (Test-TransitionCompleteAuthorityTupleMatch -Authority $prepared -Candidate $_)
+                }) +
+            @($receiptEvents | Where-Object {
+                    [int64]$_.Sequence -gt $preparedSequence -and
+                    (Test-TransitionIdentityMatch -Authority $prepared -Candidate $_) -and
+                    (Test-TransitionStatus -Event $_ -Allowed @('Accepted', 'Idempotent')) -and
+                    -not (Test-TransitionPartialAuthorityTupleMatch -Authority $prepared -Candidate $_)
+                }) +
+            @($committedEvents | Where-Object {
+                    [int64]$_.Sequence -gt $preparedSequence -and
+                    (Test-TransitionIdentityMatch -Authority $prepared -Candidate $_) -and
+                    (Test-TransitionStatus -Event $_ -Allowed @('Committed', 'Idempotent')) -and
+                    -not (Test-TransitionCompleteAuthorityTupleMatch -Authority $prepared -Candidate $_)
+                }) +
+            @($invalidatedEvents | Where-Object {
+                    [int64]$_.Sequence -gt $preparedSequence -and
+                    (Test-TransitionIdentityMatch -Authority $prepared -Candidate $_) -and
+                    (Test-TransitionStatus -Event $_ -Allowed @('Invalidated', 'Idempotent')) -and
+                    -not (Test-TransitionCompleteAuthorityTupleMatch -Authority $prepared -Candidate $_)
+                }) |
+                Sort-Object Sequence, LineNumber
+        )
+        if ($mutatedLifecycleEvents.Count -gt 0) {
+            Add-TransitionCandidate `
+                -Event $mutatedLifecycleEvents[0] `
+                -Key $candidateKey `
+                -Reason 'regular_v4_to_tuna_transition_authority_tuple_mutated'
+            continue
+        }
+
+        [object[]]$pauseBound = @($pauseBoundEvents | Where-Object {
+                [int64]$_.Sequence -gt $preparedSequence -and
+                (Test-TransitionPauseBound -Prepared $prepared -PauseBound $_)
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        [object[]]$draining = @($drainingEvents | Where-Object {
+                [int64]$_.Sequence -gt $preparedSequence -and
+                (Test-TransitionStatus -Event $_ -Allowed @('Draining', 'Idempotent')) -and
+                (Test-TransitionCompleteAuthorityTupleMatch -Authority $prepared -Candidate $_)
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        [object[]]$receipts = @($receiptEvents | Where-Object {
+                [int64]$_.Sequence -gt $preparedSequence -and
+                (Test-TransitionIdentityMatch -Authority $prepared -Candidate $_)
+            } | Sort-Object Sequence, LineNumber)
+        [object[]]$acceptedReceipts = @($receipts | Where-Object {
+                Test-TransitionReceiptComplete -Prepared $prepared -Receipt $_
+            })
+        [object[]]$committed = @($committedEvents | Where-Object {
+                [int64]$_.Sequence -gt $preparedSequence -and
+                (Test-TransitionStatus -Event $_ -Allowed @('Committed', 'Idempotent')) -and
+                (Test-TransitionCompleteAuthorityTupleMatch -Authority $prepared -Candidate $_)
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        [object[]]$invalidated = @($invalidatedEvents | Where-Object {
+                [int64]$_.Sequence -gt $preparedSequence -and
+                (Test-TransitionStatus -Event $_ -Allowed @('Invalidated', 'Idempotent')) -and
+                (Test-TransitionCompleteAuthorityTupleMatch -Authority $prepared -Candidate $_)
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+
+        $terminalSequence = [int64]::MaxValue
+        [object[]]$matchingTerminal = @($terminalEvents | Where-Object {
+                [int64]$_.Sequence -gt $preparedSequence -and
+                (Test-TransitionTransferScopeMatch -Authority $prepared -Candidate $_)
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($matchingTerminal.Count -gt 0) {
+            $terminalSequence = [int64]$matchingTerminal[0].Sequence
+        }
+
+        $commitSequence = if ($committed.Count -gt 0) {
+            [int64]$committed[0].Sequence
+        }
+        else {
+            [int64]::MaxValue
+        }
+        $invalidationSequence = if ($invalidated.Count -gt 0) {
+            [int64]$invalidated[0].Sequence
+        }
+        else {
+            [int64]::MaxValue
+        }
+        $operationBoundarySequence = [Math]::Min(
+            $terminalSequence,
+            [Math]::Min($commitSequence, $invalidationSequence))
+
+        if ($draining.Count -gt 0) {
+            [object[]]$postDrainRegistrations = @($registeredLeaseEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$draining[0].Sequence -and
+                    [int64]$_.Sequence -lt $operationBoundarySequence -and
+                    (Test-TransitionSourceScopeMatch -Authority $prepared -Candidate $_)
+                } | Sort-Object Sequence, LineNumber)
+            if ($postDrainRegistrations.Count -gt 0) {
+                Add-TransitionCandidate `
+                    -Event $postDrainRegistrations[0] `
+                    -Key $candidateKey `
+                    -Reason 'regular_v4_payload_lease_registered_after_transition_draining'
+                continue
+            }
+        }
+
+        $receiptSequence = if ($acceptedReceipts.Count -gt 0) {
+            [int64]$acceptedReceipts[0].Sequence
+        }
+        else {
+            [int64]::MaxValue
+        }
+        [object[]]$prematureOwnerBoundaries = @($ownerBoundaryEvents | Where-Object {
+                [int64]$_.Sequence -gt $preparedSequence -and
+                [int64]$_.Sequence -lt $receiptSequence -and
+                [int64]$_.Sequence -lt $operationBoundarySequence -and
+                (Test-TransitionOwnerBoundary -Prepared $prepared -Boundary $_)
+            } | Sort-Object Sequence, LineNumber)
+        if ($prematureOwnerBoundaries.Count -gt 0) {
+            Add-TransitionCandidate `
+                -Event $prematureOwnerBoundaries[0] `
+                -Key $candidateKey `
+                -Reason 'tuna_owner_or_publication_installed_before_physical_drain_receipt'
+            continue
+        }
+
+        if ($committed.Count -gt 0) {
+            $commit = $committed[0]
+            if ($pauseBound.Count -eq 0 -or
+                $draining.Count -eq 0 -or
+                [int64]$pauseBound[0].Sequence -ge [int64]$draining[0].Sequence) {
+                Add-TransitionCandidate `
+                    -Event $commit `
+                    -Key $candidateKey `
+                    -Reason 'regular_v4_to_tuna_transition_committed_without_exact_physical_drain_receipt'
+                continue
+            }
+
+            [object[]]$matchingAck = @($precommitAckEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$draining[0].Sequence -and
+                    [int64]$_.Sequence -lt [int64]$commit.Sequence -and
+                    (Test-TransitionPrecommitAckMatch -Prepared $prepared -Ack $_)
+                } | Sort-Object Sequence, LineNumber)
+            if ($matchingAck.Count -eq 0) {
+                Add-TransitionCandidate `
+                    -Event $commit `
+                    -Key $candidateKey `
+                    -Reason 'regular_v4_to_tuna_transition_committed_without_acked_precommit_proof'
+                continue
+            }
+
+            [object[]]$orderedAcceptedReceipts = @($acceptedReceipts | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$matchingAck[0].Sequence -and
+                    [int64]$_.Sequence -lt [int64]$commit.Sequence
+                } | Sort-Object Sequence, LineNumber)
+            if ($orderedAcceptedReceipts.Count -eq 0) {
+                Add-TransitionCandidate `
+                    -Event $commit `
+                    -Key $candidateKey `
+                    -Reason 'regular_v4_to_tuna_transition_committed_without_exact_physical_drain_receipt'
+                continue
+            }
+
+            if (-not (Test-TransitionAtomicCommitShape -Prepared $prepared -Commit $commit)) {
+                Add-TransitionCandidate `
+                    -Event $commit `
+                    -Key $candidateKey `
+                    -Reason 'regular_v4_to_tuna_transition_commit_owner_leg_publication_not_atomic'
+                continue
+            }
+
+            [object[]]$matchingDisposition = @($dispositionEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$commit.Sequence -and
+                    (Test-TransitionTerminalDisposition `
+                        -Prepared $prepared `
+                        -Disposition $_ `
+                        -ExpectedStatus 'Committed')
+                } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            if ($matchingDisposition.Count -eq 0) {
+                Add-TransitionCandidate `
+                    -Event $commit `
+                    -Key $candidateKey `
+                    -Reason 'regular_v4_to_tuna_transition_committed_without_pause_disposition'
+            }
+            continue
+        }
+
+        if ($invalidated.Count -gt 0) {
+            [object[]]$matchingDisposition = @($dispositionEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$invalidated[0].Sequence -and
+                    (Test-TransitionTerminalDisposition `
+                        -Prepared $prepared `
+                        -Disposition $_ `
+                        -ExpectedStatus 'Invalidated')
+                } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            if ($matchingDisposition.Count -eq 0) {
+                Add-TransitionCandidate `
+                    -Event $invalidated[0] `
+                    -Key $candidateKey `
+                    -Reason 'regular_v4_to_tuna_transition_invalidated_without_pause_disposition'
+            }
+            continue
+        }
+
+        if ($matchingTerminal.Count -gt 0) {
+            Add-TransitionCandidate `
+                -Event $matchingTerminal[0] `
+                -Key $candidateKey `
+                -Reason 'regular_v4_to_tuna_transition_terminal_without_commit_or_invalidation'
+        }
+    }
+
+    return [pscustomobject]@{
+        RawCount = $rawCandidateRecords.Count
+        DistinctCount = $distinctCandidateRecords.Count
+        RecoveredCount = 0
+        UnresolvedCount = $distinctCandidateRecords.Count
+        Verdict = if ($distinctCandidateRecords.Count -gt 0) { 'fail' } else { 'pass' }
+        RawCandidateRecords = @($rawCandidateRecords.ToArray())
+        CandidateRecords = @($distinctCandidateRecords.ToArray())
+        UnresolvedCandidateRecords = @($distinctCandidateRecords.ToArray())
+        IdentityScopeKeys = @($identityKeys)
+    }
+}
+
 function Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation {
     param([object[]]$Events = @())
 
     [object[]]$orderedEvents = @($Events | Sort-Object Sequence, LineNumber)
+    $coordinatorTransitionProof =
+        Get-FileTransferRegularV4ToTunaRouteTransitionCorrelation -Events $orderedEvents
     [object[]]$ownerRetirements = @($orderedEvents | Where-Object {
             $_.EventName -eq 'filetransfer_runtime_owner_workers_retired' -and
             (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
@@ -7872,6 +8619,13 @@ function Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation {
         if ($distinctKeys.Add($DistinctKey)) {
             $distinctCandidateRecords.Add($record) | Out-Null
         }
+    }
+
+    foreach ($candidateRecord in @($coordinatorTransitionProof.RawCandidateRecords)) {
+        Add-RouteCommitSendDrainCandidate `
+            -Event $candidateRecord.Event `
+            -DistinctKey $candidateRecord.DistinctKey `
+            -Reason $candidateRecord.Reason
     }
 
     function Add-RouteCommitSendDrainCorroboratingMismatch {

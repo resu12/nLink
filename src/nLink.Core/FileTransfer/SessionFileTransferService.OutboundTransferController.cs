@@ -96,6 +96,37 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
+            if (context.CoordinatorPersistentState.RegularV4ToTunaRouteTransition
+                    .CurrentOperation is { } activeRouteTransition)
+            {
+                if (context.PendingRuntimeUnlockRegularV4RouteCommitDrain is { } drain &&
+                    drain.Authority == activeRouteTransition.Authority)
+                {
+                    InvalidateRuntimeUnlockRegularV4RouteCommitDrainLocked(
+                        context,
+                        drain,
+                        "outbound_transfer_terminal",
+                        terminalInvalidation: true);
+                }
+                else
+                {
+                    InvalidateRegularV4ToTunaRouteTransitionLocked(
+                        context,
+                        activeRouteTransition.Authority,
+                        terminalInvalidation: true,
+                        "outbound_transfer_terminal");
+                }
+
+                if (context.CoordinatorPersistentState.RegularV4ToTunaRouteTransition
+                        .CurrentOperation is not null)
+                {
+                    LocalOperationalLog.Info(
+                        "FileTransferService",
+                        $"event=filetransfer_terminal_transition_rejected; direction=outbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; decision_reason=regular_v4_to_tuna_transition_invalidation_failed");
+                    return false;
+                }
+            }
+
             if (!TryRetireRegularV4FrontierRepairPressureForScopeReplacementLocked(
                     context,
                     "outbound_transfer_terminal",
@@ -379,6 +410,24 @@ public sealed partial class SessionFileTransferService
                     "transition_inbound_terminal",
                     "already_terminal");
                 return;
+            }
+
+            if (context.CoordinatorPersistentState.RegularV4ToTunaRouteTransition
+                    .CurrentOperation is { } activeRouteTransition)
+            {
+                InvalidateRegularV4ToTunaRouteTransitionLocked(
+                    context,
+                    activeRouteTransition.Authority,
+                    terminalInvalidation: true,
+                    "inbound_transfer_terminal");
+                if (context.CoordinatorPersistentState.RegularV4ToTunaRouteTransition
+                        .CurrentOperation is not null)
+                {
+                    LocalOperationalLog.Info(
+                        "FileTransferService",
+                        $"event=filetransfer_terminal_transition_rejected; direction=inbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; decision_reason=regular_v4_to_tuna_transition_invalidation_failed");
+                    return;
+                }
             }
 
             if (!TryRetireRegularV4FrontierRepairPressureForScopeReplacementLocked(

@@ -286,14 +286,16 @@ public sealed partial class SessionFileTransferV4SenderTests
     }
 
     [Theory]
-    [InlineData(true, false, false, false, false, false)]
-    [InlineData(false, false, false, false, false, false)]
-    [InlineData(true, true, false, false, false, false)]
-    [InlineData(false, true, false, false, false, false)]
-    [InlineData(true, false, true, false, false, false)]
-    [InlineData(true, false, false, true, false, false)]
-    [InlineData(true, false, false, false, true, false)]
-    [InlineData(true, false, false, false, false, true)]
+    [InlineData(true, false, false, false, false, false, false, false)]
+    [InlineData(false, false, false, false, false, false, false, false)]
+    [InlineData(true, true, false, false, false, false, false, false)]
+    [InlineData(false, true, false, false, false, false, false, false)]
+    [InlineData(true, false, true, false, false, false, false, false)]
+    [InlineData(true, false, false, true, false, false, false, false)]
+    [InlineData(true, false, false, false, true, false, false, false)]
+    [InlineData(true, false, false, false, true, false, true, false)]
+    [InlineData(true, false, false, false, false, true, false, false)]
+    [InlineData(true, false, false, false, false, false, false, true)]
     [Trait("FileTransferRuntimeSuite", "SparseWorkerHandoff")]
     public async Task UncommittedTunaFallback_BothArrivalOrdersRejectEpochMutationThenCommitAndApplyRetainedFrameOnce(
         bool proofFirst,
@@ -301,10 +303,13 @@ public sealed partial class SessionFileTransferV4SenderTests
         bool rejectFirstAdoptionCommit,
         bool invalidateCoordinatorCommitAfterPreparation,
         bool replaceAvailabilityGenerationAfterPreparation,
-        bool throwDuringRetainedStateApply)
+        bool throwDuringRetainedStateApply,
+        bool keepReplacingAvailabilityGenerationAfterPreparation,
+        bool rejectFirstTransitionDisposition)
     {
         const string transferId = "uncommitted_tuna_fallback_proof_first_drain_later";
         const string sessionId = "session_uncommitted_tuna_fallback_proof_first_drain_later";
+        const int sourcePeerStateEpoch = 1;
         using var service = new SessionFileTransferService();
         using var transport = new LoopbackFileTransferTransport(sessionId);
         service.AttachTransport(transport);
@@ -314,6 +319,7 @@ public sealed partial class SessionFileTransferV4SenderTests
             chunksAcceptedForTransport: 4,
             remoteGrantedUntilExclusive: 64,
             lastGrantReceivedUtc: DateTimeOffset.UtcNow);
+        SetPrivateProperty(context, "V4LastStateEpoch", sourcePeerStateEpoch);
         typeof(SessionFileTransferService)
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
@@ -332,6 +338,28 @@ public sealed partial class SessionFileTransferV4SenderTests
         var sourceRoutePublication =
             GetPrivateProperty<RoutePublicationToken>(context, "CurrentRoutePublicationToken");
         var adoptionCommitAttempt = 0;
+        var transitionDispositionAttempt = 0;
+        RegularV4ToTunaRouteTransitionDispositionCommand?
+            rejectedTransitionDisposition = null;
+        if (rejectFirstTransitionDisposition)
+        {
+            transport.RegularV4ToTunaRouteTransitionDispositionOverride = command =>
+            {
+                transitionDispositionAttempt++;
+                if (transitionDispositionAttempt == 1)
+                {
+                    rejectedTransitionDisposition = command;
+                    return new(
+                        command,
+                        RegularV4ToTunaRouteTransitionDispositionApplyStatus.Rejected,
+                        "unit_test_superseded_disposition_rejected");
+                }
+
+                Assert.Equal(rejectedTransitionDisposition, command);
+                return null;
+            };
+        }
+
         if (invalidateCoordinatorCommitAfterPreparation)
         {
             transport.RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationObserverForTests = _ =>
@@ -351,7 +379,8 @@ public sealed partial class SessionFileTransferV4SenderTests
                 BindingFlags.Instance | BindingFlags.NonPublic)!;
             transport.RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationObserverForTests = _ =>
             {
-                if (availabilityGenerationReplaced)
+                if (availabilityGenerationReplaced &&
+                    !keepReplacingAvailabilityGenerationAfterPreparation)
                 {
                     return;
                 }
@@ -557,6 +586,41 @@ public sealed partial class SessionFileTransferV4SenderTests
             context,
             physicalSends[^1].Lease!,
             Task.CompletedTask);
+        if (keepReplacingAvailabilityGenerationAfterPreparation)
+        {
+            await WaitUntilAsync(
+                () => transport.RuntimeUnlockUncommittedTunaFallbackAdoptionStages.Count == 2 &&
+                      GetPrivatePropertyValue(
+                          context,
+                          "PendingRuntimeUnlockUncommittedTunaFallbackAdoptionContinuation") is not null,
+                timeoutMs: 5000);
+            Assert.Single(transport.RuntimeUnlockUncommittedTunaFallbackAdoptionDiscardedStages);
+            Assert.Equal(
+                1,
+                GetPrivateProperty<int>(
+                    context,
+                    "LastRuntimeUnlockUncommittedTunaFallbackAdoptionRestageHandoffGeneration"));
+
+            Assert.True(RetainUncommittedTunaFallbackAvailability(
+                service,
+                context,
+                dataSession,
+                evidence).Handled);
+            Assert.True(RetainUncommittedTunaFallbackAvailability(
+                service,
+                context,
+                dataSession,
+                evidence).Handled);
+
+            Assert.Equal(2, transport.RuntimeUnlockUncommittedTunaFallbackAdoptionStages.Count);
+            Assert.Single(transport.RuntimeUnlockUncommittedTunaFallbackAdoptionDiscardedStages);
+            Assert.True(GetPrivateProperty<bool>(context, "PullTransportPaused"));
+            Assert.Equal(
+                FileTransferRoute.RegularNknV4Fast,
+                GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner").Route);
+            return;
+        }
+
         if (invalidateCoordinatorCommitAfterPreparation)
         {
             await WaitUntilAsync(
@@ -600,6 +664,25 @@ public sealed partial class SessionFileTransferV4SenderTests
                 evidence).Handled);
         }
 
+        if (rejectFirstTransitionDisposition)
+        {
+            await WaitUntilAsync(
+                () => transitionDispositionAttempt == 1 &&
+                      GetPrivatePropertyValue(
+                          context,
+                          "PendingRuntimeUnlockUncommittedTunaFallbackAdoptionContinuation") is not null,
+                timeoutMs: 5000);
+            Assert.True(GetPrivateProperty<bool>(context, "PullTransportPaused"));
+            Assert.Equal(
+                FileTransferRoute.RegularNknV4Fast,
+                GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner").Route);
+            Assert.True(RetainUncommittedTunaFallbackAvailability(
+                service,
+                context,
+                dataSession,
+                evidence).Handled);
+        }
+
         await WaitUntilAsync(
             () => GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner").Route ==
                       FileTransferRoute.PostTunaFallbackV6 &&
@@ -607,6 +690,9 @@ public sealed partial class SessionFileTransferV4SenderTests
             timeoutMs: 5000);
 
         Assert.False(GetPrivateProperty<bool>(context, "PullTransportPaused"));
+        Assert.Equal(
+            rejectFirstTransitionDisposition ? 2 : 0,
+            transitionDispositionAttempt);
         Assert.Equal(
             rejectFirstAdoptionCommit || replaceAvailabilityGenerationAfterPreparation ? 2 : 1,
             transport.RuntimeUnlockUncommittedTunaFallbackAdoptions.Count);
@@ -619,6 +705,13 @@ public sealed partial class SessionFileTransferV4SenderTests
             GetPrivatePropertyValue(
                 context,
                 "LastRuntimeUnlockUncommittedTunaFallbackHandoff"));
+        Assert.Equal(
+            replaceAvailabilityGenerationAfterPreparation
+                ? committedHandoff.Handoff.HandoffGeneration
+                : 0,
+            GetPrivateProperty<int>(
+                context,
+                "LastRuntimeUnlockUncommittedTunaFallbackAdoptionRestageHandoffGeneration"));
         var coordinatorState = Assert.IsType<FileTransferCoordinatorState>(
             typeof(SessionFileTransferService)
                 .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
@@ -647,6 +740,12 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Equal(
             RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus.Idempotent,
             duplicateCommit.Status);
+        Assert.NotNull(
+            FileTransferCoordinator.GetRegularV4ToTunaRouteTransitionSubstate(
+                    coordinatorState)
+                .LastTerminalOperation!
+                .Value
+                .DispositionReceipt);
         var retained = GetPrivatePropertyValue(
             context,
             "PendingRuntimeUnlockUncommittedTunaFallbackRetainedPeerProof");
@@ -730,7 +829,7 @@ public sealed partial class SessionFileTransferV4SenderTests
                 context,
                 "RuntimeUnlockUncommittedTunaFallbackRetainedPeerProofApplyInFlightGeneration"));
         Assert.Equal(
-            replaceDataSessionBeforeRetainedProofApply ? -1 : 17,
+            replaceDataSessionBeforeRetainedProofApply ? sourcePeerStateEpoch : 17,
             GetPrivateProperty<int>(context, "V4LastStateEpoch"));
         var retainedProofLog = ReadOperationalLogTail(retainedProofLogStart);
         Assert.Contains(
@@ -779,6 +878,10 @@ public sealed partial class SessionFileTransferV4SenderTests
         typeof(SessionFileTransferService)
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
+        SetPrivateProperty(
+            context,
+            "V4LastStateDurableHighestChunkIndex",
+            99);
         var dataSession = new RecordingDataSession(sessionId, transferId);
         ReplaceOutboundDataSession(service, context, dataSession);
         SetPrivateProperty(context, "PullSourceCanSeek", true);
@@ -827,7 +930,9 @@ public sealed partial class SessionFileTransferV4SenderTests
             service,
             context,
             "unit_test_uncommitted_tuna_fallback_pressure");
-        Assert.True(stagedDrain.Accepted);
+        Assert.True(
+            stagedDrain.Accepted,
+            LocalOperationalLog.GetRecentLogText());
 
         const long proofTransportEpoch = 2;
         var peerProof = new FileTransferReceiverStateFrameV6
@@ -1047,9 +1152,8 @@ public sealed partial class SessionFileTransferV4SenderTests
         var previousPendingGeneration = GetPrivateProperty<int>(
             context,
             "LastRuntimeUnlockPendingPreCommitProbeGeneration");
-        var previousDrainGeneration = GetPrivateProperty<long>(
-            context,
-            "LastRuntimeUnlockRegularV4RouteCommitDrainGeneration");
+        var previousTransition =
+            GetRegularV4ToTunaRouteTransitionSubstate(context);
 
         object?[] arguments = [context, "unit_test_pending_mutation_retry", null];
         var accepted = Assert.IsType<bool>(typeof(SessionFileTransferService)
@@ -1072,8 +1176,8 @@ public sealed partial class SessionFileTransferV4SenderTests
             previousPendingGeneration,
             GetPrivateProperty<int>(context, "LastRuntimeUnlockPendingPreCommitProbeGeneration"));
         Assert.Equal(
-            previousDrainGeneration,
-            GetPrivateProperty<long>(context, "LastRuntimeUnlockRegularV4RouteCommitDrainGeneration"));
+            previousTransition,
+            GetRegularV4ToTunaRouteTransitionSubstate(context));
         Assert.Null(GetPrivatePropertyValue(context, "RuntimeUnlockRouteCommitToken"));
     }
 
@@ -1125,7 +1229,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.False(registration.Accepted);
         Assert.Null(registration.Lease);
         Assert.Equal(
-            "runtime_unlock_regular_v4_route_commit_send_drain_pending",
+            "regular_v4_to_tuna_transition_draining",
             registration.Reason);
         Assert.Empty(dataSession.SentFrames);
         Assert.Equal(0L, GetPrivateProperty<long>(context, "OutboundRegularV4PhysicalSendRegisteredCount"));
@@ -1149,7 +1253,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.False(divergentRegistration.Accepted);
         Assert.Null(divergentRegistration.Lease);
         Assert.Equal(
-            "runtime_unlock_regular_v4_route_commit_send_drain_pending",
+            "regular_v4_to_tuna_transition_draining",
             divergentRegistration.Reason);
         Assert.Same(
             staged.Drain,
@@ -1172,6 +1276,7 @@ public sealed partial class SessionFileTransferV4SenderTests
             chunksAcceptedForTransport: 0,
             remoteGrantedUntilExclusive: 64,
             lastGrantReceivedUtc: DateTimeOffset.UtcNow);
+        SetPrivateProperty(context, "V4LastStateEpoch", 1);
         typeof(SessionFileTransferService)
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
@@ -1192,22 +1297,8 @@ public sealed partial class SessionFileTransferV4SenderTests
             Assert.IsType<RuntimeUnlockRouteCommitSnapshot>(
                 transport.RuntimeUnlockRouteCommitSnapshot));
         transport.RuntimeUnlockRouteCommitSnapshot = preProbe;
-        var staged = StageRegularV4RouteCommitSendDrain(
-            service,
-            context,
-            "unit_test_launch_binding");
-        var originalDrain = Assert.IsAssignableFrom<object>(staged.Drain);
-        Assert.Equal(
-            0L,
-            GetPrivateProperty<RuntimeUnlockRouteCommitSnapshot>(
-                originalDrain,
-                "RouteCommitSnapshot").LaunchGeneration);
-        var originalAdmission = GetPrivateProperty<RuntimeUnlockAdmissionToken>(
-            originalDrain,
-            "RuntimeUnlockAdmission");
-        var originalPending = GetPrivateProperty<RuntimeUnlockPendingPreCommitProbeRequest>(
-            originalDrain,
-            "PendingPreCommitProbe");
+        Assert.Null(
+            GetRegularV4ToTunaRouteTransitionSubstate(context).CurrentOperation);
 
         var launch = preProbe with { LaunchGeneration = 17 };
         object?[] arguments = [context, dataSession, launch, "unit_test_launch_binding"];
@@ -1223,23 +1314,21 @@ public sealed partial class SessionFileTransferV4SenderTests
 
         var reboundDrain = Assert.IsAssignableFrom<object>(
             GetPrivatePropertyValue(context, "PendingRuntimeUnlockRegularV4RouteCommitDrain"));
+        var currentOperation = AssertRegularV4ToTunaTransitionOperation(
+            context,
+            RegularV4ToTunaRouteTransitionState.Draining);
         Assert.Equal(
             17L,
             GetPrivateProperty<RuntimeUnlockRouteCommitSnapshot>(
                 reboundDrain,
                 "RouteCommitSnapshot").LaunchGeneration);
         Assert.Equal(
-            GetPrivateProperty<long>(originalDrain, "DrainGeneration"),
+            1L,
+            currentOperation.Authority.TransitionGeneration);
+        Assert.Equal(
+            currentOperation.Authority.TransitionGeneration,
             GetPrivateProperty<long>(reboundDrain, "DrainGeneration"));
-        Assert.Equal(
-            GetPrivateProperty<long>(originalDrain, "CapturedThroughSendLeaseGeneration"),
-            GetPrivateProperty<long>(reboundDrain, "CapturedThroughSendLeaseGeneration"));
-        Assert.Equal(
-            originalAdmission,
-            GetPrivateProperty<RuntimeUnlockAdmissionToken>(reboundDrain, "RuntimeUnlockAdmission"));
-        Assert.Equal(
-            originalPending,
-            GetPrivateProperty<RuntimeUnlockPendingPreCommitProbeRequest>(reboundDrain, "PendingPreCommitProbe"));
+        Assert.Equal(17L, currentOperation.Authority.LaunchGeneration);
 
         var mutated = launch with { OfferGeneration = launch.OfferGeneration + 1 };
         object?[] mutatedArguments = [context, dataSession, mutated, "unit_test_launch_binding_mutated"];
@@ -1252,6 +1341,11 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Same(
             reboundDrain,
             GetPrivatePropertyValue(context, "PendingRuntimeUnlockRegularV4RouteCommitDrain"));
+        Assert.Equal(
+            currentOperation,
+            AssertRegularV4ToTunaTransitionOperation(
+                context,
+                RegularV4ToTunaRouteTransitionState.Draining));
     }
 
     [Fact]
@@ -1271,6 +1365,7 @@ public sealed partial class SessionFileTransferV4SenderTests
             chunksAcceptedForTransport: 4,
             remoteGrantedUntilExclusive: 64,
             lastGrantReceivedUtc: DateTimeOffset.UtcNow);
+        SetPrivateProperty(context, "V4LastStateEpoch", 1);
         typeof(SessionFileTransferService)
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
@@ -1383,6 +1478,7 @@ public sealed partial class SessionFileTransferV4SenderTests
             chunksAcceptedForTransport: 4,
             remoteGrantedUntilExclusive: 64,
             lastGrantReceivedUtc: DateTimeOffset.UtcNow);
+        SetPrivateProperty(context, "V4LastStateEpoch", 1);
         typeof(SessionFileTransferService)
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
@@ -1617,6 +1713,7 @@ public sealed partial class SessionFileTransferV4SenderTests
             chunksAcceptedForTransport: 0,
             remoteGrantedUntilExclusive: 64,
             lastGrantReceivedUtc: DateTimeOffset.UtcNow);
+        SetPrivateProperty(context, "V4LastStateEpoch", 1);
         typeof(SessionFileTransferService)
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
@@ -1794,6 +1891,116 @@ public sealed partial class SessionFileTransferV4SenderTests
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "SparseWorkerHandoff")]
+    public async Task OutboundRegularV4WriteHandoff_ReservationAndPhysicalSubmissionCompleteBeforeDraining()
+    {
+        var transferId =
+            $"transfer_regular_v4_send_drain_reservation_wins_{Guid.NewGuid():N}";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 0,
+            chunksAcceptedForTransport: 0,
+            remoteGrantedUntilExclusive: 64,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow);
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        using var dataSession = new BlockingPhysicalSendDataSession(
+            $"session_{transferId}",
+            transferId,
+            () => GetRegularV4ToTunaRouteTransitionSubstate(context)
+                .CurrentOperation?.State);
+        ReplaceOutboundDataSession(service, context, dataSession);
+        transport.SeedRuntimeUnlockRouteCommitProofForTests(
+            transferId,
+            "tuna_activation_answer_ack");
+
+        await using var stream = new MemoryStream(
+            new byte[Math.Max(1, GetPrivateProperty<int>(context, "ChunkSizeBytes"))],
+            writable: false);
+        var sendTask = Task.Run(
+            async () => await Assert.IsAssignableFrom<Task<bool>>(
+                    typeof(SessionFileTransferService)
+                        .GetMethod(
+                            "SendChunkIndicesV4Async",
+                            BindingFlags.Instance | BindingFlags.NonPublic)!
+                        .Invoke(
+                            service,
+                            [
+                                context,
+                                stream,
+                                dataSession,
+                                new List<int> { 0 },
+                                false,
+                                "(none)",
+                                null,
+                                null,
+                                null,
+                                FileTransferV4RepairDeliveryMode.BulkOnly,
+                                "normal",
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                CancellationToken.None,
+                            ])!)
+                .ConfigureAwait(false));
+
+        await dataSession.SubmissionEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var serviceGate = typeof(SessionFileTransferService)
+            .GetField("gate", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(service)!;
+        var stageTask = Task.Run(
+            () =>
+            {
+                lock (serviceGate)
+                {
+                    return StageRegularV4RouteCommitSendDrain(
+                        service,
+                        context,
+                        "tuna_activation_answer_ack");
+                }
+            });
+        await Task.Delay(100);
+
+        Assert.False(stageTask.IsCompleted);
+        Assert.NotEqual(
+            RegularV4ToTunaRouteTransitionState.Draining,
+            dataSession.TransitionStateAtSubmission);
+
+        dataSession.ReleaseSubmission.TrySetResult();
+        var staged = await stageTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(staged.Accepted);
+        Assert.NotNull(staged.Drain);
+        Assert.Equal(1, dataSession.SubmissionCount);
+        Assert.Equal(
+            1,
+            AssertRegularV4ToTunaTransitionOperation(
+                    context,
+                    RegularV4ToTunaRouteTransitionState.Draining)
+                .DrainCommand!.Value.CapturedPhysicalSendCount);
+        Assert.False(await sendTask.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Single(Assert.IsAssignableFrom<System.Collections.IDictionary>(
+            GetPrivatePropertyValue(
+                context,
+                "ActiveOutboundRegularV4PhysicalSendLeases")));
+
+        dataSession.PhysicalCompletion.TrySetResult();
+        await WaitUntilAsync(
+            () => Assert.IsAssignableFrom<System.Collections.IDictionary>(
+                    GetPrivatePropertyValue(
+                        context,
+                        "ActiveOutboundRegularV4PhysicalSendLeases"))
+                .Count == 0,
+            timeoutMs: 5000);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "SparseWorkerHandoff")]
     public void OutboundRegularV4WriteHandoff_DuplicateEmptyDrainCompletesIdempotently()
     {
         var transferId = $"transfer_regular_v4_empty_send_drain_{Guid.NewGuid():N}";
@@ -1830,9 +2037,10 @@ public sealed partial class SessionFileTransferV4SenderTests
             "tuna_activation_answer_ack");
         Assert.True(duplicate.Accepted);
         Assert.Same(first.Drain, duplicate.Drain);
-        Assert.Equal(
-            1L,
-            GetPrivateProperty<long>(context, "LastRuntimeUnlockRegularV4RouteCommitDrainGeneration"));
+        var draining = AssertRegularV4ToTunaTransitionOperation(
+            context,
+            RegularV4ToTunaRouteTransitionState.Draining);
+        Assert.Equal(1L, draining.Authority.TransitionGeneration);
 
         var firstCompletion = CompleteRegularV4RouteCommitSendDrain(
             service,
@@ -1848,8 +2056,12 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.True(firstCompletion.Accepted, firstCompletion.Reason);
         Assert.True(duplicateCompletion.Accepted, duplicateCompletion.Reason);
         Assert.Equal(
-            1L,
-            GetPrivateProperty<long>(context, "LastCompletedRuntimeUnlockRegularV4RouteCommitDrainGeneration"));
+            draining,
+            AssertRegularV4ToTunaTransitionOperation(
+                context,
+                RegularV4ToTunaRouteTransitionState.Draining));
+        Assert.Null(
+            GetRegularV4ToTunaRouteTransitionSubstate(context).LastTerminalOperation);
         Assert.Null(GetPrivatePropertyValue(context, "RuntimeUnlockRouteCommitToken"));
     }
 
@@ -1938,7 +2150,9 @@ public sealed partial class SessionFileTransferV4SenderTests
         normalCompletion.TrySetResult();
         await observeNormal;
         Assert.Equal(1L, GetPrivateProperty<long>(context, "OutboundRegularV4PhysicalSendRetiredCount"));
-        Assert.Equal(0L, GetPrivateProperty<long>(context, "LastCompletedRuntimeUnlockRegularV4RouteCommitDrainGeneration"));
+        AssertRegularV4ToTunaTransitionOperation(
+            context,
+            RegularV4ToTunaRouteTransitionState.Draining);
         Assert.Equal(
             FileTransferRoute.RegularNknV4Fast,
             GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner").Route);
@@ -1953,9 +2167,9 @@ public sealed partial class SessionFileTransferV4SenderTests
         repairCompletion.TrySetResult();
         await observeRepair;
         await WaitUntilAsync(
-            () => GetPrivateProperty<long>(
-                      context,
-                      "LastCompletedRuntimeUnlockRegularV4RouteCommitDrainGeneration") == 1 &&
+            () => GetRegularV4ToTunaRouteTransitionSubstate(context)
+                      .LastTerminalOperation is
+                      { State: RegularV4ToTunaRouteTransitionState.Committed } &&
                   GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner").Route ==
                   FileTransferRoute.FileTunaV4,
             timeoutMs: 5000);
@@ -1983,7 +2197,13 @@ public sealed partial class SessionFileTransferV4SenderTests
             GetPrivateProperty<RoutePublicationToken>(context, "CurrentRoutePublicationToken"));
         Assert.Equal(installedCommit, GetPrivatePropertyValue(context, "RuntimeUnlockRouteCommitToken"));
         Assert.Equal(terminalGeneration, GetPrivateProperty<int>(context, "TerminalGeneration"));
-        Assert.Equal(1L, GetPrivateProperty<long>(context, "LastCompletedRuntimeUnlockRegularV4RouteCommitDrainGeneration"));
+        var terminalTransition =
+            GetRegularV4ToTunaRouteTransitionSubstate(context).LastTerminalOperation;
+        Assert.True(terminalTransition.HasValue);
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionState.Committed,
+            terminalTransition.Value.State);
+        Assert.Equal(1L, terminalTransition.Value.Authority.TransitionGeneration);
     }
 
     [Fact]
@@ -2114,7 +2334,7 @@ public sealed partial class SessionFileTransferV4SenderTests
             "tuna_activation_answer_ack");
         Assert.True(staged.Accepted);
         Assert.NotNull(staged.Drain);
-        Assert.Equal(0L, GetPrivateProperty<long>(staged.Drain!, "CapturedSendCount"));
+        Assert.Equal(0, GetPrivateProperty<int>(staged.Drain!, "CapturedSendCount"));
         Assert.Equal(
             GetPrivateProperty<long>(registration.Lease!, "LeaseGeneration"),
             GetPrivateProperty<long>(staged.Drain!, "CapturedThroughSendLeaseGeneration"));
@@ -2190,7 +2410,16 @@ public sealed partial class SessionFileTransferV4SenderTests
             "unit_test_matching_probe_failure");
 
         Assert.Null(GetPrivatePropertyValue(context, "PendingRuntimeUnlockRegularV4RouteCommitDrain"));
-        Assert.Equal(0L, GetPrivateProperty<long>(context, "LastCompletedRuntimeUnlockRegularV4RouteCommitDrainGeneration"));
+        var invalidatedTransition =
+            GetRegularV4ToTunaRouteTransitionSubstate(context);
+        Assert.Null(invalidatedTransition.CurrentOperation);
+        Assert.True(invalidatedTransition.LastTerminalOperation.HasValue);
+        Assert.Equal(
+            RegularV4ToTunaRouteTransitionState.Invalidated,
+            invalidatedTransition.LastTerminalOperation.Value.State);
+        Assert.Equal(
+            1L,
+            invalidatedTransition.LastTerminalOperation.Value.Authority.TransitionGeneration);
         Assert.Equal(owner, GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner"));
         Assert.Equal(publication, GetPrivateProperty<RoutePublicationToken>(context, "CurrentRoutePublicationToken"));
         var currentLeg = GetPrivateProperty<FileTransferLeg>(context, "CurrentTransferLeg");
@@ -2340,7 +2569,18 @@ public sealed partial class SessionFileTransferV4SenderTests
 
         Assert.False(completed.Accepted);
         Assert.Equal(expectedReason, completed.Reason);
-        Assert.Null(GetPrivatePropertyValue(context, "PendingRuntimeUnlockRegularV4RouteCommitDrain"));
+        if (invalidation is "runtime_owner" or "route_publication" or "leg" or "transport" or "bridge")
+        {
+            Assert.Same(
+                staged.Drain,
+                GetPrivatePropertyValue(
+                    context,
+                    "PendingRuntimeUnlockRegularV4RouteCommitDrain"));
+        }
+        else
+        {
+            Assert.Null(GetPrivatePropertyValue(context, "PendingRuntimeUnlockRegularV4RouteCommitDrain"));
+        }
         Assert.Null(GetPrivatePropertyValue(context, "RuntimeUnlockRouteCommitToken"));
     }
 
@@ -6232,8 +6472,15 @@ public sealed partial class SessionFileTransferV4SenderTests
     private static (bool Accepted, object? Drain) StageRegularV4RouteCommitSendDrain(
         SessionFileTransferService service,
         object context,
-        string reason)
+        string reason,
+        bool seedAcceptedPeerState = true)
     {
+        if (seedAcceptedPeerState &&
+            GetPrivateProperty<int>(context, "V4LastStateEpoch") < 0)
+        {
+            SetPrivateProperty(context, "V4LastStateEpoch", 0);
+        }
+
         EnsureRuntimeUnlockPreCommitAuthoritiesForDrainForTest(service, context, reason);
         object?[] args = [context, reason, null];
         var accepted = Assert.IsType<bool>(typeof(SessionFileTransferService)
@@ -6242,6 +6489,25 @@ public sealed partial class SessionFileTransferV4SenderTests
                 BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, args));
         return (accepted, args[2]);
+    }
+
+    private static RegularV4ToTunaRouteTransitionSubstate
+        GetRegularV4ToTunaRouteTransitionSubstate(object context)
+        => GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                context,
+                "CoordinatorPersistentState")
+            .RegularV4ToTunaRouteTransition;
+
+    private static RegularV4ToTunaRouteTransitionOperation
+        AssertRegularV4ToTunaTransitionOperation(
+            object context,
+            RegularV4ToTunaRouteTransitionState expectedState)
+    {
+        var current =
+            GetRegularV4ToTunaRouteTransitionSubstate(context).CurrentOperation;
+        Assert.True(current.HasValue);
+        Assert.Equal(expectedState, current.Value.State);
+        return current.Value;
     }
 
     private static void EnsureRuntimeUnlockPreCommitAuthoritiesForDrainForTest(
@@ -6728,5 +6994,75 @@ public sealed partial class SessionFileTransferV4SenderTests
         public RecordingDataSession DataSession { get; }
 
         public void Dispose() => Service.Dispose();
+    }
+
+    private sealed class BlockingPhysicalSendDataSession(
+        string sessionId,
+        string transferId,
+        Func<RegularV4ToTunaRouteTransitionState?> transitionStateProvider) :
+        IFileTransferDataSession,
+        IFileTransferPhysicalSendSubmissionSession
+    {
+        private int submissionCount;
+
+        public string SessionId { get; } = sessionId;
+
+        public string TransferId { get; } = transferId;
+
+        public bool IsAvailable => true;
+
+        public int SubmissionCount => Volatile.Read(ref submissionCount);
+
+        public RegularV4ToTunaRouteTransitionState? TransitionStateAtSubmission
+        {
+            get;
+            private set;
+        }
+
+        public TaskCompletionSource SubmissionEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource ReleaseSubmission { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource PhysicalCompletion { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public event EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>?
+            AvailabilityChanged
+        {
+            add { }
+            remove { }
+        }
+
+        public ValueTask<FileTransferDataFrame> ReceiveAsync(CancellationToken ct)
+            => throw new NotSupportedException();
+
+        public ValueTask<FileTransferReceivedDataFrame> ReceiveWithMetadataAsync(
+            CancellationToken ct)
+            => throw new NotSupportedException();
+
+        public Task SendAsync(FileTransferDataFrame frame, CancellationToken ct)
+            => Task.CompletedTask;
+
+        public FileTransferPhysicalSendSubmission SubmitPhysicalSend(
+            FileTransferDataFrame frame,
+            FileTransferDataPathSendAuthority? authority,
+            CancellationToken ct)
+        {
+            Interlocked.Increment(ref submissionCount);
+            TransitionStateAtSubmission = transitionStateProvider();
+            SubmissionEntered.TrySetResult();
+            ReleaseSubmission.Task.GetAwaiter().GetResult();
+            return new FileTransferPhysicalSendSubmission(
+                Task.CompletedTask,
+                PhysicalCompletion.Task);
+        }
+
+        public void Dispose()
+        {
+            ReleaseSubmission.TrySetResult();
+            PhysicalCompletion.TrySetResult();
+        }
     }
 }

@@ -1770,6 +1770,14 @@ public sealed partial class NknSignalingTransport
             }
         }
 
+        if (receipt.Status is (
+                RuntimeUnlockUncommittedTunaFallbackAdoptionStatus.Applied or
+                RuntimeUnlockUncommittedTunaFallbackAdoptionStatus.Idempotent))
+        {
+            CompleteSupersededRegularV4ToTunaActivationPause(
+                command.RoutePublication);
+        }
+
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=runtime_unlock_uncommitted_tuna_fallback_transport_adoption_decided; session_id={SanitizeLogToken(command.RuntimeOwner.SessionId)}; transfer_id={SanitizeLogToken(command.RuntimeOwner.TransferId)}; direction={FormatFileTransferDirection(command.RuntimeOwner.Direction)}; route={SanitizeLogToken(command.RuntimeOwner.RouteToken)}; protocol_version={command.RuntimeOwner.ProtocolVersion}; live_route_epoch={command.RuntimeOwner.LiveRouteEpoch}; runtime_generation={command.RuntimeOwner.RuntimeGeneration}; terminal_generation={command.RuntimeOwner.TerminalGeneration}; leg_generation={command.RoutePublication.LegGeneration}; transport_epoch={command.TransportEpoch}; bridge_recovery_generation={command.BridgeRecoveryGeneration}; data_session_generation={command.DataSessionGeneration}; stage_generation={command.StageGeneration}; handoff_generation={command.HandoffGeneration}; drain_generation={command.DrainGeneration}; route_publication_generation={command.RoutePublication.PublicationGeneration}; adoption_status={receipt.Status}; decision_reason={SanitizeLogToken(receipt.Reason)}");
@@ -2346,6 +2354,18 @@ public sealed partial class NknSignalingTransport
                  (postTunaFallbackProofBoundary is { IsComplete: true } boundary &&
                   string.Equals(boundary.PeerProofEvidence.SessionId, session.SessionId, StringComparison.Ordinal) &&
                   string.Equals(boundary.PeerProofEvidence.TransferId, session.TransferId, StringComparison.Ordinal)));
+            if (isAvailable &&
+                IsRegularV4ToTunaActivationPauseBound(
+                    session.SessionId,
+                    session.TransferId) &&
+                !proofScopedFallbackBoundary)
+            {
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=filetransfer_regular_v4_to_tuna_route_transition_pause_release_rejected; session_id={SanitizeLogToken(session.SessionId)}; transfer_id={SanitizeLogToken(session.TransferId)}; reason={SanitizeLogToken(reason)}; decision_reason=coordinator_transition_disposition_required");
+                continue;
+            }
+
             var stagedFallbackBoundary =
                 effectiveHandoffKind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
                 targetTransport == FileTransferTransportKind.RegularNkn &&
@@ -10863,24 +10883,6 @@ public sealed partial class NknSignalingTransport
                 handoffKind == FileTransferTransportHandoffKind.None)
             {
                 return;
-            }
-
-            if (IsNormalToTunaActivationHandoff(handoffKind, targetTransport))
-            {
-                lock (uncommittedTunaFallbackAdoptionGate)
-                {
-                    var previousReason = Volatile.Read(ref availabilityReason);
-                    if (IsTunaActivationNegotiationAvailabilityReason(previousReason))
-                    {
-                        Volatile.Write(ref lastTunaActivationPauseReason, previousReason);
-                    }
-
-                    Volatile.Write(ref available, 1);
-                    Volatile.Write(ref availabilityReason, string.IsNullOrWhiteSpace(reason) ? "tuna_activation_handoff" : reason.Trim());
-                    Volatile.Write(ref lastTunaActivationPauseRecoveredUtcTicks, DateTimeOffset.UtcNow.UtcTicks);
-                    ResetTunaActivationPauseSends();
-                    availabilityGeneration = Math.Max(1, availabilityGeneration + 1);
-                }
             }
 
             var handler = availabilityChanged;

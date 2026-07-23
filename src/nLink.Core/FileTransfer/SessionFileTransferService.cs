@@ -3308,6 +3308,46 @@ public sealed partial class SessionFileTransferService : IDisposable
             return;
         }
 
+        if (!availability.IsAvailable &&
+            !dataSession.IsAvailable &&
+            availability.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
+            availability.TargetTransport == FileTransferTransportKind.Tuna &&
+            availability.RuntimeUnlockPreCommitProbeSnapshot is
+                { LaunchGeneration: > 0 } pausedLaunchSnapshot)
+        {
+            var handled = false;
+            lock (gate)
+            {
+                if (outboundTransfer is { IsTerminal: false } outbound &&
+                    ReferenceEquals(outbound.DataSession, dataSession) &&
+                    string.Equals(outbound.SessionId, pausedLaunchSnapshot.SessionId, StringComparison.Ordinal) &&
+                    string.Equals(outbound.TransferId, pausedLaunchSnapshot.TransferId, StringComparison.Ordinal))
+                {
+                    handled = TryHandleOutboundRuntimeUnlockPreCommitProbeLaunchSnapshotLocked(
+                        outbound,
+                        dataSession,
+                        pausedLaunchSnapshot,
+                        availability.Reason);
+                }
+                else if (inboundTransfer is { IsTerminal: false } inbound &&
+                         ReferenceEquals(inbound.DataSession, dataSession) &&
+                         string.Equals(inbound.SessionId, pausedLaunchSnapshot.SessionId, StringComparison.Ordinal) &&
+                         string.Equals(inbound.TransferId, pausedLaunchSnapshot.TransferId, StringComparison.Ordinal))
+                {
+                    handled = TryStartInboundRuntimeUnlockPreCommitProbeOrWaitForFallbackWithSnapshotLocked(
+                        inbound,
+                        availability.Reason,
+                        "runtime_unlock_probe_missing",
+                        pausedLaunchSnapshot);
+                }
+            }
+
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_regular_v4_to_tuna_route_transition_handoff_observed; session_id={FormatProtocolLogValue(dataSession.SessionId)}; transfer_id={FormatProtocolLogValue(dataSession.TransferId)}; is_available=0; launch_generation={pausedLaunchSnapshot.LaunchGeneration}; transaction_generation={pausedLaunchSnapshot.TransactionGeneration}; offer_generation={pausedLaunchSnapshot.OfferGeneration}; tuna_path_lease_generation={pausedLaunchSnapshot.TunaPathLeaseGeneration}; decision_status={(handled ? "Accepted" : "Rejected")}; decision_reason={(handled ? "transition_handoff_retained_while_paused" : "transition_handoff_not_current")}");
+            return;
+        }
+
         if (dataSession.IsAvailable != availability.IsAvailable)
         {
             if (availability.RuntimeUnlockPreCommitProbeSnapshot is
@@ -6054,14 +6094,25 @@ public sealed partial class SessionFileTransferService : IDisposable
                 ReferenceEquals(context.DataSession, pendingDrain.SourceDataSession) &&
                 context.DataSessionGeneration == pendingDrain.SourceDataSessionGeneration;
             var completedTunaTransition =
-                context.LastCompletedRuntimeUnlockRegularV4RouteCommitDrainGeneration ==
-                    pendingDrain.DrainGeneration &&
+                decision.State.PersistentState.RegularV4ToTunaRouteTransition
+                    .LastTerminalOperation is
+                    {
+                        State: RegularV4ToTunaRouteTransitionState.Committed,
+                    } completedOperation &&
+                completedOperation.Authority == pendingDrain.Authority &&
                 context.RouteRuntime.UsesFileTunaV4Runtime;
             if (!sourceScopeStillCurrent && !completedTunaTransition)
             {
-                InvalidateRuntimeUnlockRegularV4RouteCommitDrainLocked(
+                context.PendingRuntimeUnlockRegularV4RouteCommitDrain = null;
+                context.RuntimeUnlockRegularV4RouteCommitDrainRecheckQueued = false;
+                LogRuntimeUnlockRegularV4RouteCommitSendDrain(
+                    "runtime_unlock_regular_v4_route_commit_send_drain_invalidated",
                     context,
                     pendingDrain,
+                    activeSendCount:
+                        CountActiveOutboundRegularV4PhysicalSendLeasesForDrainLocked(
+                            context,
+                            pendingDrain),
                     context.IsTerminal
                         ? "terminal_context"
                         : "coordinator_source_scope_replaced");
@@ -6078,7 +6129,8 @@ public sealed partial class SessionFileTransferService : IDisposable
 
     private static void ApplyCoordinatorDecisionToContextLocked(
         InboundTransferContext context,
-        FileTransferCoordinatorDecision decision)
+        FileTransferCoordinatorDecision decision,
+        bool forwardRoutePublication = true)
     {
         var previousRoutePublicationToken = context.CurrentRoutePublicationToken;
         var runtimeGraph = CloneCoordinatorRuntimeGraphForContext(decision.State);
@@ -6174,7 +6226,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable;
         context.TransferLegHistory.Clear();
         context.TransferLegHistory.AddRange(runtimeGraph.LegHistory);
-        if (context.CurrentRoutePublicationToken is { IsDefault: false } currentToken &&
+        if (forwardRoutePublication &&
+            context.CurrentRoutePublicationToken is { IsDefault: false } currentToken &&
             previousRoutePublicationToken?.PublicationGeneration != currentToken.PublicationGeneration)
         {
             context.RoutePublicationAuthorityForwarder?.Invoke(currentToken, decision.Reason);
@@ -7706,7 +7759,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             rejectionReason,
             previousRouteSelection.Route == FileTransferRoute.RegularNknV4Fast &&
             context.RouteSelection.Route == FileTransferRoute.FileTunaV4
-                ? context.LastCompletedRuntimeUnlockRegularV4RouteCommitDrainGeneration
+                ? context.CoordinatorPersistentState.RegularV4ToTunaRouteTransition
+                    .LastTerminalOperation?.Authority.TransitionGeneration ?? 0
                 : 0);
         return true;
     }
@@ -7750,6 +7804,46 @@ public sealed partial class SessionFileTransferService : IDisposable
             token,
             rejectionReason,
             completedSendDrainGeneration);
+        return true;
+    }
+
+    private bool TryPublishRouteTransitionedWithExistingAuthorityLocked(
+        InboundTransferContext context,
+        FileTransferRouteSelection previousRouteSelection,
+        string source,
+        string reason,
+        RoutePublicationToken routePublicationToken)
+    {
+        if (!TryValidateRoutePublicationForEmissionLocked(
+                context,
+                source,
+                reason,
+                routeCommitToken: null,
+                routePublicationToken,
+                out var token,
+                out var rejectionReason))
+        {
+            return false;
+        }
+
+        if (context.V6TransportEpoch is { } epoch)
+        {
+            epoch.RoutePublicationToken ??= token;
+        }
+        if (context.CurrentLiveRouteEpoch is { } liveRouteEpoch)
+        {
+            liveRouteEpoch.RoutePublicationToken ??= token;
+        }
+
+        LogFileTransferRouteTransitioned(
+            FileTransferDirection.Inbound,
+            context.TransferId,
+            context.SessionId,
+            previousRouteSelection,
+            context.RouteSelection,
+            reason,
+            token,
+            rejectionReason);
         return true;
     }
 
@@ -21349,21 +21443,39 @@ public sealed partial class SessionFileTransferService : IDisposable
         string RepairRequestKey);
 
     private sealed record RuntimeUnlockRegularV4RouteCommitDrain(
-        long DrainGeneration,
-        RuntimeOwnerToken SourceRuntimeOwner,
-        RoutePublicationToken SourceRoutePublication,
-        int SourceTerminalGeneration,
-        long SourceLegGeneration,
-        long SourceTransportEpoch,
-        int SourceBridgeRecoveryGeneration,
+        RegularV4ToTunaPhysicalDrainCommand DrainCommand,
         IFileTransferDataSession SourceDataSession,
-        long SourceDataSessionGeneration,
-        RuntimeUnlockAdmissionToken RuntimeUnlockAdmission,
-        RuntimeUnlockPendingPreCommitProbeRequest PendingPreCommitProbe,
-        long CapturedThroughSendLeaseGeneration,
-        long CapturedSendCount,
         RuntimeUnlockRouteCommitSnapshot RouteCommitSnapshot,
-        string Reason);
+        string Reason)
+    {
+        public RegularV4ToTunaRouteTransitionAuthority Authority => DrainCommand.Authority;
+
+        public long DrainGeneration => Authority.TransitionGeneration;
+
+        public RuntimeOwnerToken SourceRuntimeOwner => Authority.SourceRuntimeOwner;
+
+        public RoutePublicationToken SourceRoutePublication => Authority.SourceRoutePublication;
+
+        public int SourceTerminalGeneration => Authority.SourceTerminalGeneration;
+
+        public int SourceLegGeneration => Authority.SourceLegGeneration;
+
+        public long SourceTransportEpoch => Authority.SourceTransportEpoch;
+
+        public int SourceBridgeRecoveryGeneration => Authority.SourceBridgeRecoveryGeneration;
+
+        public long SourceDataSessionGeneration => Authority.DataSessionGeneration;
+
+        public RuntimeUnlockAdmissionToken RuntimeUnlockAdmission => Authority.RuntimeUnlockAdmission;
+
+        public RuntimeUnlockPendingPreCommitProbeRequest PendingPreCommitProbe =>
+            Authority.PendingPreCommitProbe;
+
+        public long CapturedThroughSendLeaseGeneration =>
+            DrainCommand.CapturedThroughPhysicalSendGeneration;
+
+        public int CapturedSendCount => DrainCommand.CapturedPhysicalSendCount;
+    }
 
     private sealed record RuntimeUnlockUncommittedTunaFallbackHandoffIntent(
         int HandoffGeneration,
@@ -21402,7 +21514,11 @@ public sealed partial class SessionFileTransferService : IDisposable
         RuntimeUnlockUncommittedTunaFallbackAdoptionStageReceipt StageReceipt,
         RuntimeUnlockUncommittedTunaFallbackAdoptionCommand AdoptionCommand,
         RegularV4FrontierRepairContract? PressureContract,
-        IRuntimeUnlockUncommittedTunaFallbackAdoptionBridge AdoptionBridge);
+        IRuntimeUnlockUncommittedTunaFallbackAdoptionBridge AdoptionBridge)
+    {
+        public RegularV4ToTunaRouteTransitionDispositionCommand?
+            PendingTransitionDispositionCommand { get; init; }
+    }
 
     private sealed record RuntimeUnlockPreCommitProbeLaunchDisposition(
         long LaunchGeneration,
@@ -21571,10 +21687,6 @@ public sealed partial class SessionFileTransferService : IDisposable
         public Dictionary<long, OutboundRegularV4PhysicalSendLease>
             ActiveOutboundRegularV4PhysicalSendLeases { get; } = [];
 
-        public long LastRuntimeUnlockRegularV4RouteCommitDrainGeneration { get; set; }
-
-        public long LastCompletedRuntimeUnlockRegularV4RouteCommitDrainGeneration { get; set; }
-
         public RuntimeUnlockRegularV4RouteCommitDrain?
             PendingRuntimeUnlockRegularV4RouteCommitDrain { get; set; }
 
@@ -21596,6 +21708,12 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public RuntimeUnlockUncommittedTunaFallbackAdoptionContinuation?
             PendingRuntimeUnlockUncommittedTunaFallbackAdoptionContinuation { get; set; }
+
+        public int LastRuntimeUnlockUncommittedTunaFallbackAdoptionRestageHandoffGeneration
+        {
+            get;
+            set;
+        }
 
         public int LastRuntimeUnlockUncommittedTunaFallbackRetainedPeerProofDispatchGeneration { get; set; }
 
@@ -22209,6 +22327,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public Dictionary<string, V4SenderRepairRequestState> PullV4SenderPumpRepairRequests { get; } = new(StringComparer.Ordinal);
 
         public int V4LastStateEpoch { get; set; } = -1;
+
+        public int V4LastStateDurableHighestChunkIndex { get; set; } = -1;
 
         public int PullV4StateReceivedCountTotal { get; set; }
 
