@@ -2607,6 +2607,87 @@ public sealed partial class NknSignalingTransport
         return true;
     }
 
+    private bool TryValidateRuntimeUnlockRegularV4RecoveryExecutionReceipt(
+        RuntimeUnlockRegularV4RecoveryLifecycleDecision decision,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (decision.ExecutionReceipt is not { } receipt || receipt.IsDefault)
+        {
+            rejectionReason = "regular_v4_recovery_execution_receipt_missing";
+            return false;
+        }
+
+        lock (accelerationGate)
+        {
+            if (lastFileTransferBridgeRecoveryExecutionReceipt is not { } acceptedReceipt ||
+                acceptedReceipt != receipt)
+            {
+                rejectionReason = "regular_v4_recovery_execution_receipt_not_accepted";
+                return false;
+            }
+        }
+
+        var expectedOutcome = receipt.Outcome switch
+        {
+            FileTransferBridgeRecoveryExecutionOutcome.Completed =>
+                RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed,
+            FileTransferBridgeRecoveryExecutionOutcome.Exhausted =>
+                RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Exhausted,
+            FileTransferBridgeRecoveryExecutionOutcome.Discarded =>
+                RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Discarded,
+            _ => (RuntimeUnlockRegularV4RecoveryLifecycleOutcome?)null,
+        };
+        if (expectedOutcome is null || decision.Report.Outcome != expectedOutcome.Value)
+        {
+            rejectionReason = "regular_v4_recovery_execution_receipt_outcome_mismatch";
+            return false;
+        }
+
+        if (receipt.Command.RecoveryLivenessLease is not { } commandLease ||
+            commandLease != decision.Report.RecoveryAuthority.RecoveryLivenessLease)
+        {
+            rejectionReason = "regular_v4_recovery_execution_receipt_lease_mismatch";
+            return false;
+        }
+
+        var reportAuthority = decision.Report.Authority;
+        var commandDecision = receipt.Command.Decision;
+        var commandOwner = commandDecision.RuntimeOwner;
+        if (!string.Equals(reportAuthority.SessionId, commandOwner.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(reportAuthority.TransferId, commandOwner.TransferId, StringComparison.Ordinal) ||
+            reportAuthority.Direction != commandOwner.Direction ||
+            commandOwner != commandLease.RuntimeOwner ||
+            commandDecision.CurrentRoute != commandLease.Route ||
+            !string.Equals(reportAuthority.RouteToken, commandLease.RouteToken, StringComparison.Ordinal) ||
+            reportAuthority.ProtocolVersion != commandDecision.CurrentProtocolVersion ||
+            reportAuthority.ProtocolVersion != commandLease.ProtocolVersion ||
+            reportAuthority.LiveRouteEpoch != commandDecision.CurrentLiveRouteEpoch ||
+            reportAuthority.LiveRouteEpoch != commandLease.LiveRouteEpoch ||
+            reportAuthority.RuntimeGeneration != commandDecision.CurrentRuntimeGeneration ||
+            reportAuthority.RuntimeGeneration != commandLease.RuntimeGeneration ||
+            reportAuthority.TerminalGeneration != commandDecision.CurrentTerminalGeneration ||
+            reportAuthority.TerminalGeneration != commandLease.TerminalGeneration ||
+            reportAuthority.TransferLegGeneration != commandDecision.CurrentLegGeneration ||
+            reportAuthority.TransferLegGeneration != commandLease.LegGeneration ||
+            reportAuthority.TransportEpoch != commandDecision.TransportEpoch ||
+            reportAuthority.TransportEpoch != commandLease.TransportEpoch ||
+            reportAuthority.BridgeRecoveryGeneration != commandDecision.BridgeRecoveryGeneration ||
+            reportAuthority.BridgeRecoveryGeneration != commandLease.BridgeRecoveryGeneration ||
+            reportAuthority.BridgeDecisionGeneration != commandDecision.BridgeDecisionGeneration ||
+            !string.Equals(
+                reportAuthority.RecoveryKind,
+                commandDecision.RecoveryKind.ToString(),
+                StringComparison.Ordinal) ||
+            !string.Equals(reportAuthority.Reason, commandDecision.Reason, StringComparison.Ordinal))
+        {
+            rejectionReason = "regular_v4_recovery_execution_receipt_scope_mismatch";
+            return false;
+        }
+
+        return true;
+    }
+
     private static string ResolveRuntimeUnlockRegularV4RecoveryLeaseClosureMismatchKind(
         string? rejectionReason)
     {
@@ -19501,6 +19582,12 @@ public sealed partial class NknSignalingTransport
     {
         var accepted = false;
         var rejectionReason = "none";
+        var receiptBacked = decision.ExecutionReceipt is not null;
+        var receiptCurrent = !receiptBacked ||
+            TryValidateRuntimeUnlockRegularV4RecoveryExecutionReceipt(
+                decision,
+                out rejectionReason);
+        var report = decision.Report;
         RuntimeUnlockRegularV4RecoveryLeaseClosureReceipt? retainedReceipt = null;
         RuntimeUnlockRegularV4RecoveryLeaseClosureContinuationProof? retainedContinuationProof = null;
         lock (fileTransferFallbackProofGate)
@@ -19510,25 +19597,63 @@ public sealed partial class NknSignalingTransport
             {
                 rejectionReason = "regular_v4_recovery_lifecycle_state_missing";
             }
-            else if (state.PendingLifecycleReport is not { } pending || pending != decision.Report)
+            else if (!receiptCurrent)
+            {
+                // Receipt-backed lifecycle decisions are valid only after Infra has
+                // observed the exact coordinator-accepted execution receipt.
+            }
+            else if (!receiptBacked &&
+                     (state.PendingLifecycleReport is not { } pending || pending != report))
             {
                 rejectionReason = "regular_v4_recovery_lifecycle_report_not_pending";
+            }
+            else if (receiptBacked &&
+                     (state.RecoveryAuthority != report.RecoveryAuthority ||
+                      state.Generation != report.RegularV4LivenessGeneration ||
+                      (state.Completed || state.RecoveryExhausted) &&
+                      state.LastAppliedLifecycleReport != report))
+            {
+                rejectionReason = "regular_v4_recovery_execution_receipt_state_mismatch";
             }
             else if (decision.Status is not (
                          RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted or
                          RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Idempotent))
             {
                 rejectionReason = decision.Reason;
-                state.PendingLifecycleReport = null;
-                state.PendingLifecycleDecision = decision;
+                if (!receiptBacked)
+                {
+                    state.PendingLifecycleReport = null;
+                    state.PendingLifecycleDecision = decision;
+                }
             }
             else if (decision.State is null ||
-                     decision.State.LastRuntimeUnlockRegularV4RecoveryLifecycle != pending ||
+                     decision.State.LastRuntimeUnlockRegularV4RecoveryLifecycle != report ||
                      decision.State.CurrentRecoveryLivenessLease is not null)
             {
                 rejectionReason = "regular_v4_recovery_lifecycle_decision_state_mismatch";
             }
-            else if (pending.Outcome is (
+            else if (receiptBacked &&
+                     decision.Status ==
+                         RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Idempotent &&
+                     state.LastAppliedLifecycleReport == report)
+            {
+                if (report.Outcome == RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed &&
+                    (state.LeaseClosureReceipt is not { } existingReceipt ||
+                     state.LeaseClosureContinuationProof is not { } existingProof ||
+                     existingReceipt.Report != report ||
+                     existingProof.LifecycleReport != report))
+                {
+                    rejectionReason =
+                        "regular_v4_recovery_lease_closure_duplicate_state_missing";
+                }
+                else
+                {
+                    retainedReceipt = state.LeaseClosureReceipt;
+                    retainedContinuationProof = state.LeaseClosureContinuationProof;
+                    accepted = true;
+                }
+            }
+            else if (report.Outcome is (
                          RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed or
                          RuntimeUnlockRegularV4RecoveryLifecycleOutcome.ReceiveProofObserved) &&
                      !TryCreateRuntimeUnlockRegularV4RecoveryLeaseClosureReceipt(
@@ -19562,9 +19687,33 @@ public sealed partial class NknSignalingTransport
                 }
                 else
                 {
+                    if (receiptBacked)
+                    {
+                        switch (report.Outcome)
+                        {
+                            case RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed:
+                                if (!state.BridgeRecoveryCompleted)
+                                {
+                                    state.BridgeRecoveryCompleted = true;
+                                }
+
+                                break;
+                            case RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Exhausted:
+                                state.RecoveryExhausted = true;
+                                break;
+                            case RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Discarded:
+                                state.Completed = true;
+                                state.LivenessDeferralDeadlineUtcMs = 0;
+                                break;
+                        }
+                    }
+
                     state.PendingLifecycleDecision = decision;
-                    state.LastAppliedLifecycleReport = pending;
-                    state.PendingLifecycleReport = null;
+                    state.LastAppliedLifecycleReport = report;
+                    if (!receiptBacked || state.PendingLifecycleReport == report)
+                    {
+                        state.PendingLifecycleReport = null;
+                    }
                     if (retainedReceipt is not null)
                     {
                         state.LeaseClosureReceipt ??= retainedReceipt;
@@ -19576,18 +19725,18 @@ public sealed partial class NknSignalingTransport
             }
         }
 
-        var report = decision.Report;
         var authority = report.Authority;
+        var executionReceipt = decision.ExecutionReceipt;
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=runtime_unlock_regular_v4_recovery_lifecycle_decided; session_id={SanitizeLogToken(authority?.SessionId ?? "(none)")}; transfer_id={SanitizeLogToken(authority?.TransferId ?? "(none)")}; direction={authority?.Direction.ToString().ToLowerInvariant() ?? "unknown"}; route={SanitizeLogToken(authority?.RouteToken ?? "(none)")}; protocol_version={authority?.ProtocolVersion ?? 0}; live_route_epoch={authority?.LiveRouteEpoch ?? 0}; runtime_generation={authority?.RuntimeGeneration ?? 0}; terminal_generation={authority?.TerminalGeneration ?? 0}; leg_generation={authority?.TransferLegGeneration ?? 0}; transport_epoch={authority?.TransportEpoch ?? 0}; bridge_recovery_generation={authority?.BridgeRecoveryGeneration ?? 0}; bridge_decision_generation={authority?.BridgeDecisionGeneration ?? 0}; regular_v4_liveness_generation={report.RegularV4LivenessGeneration}; lifecycle_outcome={SanitizeLogToken(report.Outcome.ToString())}; lifecycle_reason={SanitizeLogToken(report.Reason)}; decision_status={SanitizeLogToken(decision.Status.ToString())}; decision_reason={SanitizeLogToken(accepted ? decision.Reason : rejectionReason)}");
+            $"event=runtime_unlock_regular_v4_recovery_lifecycle_decided; session_id={SanitizeLogToken(authority?.SessionId ?? "(none)")}; transfer_id={SanitizeLogToken(authority?.TransferId ?? "(none)")}; direction={authority?.Direction.ToString().ToLowerInvariant() ?? "unknown"}; route={SanitizeLogToken(authority?.RouteToken ?? "(none)")}; protocol_version={authority?.ProtocolVersion ?? 0}; live_route_epoch={authority?.LiveRouteEpoch ?? 0}; runtime_generation={authority?.RuntimeGeneration ?? 0}; terminal_generation={authority?.TerminalGeneration ?? 0}; leg_generation={authority?.TransferLegGeneration ?? 0}; transport_epoch={authority?.TransportEpoch ?? 0}; bridge_recovery_generation={authority?.BridgeRecoveryGeneration ?? 0}; bridge_decision_generation={authority?.BridgeDecisionGeneration ?? 0}; regular_v4_liveness_generation={report.RegularV4LivenessGeneration}; lifecycle_source={(receiptBacked ? "execution_receipt" : "legacy_report")}; execution_outcome={executionReceipt?.Outcome.ToString() ?? "none"}; execution_mode={SanitizeLogToken(executionReceipt?.ExecutionMode ?? "none")}; execution_command_generation={executionReceipt?.Command.Decision.BridgeDecisionGeneration ?? 0}; lifecycle_outcome={SanitizeLogToken(report.Outcome.ToString())}; lifecycle_reason={SanitizeLogToken(report.Reason)}; decision_status={SanitizeLogToken(decision.Status.ToString())}; decision_reason={SanitizeLogToken(accepted ? decision.Reason : rejectionReason)}");
         if (accepted &&
             retainedReceipt is not null &&
             retainedContinuationProof is { } immutableContinuationProof)
         {
             LocalOperationalLog.Info(
                 "NKN.Tuna",
-                $"event=runtime_unlock_regular_v4_recovery_lease_closure_retained; {FormatRuntimeUnlockRegularV4RecoveryLeaseClosureReceipt(retainedReceipt)}; {FormatRuntimeUnlockRegularV4RecoveryLeaseClosureContinuationProof(immutableContinuationProof)}; decision_reason=coordinator_lease_closure_accepted");
+                $"event=runtime_unlock_regular_v4_recovery_lease_closure_retained; {FormatRuntimeUnlockRegularV4RecoveryLeaseClosureReceipt(retainedReceipt)}; {FormatRuntimeUnlockRegularV4RecoveryLeaseClosureContinuationProof(immutableContinuationProof)}; lifecycle_source={(receiptBacked ? "execution_receipt" : "legacy_report")}; execution_outcome={executionReceipt?.Outcome.ToString() ?? "none"}; execution_mode={SanitizeLogToken(executionReceipt?.ExecutionMode ?? "none")}; execution_command_generation={executionReceipt?.Command.Decision.BridgeDecisionGeneration ?? 0}; decision_reason=coordinator_lease_closure_accepted");
         }
         else if (!accepted && report.Outcome is (
                      RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed or
@@ -19596,7 +19745,7 @@ public sealed partial class NknSignalingTransport
             var mismatchKind = ResolveRuntimeUnlockRegularV4RecoveryLeaseClosureMismatchKind(rejectionReason);
             LocalOperationalLog.Warn(
                 "NKN.Tuna",
-                $"event=runtime_unlock_regular_v4_recovery_lease_closure_rejected; session_id={SanitizeLogToken(authority?.SessionId ?? "(none)")}; transfer_id={SanitizeLogToken(authority?.TransferId ?? "(none)")}; regular_v4_liveness_generation={report.RegularV4LivenessGeneration}; lifecycle_outcome={SanitizeLogToken(report.Outcome.ToString())}; decision_status={SanitizeLogToken(decision.Status.ToString())}; mismatch_kind={mismatchKind}; decision_reason={SanitizeLogToken(rejectionReason)}");
+                $"event=runtime_unlock_regular_v4_recovery_lease_closure_rejected; session_id={SanitizeLogToken(authority?.SessionId ?? "(none)")}; transfer_id={SanitizeLogToken(authority?.TransferId ?? "(none)")}; direction={authority?.Direction.ToString().ToLowerInvariant() ?? "unknown"}; route={SanitizeLogToken(authority?.RouteToken ?? "(none)")}; protocol_version={authority?.ProtocolVersion ?? 0}; live_route_epoch={authority?.LiveRouteEpoch ?? 0}; runtime_generation={authority?.RuntimeGeneration ?? 0}; terminal_generation={authority?.TerminalGeneration ?? 0}; leg_generation={authority?.TransferLegGeneration ?? 0}; transport_epoch={authority?.TransportEpoch ?? 0}; bridge_recovery_generation={authority?.BridgeRecoveryGeneration ?? 0}; bridge_decision_generation={authority?.BridgeDecisionGeneration ?? 0}; regular_v4_liveness_generation={report.RegularV4LivenessGeneration}; lifecycle_source={(receiptBacked ? "execution_receipt" : "legacy_report")}; execution_outcome={executionReceipt?.Outcome.ToString() ?? "none"}; execution_mode={SanitizeLogToken(executionReceipt?.ExecutionMode ?? "none")}; execution_command_generation={executionReceipt?.Command.Decision.BridgeDecisionGeneration ?? 0}; lifecycle_outcome={SanitizeLogToken(report.Outcome.ToString())}; decision_status={SanitizeLogToken(decision.Status.ToString())}; mismatch_kind={mismatchKind}; decision_reason={SanitizeLogToken(rejectionReason)}");
         }
         return accepted;
     }

@@ -623,7 +623,11 @@ public sealed partial class SessionFileTransferService
         {
             executionDecision = ObserveBridgeRecoveryExecutionReceiptLocked(request, receipt);
             if (executionDecision is
-                    { Status: FileTransferBridgeRecoveryExecutionDecisionStatus.Accepted } &&
+                    {
+                        Status:
+                            FileTransferBridgeRecoveryExecutionDecisionStatus.Accepted or
+                            FileTransferBridgeRecoveryExecutionDecisionStatus.Idempotent,
+                    } &&
                 request.RegularV4RecoveryAuthority is { IsDefault: false } recoveryAuthority)
             {
                 var lifecycleReport = new RuntimeUnlockRegularV4RecoveryLifecycleReport(
@@ -643,7 +647,10 @@ public sealed partial class SessionFileTransferService
                     string.Equals(outbound.TransferId, request.TransferId, StringComparison.Ordinal))
                 {
                     lifecycleDecision =
-                        ObserveRuntimeUnlockRegularV4RecoveryLifecycleLocked(outbound, lifecycleReport);
+                        ObserveRuntimeUnlockRegularV4RecoveryLifecycleLocked(outbound, lifecycleReport) with
+                        {
+                            ExecutionReceipt = receipt,
+                        };
                 }
                 else if (request.Direction == FileTransferDirection.Inbound &&
                          inboundTransfer is { } inbound &&
@@ -651,7 +658,10 @@ public sealed partial class SessionFileTransferService
                          string.Equals(inbound.TransferId, request.TransferId, StringComparison.Ordinal))
                 {
                     lifecycleDecision =
-                        ObserveRuntimeUnlockRegularV4RecoveryLifecycleLocked(inbound, lifecycleReport);
+                        ObserveRuntimeUnlockRegularV4RecoveryLifecycleLocked(inbound, lifecycleReport) with
+                        {
+                            ExecutionReceipt = receipt,
+                        };
                 }
 
                 if (lifecycleDecision is not null &&
@@ -662,23 +672,19 @@ public sealed partial class SessionFileTransferService
             }
         }
 
-        if (lifecycleBridge is not null && lifecycleDecision is { } resolvedLifecycleDecision)
-        {
-            lifecycleBridge.ObserveRuntimeUnlockRegularV4RecoveryLifecycleDecision(
-                resolvedLifecycleDecision);
-        }
-
         var receiptAccepted = executionDecision is
         {
             Status: FileTransferBridgeRecoveryExecutionDecisionStatus.Accepted or
                 FileTransferBridgeRecoveryExecutionDecisionStatus.Idempotent,
         };
+        var receiptNotificationSucceeded = false;
         try
         {
             executionBridge.ObserveBridgeRecoveryExecutionReceiptDecision(
                 receipt,
                 receiptAccepted,
                 executionDecision?.Reason ?? "current_transfer_missing");
+            receiptNotificationSucceeded = true;
         }
         catch (Exception ex)
         {
@@ -687,9 +693,17 @@ public sealed partial class SessionFileTransferService
                 $"event=filetransfer_bridge_recovery_execution_receipt_notification_failed; session_id={FormatProtocolLogValue(request.SessionId)}; transfer_id={FormatProtocolLogValue(request.TransferId)}; direction={request.Direction.ToString().ToLowerInvariant()}; bridge_decision_generation={receipt.Command.Decision.BridgeDecisionGeneration}; execution_outcome={receipt.Outcome}; decision_status={executionDecision?.Status.ToString() ?? "missing"}; reason={FormatProtocolLogValue(ex.GetType().Name)}");
         }
 
+        if (receiptNotificationSucceeded &&
+            lifecycleBridge is not null &&
+            lifecycleDecision is { } resolvedLifecycleDecision)
+        {
+            lifecycleBridge.ObserveRuntimeUnlockRegularV4RecoveryLifecycleDecision(
+                resolvedLifecycleDecision);
+        }
+
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_bridge_recovery_execution_completion_decided; session_id={FormatProtocolLogValue(request.SessionId)}; transfer_id={FormatProtocolLogValue(request.TransferId)}; direction={request.Direction.ToString().ToLowerInvariant()}; execution_outcome={receipt.Outcome}; execution_mode={FormatProtocolLogValue(receipt.ExecutionMode)}; execution_reason={FormatProtocolLogValue(receipt.Reason)}; decision_status={executionDecision?.Status.ToString() ?? "missing"}; decision_reason={FormatProtocolLogValue(executionDecision?.Reason ?? "current_transfer_missing")}; lifecycle_status={lifecycleDecision?.Status.ToString() ?? "none"}; lifecycle_reason={FormatProtocolLogValue(lifecycleDecision?.Reason ?? "none")}{FormatReceiveRecoveryAuthorityFields(request)}");
+            $"event=filetransfer_bridge_recovery_execution_completion_decided; session_id={FormatProtocolLogValue(request.SessionId)}; transfer_id={FormatProtocolLogValue(request.TransferId)}; direction={request.Direction.ToString().ToLowerInvariant()}; execution_outcome={receipt.Outcome}; execution_mode={FormatProtocolLogValue(receipt.ExecutionMode)}; execution_reason={FormatProtocolLogValue(receipt.Reason)}; bridge_decision_generation={receipt.Command.Decision.BridgeDecisionGeneration}; lifecycle_source=execution_receipt; receipt_notification_succeeded={(receiptNotificationSucceeded ? 1 : 0)}; decision_status={executionDecision?.Status.ToString() ?? "missing"}; decision_reason={FormatProtocolLogValue(executionDecision?.Reason ?? "current_transfer_missing")}; lifecycle_status={lifecycleDecision?.Status.ToString() ?? "none"}; lifecycle_reason={FormatProtocolLogValue(lifecycleDecision?.Reason ?? "none")}{FormatReceiveRecoveryAuthorityFields(request)}");
     }
 
     private void RetireUndispatchedRegularV4RecoveryAuthority(

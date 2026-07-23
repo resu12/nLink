@@ -633,6 +633,166 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
     }
 
     [Fact]
+    public async Task BridgeRecoveryExecutionCompletion_ReceiptPrecedesLifecycle_AndDuplicateIsIdempotent()
+    {
+        using var fixture = await CreateFixtureAsync(
+            "session_retry_bridge_execution_completion",
+            "transfer_retry_bridge_execution_completion");
+        var (request, receipt) = SeedRunningBridgeRecoveryExecution(
+            fixture.Context,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed);
+
+        await ObserveBridgeRecoveryExecutionCompletionAsync(fixture, request, receipt);
+
+        Assert.Equal("receipt", fixture.Bridge.DequeueBridgeRecoveryCompletionObservation());
+        Assert.Equal("lifecycle", fixture.Bridge.DequeueBridgeRecoveryCompletionObservation());
+        var acceptedReceipt = fixture.Bridge.DequeueBridgeRecoveryExecutionReceiptDecision();
+        Assert.Equal(receipt, acceptedReceipt.Receipt);
+        Assert.True(acceptedReceipt.Accepted);
+        Assert.Equal(
+            "bridge_recovery_execution_receipt_accepted",
+            acceptedReceipt.Reason);
+        var acceptedLifecycle = fixture.Bridge.DequeueRegularV4LifecycleDecision();
+        Assert.Equal(
+            RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted,
+            acceptedLifecycle.Status);
+        Assert.Equal(receipt, acceptedLifecycle.ExecutionReceipt);
+        Assert.True(GetRequiredProperty<bool>(
+            fixture.Context,
+            "RuntimeUnlockRecoveryLeaseClosureAvailable"));
+        var retainedLease = Assert.IsType<RecoveryLivenessLease>(
+            GetOptionalStructProperty<RecoveryLivenessLease>(
+                fixture.Context,
+                "LastRetiredRecoveryLivenessLease"));
+
+        await ObserveBridgeRecoveryExecutionCompletionAsync(fixture, request, receipt);
+
+        Assert.Equal("receipt", fixture.Bridge.DequeueBridgeRecoveryCompletionObservation());
+        Assert.Equal("lifecycle", fixture.Bridge.DequeueBridgeRecoveryCompletionObservation());
+        var duplicateReceipt = fixture.Bridge.DequeueBridgeRecoveryExecutionReceiptDecision();
+        Assert.Equal(receipt, duplicateReceipt.Receipt);
+        Assert.True(duplicateReceipt.Accepted);
+        Assert.Equal(
+            "bridge_recovery_execution_receipt_duplicate",
+            duplicateReceipt.Reason);
+        var duplicateLifecycle = fixture.Bridge.DequeueRegularV4LifecycleDecision();
+        Assert.Equal(
+            RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Idempotent,
+            duplicateLifecycle.Status);
+        Assert.Equal(receipt, duplicateLifecycle.ExecutionReceipt);
+        Assert.Equal(
+            retainedLease,
+            GetOptionalStructProperty<RecoveryLivenessLease>(
+                fixture.Context,
+                "LastRetiredRecoveryLivenessLease"));
+        Assert.True(GetRequiredProperty<bool>(
+            fixture.Context,
+            "RuntimeUnlockRecoveryLeaseClosureAvailable"));
+    }
+
+    [Theory]
+    [InlineData("Exhausted")]
+    [InlineData("Discarded")]
+    public async Task BridgeRecoveryExecutionCompletion_NonCompletedReceiptRetiresLifecycleWithoutClosure(
+        string outcomeName)
+    {
+        var outcome = Enum.Parse<FileTransferBridgeRecoveryExecutionOutcome>(outcomeName);
+        using var fixture = await CreateFixtureAsync(
+            $"session_retry_bridge_execution_{outcome.ToString().ToLowerInvariant()}",
+            $"transfer_retry_bridge_execution_{outcome.ToString().ToLowerInvariant()}");
+        var (request, receipt) = SeedRunningBridgeRecoveryExecution(
+            fixture.Context,
+            outcome);
+
+        await ObserveBridgeRecoveryExecutionCompletionAsync(fixture, request, receipt);
+
+        Assert.Equal("receipt", fixture.Bridge.DequeueBridgeRecoveryCompletionObservation());
+        Assert.Equal("lifecycle", fixture.Bridge.DequeueBridgeRecoveryCompletionObservation());
+        var observedReceipt = fixture.Bridge.DequeueBridgeRecoveryExecutionReceiptDecision();
+        Assert.Equal(receipt, observedReceipt.Receipt);
+        Assert.True(observedReceipt.Accepted);
+        var lifecycle = fixture.Bridge.DequeueRegularV4LifecycleDecision();
+        Assert.Equal(
+            RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted,
+            lifecycle.Status);
+        Assert.Equal(receipt, lifecycle.ExecutionReceipt);
+        Assert.Equal(
+            outcome == FileTransferBridgeRecoveryExecutionOutcome.Exhausted
+                ? RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Exhausted
+                : RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Discarded,
+            lifecycle.Report.Outcome);
+        Assert.Null(GetOptionalStructProperty<RecoveryLivenessLease>(
+            fixture.Context,
+            "CurrentRecoveryLivenessLease"));
+        Assert.NotNull(GetOptionalStructProperty<RecoveryLivenessLease>(
+            fixture.Context,
+            "LastRetiredRecoveryLivenessLease"));
+        Assert.False(GetRequiredProperty<bool>(
+            fixture.Context,
+            "RuntimeUnlockRecoveryLeaseClosureAvailable"));
+    }
+
+    [Fact]
+    public async Task BridgeRecoveryExecutionCompletion_ReceiptNotificationFailureWithholdsLifecycle()
+    {
+        using var fixture = await CreateFixtureAsync(
+            "session_retry_bridge_execution_receipt_notification_failure",
+            "transfer_retry_bridge_execution_receipt_notification_failure");
+        var (request, receipt) = SeedRunningBridgeRecoveryExecution(
+            fixture.Context,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed);
+        fixture.Bridge.ThrowOnBridgeRecoveryExecutionReceiptDecision = true;
+
+        await ObserveBridgeRecoveryExecutionCompletionAsync(fixture, request, receipt);
+
+        Assert.Equal("receipt", fixture.Bridge.DequeueBridgeRecoveryCompletionObservation());
+        Assert.Equal(0, fixture.Bridge.RegularV4LifecycleDecisionCount);
+        Assert.Contains(
+            "event=filetransfer_bridge_recovery_execution_receipt_notification_failed;",
+            LocalOperationalLog.GetRecentLogText(),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task BridgeRecoveryExecutionCompletion_InboundReceiptPrecedesLifecycle()
+    {
+        const string sessionId = "session_retry_bridge_execution_completion_inbound";
+        const string transferId = "transfer_retry_bridge_execution_completion_inbound";
+        using var bridge = new RetryAuthorityLoopbackTransport(sessionId);
+        using var peerTransport = new LoopbackFileTransferTransport(sessionId);
+        using var service = new SessionFileTransferService();
+        using var peerService = new SessionFileTransferService();
+        bridge.Connect(peerTransport);
+        service.AttachTransport(bridge);
+        peerService.AttachTransport(peerTransport);
+        var started = await peerService.TryStartSendAsync(
+            new FileTransferSendDescriptor("inbound-recovery.bin", 1, transferId, 4096),
+            _ => Task.FromResult<Stream>(new MemoryStream([0x33], writable: false)),
+            CancellationToken.None);
+        Assert.NotNull(started);
+        await WaitUntilAsync(() => service.Snapshot.Inbound?.TransferId == transferId);
+        var context = GetInboundContext(service);
+        var (request, receipt) = SeedRunningBridgeRecoveryExecution(
+            context,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            FileTransferDirection.Inbound);
+
+        await ObserveBridgeRecoveryExecutionCompletionAsync(service, bridge, request, receipt);
+
+        Assert.Equal("receipt", bridge.DequeueBridgeRecoveryCompletionObservation());
+        Assert.Equal("lifecycle", bridge.DequeueBridgeRecoveryCompletionObservation());
+        var receiptDecision = bridge.DequeueBridgeRecoveryExecutionReceiptDecision();
+        Assert.True(receiptDecision.Accepted);
+        Assert.Equal(receipt, receiptDecision.Receipt);
+        var lifecycle = bridge.DequeueRegularV4LifecycleDecision();
+        Assert.Equal(FileTransferDirection.Inbound, lifecycle.Report.Authority.Direction);
+        Assert.Equal(receipt, lifecycle.ExecutionReceipt);
+        Assert.Equal(
+            RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted,
+            lifecycle.Status);
+    }
+
+    [Fact]
     public async Task RecoveryLeaseClosureContinuation_DefersOnlyWithinExactRetainedProofWindow()
     {
         using var fixture = await CreateFixtureAsync(
@@ -1412,7 +1572,9 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
     }
 
     private static RuntimeUnlockRegularV4RecoveryLifecycleReport
-        SeedRegularV4RecoveryLifecycle(object context)
+        SeedRegularV4RecoveryLifecycle(
+            object context,
+            FileTransferDirection direction = FileTransferDirection.Outbound)
     {
         var sessionId = GetRequiredProperty<string>(context, "SessionId");
         var transferId = GetRequiredProperty<string>(context, "TransferId");
@@ -1441,7 +1603,7 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         var lease = new RecoveryLivenessLease(
             sessionId,
             transferId,
-            FileTransferDirection.Outbound,
+            direction,
             owner,
             route.Route,
             route.TelemetryToken,
@@ -1464,7 +1626,7 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         var authority = new FileTransferBridgeRecoveryAuthority(
             sessionId,
             transferId,
-            FileTransferDirection.Outbound,
+            direction,
             route.TelemetryToken,
             route.ProtocolVersion,
             epoch?.EpochId ?? 0,
@@ -1480,6 +1642,91 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             new RuntimeUnlockRegularV4RecoveryAuthority(authority, lease),
             RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed,
             "bridge_lifecycle_completed");
+    }
+
+    private static (
+        FileTransferReceiveRecoveryRequest Request,
+        FileTransferBridgeRecoveryExecutionReceipt Receipt)
+        SeedRunningBridgeRecoveryExecution(
+            object context,
+            FileTransferBridgeRecoveryExecutionOutcome outcome,
+            FileTransferDirection direction = FileTransferDirection.Outbound)
+    {
+        var lifecycle = SeedRegularV4RecoveryLifecycle(context, direction);
+        var bridgeDecision = GetRequiredProperty<BridgeRecoveryDecision>(
+            context,
+            "CurrentBridgeRecoveryDecision");
+        var leg = GetRequiredProperty<FileTransferLeg>(context, "CurrentTransferLeg");
+        var command = new FileTransferBridgeRecoveryExecutionCommand(
+            bridgeDecision,
+            lifecycle.RecoveryAuthority.RecoveryLivenessLease,
+            leg.CheckpointRequestId);
+        SetProperty(context, "CurrentBridgeRecoveryExecutionCommand", command);
+        SetProperty(
+            context,
+            "CurrentBridgeRecoveryExecutionState",
+            FileTransferBridgeRecoveryExecutionState.Running);
+        SetProperty(context, "LastBridgeRecoveryExecutionReceipt", null);
+
+        var receipt = new FileTransferBridgeRecoveryExecutionReceipt(
+            command,
+            outcome,
+            "hard_restart",
+            outcome switch
+            {
+                FileTransferBridgeRecoveryExecutionOutcome.Completed =>
+                    "bridge_recovery_completed",
+                FileTransferBridgeRecoveryExecutionOutcome.Exhausted =>
+                    "bridge_recovery_exhausted",
+                _ => "bridge_recovery_discarded",
+            });
+        var authority = lifecycle.Authority;
+        var request = new FileTransferReceiveRecoveryRequest(
+            authority.SessionId,
+            authority.TransferId,
+            authority.Direction,
+            receipt.Reason)
+        {
+            RouteToken = authority.RouteToken,
+            ProtocolVersion = authority.ProtocolVersion,
+            LiveRouteEpoch = authority.LiveRouteEpoch,
+            TransferLegGeneration = authority.TransferLegGeneration,
+            BridgeRecoveryGeneration = authority.BridgeRecoveryGeneration,
+            TransportEpoch = authority.TransportEpoch,
+            CheckpointRequestId = leg.CheckpointRequestId,
+            AuthorityReason = authority.Reason,
+            BridgeRecoveryAuthority = authority,
+            RegularV4RecoveryAuthority = lifecycle.RecoveryAuthority,
+            BridgeRecoveryExecutionCommand = command,
+        };
+        return (request, receipt);
+    }
+
+    private static async Task ObserveBridgeRecoveryExecutionCompletionAsync(
+        RetryFixture fixture,
+        FileTransferReceiveRecoveryRequest request,
+        FileTransferBridgeRecoveryExecutionReceipt receipt)
+        => await ObserveBridgeRecoveryExecutionCompletionAsync(
+            fixture.Service,
+            fixture.Bridge,
+            request,
+            receipt);
+
+    private static async Task ObserveBridgeRecoveryExecutionCompletionAsync(
+        SessionFileTransferService service,
+        RetryAuthorityLoopbackTransport bridge,
+        FileTransferReceiveRecoveryRequest request,
+        FileTransferBridgeRecoveryExecutionReceipt receipt)
+    {
+        var method = typeof(SessionFileTransferService).GetMethod(
+            "ObserveBridgeRecoveryExecutionCompletionAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        var invocation = method!.Invoke(
+            service,
+            [request, Task.FromResult(receipt), bridge]);
+        var task = Assert.IsAssignableFrom<Task>(invocation);
+        await task.WaitAsync(TimeSpan.FromSeconds(3));
     }
 
     private static object GetOutboundContext(SessionFileTransferService service)
@@ -1695,7 +1942,8 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
 
     private sealed class RetryAuthorityLoopbackTransport(string sessionId) :
         LoopbackFileTransferTransport(sessionId),
-        IRuntimeUnlockRetryDispatchAuthorityBridge
+        IRuntimeUnlockRetryDispatchAuthorityBridge,
+        IFileTransferBridgeRecoveryExecutionBridge
     {
         private readonly ConcurrentQueue<RuntimeUnlockRetryDispatchDecision> authorityDecisions = [];
         private readonly ConcurrentQueue<RuntimeUnlockRetryDispatchDecisionStageResult> stageResults = [];
@@ -1703,10 +1951,16 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         private readonly ConcurrentQueue<RuntimeUnlockRetryDispatchSettlementDecision> settlementDecisions = [];
         private readonly ConcurrentQueue<RuntimeUnlockRegularV4RecoverySettlementDecision> regularV4SettlementDecisions = [];
         private readonly ConcurrentQueue<RuntimeUnlockRegularV4RecoveryLifecycleDecision> regularV4LifecycleDecisions = [];
+        private readonly ConcurrentQueue<(
+            FileTransferBridgeRecoveryExecutionReceipt Receipt,
+            bool Accepted,
+            string Reason)> bridgeRecoveryExecutionReceiptDecisions = [];
+        private readonly ConcurrentQueue<string> bridgeRecoveryCompletionObservations = [];
         private EventHandler<RuntimeUnlockRetryDispatchAuthorityRequestedEventArgs>? authorityRequested;
         private EventHandler<RuntimeUnlockRetryDispatchSettlementReportedEventArgs>? settlementReported;
         private EventHandler<RuntimeUnlockRegularV4RecoverySettlementReportedEventArgs>? regularV4SettlementReported;
         private EventHandler<RuntimeUnlockRegularV4RecoveryLifecycleReportedEventArgs>? regularV4LifecycleReported;
+        private EventHandler<FileTransferBridgeRecoveryEvaluationRequestedEventArgs>? bridgeRecoveryEvaluationRequested;
         private RuntimeUnlockRetryDispatchAuthorityRequest? pendingRequest;
         private RuntimeUnlockRetryDispatchDecision? pendingStage;
         private long pendingStageStagedUtcMs;
@@ -1743,8 +1997,19 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             remove => regularV4LifecycleReported -= value;
         }
 
+        public event EventHandler<FileTransferBridgeRecoveryEvaluationRequestedEventArgs>?
+            BridgeRecoveryEvaluationRequested
+        {
+            add => bridgeRecoveryEvaluationRequested += value;
+            remove => bridgeRecoveryEvaluationRequested -= value;
+        }
+
         public int AuthorityRequestSubscriberCount =>
             authorityRequested?.GetInvocationList().Length ?? 0;
+
+        public bool ThrowOnBridgeRecoveryExecutionReceiptDecision { get; set; }
+
+        public int RegularV4LifecycleDecisionCount => regularV4LifecycleDecisions.Count;
 
         public int SettlementReportSubscriberCount =>
             settlementReported?.GetInvocationList().Length ?? 0;
@@ -1852,6 +2117,21 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         {
             Assert.True(regularV4LifecycleDecisions.TryDequeue(out var decision));
             return decision;
+        }
+
+        public (
+            FileTransferBridgeRecoveryExecutionReceipt Receipt,
+            bool Accepted,
+            string Reason) DequeueBridgeRecoveryExecutionReceiptDecision()
+        {
+            Assert.True(bridgeRecoveryExecutionReceiptDecisions.TryDequeue(out var decision));
+            return decision;
+        }
+
+        public string DequeueBridgeRecoveryCompletionObservation()
+        {
+            Assert.True(bridgeRecoveryCompletionObservations.TryDequeue(out var observation));
+            return observation;
         }
 
         public bool TryGetPendingRuntimeUnlockRetryDispatchAuthorityRequest(
@@ -2130,8 +2410,37 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         public bool ObserveRuntimeUnlockRegularV4RecoveryLifecycleDecision(
             RuntimeUnlockRegularV4RecoveryLifecycleDecision decision)
         {
+            bridgeRecoveryCompletionObservations.Enqueue("lifecycle");
             regularV4LifecycleDecisions.Enqueue(decision);
             return true;
         }
+
+        public FileTransferBridgeRecoveryExecutionStartResult BeginBridgeRecoveryExecution(
+            FileTransferBridgeRecoveryExecutionCommand command)
+            => new(
+                command,
+                FileTransferBridgeRecoveryExecutionStartStatus.Rejected,
+                "test_bridge_recovery_execution_not_started",
+                Completion: null);
+
+        public void ObserveBridgeRecoveryExecutionReceiptDecision(
+            FileTransferBridgeRecoveryExecutionReceipt receipt,
+            bool accepted,
+            string reason)
+        {
+            bridgeRecoveryCompletionObservations.Enqueue("receipt");
+            if (ThrowOnBridgeRecoveryExecutionReceiptDecision)
+            {
+                throw new InvalidOperationException(
+                    "test_bridge_recovery_execution_receipt_notification_failed");
+            }
+
+            bridgeRecoveryExecutionReceiptDecisions.Enqueue((receipt, accepted, reason));
+        }
+
+        public bool InvalidateBridgeRecoveryExecution(
+            FileTransferBridgeRecoveryExecutionCommand command,
+            string reason)
+            => true;
     }
 }

@@ -1575,6 +1575,8 @@ internal readonly record struct RuntimeUnlockRegularV4RecoveryLifecycleDecision(
     public bool Accepted => Status == RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted;
 
     public FileTransferCoordinatorState State { get; init; } = null!;
+
+    public FileTransferBridgeRecoveryExecutionReceipt? ExecutionReceipt { get; init; }
 }
 
 internal sealed class RuntimeUnlockRetryDispatchAuthorityRequestedEventArgs(
