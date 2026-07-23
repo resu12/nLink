@@ -1,3 +1,5 @@
+using NLink.Core.FileTransfer;
+
 namespace NLink.Infra.Nkn;
 
 internal enum BridgeLifecycleEventKind
@@ -43,7 +45,8 @@ internal readonly record struct BridgeLifecycleEvent(
     long TotalMessagesReceivedSinceLast = 0,
     long ControlMessagesReceivedSinceLast = 0,
     long MediaMessagesReceivedSinceLast = 0,
-    long BulkMessagesReceivedSinceLast = 0);
+    long BulkMessagesReceivedSinceLast = 0,
+    FileTransferBridgeRecoveryExecutionCommand? RecoveryExecutionCommand = null);
 
 internal readonly record struct BridgeExitClassification(
     BridgeExitReasonKind ReasonKind,

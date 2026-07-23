@@ -141,11 +141,119 @@ public sealed record FileTransferReceiveRecoveryRequest(
     public FileTransferBridgeRecoveryAuthority? BridgeRecoveryAuthority { get; init; }
 
     internal RuntimeUnlockRegularV4RecoveryAuthority? RegularV4RecoveryAuthority { get; init; }
+
+    internal FileTransferBridgeRecoveryExecutionCommand? BridgeRecoveryExecutionCommand { get; init; }
 }
 
 public interface IFileTransferReceiveRecoveryController
 {
     void RequestFileTransferReceiveRecovery(FileTransferReceiveRecoveryRequest request);
+}
+
+internal enum FileTransferBridgeRecoveryExecutionStartStatus
+{
+    Started,
+    Idempotent,
+    Rejected,
+}
+
+internal enum FileTransferBridgeRecoveryExecutionOutcome
+{
+    Completed,
+    Exhausted,
+    Discarded,
+}
+
+internal enum FileTransferBridgeRecoveryExecutionState
+{
+    Issued,
+    Running,
+}
+
+internal readonly record struct FileTransferBridgeRecoveryExecutionCommand(
+    BridgeRecoveryDecision Decision,
+    RecoveryLivenessLease? RecoveryLivenessLease,
+    string? CheckpointRequestId)
+{
+    public bool IsDefault =>
+        Decision.IsDefault ||
+        !Decision.Accepted ||
+        Decision.RecoveryKind == BridgeRecoveryKind.Unknown;
+}
+
+internal readonly record struct FileTransferBridgeRecoveryExecutionReceipt(
+    FileTransferBridgeRecoveryExecutionCommand Command,
+    FileTransferBridgeRecoveryExecutionOutcome Outcome,
+    string ExecutionMode,
+    string Reason)
+{
+    public bool IsDefault =>
+        Command.IsDefault ||
+        string.IsNullOrWhiteSpace(ExecutionMode) ||
+        string.IsNullOrWhiteSpace(Reason) ||
+        !string.Equals(ExecutionMode, ExecutionMode.Trim(), StringComparison.Ordinal) ||
+        !string.Equals(Reason, Reason.Trim(), StringComparison.Ordinal);
+}
+
+internal readonly record struct FileTransferBridgeRecoveryExecutionStartResult(
+    FileTransferBridgeRecoveryExecutionCommand Command,
+    FileTransferBridgeRecoveryExecutionStartStatus Status,
+    string Reason,
+    Task<FileTransferBridgeRecoveryExecutionReceipt>? Completion)
+{
+    public bool Accepted =>
+        !Command.IsDefault &&
+        !string.IsNullOrWhiteSpace(Reason) &&
+        string.Equals(Reason, Reason.Trim(), StringComparison.Ordinal) &&
+        Status is (
+            FileTransferBridgeRecoveryExecutionStartStatus.Started or
+            FileTransferBridgeRecoveryExecutionStartStatus.Idempotent) &&
+        Completion is not null;
+}
+
+internal readonly record struct FileTransferBridgeRecoveryEvaluationRequest(
+    string? SessionId,
+    string? TransferId,
+    FileTransferDirection? Direction,
+    string ObservationKind,
+    string Reason,
+    long ObservationGeneration,
+    int ConsecutiveObservations = 0,
+    long FramesSentSinceLast = 0,
+    long MessagesReceivedSinceLast = 0,
+    long ControlLastReceivedAgeMs = -1,
+    long BulkLastReceivedAgeMs = -1)
+{
+    public bool IsDefault =>
+        string.IsNullOrWhiteSpace(ObservationKind) ||
+        string.IsNullOrWhiteSpace(Reason) ||
+        !string.Equals(ObservationKind, ObservationKind.Trim(), StringComparison.Ordinal) ||
+        !string.Equals(Reason, Reason.Trim(), StringComparison.Ordinal) ||
+        ObservationGeneration <= 0;
+}
+
+internal sealed class FileTransferBridgeRecoveryEvaluationRequestedEventArgs(
+    FileTransferBridgeRecoveryEvaluationRequest request) : EventArgs
+{
+    public FileTransferBridgeRecoveryEvaluationRequest Request { get; } = request;
+}
+
+internal interface IFileTransferBridgeRecoveryExecutionBridge
+{
+    event EventHandler<FileTransferBridgeRecoveryEvaluationRequestedEventArgs>?
+        BridgeRecoveryEvaluationRequested;
+
+    FileTransferBridgeRecoveryExecutionStartResult BeginBridgeRecoveryExecution(
+        FileTransferBridgeRecoveryExecutionCommand command);
+
+    void ObserveBridgeRecoveryExecutionReceiptDecision(
+        FileTransferBridgeRecoveryExecutionReceipt receipt,
+        bool accepted,
+        string reason);
+
+    bool InvalidateBridgeRecoveryExecution(
+        FileTransferBridgeRecoveryExecutionCommand command,
+        string reason);
 }
 
 public enum FileTransferRecoveryLivenessState

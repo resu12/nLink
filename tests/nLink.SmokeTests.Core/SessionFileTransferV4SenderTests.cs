@@ -824,6 +824,112 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
+    public async Task BridgeRecoveryExecution_TerminalizationBeforeFinalDispatchPreventsBegin()
+    {
+        const string transferId = "transfer_bridge_recovery_terminal_before_dispatch";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        using var finalDispatchReached = new ManualResetEventSlim();
+        using var releaseFinalDispatch = new ManualResetEventSlim();
+        service.BridgeRecoveryExecutionBeforeFinalDispatchForTests = () =>
+        {
+            finalDispatchReached.Set();
+            Assert.True(releaseFinalDispatch.Wait(TimeSpan.FromSeconds(5)));
+        };
+        var requestMethod = typeof(SessionFileTransferService)
+            .GetMethod("TryRequestFileTransferReceiveRecovery", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+        var recoveryTask = Task.Run(() => (bool)requestMethod.Invoke(
+            service,
+            [
+                new FileTransferReceiveRecoveryRequest(
+                    $"session_{transferId}",
+                    transferId,
+                    FileTransferDirection.Outbound,
+                    "session_liveness_timeout_pending"),
+            ])!);
+        Assert.True(finalDispatchReached.Wait(TimeSpan.FromSeconds(5)));
+
+        var terminal = await service.CancelTransferAsync(
+            transferId,
+            "unit_test_terminal_before_bridge_recovery_dispatch",
+            CancellationToken.None);
+        Assert.NotNull(terminal);
+        releaseFinalDispatch.Set();
+
+        Assert.False(await recoveryTask.WaitAsync(TimeSpan.FromSeconds(5)));
+        await WaitUntilAsync(
+            () => !transport.InvalidatedBridgeRecoveryExecutionCommands.IsEmpty);
+        Assert.Empty(transport.BridgeRecoveryExecutionCommands);
+        Assert.Single(transport.InvalidatedBridgeRecoveryExecutionCommands);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
+    public async Task BridgeRecoveryExecution_BeginLinearizesBeforeTerminalInvalidation()
+    {
+        const string transferId = "transfer_bridge_recovery_begin_before_terminal";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        using var beginReached = new ManualResetEventSlim();
+        using var releaseBegin = new ManualResetEventSlim();
+        transport.BridgeRecoveryExecutionBeginObserverForTests = _ =>
+        {
+            beginReached.Set();
+            Assert.True(releaseBegin.Wait(TimeSpan.FromSeconds(5)));
+        };
+        var requestMethod = typeof(SessionFileTransferService)
+            .GetMethod("TryRequestFileTransferReceiveRecovery", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+        var recoveryTask = Task.Run(() => (bool)requestMethod.Invoke(
+            service,
+            [
+                new FileTransferReceiveRecoveryRequest(
+                    $"session_{transferId}",
+                    transferId,
+                    FileTransferDirection.Outbound,
+                    "session_liveness_timeout_pending"),
+            ])!);
+        Assert.True(beginReached.Wait(TimeSpan.FromSeconds(5)));
+
+        var terminalTask = Task.Run(() => service.CancelTransferAsync(
+            transferId,
+            "unit_test_terminal_after_bridge_recovery_begin",
+            CancellationToken.None));
+        await Task.Delay(50);
+        Assert.False(terminalTask.IsCompleted);
+        releaseBegin.Set();
+
+        Assert.NotNull(await terminalTask.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.False(await recoveryTask.WaitAsync(TimeSpan.FromSeconds(5)));
+        await WaitUntilAsync(
+            () => !transport.InvalidatedBridgeRecoveryExecutionCommands.IsEmpty);
+        Assert.Single(transport.BridgeRecoveryExecutionCommands);
+        Assert.Single(transport.InvalidatedBridgeRecoveryExecutionCommands);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
     public void RecoveryLivenessDeferral_AfterAcceptedLifecycleCompletion_DoesNotReconstructLeaseOrDeadline()
     {
         const string transferId = "transfer_regular_v4_liveness_after_completion";
@@ -868,7 +974,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
-    public void RecoveryLivenessDeferral_AfterBridgeDecisionReplacement_DoesNotReconstructLeaseOrDeadline()
+    public async Task RecoveryLivenessDeferral_AfterBridgeDecisionReplacement_DoesNotReconstructLeaseOrDeadline()
     {
         const string transferId = "transfer_regular_v4_liveness_after_bridge_replacement";
         using var service = new SessionFileTransferService();
@@ -882,6 +988,16 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             GetPrivatePropertyValue(context, "CurrentRuntimeOwner"));
         var leg = Assert.IsType<FileTransferLeg>(
             GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        var initialExecutionCommand = Assert.Single(
+            transport.BridgeRecoveryExecutionCommands);
+        var discardedReceipt = transport.CompleteBridgeRecoveryExecution(
+            initialExecutionCommand,
+            FileTransferBridgeRecoveryExecutionOutcome.Discarded,
+            "unit_test_bridge_decision_replacement");
+        await WaitUntilAsync(() =>
+            transport.BridgeRecoveryExecutionReceiptDecisions.Any(decision =>
+                decision.Receipt == discardedReceipt &&
+                decision.Accepted));
         var replacement = FileTransferCoordinator.AuthorizeAction(
             CreateCoordinatorStateForTest(context),
             new FileTransferCoordinatorActionRequest(

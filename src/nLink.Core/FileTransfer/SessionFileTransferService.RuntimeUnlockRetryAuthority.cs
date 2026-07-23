@@ -159,7 +159,18 @@ public sealed partial class SessionFileTransferService
                 string.Equals(report.Authority.SessionId, outbound.SessionId, StringComparison.Ordinal) &&
                 string.Equals(report.Authority.TransferId, outbound.TransferId, StringComparison.Ordinal))
             {
-                decision = ObserveRuntimeUnlockRegularV4RecoveryLifecycleLocked(outbound, report);
+                decision = IsBridgeRecoveryExecutionLifecycleAwaitingReceipt(
+                    outbound.CurrentBridgeRecoveryExecutionCommand,
+                    outbound.CurrentBridgeRecoveryExecutionState,
+                    report)
+                    ? new RuntimeUnlockRegularV4RecoveryLifecycleDecision(
+                        RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Rejected,
+                        "bridge_recovery_execution_receipt_required",
+                        report)
+                    {
+                        State = CreateCoordinatorStateLocked(outbound),
+                    }
+                    : ObserveRuntimeUnlockRegularV4RecoveryLifecycleLocked(outbound, report);
             }
             else if (!report.IsDefault &&
                      bridgeIsCurrentTransport &&
@@ -168,7 +179,18 @@ public sealed partial class SessionFileTransferService
                      string.Equals(report.Authority.SessionId, inbound.SessionId, StringComparison.Ordinal) &&
                      string.Equals(report.Authority.TransferId, inbound.TransferId, StringComparison.Ordinal))
             {
-                decision = ObserveRuntimeUnlockRegularV4RecoveryLifecycleLocked(inbound, report);
+                decision = IsBridgeRecoveryExecutionLifecycleAwaitingReceipt(
+                    inbound.CurrentBridgeRecoveryExecutionCommand,
+                    inbound.CurrentBridgeRecoveryExecutionState,
+                    report)
+                    ? new RuntimeUnlockRegularV4RecoveryLifecycleDecision(
+                        RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Rejected,
+                        "bridge_recovery_execution_receipt_required",
+                        report)
+                    {
+                        State = CreateCoordinatorStateLocked(inbound),
+                    }
+                    : ObserveRuntimeUnlockRegularV4RecoveryLifecycleLocked(inbound, report);
             }
             else if (outboundTransfer is { } rejectionOutbound)
             {
@@ -197,6 +219,26 @@ public sealed partial class SessionFileTransferService
             bridge.ObserveRuntimeUnlockRegularV4RecoveryLifecycleDecision(resolvedDecision);
         }
     }
+
+    private static bool IsBridgeRecoveryExecutionLifecycleAwaitingReceipt(
+        FileTransferBridgeRecoveryExecutionCommand? command,
+        FileTransferBridgeRecoveryExecutionState? executionState,
+        RuntimeUnlockRegularV4RecoveryLifecycleReport report)
+        => report.Outcome is not RuntimeUnlockRegularV4RecoveryLifecycleOutcome.ReceiveProofObserved &&
+           executionState is
+               FileTransferBridgeRecoveryExecutionState.Issued or
+               FileTransferBridgeRecoveryExecutionState.Running &&
+           command is
+           {
+               IsDefault: false,
+               RecoveryLivenessLease: { } recoveryLivenessLease,
+           } currentCommand &&
+           currentCommand.Decision.BridgeDecisionGeneration ==
+               report.Authority.BridgeDecisionGeneration &&
+           currentCommand.Decision.RuntimeOwner.SessionId == report.Authority.SessionId &&
+           currentCommand.Decision.RuntimeOwner.TransferId == report.Authority.TransferId &&
+           currentCommand.Decision.RuntimeOwner.Direction == report.Authority.Direction &&
+           recoveryLivenessLease == report.RecoveryAuthority.RecoveryLivenessLease;
 
     private static RuntimeUnlockRegularV4RecoveryLifecycleDecision
         ObserveRuntimeUnlockRegularV4RecoveryLifecycleLocked(

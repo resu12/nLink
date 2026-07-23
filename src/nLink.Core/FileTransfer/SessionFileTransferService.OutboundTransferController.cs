@@ -55,6 +55,9 @@ public sealed partial class SessionFileTransferService
         IFileTransferRouteCompletionObserver? routeCompletionObserver;
         IFileTransferTerminalObserver? terminalObserver;
         string? normalizedErrorCodeForNotify;
+        IFileTransferBridgeRecoveryExecutionBridge? bridgeRecoveryExecutionBridge = null;
+        FileTransferBridgeRecoveryExecutionCommand? bridgeRecoveryExecutionCommand = null;
+        BridgeRecoveryExecutionDispatchOrdering? bridgeRecoveryExecutionDispatchOrdering = null;
 
         lock (gate)
         {
@@ -114,6 +117,12 @@ public sealed partial class SessionFileTransferService
                 FallbackFrontierRepairSettlementOutcome.TransferTerminal,
                 "outbound_transfer_terminal");
             ConsumeOutboundFallbackTailTerminalProofBeforeTerminalLocked(context, terminalState, "transfer_terminal");
+            bridgeRecoveryExecutionBridge =
+                transport as IFileTransferBridgeRecoveryExecutionBridge;
+            bridgeRecoveryExecutionCommand =
+                context.CurrentBridgeRecoveryExecutionCommand;
+            bridgeRecoveryExecutionDispatchOrdering =
+                context.BridgeRecoveryExecutionDispatchOrdering;
             var terminalDecision = FileTransferCoordinator.Apply(
                 new FileTransferCoordinatorEvent(
                     FileTransferCoordinatorEventKind.Terminalized,
@@ -183,6 +192,16 @@ public sealed partial class SessionFileTransferService
             dataSessionToDispose = context.DetachDataSession();
             routeCompletionObserver = transport as IFileTransferRouteCompletionObserver;
             terminalObserver = transport as IFileTransferTerminalObserver;
+        }
+
+        if (bridgeRecoveryExecutionBridge is not null &&
+            bridgeRecoveryExecutionCommand is { IsDefault: false } outboundExecutionCommand)
+        {
+            InvalidateBridgeRecoveryExecutionOrderedOutsideLock(
+                bridgeRecoveryExecutionDispatchOrdering,
+                bridgeRecoveryExecutionBridge,
+                outboundExecutionCommand,
+                "coordinator_terminalized");
         }
 
         LogV4EfficiencySummary(context, terminalState);
@@ -336,6 +355,9 @@ public sealed partial class SessionFileTransferService
         IFileTransferRouteCompletionObserver? routeCompletionObserver;
         IFileTransferTerminalObserver? terminalObserver;
         string? normalizedErrorCodeForNotify;
+        IFileTransferBridgeRecoveryExecutionBridge? bridgeRecoveryExecutionBridge = null;
+        FileTransferBridgeRecoveryExecutionCommand? bridgeRecoveryExecutionCommand = null;
+        BridgeRecoveryExecutionDispatchOrdering? bridgeRecoveryExecutionDispatchOrdering = null;
 
         lock (gate)
         {
@@ -380,6 +402,12 @@ public sealed partial class SessionFileTransferService
                 FallbackFrontierRepairSettlementOutcome.TransferTerminal,
                 "inbound_transfer_terminal");
             ConsumeInboundFallbackTailTerminalProofBeforeTerminalLocked(context, terminalState, "transfer_terminal");
+            bridgeRecoveryExecutionBridge =
+                transport as IFileTransferBridgeRecoveryExecutionBridge;
+            bridgeRecoveryExecutionCommand =
+                context.CurrentBridgeRecoveryExecutionCommand;
+            bridgeRecoveryExecutionDispatchOrdering =
+                context.BridgeRecoveryExecutionDispatchOrdering;
             var terminalDecision = FileTransferCoordinator.Apply(
                 new FileTransferCoordinatorEvent(
                     FileTransferCoordinatorEventKind.Terminalized,
@@ -444,6 +472,16 @@ public sealed partial class SessionFileTransferService
             dataSessionToDispose = context.DetachDataSession();
             routeCompletionObserver = transport as IFileTransferRouteCompletionObserver;
             terminalObserver = transport as IFileTransferTerminalObserver;
+        }
+
+        if (bridgeRecoveryExecutionBridge is not null &&
+            bridgeRecoveryExecutionCommand is { IsDefault: false } inboundExecutionCommand)
+        {
+            InvalidateBridgeRecoveryExecutionOrderedOutsideLock(
+                bridgeRecoveryExecutionDispatchOrdering,
+                bridgeRecoveryExecutionBridge,
+                inboundExecutionCommand,
+                "coordinator_terminalized");
         }
 
         LogV4EfficiencySummary(context, terminalState);
@@ -1234,6 +1272,12 @@ public sealed partial class SessionFileTransferService
                     OnRuntimeUnlockRegularV4RecoverySettlementReported;
                 retryDispatchBridge.RuntimeUnlockRegularV4RecoveryLifecycleReported -=
                     OnRuntimeUnlockRegularV4RecoveryLifecycleReported;
+            }
+
+            if (previousTransport is IFileTransferBridgeRecoveryExecutionBridge bridgeRecoveryExecutionBridge)
+            {
+                bridgeRecoveryExecutionBridge.BridgeRecoveryEvaluationRequested -=
+                    OnBridgeRecoveryEvaluationRequested;
             }
         }
 

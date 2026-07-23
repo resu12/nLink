@@ -13,6 +13,18 @@ namespace NLink.Core.FileTransfer;
 
 public sealed partial class SessionFileTransferService : IDisposable
 {
+    private readonly record struct BridgeRecoveryExecutionInvalidation(
+        IFileTransferBridgeRecoveryExecutionBridge Bridge,
+        FileTransferBridgeRecoveryExecutionCommand Command,
+        string Reason);
+
+    private sealed class BridgeRecoveryExecutionDispatchOrdering
+    {
+        public object Gate { get; } = new();
+
+        public Queue<BridgeRecoveryExecutionInvalidation> PendingInvalidations { get; } = [];
+    }
+
     private readonly record struct FallbackControlPlaneExchangeOwnerSnapshot(
         string SessionId,
         string TransferId,
@@ -391,6 +403,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private static readonly TimeSpan OutboundWindowTimeout = TimeSpan.FromSeconds(15);
 
     private readonly object gate = new();
+    private readonly BridgeRecoveryExecutionDispatchOrdering bridgeRecoveryExecutionDispatchOrdering = new();
     private readonly object inboundLifecycleDispatchGate = new();
     private readonly object inboundControlDispatchGate = new();
     private readonly object inboundChunkDispatchGate = new();
@@ -410,6 +423,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private bool disposed;
 
     internal Func<string, string, Task>? InboundDispatchBeforeWorkAsyncForTests { get; set; }
+    internal Action? BridgeRecoveryExecutionBeforeFinalDispatchForTests { get; set; }
 
     internal static TimeSpan? V4PeerSilenceTimeoutOverrideForTests { get; set; }
     internal static TimeSpan? V6HeartbeatIntervalOverrideForTests { get; set; }
@@ -698,6 +712,12 @@ public sealed partial class SessionFileTransferService : IDisposable
                 OnRuntimeUnlockRegularV4RecoverySettlementReported;
             retryDispatchBridge.RuntimeUnlockRegularV4RecoveryLifecycleReported +=
                 OnRuntimeUnlockRegularV4RecoveryLifecycleReported;
+        }
+
+        if (transport is IFileTransferBridgeRecoveryExecutionBridge bridgeRecoveryExecutionBridge)
+        {
+            bridgeRecoveryExecutionBridge.BridgeRecoveryEvaluationRequested +=
+                OnBridgeRecoveryEvaluationRequested;
         }
 
         if (transport is ISignalingTransport lifecycleTransport)
@@ -5918,7 +5938,10 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.LastRegularV4FrontierRepairPressureInstallGeneration,
             context.LastRegularV4FrontierRepairPressureSettlementApplyReceipt,
             context.LastRegularV4FrontierRepairPressureRecoveryHandoff,
-            context.LastRuntimeUnlockUncommittedTunaFallbackHandoff);
+            context.LastRuntimeUnlockUncommittedTunaFallbackHandoff,
+            context.CurrentBridgeRecoveryExecutionCommand,
+            context.CurrentBridgeRecoveryExecutionState,
+            context.LastBridgeRecoveryExecutionReceipt);
 
     private static void ApplyCoordinatorDecisionToContextLocked(
         OutboundTransferContext context,
@@ -5926,6 +5949,14 @@ public sealed partial class SessionFileTransferService : IDisposable
         bool forwardRoutePublication = true)
     {
         var previousRoutePublicationToken = context.CurrentRoutePublicationToken;
+        QueueBridgeRecoveryExecutionInvalidationLocked(
+            context.CurrentBridgeRecoveryExecutionCommand,
+            decision.State.CurrentBridgeRecoveryExecutionCommand,
+            context.BridgeRecoveryExecutionBridge,
+            context.BridgeRecoveryExecutionDispatchOrdering,
+            decision.State.IsTerminal
+                ? "coordinator_terminalized"
+                : "coordinator_scope_replaced");
         context.CurrentRuntimeUnlockRetryDispatchContract =
             ReconcileRuntimeUnlockRetryDispatchContract(
                 context.CurrentRuntimeUnlockRetryDispatchContract,
@@ -5984,6 +6015,12 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.LastTransportEpochDecisionGeneration = decision.State.LastTransportEpochDecisionGeneration;
         context.CurrentBridgeRecoveryDecision = decision.State.CurrentBridgeRecoveryDecision;
         context.LastBridgeRecoveryDecisionGeneration = decision.State.LastBridgeRecoveryDecisionGeneration;
+        context.CurrentBridgeRecoveryExecutionCommand =
+            decision.State.CurrentBridgeRecoveryExecutionCommand;
+        context.CurrentBridgeRecoveryExecutionState =
+            decision.State.CurrentBridgeRecoveryExecutionState;
+        context.LastBridgeRecoveryExecutionReceipt =
+            decision.State.LastBridgeRecoveryExecutionReceipt;
         context.CurrentRecoveryLivenessLease = decision.State.CurrentRecoveryLivenessLease;
         context.LastRecoveryLivenessLeaseGeneration = decision.State.LastRecoveryLivenessLeaseGeneration;
         context.LastRetiredRecoveryLivenessLease = decision.State.LastRetiredRecoveryLivenessLease;
@@ -6050,6 +6087,14 @@ public sealed partial class SessionFileTransferService : IDisposable
         FileTransferCoordinatorDecision decision)
     {
         var previousRoutePublicationToken = context.CurrentRoutePublicationToken;
+        QueueBridgeRecoveryExecutionInvalidationLocked(
+            context.CurrentBridgeRecoveryExecutionCommand,
+            decision.State.CurrentBridgeRecoveryExecutionCommand,
+            context.BridgeRecoveryExecutionBridge,
+            context.BridgeRecoveryExecutionDispatchOrdering,
+            decision.State.IsTerminal
+                ? "coordinator_terminalized"
+                : "coordinator_scope_replaced");
         context.CurrentRuntimeUnlockRetryDispatchContract =
             ReconcileRuntimeUnlockRetryDispatchContract(
                 context.CurrentRuntimeUnlockRetryDispatchContract,
@@ -6106,6 +6151,12 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.LastTransportEpochDecisionGeneration = decision.State.LastTransportEpochDecisionGeneration;
         context.CurrentBridgeRecoveryDecision = decision.State.CurrentBridgeRecoveryDecision;
         context.LastBridgeRecoveryDecisionGeneration = decision.State.LastBridgeRecoveryDecisionGeneration;
+        context.CurrentBridgeRecoveryExecutionCommand =
+            decision.State.CurrentBridgeRecoveryExecutionCommand;
+        context.CurrentBridgeRecoveryExecutionState =
+            decision.State.CurrentBridgeRecoveryExecutionState;
+        context.LastBridgeRecoveryExecutionReceipt =
+            decision.State.LastBridgeRecoveryExecutionReceipt;
         context.CurrentRecoveryLivenessLease = decision.State.CurrentRecoveryLivenessLease;
         context.LastRecoveryLivenessLeaseGeneration = decision.State.LastRecoveryLivenessLeaseGeneration;
         context.LastRetiredRecoveryLivenessLease = decision.State.LastRetiredRecoveryLivenessLease;
@@ -6235,6 +6286,12 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.LastTransportEpochDecisionGeneration = decision.State.LastTransportEpochDecisionGeneration;
         context.CurrentBridgeRecoveryDecision = decision.State.CurrentBridgeRecoveryDecision;
         context.LastBridgeRecoveryDecisionGeneration = decision.State.LastBridgeRecoveryDecisionGeneration;
+        context.CurrentBridgeRecoveryExecutionCommand =
+            decision.State.CurrentBridgeRecoveryExecutionCommand;
+        context.CurrentBridgeRecoveryExecutionState =
+            decision.State.CurrentBridgeRecoveryExecutionState;
+        context.LastBridgeRecoveryExecutionReceipt =
+            decision.State.LastBridgeRecoveryExecutionReceipt;
         context.CurrentRecoveryLivenessLease = decision.State.CurrentRecoveryLivenessLease;
         context.LastRecoveryLivenessLeaseGeneration = decision.State.LastRecoveryLivenessLeaseGeneration;
         context.LastRetiredRecoveryLivenessLease = decision.State.LastRetiredRecoveryLivenessLease;
@@ -6302,6 +6359,12 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.LastTransportEpochDecisionGeneration = decision.State.LastTransportEpochDecisionGeneration;
         context.CurrentBridgeRecoveryDecision = decision.State.CurrentBridgeRecoveryDecision;
         context.LastBridgeRecoveryDecisionGeneration = decision.State.LastBridgeRecoveryDecisionGeneration;
+        context.CurrentBridgeRecoveryExecutionCommand =
+            decision.State.CurrentBridgeRecoveryExecutionCommand;
+        context.CurrentBridgeRecoveryExecutionState =
+            decision.State.CurrentBridgeRecoveryExecutionState;
+        context.LastBridgeRecoveryExecutionReceipt =
+            decision.State.LastBridgeRecoveryExecutionReceipt;
         context.CurrentRecoveryLivenessLease = decision.State.CurrentRecoveryLivenessLease;
         context.LastRecoveryLivenessLeaseGeneration = decision.State.LastRecoveryLivenessLeaseGeneration;
         context.LastRetiredRecoveryLivenessLease = decision.State.LastRetiredRecoveryLivenessLease;
@@ -6327,6 +6390,93 @@ public sealed partial class SessionFileTransferService : IDisposable
             ReconcileInboundRegularV4FrontierRepairProjectionLocked(
                 context,
                 $"coordinator_action_{NormalizeReason(decision.Kind.ToString())}");
+        }
+    }
+
+    private static void QueueBridgeRecoveryExecutionInvalidationLocked(
+        FileTransferBridgeRecoveryExecutionCommand? previousCommand,
+        FileTransferBridgeRecoveryExecutionCommand? currentCommand,
+        IFileTransferBridgeRecoveryExecutionBridge? executionBridge,
+        BridgeRecoveryExecutionDispatchOrdering? dispatchOrdering,
+        string reason)
+    {
+        if (previousCommand is not { IsDefault: false } command ||
+            command == currentCommand ||
+            executionBridge is null ||
+            dispatchOrdering is null)
+        {
+            return;
+        }
+
+        lock (dispatchOrdering.Gate)
+        {
+            dispatchOrdering.PendingInvalidations.Enqueue(
+                new BridgeRecoveryExecutionInvalidation(executionBridge, command, reason));
+        }
+
+        _ = Task.Run(() => FlushBridgeRecoveryExecutionInvalidations(dispatchOrdering));
+    }
+
+    private static void FlushBridgeRecoveryExecutionInvalidations(
+        BridgeRecoveryExecutionDispatchOrdering dispatchOrdering)
+    {
+        lock (dispatchOrdering.Gate)
+        {
+            FlushBridgeRecoveryExecutionInvalidationsUnsafe(dispatchOrdering);
+        }
+    }
+
+    private static void FlushBridgeRecoveryExecutionInvalidationsUnsafe(
+        BridgeRecoveryExecutionDispatchOrdering dispatchOrdering)
+    {
+        while (dispatchOrdering.PendingInvalidations.TryDequeue(out var invalidation))
+        {
+            InvalidateBridgeRecoveryExecutionOutsideLock(
+                invalidation.Bridge,
+                invalidation.Command,
+                invalidation.Reason);
+        }
+    }
+
+    private static void InvalidateBridgeRecoveryExecutionOutsideLock(
+        IFileTransferBridgeRecoveryExecutionBridge executionBridge,
+        FileTransferBridgeRecoveryExecutionCommand command,
+        string reason)
+    {
+        try
+        {
+            executionBridge.InvalidateBridgeRecoveryExecution(command, reason);
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn(
+                "FileTransferService",
+                $"event=filetransfer_bridge_recovery_execution_invalidation_failed; session_id={FormatProtocolLogValue(command.Decision.RuntimeOwner.SessionId)}; transfer_id={FormatProtocolLogValue(command.Decision.RuntimeOwner.TransferId)}; direction={command.Decision.RuntimeOwner.Direction.ToString().ToLowerInvariant()}; bridge_decision_generation={command.Decision.BridgeDecisionGeneration}; reason={FormatProtocolLogValue(reason)}; error={FormatProtocolLogValue(ex.GetType().Name)}");
+        }
+    }
+
+    private static void InvalidateBridgeRecoveryExecutionOrderedOutsideLock(
+        BridgeRecoveryExecutionDispatchOrdering? dispatchOrdering,
+        IFileTransferBridgeRecoveryExecutionBridge executionBridge,
+        FileTransferBridgeRecoveryExecutionCommand command,
+        string reason)
+    {
+        if (dispatchOrdering is null)
+        {
+            InvalidateBridgeRecoveryExecutionOutsideLock(
+                executionBridge,
+                command,
+                reason);
+            return;
+        }
+
+        lock (dispatchOrdering.Gate)
+        {
+            FlushBridgeRecoveryExecutionInvalidationsUnsafe(dispatchOrdering);
+            InvalidateBridgeRecoveryExecutionOutsideLock(
+                executionBridge,
+                command,
+                reason);
         }
     }
 
@@ -6674,7 +6824,13 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.LastRegularV4FrontierRepairPressureSettlement,
             context.LastRegularV4FrontierRepairPressureInstallGeneration,
             context.LastRegularV4FrontierRepairPressureSettlementApplyReceipt,
-            context.LastRegularV4FrontierRepairPressureRecoveryHandoff);
+            context.LastRegularV4FrontierRepairPressureRecoveryHandoff,
+            CurrentBridgeRecoveryExecutionCommand:
+                context.CurrentBridgeRecoveryExecutionCommand,
+            CurrentBridgeRecoveryExecutionState:
+                context.CurrentBridgeRecoveryExecutionState,
+            LastBridgeRecoveryExecutionReceipt:
+                context.LastBridgeRecoveryExecutionReceipt);
 
     private static void ApplyRegularV4FrontierRepairPressureBindingStateLocked(
         OutboundTransferContext context,
@@ -8228,6 +8384,10 @@ public sealed partial class SessionFileTransferService : IDisposable
         out FileTransferReceiveRecoveryRequest authorizedRequest)
     {
         authorizedRequest = request;
+        context.BridgeRecoveryExecutionBridge =
+            transport as IFileTransferBridgeRecoveryExecutionBridge;
+        context.BridgeRecoveryExecutionDispatchOrdering =
+            bridgeRecoveryExecutionDispatchOrdering;
         if (context.CurrentRuntimeOwner is not { } owner)
         {
             RejectMissingRuntimeOwnerActionLocked(
@@ -8283,12 +8443,15 @@ public sealed partial class SessionFileTransferService : IDisposable
             outboundBridgeDecision.RecoveryKind == BridgeRecoveryKind.BridgeReceiveStallRecovery;
         if (!decision.Accepted ||
             decision.BridgeRecoveryDecision is null ||
+            decision.BridgeRecoveryExecutionCommand is null ||
             (requiresRegularV4RecoveryAuthority && decision.RecoveryLivenessLease is null))
         {
             var reason = !decision.Accepted
                 ? decision.RejectionReason
                 : decision.BridgeRecoveryDecision is null
                     ? "bridge_recovery_decision_missing"
+                    : decision.BridgeRecoveryExecutionCommand is null
+                        ? "bridge_recovery_execution_command_missing"
                     : "recovery_liveness_lease_missing";
             if (IsRecoveryOwnerAuthorityRejection(reason))
             {
@@ -8329,7 +8492,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         authorizedRequest = AttachBridgeRecoveryAuthority(
             request,
             decision.BridgeRecoveryDecision.Value,
-            decision.RecoveryLivenessLease);
+            decision.RecoveryLivenessLease,
+            decision.BridgeRecoveryExecutionCommand.Value);
         if (requiresRegularV4RecoveryAuthority &&
             authorizedRequest.RegularV4RecoveryAuthority is not { IsDefault: false })
         {
@@ -8395,6 +8559,10 @@ public sealed partial class SessionFileTransferService : IDisposable
         out FileTransferReceiveRecoveryRequest authorizedRequest)
     {
         authorizedRequest = request;
+        context.BridgeRecoveryExecutionBridge =
+            transport as IFileTransferBridgeRecoveryExecutionBridge;
+        context.BridgeRecoveryExecutionDispatchOrdering =
+            bridgeRecoveryExecutionDispatchOrdering;
         if (context.CurrentRuntimeOwner is not { } owner)
         {
             RejectMissingRuntimeOwnerActionLocked(
@@ -8450,12 +8618,15 @@ public sealed partial class SessionFileTransferService : IDisposable
             inboundBridgeDecision.RecoveryKind == BridgeRecoveryKind.BridgeReceiveStallRecovery;
         if (!decision.Accepted ||
             decision.BridgeRecoveryDecision is null ||
+            decision.BridgeRecoveryExecutionCommand is null ||
             (requiresRegularV4RecoveryAuthority && decision.RecoveryLivenessLease is null))
         {
             var reason = !decision.Accepted
                 ? decision.RejectionReason
                 : decision.BridgeRecoveryDecision is null
                     ? "bridge_recovery_decision_missing"
+                    : decision.BridgeRecoveryExecutionCommand is null
+                        ? "bridge_recovery_execution_command_missing"
                     : "recovery_liveness_lease_missing";
             if (IsRecoveryOwnerAuthorityRejection(reason))
             {
@@ -8496,7 +8667,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         authorizedRequest = AttachBridgeRecoveryAuthority(
             request,
             decision.BridgeRecoveryDecision.Value,
-            decision.RecoveryLivenessLease);
+            decision.RecoveryLivenessLease,
+            decision.BridgeRecoveryExecutionCommand.Value);
         if (requiresRegularV4RecoveryAuthority &&
             authorizedRequest.RegularV4RecoveryAuthority is not { IsDefault: false })
         {
@@ -8621,7 +8793,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         var preview = AttachBridgeRecoveryAuthority(
             request,
             transition.BridgeRecoveryDecision,
-            transition.RecoveryLivenessLease);
+            transition.RecoveryLivenessLease,
+            transition.BridgeRecoveryExecutionCommand);
         if (preview.RegularV4RecoveryAuthority is not { IsDefault: false })
         {
             return RejectRegularV4PressureRecoveryHandoff(
@@ -8687,7 +8860,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             accepted: true,
             committed.Reason,
             transition.BridgeRecoveryDecision,
-            transition.RecoveryLivenessLease);
+            transition.RecoveryLivenessLease,
+            transition.BridgeRecoveryExecutionCommand);
     }
 
     private static bool TryGetExactRegularV4PressureRecoveryHandoffContract(
@@ -8740,7 +8914,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             accepted: false,
             reason,
             bridgeRecoveryDecision: null,
-            recoveryLivenessLease: null);
+            recoveryLivenessLease: null,
+            bridgeRecoveryExecutionCommand: null);
     }
 
     private static FileTransferCoordinatorActionDecision CreateBridgeRecoveryActionDecision(
@@ -8749,7 +8924,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         bool accepted,
         string reason,
         BridgeRecoveryDecision? bridgeRecoveryDecision,
-        RecoveryLivenessLease? recoveryLivenessLease)
+        RecoveryLivenessLease? recoveryLivenessLease,
+        FileTransferBridgeRecoveryExecutionCommand? bridgeRecoveryExecutionCommand)
     {
         var owner = state.CurrentRuntimeOwner;
         var leg = state.CurrentLeg;
@@ -8765,7 +8941,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             state.TerminalGeneration,
             leg?.Generation ?? 0,
             BridgeRecoveryDecision: bridgeRecoveryDecision,
-            RecoveryLivenessLease: recoveryLivenessLease)
+            RecoveryLivenessLease: recoveryLivenessLease,
+            BridgeRecoveryExecutionCommand: bridgeRecoveryExecutionCommand)
         {
             State = state,
         };
@@ -8915,7 +9092,8 @@ public sealed partial class SessionFileTransferService : IDisposable
     private static FileTransferReceiveRecoveryRequest AttachBridgeRecoveryAuthority(
         FileTransferReceiveRecoveryRequest request,
         BridgeRecoveryDecision decision,
-        RecoveryLivenessLease? recoveryLivenessLease)
+        RecoveryLivenessLease? recoveryLivenessLease,
+        FileTransferBridgeRecoveryExecutionCommand executionCommand)
     {
         var selection = FileTransferRouteResolver.Resolve(decision.CurrentRoute);
         var authority = new FileTransferBridgeRecoveryAuthority(
@@ -8951,6 +9129,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 : request.AuthorityReason,
             BridgeRecoveryAuthority = authority,
             RegularV4RecoveryAuthority = recoveryAuthority,
+            BridgeRecoveryExecutionCommand = executionCommand,
         };
     }
 
@@ -10192,6 +10371,9 @@ public sealed partial class SessionFileTransferService : IDisposable
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_bridge_recovery_authority_granted; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; action_kind={FormatProtocolLogValue(actionKind.ToString())}; source={FormatProtocolLogValue(source)}; attempted_action={FormatProtocolLogValue(attemptedAction)}; reason={FormatProtocolLogValue(decision.Reason)}; route={FormatProtocolLogValue(routeToken)}; protocol_version={decision.CurrentProtocolVersion}; live_route_epoch={decision.CurrentLiveRouteEpoch}; runtime_generation={decision.CurrentRuntimeGeneration}; terminal_generation={decision.CurrentTerminalGeneration}; leg_generation={decision.CurrentLegGeneration}; transport_epoch={decision.TransportEpoch}; bridge_recovery_generation={decision.BridgeRecoveryGeneration}; bridge_decision_generation={decision.BridgeDecisionGeneration}; bridge_recovery_kind={FormatProtocolLogValue(decision.RecoveryKind.ToString())}; recovery_liveness_lease_authority_id={FormatProtocolLogValue(recoveryLease?.AuthorityId.ToString() ?? "(none)")}; recovery_liveness_lease_generation={recoveryLease?.LeaseGeneration ?? 0}; recovery_liveness_lease_state={FormatProtocolLogValue(recoveryLease?.State.ToString() ?? "(none)")}; checkpoint_request_id={FormatProtocolLogValue(request.CheckpointRequestId ?? "(none)")}");
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_bridge_recovery_execution_command_issued; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; action_kind={FormatProtocolLogValue(actionKind.ToString())}; source={FormatProtocolLogValue(source)}; attempted_action={FormatProtocolLogValue(attemptedAction)}; reason={FormatProtocolLogValue(decision.Reason)}; route={FormatProtocolLogValue(routeToken)}; protocol_version={decision.CurrentProtocolVersion}; live_route_epoch={decision.CurrentLiveRouteEpoch}; runtime_generation={decision.CurrentRuntimeGeneration}; terminal_generation={decision.CurrentTerminalGeneration}; leg_generation={decision.CurrentLegGeneration}; transport_epoch={decision.TransportEpoch}; bridge_recovery_generation={decision.BridgeRecoveryGeneration}; bridge_decision_generation={decision.BridgeDecisionGeneration}; bridge_recovery_kind={FormatProtocolLogValue(decision.RecoveryKind.ToString())}; recovery_liveness_lease_authority_id={FormatProtocolLogValue(recoveryLease?.AuthorityId.ToString() ?? "(none)")}; recovery_liveness_lease_generation={recoveryLease?.LeaseGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(request.CheckpointRequestId ?? "(none)")}");
     }
 
     private static void LogFileTransferRecoveryLivenessLeaseGranted(
@@ -16659,10 +16841,13 @@ public sealed partial class SessionFileTransferService : IDisposable
         }
 
         var recoveryLease = request.RegularV4RecoveryAuthority?.RecoveryLivenessLease;
+        var bridgeAuthority = request.BridgeRecoveryAuthority;
         return
             $"; route={FormatProtocolLogValue(request.RouteToken ?? "(none)")}" +
             $"; protocol_version={request.ProtocolVersion}" +
             $"; live_route_epoch={request.LiveRouteEpoch}" +
+            $"; runtime_generation={bridgeAuthority?.RuntimeGeneration ?? 0}" +
+            $"; terminal_generation={bridgeAuthority?.TerminalGeneration ?? 0}" +
             $"; leg_generation={request.TransferLegGeneration}" +
             $"; bridge_recovery_generation={request.BridgeRecoveryGeneration}" +
             $"; transport_epoch={request.TransportEpoch}" +
@@ -21637,6 +21822,23 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public int LastBridgeRecoveryDecisionGeneration { get; set; }
 
+        public FileTransferBridgeRecoveryExecutionCommand?
+            CurrentBridgeRecoveryExecutionCommand { get; set; }
+
+        public FileTransferBridgeRecoveryExecutionState?
+            CurrentBridgeRecoveryExecutionState { get; set; }
+
+        public FileTransferBridgeRecoveryExecutionReceipt?
+            LastBridgeRecoveryExecutionReceipt { get; set; }
+
+        public IFileTransferBridgeRecoveryExecutionBridge?
+            BridgeRecoveryExecutionBridge { get; set; }
+
+        public BridgeRecoveryExecutionDispatchOrdering?
+            BridgeRecoveryExecutionDispatchOrdering { get; set; }
+
+        public long LastBridgeRecoveryEvaluationObservationGeneration { get; set; }
+
         public RecoveryLivenessLease? CurrentRecoveryLivenessLease { get; set; }
 
         public int LastRecoveryLivenessLeaseGeneration { get; set; }
@@ -22865,6 +23067,23 @@ public sealed partial class SessionFileTransferService : IDisposable
         public BridgeRecoveryDecision? CurrentBridgeRecoveryDecision { get; set; }
 
         public int LastBridgeRecoveryDecisionGeneration { get; set; }
+
+        public FileTransferBridgeRecoveryExecutionCommand?
+            CurrentBridgeRecoveryExecutionCommand { get; set; }
+
+        public FileTransferBridgeRecoveryExecutionState?
+            CurrentBridgeRecoveryExecutionState { get; set; }
+
+        public FileTransferBridgeRecoveryExecutionReceipt?
+            LastBridgeRecoveryExecutionReceipt { get; set; }
+
+        public IFileTransferBridgeRecoveryExecutionBridge?
+            BridgeRecoveryExecutionBridge { get; set; }
+
+        public BridgeRecoveryExecutionDispatchOrdering?
+            BridgeRecoveryExecutionDispatchOrdering { get; set; }
+
+        public long LastBridgeRecoveryEvaluationObservationGeneration { get; set; }
 
         public RecoveryLivenessLease? CurrentRecoveryLivenessLease { get; set; }
 

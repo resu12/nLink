@@ -1125,8 +1125,13 @@ public sealed class FileTransferCoordinatorTests
                 targetOwner,
                 targetLeg,
                 bridgeRecoveryKind: BridgeRecoveryKind.ReceiveRecoveryRequest));
-        Assert.True(sameEpochBridgeReplacement.Accepted);
-        Assert.Null(sameEpochBridgeReplacement.State.PendingFallbackTailYieldTransportEpochReauthorization);
+        Assert.False(sameEpochBridgeReplacement.Accepted);
+        Assert.Equal(
+            "bridge_recovery_execution_pending",
+            sameEpochBridgeReplacement.RejectionReason);
+        Assert.Equal(
+            bridgeBoundReauthorization,
+            sameEpochBridgeReplacement.State.PendingFallbackTailYieldTransportEpochReauthorization);
 
         targetLeg.TransportEpochId = 6;
         targetLeg.BridgeRecoveryGeneration++;
@@ -3214,6 +3219,152 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void BridgeRecoveryExecution_ExactStartAndReceiptAreOneShot()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var state = StartRegular(regular).State;
+        var owner = Assert.IsType<RuntimeOwnerToken>(state.CurrentRuntimeOwner);
+        var leg = Assert.IsType<FileTransferLeg>(state.CurrentLeg);
+        var recovery = FileTransferCoordinator.AuthorizeAction(
+            state,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.BridgeReceiveStallRecovery,
+                owner,
+                leg,
+                bridgeRecoveryKind: BridgeRecoveryKind.BridgeReceiveStallRecovery,
+                reason: "bridge execution"));
+        var command = Assert.IsType<FileTransferBridgeRecoveryExecutionCommand>(
+            recovery.BridgeRecoveryExecutionCommand);
+        Assert.Equal(recovery.BridgeRecoveryDecision, command.Decision);
+        Assert.Equal(recovery.RecoveryLivenessLease, command.RecoveryLivenessLease);
+        Assert.Equal(leg.CheckpointRequestId, command.CheckpointRequestId);
+        Assert.Equal(command, recovery.State.CurrentBridgeRecoveryExecutionCommand);
+        Assert.Equal(
+            FileTransferBridgeRecoveryExecutionState.Issued,
+            recovery.State.CurrentBridgeRecoveryExecutionState);
+
+        var pendingReceipt = new FileTransferBridgeRecoveryExecutionReceipt(
+            command,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            "hard_restart",
+            "bridge_recovery_completed");
+        var completion = Task.FromResult(pendingReceipt);
+        var started = FileTransferCoordinator.ObserveBridgeRecoveryExecutionStart(
+            recovery.State,
+            new FileTransferBridgeRecoveryExecutionStartResult(
+                command,
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                "bridge_recovery_execution_started",
+                completion));
+        Assert.Equal(
+            FileTransferBridgeRecoveryExecutionDecisionStatus.Accepted,
+            started.Status);
+        Assert.Equal(
+            FileTransferBridgeRecoveryExecutionState.Running,
+            started.State.CurrentBridgeRecoveryExecutionState);
+
+        var duplicateStart = FileTransferCoordinator.ObserveBridgeRecoveryExecutionStart(
+            started.State,
+            new FileTransferBridgeRecoveryExecutionStartResult(
+                command,
+                FileTransferBridgeRecoveryExecutionStartStatus.Idempotent,
+                "bridge_recovery_execution_already_started",
+                completion));
+        Assert.Equal(
+            FileTransferBridgeRecoveryExecutionDecisionStatus.Idempotent,
+            duplicateStart.Status);
+        Assert.Equal(started.State, duplicateStart.State);
+
+        var completed = FileTransferCoordinator.ObserveBridgeRecoveryExecutionReceipt(
+            duplicateStart.State,
+            pendingReceipt);
+        Assert.Equal(
+            FileTransferBridgeRecoveryExecutionDecisionStatus.Accepted,
+            completed.Status);
+        Assert.Null(completed.State.CurrentBridgeRecoveryExecutionCommand);
+        Assert.Null(completed.State.CurrentBridgeRecoveryExecutionState);
+        Assert.Equal(pendingReceipt, completed.State.LastBridgeRecoveryExecutionReceipt);
+
+        var duplicateReceipt = FileTransferCoordinator.ObserveBridgeRecoveryExecutionReceipt(
+            completed.State,
+            pendingReceipt);
+        Assert.Equal(
+            FileTransferBridgeRecoveryExecutionDecisionStatus.Idempotent,
+            duplicateReceipt.Status);
+        Assert.Equal(completed.State, duplicateReceipt.State);
+    }
+
+    [Fact]
+    public void BridgeRecoveryExecution_MutatedOrTerminalCommandCannotStartOrComplete()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var state = StartRegular(regular).State;
+        var owner = Assert.IsType<RuntimeOwnerToken>(state.CurrentRuntimeOwner);
+        var leg = Assert.IsType<FileTransferLeg>(state.CurrentLeg);
+        var recovery = FileTransferCoordinator.AuthorizeAction(
+            state,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.BridgeReceiveStallRecovery,
+                owner,
+                leg,
+                bridgeRecoveryKind: BridgeRecoveryKind.BridgeReceiveStallRecovery));
+        var command = Assert.IsType<FileTransferBridgeRecoveryExecutionCommand>(
+            recovery.BridgeRecoveryExecutionCommand);
+        var mutated = command with
+        {
+            Decision = command.Decision with
+            {
+                BridgeDecisionGeneration =
+                    command.Decision.BridgeDecisionGeneration + 1,
+            },
+        };
+        var mutatedReceipt = new FileTransferBridgeRecoveryExecutionReceipt(
+            mutated,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            "hard_restart",
+            "bridge_recovery_completed");
+
+        var rejectedStart = FileTransferCoordinator.ObserveBridgeRecoveryExecutionStart(
+            recovery.State,
+            new FileTransferBridgeRecoveryExecutionStartResult(
+                mutated,
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                "bridge_recovery_execution_started",
+                Task.FromResult(mutatedReceipt)));
+        Assert.Equal(
+            FileTransferBridgeRecoveryExecutionDecisionStatus.Rejected,
+            rejectedStart.Status);
+        Assert.Equal(command, rejectedStart.State.CurrentBridgeRecoveryExecutionCommand);
+
+        var terminal = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.Terminalized,
+                regular,
+                reason: "completed"),
+            recovery.State);
+        Assert.Null(terminal.State.CurrentBridgeRecoveryExecutionCommand);
+        Assert.Null(terminal.State.CurrentBridgeRecoveryExecutionState);
+
+        var lateStart = FileTransferCoordinator.ObserveBridgeRecoveryExecutionStart(
+            terminal.State,
+            new FileTransferBridgeRecoveryExecutionStartResult(
+                command,
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                "bridge_recovery_execution_started",
+                Task.FromResult(mutatedReceipt with { Command = command })));
+        Assert.Equal(
+            FileTransferBridgeRecoveryExecutionDecisionStatus.Rejected,
+            lateStart.Status);
+        var lateReceipt = FileTransferCoordinator.ObserveBridgeRecoveryExecutionReceipt(
+            terminal.State,
+            mutatedReceipt with { Command = command });
+        Assert.Equal(
+            FileTransferBridgeRecoveryExecutionDecisionStatus.Rejected,
+            lateReceipt.Status);
+        Assert.Null(lateReceipt.State.LastBridgeRecoveryExecutionReceipt);
+    }
+
+    [Fact]
     public void BridgeReceiveStallRecovery_RejectsWithoutPartialAuthority()
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
@@ -3493,8 +3644,34 @@ public sealed class FileTransferCoordinatorTests
         var owner = Assert.IsType<RuntimeOwnerToken>(state.CurrentRuntimeOwner);
         var leg = Assert.IsType<FileTransferLeg>(state.CurrentLeg);
 
-        var replacement = FileTransferCoordinator.AuthorizeAction(
+        var pendingReplacement = FileTransferCoordinator.AuthorizeAction(
             state,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.BridgeRecovery,
+                owner,
+                leg,
+                bridgeRecoveryKind: BridgeRecoveryKind.ReceiveRecoveryRequest,
+                reason: "replacement_bridge_recovery"));
+        Assert.False(pendingReplacement.Accepted);
+        Assert.Equal(
+            "bridge_recovery_execution_pending",
+            pendingReplacement.RejectionReason);
+
+        var command = Assert.IsType<FileTransferBridgeRecoveryExecutionCommand>(
+            state.CurrentBridgeRecoveryExecutionCommand);
+        var discarded = FileTransferCoordinator.ObserveBridgeRecoveryExecutionReceipt(
+            state,
+            new FileTransferBridgeRecoveryExecutionReceipt(
+                command,
+                FileTransferBridgeRecoveryExecutionOutcome.Discarded,
+                "not_started",
+                "replacement_bridge_recovery"));
+        Assert.Equal(
+            FileTransferBridgeRecoveryExecutionDecisionStatus.Accepted,
+            discarded.Status);
+
+        var replacement = FileTransferCoordinator.AuthorizeAction(
+            discarded.State,
             RecoveryActionRequest(
                 FileTransferCoordinatorActionKind.BridgeRecovery,
                 owner,

@@ -6388,11 +6388,69 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 cts.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
                 suppressAutomaticAccelerationNegotiation: true);
-            _ = await host.OpenFileTransferDataSessionAsync(
+            var dataSession = await host.OpenFileTransferDataSessionAsync(
                 sessionId,
                 "transfer_tuna_activation_bridge_recovery",
                 cts.Token);
             TrackAuthorizedRegularV4RouteForTests(host, "transfer_tuna_activation_bridge_recovery");
+            var commandlessLogStart = GetOperationalLogLength();
+            foreach (var lifecycleKind in new[]
+                     {
+                         BridgeLifecycleEventKind.ReceiveStallRecoveryStarted,
+                         BridgeLifecycleEventKind.ReceiveStallRecoveryCompleted,
+                         BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted,
+                         BridgeLifecycleEventKind.ReceiveStallRecoveryReceiveResumed,
+                     })
+            {
+                InvokePrivateMethod(
+                    host,
+                    "OnBridgeLifecycle",
+                    host,
+                    new BridgeLifecycleEvent(
+                        lifecycleKind,
+                        StartMode: null,
+                        Pid: null,
+                        ReadyTimeMs: null,
+                        PingRttMs: null,
+                        UptimeMs: null,
+                        ExitCode: null,
+                        ExitReasonKind: null,
+                        ExitReasonText: "control_receive_stalled"));
+            }
+
+            Assert.True(dataSession.IsAvailable);
+            Assert.Equal(0, Assert.IsType<int>(
+                GetPrivateField(host, "bridgeReceiveStallRecoveryActive")));
+            var commandlessLog = ReadOperationalLogTail(commandlessLogStart);
+            Assert.Contains(
+                "lifecycle=receivestallrecoverystarted; reason=bridge_recovery_execution_command_missing",
+                commandlessLog,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "lifecycle=receivestallrecoverycompleted; reason=bridge_recovery_execution_command_missing",
+                commandlessLog,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "lifecycle=receivestallrecoveryexhausted; reason=bridge_recovery_execution_command_missing",
+                commandlessLog,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "lifecycle=receivestallrecoveryreceiveresumed; reason=bridge_recovery_execution_command_missing",
+                commandlessLog,
+                StringComparison.Ordinal);
+
+            var recoveryCommand = CreateBridgeRecoveryExecutionCommandForLifecycleTest(
+                sessionId,
+                "transfer_tuna_activation_bridge_recovery",
+                FileTransferDirection.Outbound,
+                FileTransferRoute.RegularNknV4Fast,
+                FileTransferRouteResolver.RegularNknV4FastToken,
+                FileTransferProtocol.ProtocolVersionV4,
+                "control_receive_stalled");
+            SetPrivateField(
+                host,
+                "fileTransferBridgeRecoveryExecutionCommand",
+                (FileTransferBridgeRecoveryExecutionCommand?)recoveryCommand);
             InvokePrivateMethod(
                 host,
                 "MarkFileTransferTunaActivationBridgeRecoveryStarted",
@@ -6410,7 +6468,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     UptimeMs: null,
                     ExitCode: null,
                     ExitReasonKind: null,
-                    ExitReasonText: "control_receive_stalled"));
+                    ExitReasonText: "control_receive_stalled",
+                    RecoveryExecutionCommand: recoveryCommand));
             var logStart = GetOperationalLogLength();
 
             hostLane.SetCanListen(true);
@@ -6451,6 +6510,37 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     ExitCode: null,
                     ExitReasonKind: null,
                     ExitReasonText: "control_receive_stalled"));
+            await Task.Delay(100, cts.Token);
+            Assert.False(offerSendAttempted.Task.IsCompleted);
+
+            InvokePrivateMethod(
+                host,
+                "OnBridgeLifecycle",
+                host,
+                new BridgeLifecycleEvent(
+                    BridgeLifecycleEventKind.ReceiveStallRecoveryCompleted,
+                    StartMode: null,
+                    Pid: null,
+                    ReadyTimeMs: null,
+                    PingRttMs: null,
+                    UptimeMs: null,
+                    ExitCode: null,
+                    ExitReasonKind: null,
+                    ExitReasonText: "control_receive_stalled",
+                    RecoveryExecutionCommand: recoveryCommand));
+            await Task.Delay(100, cts.Token);
+            Assert.False(offerSendAttempted.Task.IsCompleted);
+
+            var recoveryReceipt = new FileTransferBridgeRecoveryExecutionReceipt(
+                recoveryCommand,
+                FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                "hard",
+                "control_receive_stalled");
+            Assert.IsAssignableFrom<IFileTransferBridgeRecoveryExecutionBridge>(host)
+                .ObserveBridgeRecoveryExecutionReceiptDecision(
+                    recoveryReceipt,
+                    accepted: true,
+                    "test_receipt_accepted");
             await WaitUntilAsync(
                 () => offerSendAttempted.Task.IsCompleted,
                 TimeSpan.FromSeconds(2));
@@ -6625,17 +6715,32 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     ExitReasonKind: null,
                     ExitReasonText: "receive_stall_recovery_receive_resumed"));
 
-            await WaitUntilAsync(
-                () =>
-                {
-                    var tail = ReadOperationalLogTail(logStart);
-                    return tail.Contains("event=runtime_unlock_retry_dispatch_observed;", StringComparison.Ordinal) &&
-                           tail.Contains("event=runtime_unlock_retry_dispatch_contract_settled;", StringComparison.Ordinal) &&
-                           tail.Contains("settlement_outcome=DispatchObserved", StringComparison.Ordinal);
-                },
-                TimeSpan.FromSeconds(3));
+            await Task.Delay(150, CancellationToken.None);
+            var commandlessLifecycleTail = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=filetransfer_bridge_recovery_lifecycle_diagnostic_only; " +
+                "lifecycle=receivestallrecoveryreceiveresumed; " +
+                "reason=bridge_recovery_execution_command_missing",
+                commandlessLifecycleTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_retry_dispatch_observed;",
+                commandlessLifecycleTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_retry_dispatch_contract_settled;",
+                commandlessLifecycleTail,
+                StringComparison.Ordinal);
 
-            await negotiationTask.WaitAsync(cts.Token);
+            cts.Cancel();
+            try
+            {
+                await negotiationTask;
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected: commandless lifecycle evidence cannot release the armed retry.
+            }
         }
         finally
         {
@@ -10658,26 +10763,25 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     ExitReasonKind: null,
                     ExitReasonText: "receive_stall_recovery_receive_resumed"));
 
-            await WaitUntilAsync(
-                () =>
-                {
-                    var tail = ReadOperationalLogTail(logStart);
-                    return tail.Contains(
-                               "event=filetransfer_regular_v4_recovery_liveness_bridge_lifecycle; lifecycle=receive_resumed",
-                               StringComparison.Ordinal) &&
-                           tail.Contains(
-                               "event=runtime_unlock_regular_v4_recovery_lease_closure_adopted;",
-                               StringComparison.Ordinal) &&
-                           tail.Contains(
-                               "event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;",
-                               StringComparison.Ordinal);
-                },
-                TimeSpan.FromSeconds(3));
-
-            var evidenceOnlyTail = ReadOperationalLogTail(logStart);
+            await Task.Delay(150, CancellationToken.None);
+            var commandlessLifecycleTail = ReadOperationalLogTail(logStart);
             Assert.Contains(
+                "event=filetransfer_bridge_recovery_lifecycle_diagnostic_only; " +
+                "lifecycle=receivestallrecoveryreceiveresumed; " +
+                "reason=bridge_recovery_execution_command_missing",
+                commandlessLifecycleTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_regular_v4_recovery_lease_closure_adopted;",
+                commandlessLifecycleTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
                 "event=runtime_unlock_regular_v4_recovery_lease_closure_consumed;",
-                evidenceOnlyTail,
+                commandlessLifecycleTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;",
+                commandlessLifecycleTail,
                 StringComparison.Ordinal);
         }
         finally
@@ -32212,6 +32316,38 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     ExitCode: null,
                     ExitReasonKind: null,
                     ExitReasonText: recoveryReason));
+            Assert.Empty(availabilityEvents);
+            Assert.Equal(0, Assert.IsType<int>(
+                GetPrivateField(helper, "bridgeReceiveStallRecoveryActive")));
+
+            var recoveryCommand = CreateBridgeRecoveryExecutionCommandForLifecycleTest(
+                sessionId,
+                transferId,
+                FileTransferDirection.Inbound,
+                FileTransferRoute.PostTunaFallbackV6,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                FileTransferProtocol.ProtocolVersionV6,
+                recoveryReason,
+                transportEpoch: 92);
+            SetPrivateField(
+                helper,
+                "fileTransferBridgeRecoveryExecutionCommand",
+                (FileTransferBridgeRecoveryExecutionCommand?)recoveryCommand);
+            InvokePrivateMethod(
+                helper,
+                "OnBridgeLifecycle",
+                helper,
+                new BridgeLifecycleEvent(
+                    BridgeLifecycleEventKind.ReceiveStallRecoveryStarted,
+                    StartMode: null,
+                    Pid: null,
+                    ReadyTimeMs: null,
+                    PingRttMs: null,
+                    UptimeMs: null,
+                    ExitCode: null,
+                    ExitReasonKind: null,
+                    ExitReasonText: recoveryReason,
+                    RecoveryExecutionCommand: recoveryCommand));
 
             InvokePrivateMethod(
                 helper,
@@ -32272,6 +32408,51 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     ExitCode: null,
                     ExitReasonKind: null,
                     ExitReasonText: recoveryReason));
+            Assert.DoesNotContain(
+                availabilityEvents,
+                e => !e.IsAvailable &&
+                     e.RequiresResumeRequest &&
+                     e.Reason == "transport_recovered_unproven");
+            Assert.DoesNotContain(
+                "event=filetransfer_fallback_nkn_probe_scheduled;",
+                ReadOperationalLogTail(logStart),
+                StringComparison.Ordinal);
+
+            InvokePrivateMethod(
+                helper,
+                "OnBridgeLifecycle",
+                helper,
+                new BridgeLifecycleEvent(
+                    BridgeLifecycleEventKind.ReceiveStallRecoveryCompleted,
+                    StartMode: null,
+                    Pid: null,
+                    ReadyTimeMs: null,
+                    PingRttMs: null,
+                    UptimeMs: null,
+                    ExitCode: null,
+                    ExitReasonKind: null,
+                    ExitReasonText: recoveryReason,
+                    RecoveryExecutionCommand: recoveryCommand));
+            Assert.DoesNotContain(
+                availabilityEvents,
+                e => !e.IsAvailable &&
+                     e.RequiresResumeRequest &&
+                     e.Reason == "transport_recovered_unproven");
+            Assert.DoesNotContain(
+                "event=filetransfer_fallback_nkn_probe_scheduled;",
+                ReadOperationalLogTail(logStart),
+                StringComparison.Ordinal);
+
+            var recoveryReceipt = new FileTransferBridgeRecoveryExecutionReceipt(
+                recoveryCommand,
+                FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                "hard",
+                recoveryReason);
+            Assert.IsAssignableFrom<IFileTransferBridgeRecoveryExecutionBridge>(helper)
+                .ObserveBridgeRecoveryExecutionReceiptDecision(
+                    recoveryReceipt,
+                    accepted: true,
+                    "test_receipt_accepted");
 
             await WaitUntilAsync(
                 () => availabilityEvents.Any(e =>
@@ -35128,6 +35309,49 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         {
             snapshot.CompleteObservation();
         }
+    }
+
+    private static FileTransferBridgeRecoveryExecutionCommand
+        CreateBridgeRecoveryExecutionCommandForLifecycleTest(
+            string sessionId,
+            string transferId,
+            FileTransferDirection direction,
+            FileTransferRoute route,
+            string routeToken,
+            int protocolVersion,
+            string reason,
+            long transportEpoch = 0)
+    {
+        var owner = new RuntimeOwnerToken(
+            sessionId,
+            transferId,
+            direction,
+            route,
+            routeToken,
+            protocolVersion,
+            LiveRouteEpoch: 1,
+            RuntimeGeneration: 1,
+            TerminalGeneration: 0,
+            RuntimeFamily: "test_bridge_recovery_execution",
+            CreatedReason: reason);
+        var decision = new BridgeRecoveryDecision(
+            Accepted: true,
+            RecoveryKind: BridgeRecoveryKind.BridgeReceiveStallRecovery,
+            Reason: reason,
+            BridgeDecisionGeneration: 1,
+            CurrentRoute: route,
+            CurrentProtocolVersion: protocolVersion,
+            CurrentLiveRouteEpoch: 1,
+            CurrentRuntimeGeneration: 1,
+            CurrentTerminalGeneration: 0,
+            CurrentLegGeneration: 1,
+            TransportEpoch: transportEpoch,
+            BridgeRecoveryGeneration: 1,
+            RuntimeOwner: owner);
+        return new FileTransferBridgeRecoveryExecutionCommand(
+            decision,
+            RecoveryLivenessLease: null,
+            CheckpointRequestId: null);
     }
 
     private static void InstallRuntimeUnlockRetryDispatchCoordinatorForTests(

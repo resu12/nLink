@@ -153,10 +153,19 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         return builder.ToString();
     }
 
-    protected class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRegularV4FrontierRepairPressureInstallBridge, IFileTransferRegularV4FrontierRepairSettlementObserver, IFileTransferRouteCompletionObserver, IFileTransferRouteHintObserver, ITransportAccelerationStatus, IFileTransferSessionContextProvider, IFileTransferInitialTunaReadinessProvider, IRuntimeUnlockRouteCommitProofProvider, IRuntimeUnlockUncommittedTunaFallbackAdoptionBridge
+    protected class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferBridgeRecoveryExecutionBridge, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRegularV4FrontierRepairPressureInstallBridge, IFileTransferRegularV4FrontierRepairSettlementObserver, IFileTransferRouteCompletionObserver, IFileTransferRouteHintObserver, ITransportAccelerationStatus, IFileTransferSessionContextProvider, IFileTransferInitialTunaReadinessProvider, IRuntimeUnlockRouteCommitProofProvider, IRuntimeUnlockUncommittedTunaFallbackAdoptionBridge
     {
         private readonly string sessionId;
         private readonly ConcurrentDictionary<string, LoopbackDataSession> dataSessions = new(StringComparer.Ordinal);
+        private readonly object bridgeRecoveryExecutionGate = new();
+        private readonly Dictionary<
+            FileTransferBridgeRecoveryExecutionCommand,
+            TaskCompletionSource<FileTransferBridgeRecoveryExecutionReceipt>>
+            bridgeRecoveryExecutions = [];
+        private readonly HashSet<FileTransferBridgeRecoveryExecutionCommand>
+            invalidatedBridgeRecoveryExecutions = [];
+        private FileTransferBridgeRecoveryExecutionReceipt?
+            lastBridgeRecoveryExecutionReceipt;
         private LoopbackFileTransferTransport? peer;
         private int activeDataSessionSends;
         private int maxConcurrentDataSessionSends;
@@ -226,6 +235,16 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public ConcurrentQueue<FileTransferV6TransportEpochSnapshot> ObservedV6TransportEpochs { get; } = [];
         public ConcurrentQueue<bool> V6TransportEpochObservationCompletionStates { get; } = [];
         public ConcurrentQueue<FileTransferReceiveRecoveryRequest> ReceiveRecoveryRequests { get; } = [];
+        internal ConcurrentQueue<FileTransferBridgeRecoveryExecutionCommand>
+            BridgeRecoveryExecutionCommands { get; } = [];
+        internal ConcurrentQueue<FileTransferBridgeRecoveryExecutionCommand>
+            InvalidatedBridgeRecoveryExecutionCommands { get; } = [];
+        internal Action<FileTransferBridgeRecoveryExecutionCommand>?
+            BridgeRecoveryExecutionBeginObserverForTests { get; set; }
+        internal ConcurrentQueue<(
+            FileTransferBridgeRecoveryExecutionReceipt Receipt,
+            bool Accepted,
+            string Reason)> BridgeRecoveryExecutionReceiptDecisions { get; } = [];
         public ConcurrentQueue<FileTransferRegularV4ControlFeedbackPressure> RegularV4ControlFeedbackPressures { get; } = [];
         public ConcurrentQueue<FileTransferRegularV4FrontierRepairSettlement> RegularV4FrontierRepairSettlements { get; } = [];
         internal ConcurrentQueue<FileTransferRegularV4FrontierRepairPressureInstallReceipt> RegularV4PressureInstallReceipts { get; } = [];
@@ -339,6 +358,14 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public event EventHandler<FileTransferRepairProofReceivedEventArgs>? FileTransferRepairProofReceived;
         public event EventHandler<FileTransferFallbackTailYieldProofReceivedEventArgs>? FileTransferFallbackTailYieldProofReceived;
         public event EventHandler<TransportAccelerationStateChangedEventArgs>? TransportAccelerationStateChanged;
+        private event EventHandler<FileTransferBridgeRecoveryEvaluationRequestedEventArgs>?
+            bridgeRecoveryEvaluationRequested;
+        event EventHandler<FileTransferBridgeRecoveryEvaluationRequestedEventArgs>?
+            IFileTransferBridgeRecoveryExecutionBridge.BridgeRecoveryEvaluationRequested
+        {
+            add => bridgeRecoveryEvaluationRequested += value;
+            remove => bridgeRecoveryEvaluationRequested -= value;
+        }
         public void Connect(LoopbackFileTransferTransport other)
         {
             peer = other;
@@ -370,6 +397,207 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             }
 
             ReceiveRecoveryRequests.Enqueue(request);
+        }
+
+        FileTransferBridgeRecoveryExecutionStartResult
+            IFileTransferBridgeRecoveryExecutionBridge.BeginBridgeRecoveryExecution(
+                FileTransferBridgeRecoveryExecutionCommand command)
+        {
+            BridgeRecoveryExecutionBeginObserverForTests?.Invoke(command);
+            TaskCompletionSource<FileTransferBridgeRecoveryExecutionReceipt> completion;
+            FileTransferBridgeRecoveryExecutionStartStatus status;
+            lock (bridgeRecoveryExecutionGate)
+            {
+                if (lastBridgeRecoveryExecutionReceipt is { } lastReceipt &&
+                    lastReceipt.Command == command)
+                {
+                    return new FileTransferBridgeRecoveryExecutionStartResult(
+                        command,
+                        FileTransferBridgeRecoveryExecutionStartStatus.Idempotent,
+                        "loopback_bridge_recovery_execution_already_completed",
+                        Task.FromResult(lastReceipt));
+                }
+
+                if (invalidatedBridgeRecoveryExecutions.Contains(command))
+                {
+                    return new FileTransferBridgeRecoveryExecutionStartResult(
+                        command,
+                        FileTransferBridgeRecoveryExecutionStartStatus.Rejected,
+                        "loopback_bridge_recovery_execution_invalidated",
+                        Completion: null);
+                }
+
+                if (bridgeRecoveryExecutions.TryGetValue(command, out completion!))
+                {
+                    status = FileTransferBridgeRecoveryExecutionStartStatus.Idempotent;
+                }
+                else
+                {
+                    completion = new TaskCompletionSource<FileTransferBridgeRecoveryExecutionReceipt>(
+                        TaskCreationOptions.RunContinuationsAsynchronously);
+                    bridgeRecoveryExecutions.Add(command, completion);
+                    status = FileTransferBridgeRecoveryExecutionStartStatus.Started;
+                }
+            }
+
+            if (status == FileTransferBridgeRecoveryExecutionStartStatus.Started)
+            {
+                var request = CreateReceiveRecoveryRequest(command);
+                ReceiveRecoveryRequestObserver?.Invoke(request);
+                if (ReceiveRecoveryException is { } exception)
+                {
+                    lock (bridgeRecoveryExecutionGate)
+                    {
+                        bridgeRecoveryExecutions.Remove(command);
+                    }
+
+                    throw exception;
+                }
+
+                ReceiveRecoveryRequests.Enqueue(request);
+                BridgeRecoveryExecutionCommands.Enqueue(command);
+            }
+
+            return new FileTransferBridgeRecoveryExecutionStartResult(
+                command,
+                status,
+                status == FileTransferBridgeRecoveryExecutionStartStatus.Started
+                    ? "loopback_bridge_recovery_execution_started"
+                    : "loopback_bridge_recovery_execution_idempotent",
+                completion.Task);
+        }
+
+        bool IFileTransferBridgeRecoveryExecutionBridge.InvalidateBridgeRecoveryExecution(
+            FileTransferBridgeRecoveryExecutionCommand command,
+            string reason)
+        {
+            TaskCompletionSource<FileTransferBridgeRecoveryExecutionReceipt>? completion;
+            FileTransferBridgeRecoveryExecutionReceipt receipt;
+            lock (bridgeRecoveryExecutionGate)
+            {
+                if (lastBridgeRecoveryExecutionReceipt is { } lastReceipt &&
+                    lastReceipt.Command == command)
+                {
+                    return true;
+                }
+
+                if (!invalidatedBridgeRecoveryExecutions.Add(command))
+                {
+                    return false;
+                }
+
+                bridgeRecoveryExecutions.Remove(command, out completion);
+                receipt = new FileTransferBridgeRecoveryExecutionReceipt(
+                    command,
+                    FileTransferBridgeRecoveryExecutionOutcome.Discarded,
+                    "loopback",
+                    string.IsNullOrWhiteSpace(reason)
+                        ? "loopback_bridge_recovery_execution_invalidated"
+                        : reason.Trim());
+                lastBridgeRecoveryExecutionReceipt = receipt;
+            }
+
+            InvalidatedBridgeRecoveryExecutionCommands.Enqueue(command);
+            completion?.TrySetResult(receipt);
+            return true;
+        }
+
+        internal FileTransferBridgeRecoveryExecutionReceipt CompleteBridgeRecoveryExecution(
+            FileTransferBridgeRecoveryExecutionCommand command,
+            FileTransferBridgeRecoveryExecutionOutcome outcome,
+            string reason)
+        {
+            var receipt = new FileTransferBridgeRecoveryExecutionReceipt(
+                command,
+                outcome,
+                "loopback",
+                string.IsNullOrWhiteSpace(reason)
+                    ? "loopback_bridge_recovery_execution_completed"
+                    : reason.Trim());
+            TaskCompletionSource<FileTransferBridgeRecoveryExecutionReceipt> completion;
+            lock (bridgeRecoveryExecutionGate)
+            {
+                if (lastBridgeRecoveryExecutionReceipt is { } lastReceipt &&
+                    lastReceipt.Command == command)
+                {
+                    if (lastReceipt != receipt)
+                    {
+                        throw new InvalidOperationException(
+                            "The bridge recovery execution already completed with a different receipt.");
+                    }
+
+                    return lastReceipt;
+                }
+
+                if (!bridgeRecoveryExecutions.Remove(command, out completion!))
+                {
+                    throw new InvalidOperationException(
+                        "The bridge recovery execution command is not active.");
+                }
+
+                lastBridgeRecoveryExecutionReceipt = receipt;
+            }
+
+            completion.TrySetResult(receipt);
+            return receipt;
+        }
+
+        void IFileTransferBridgeRecoveryExecutionBridge.ObserveBridgeRecoveryExecutionReceiptDecision(
+            FileTransferBridgeRecoveryExecutionReceipt receipt,
+            bool accepted,
+            string reason)
+        {
+            BridgeRecoveryExecutionReceiptDecisions.Enqueue((
+                receipt,
+                accepted,
+                string.IsNullOrWhiteSpace(reason) ? "none" : reason.Trim()));
+        }
+
+        private static FileTransferReceiveRecoveryRequest CreateReceiveRecoveryRequest(
+            FileTransferBridgeRecoveryExecutionCommand command)
+        {
+            var decision = command.Decision;
+            var owner = decision.RuntimeOwner;
+            var bridgeAuthority = new FileTransferBridgeRecoveryAuthority(
+                owner.SessionId,
+                owner.TransferId,
+                owner.Direction,
+                owner.RouteToken,
+                decision.CurrentProtocolVersion,
+                decision.CurrentLiveRouteEpoch,
+                decision.CurrentRuntimeGeneration,
+                decision.CurrentTerminalGeneration,
+                decision.CurrentLegGeneration,
+                decision.TransportEpoch,
+                decision.BridgeRecoveryGeneration,
+                decision.BridgeDecisionGeneration,
+                decision.RecoveryKind.ToString(),
+                decision.Reason);
+            RuntimeUnlockRegularV4RecoveryAuthority? regularV4Authority =
+                command.RecoveryLivenessLease is { } recoveryLivenessLease
+                ? new RuntimeUnlockRegularV4RecoveryAuthority(
+                    bridgeAuthority,
+                    recoveryLivenessLease)
+                : null;
+
+            return new FileTransferReceiveRecoveryRequest(
+                owner.SessionId,
+                owner.TransferId,
+                owner.Direction,
+                decision.Reason)
+            {
+                RouteToken = owner.RouteToken,
+                ProtocolVersion = decision.CurrentProtocolVersion,
+                LiveRouteEpoch = decision.CurrentLiveRouteEpoch,
+                TransferLegGeneration = decision.CurrentLegGeneration,
+                BridgeRecoveryGeneration = decision.BridgeRecoveryGeneration,
+                TransportEpoch = decision.TransportEpoch,
+                CheckpointRequestId = command.CheckpointRequestId,
+                AuthorityReason = decision.Reason,
+                BridgeRecoveryAuthority = bridgeAuthority,
+                RegularV4RecoveryAuthority = regularV4Authority,
+                BridgeRecoveryExecutionCommand = command,
+            };
         }
 
         public void ObserveRegularV4ControlFeedbackPressure(FileTransferRegularV4ControlFeedbackPressure pressure)

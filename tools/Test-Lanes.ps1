@@ -210,6 +210,10 @@ function Invoke-TestLane {
         "FileTransferInfraContract" {
             Invoke-DotnetTest `
                 -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
+                -Filter "FileTransferInfraSuite=BridgeRecoveryExecution" `
+                -ResultSuffix "infra-bridge-recovery-execution"
+            Invoke-DotnetTest `
+                -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
                 -Filter "FullyQualifiedName~NknAccelerationTransportTests&(FullyQualifiedName~RuntimeUnlockRetry|FullyQualifiedName~RegularV4Recovery|FullyQualifiedName~RegularV4Closure|FullyQualifiedName~FileTransferReceiveRecovery|FullyQualifiedName~RuntimeUnlockProbeRecovery|FullyQualifiedName~RuntimeUnlockBridgeRecoveryWaitTimeoutArmsRetry|FullyQualifiedName~RuntimeUnlockSendTimeoutRequestsBridgeRecoveryBeforeReplay|FullyQualifiedName~RegularV4PressureSendTimeoutRequestsRecoveryAndDefersRetry)" `
                 -ResultSuffix "infra"
             Invoke-DotnetTest `
