@@ -4340,8 +4340,8 @@ public sealed partial class SessionFileTransferService
         }
 
         var capturedThroughGeneration =
-            context.LastOutboundRegularV4PhysicalSendLeaseGeneration;
-        var capturedLeaseIds = context.ActiveOutboundRegularV4PhysicalSendLeases.Values
+            context.LastOutboundPhysicalSendLeaseGeneration;
+        var capturedLeaseIds = context.ActiveOutboundPhysicalSendLeases.Values
             .Where(lease =>
                 lease.LeaseGeneration <= capturedThroughGeneration &&
                 IsOutboundRegularV4PhysicalSendLeaseForTransitionAuthority(
@@ -5617,11 +5617,11 @@ public sealed partial class SessionFileTransferService
     private static int CountActiveOutboundRegularV4PhysicalSendLeasesForDrainLocked(
         OutboundTransferContext context,
         RuntimeUnlockRegularV4RouteCommitDrain drain)
-        => context.ActiveOutboundRegularV4PhysicalSendLeases.Values.Count(lease =>
+        => context.ActiveOutboundPhysicalSendLeases.Values.Count(lease =>
             IsOutboundRegularV4PhysicalSendLeaseForDrain(lease, drain));
 
     private static bool IsOutboundRegularV4PhysicalSendLeaseForTransitionAuthority(
-        OutboundRegularV4PhysicalSendLease lease,
+        OutboundPhysicalSendLease lease,
         RegularV4ToTunaRouteTransitionAuthority authority,
         IFileTransferDataSession dataSession)
         => lease.LeaseGeneration > 0 &&
@@ -5635,7 +5635,7 @@ public sealed partial class SessionFileTransferService
            lease.DataSessionGeneration == authority.DataSessionGeneration;
 
     private static bool IsOutboundRegularV4PhysicalSendLeaseForDrain(
-        OutboundRegularV4PhysicalSendLease lease,
+        OutboundPhysicalSendLease lease,
         RuntimeUnlockRegularV4RouteCommitDrain drain)
         => IsOutboundRegularV4PhysicalSendLeaseForTransitionAuthority(
                lease,

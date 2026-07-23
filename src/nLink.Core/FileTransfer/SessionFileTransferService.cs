@@ -21427,7 +21427,18 @@ public sealed partial class SessionFileTransferService : IDisposable
         string? ProvingRepairKey,
         int ProvingDecisionGeneration);
 
-    private sealed record OutboundRegularV4PhysicalSendLease(
+    private enum OutboundPhysicalSendKind
+    {
+        Unknown = 0,
+        RegularV4Payload = 1,
+        RegularV4Repair = 2,
+        TunaV4Payload = 3,
+        TunaV4Repair = 4,
+        PostTunaFallbackV6Payload = 5,
+        PostTunaFallbackV6Repair = 6,
+    }
+
+    private sealed record OutboundPhysicalSendLease(
         long LeaseGeneration,
         RuntimeOwnerToken RuntimeOwner,
         RoutePublicationToken RoutePublication,
@@ -21439,8 +21450,9 @@ public sealed partial class SessionFileTransferService : IDisposable
         long DataSessionGeneration,
         int StartChunkIndex,
         int ChunkCount,
-        bool RepairSend,
-        string RepairRequestKey);
+        OutboundPhysicalSendKind SendKind,
+        string RepairRequestKey,
+        Task? PhysicalCompletionTask = null);
 
     private sealed record RuntimeUnlockRegularV4RouteCommitDrain(
         RegularV4ToTunaPhysicalDrainCommand DrainCommand,
@@ -21678,14 +21690,36 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public long DataSessionGeneration { get; set; }
 
-        public long LastOutboundRegularV4PhysicalSendLeaseGeneration { get; set; }
+        public long LastOutboundPhysicalSendLeaseGeneration { get; set; }
 
-        public long OutboundRegularV4PhysicalSendRegisteredCount { get; set; }
+        public long OutboundPhysicalSendRegisteredCount { get; set; }
 
-        public long OutboundRegularV4PhysicalSendRetiredCount { get; set; }
+        public long OutboundPhysicalSendRetiredCount { get; set; }
 
-        public Dictionary<long, OutboundRegularV4PhysicalSendLease>
-            ActiveOutboundRegularV4PhysicalSendLeases { get; } = [];
+        public Dictionary<long, OutboundPhysicalSendLease>
+            ActiveOutboundPhysicalSendLeases { get; } = [];
+
+        // Compatibility projections retained for focused Slice-3 reflection tests.
+        public long LastOutboundRegularV4PhysicalSendLeaseGeneration
+        {
+            get => LastOutboundPhysicalSendLeaseGeneration;
+            set => LastOutboundPhysicalSendLeaseGeneration = value;
+        }
+
+        public long OutboundRegularV4PhysicalSendRegisteredCount
+        {
+            get => OutboundPhysicalSendRegisteredCount;
+            set => OutboundPhysicalSendRegisteredCount = value;
+        }
+
+        public long OutboundRegularV4PhysicalSendRetiredCount
+        {
+            get => OutboundPhysicalSendRetiredCount;
+            set => OutboundPhysicalSendRetiredCount = value;
+        }
+
+        public Dictionary<long, OutboundPhysicalSendLease>
+            ActiveOutboundRegularV4PhysicalSendLeases => ActiveOutboundPhysicalSendLeases;
 
         public RuntimeUnlockRegularV4RouteCommitDrain?
             PendingRuntimeUnlockRegularV4RouteCommitDrain { get; set; }

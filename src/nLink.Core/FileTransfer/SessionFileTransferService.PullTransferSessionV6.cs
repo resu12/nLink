@@ -4538,7 +4538,59 @@ public sealed partial class SessionFileTransferService
         }
 
         using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(context.LifetimeCts.Token, senderPipelineToken);
-        Task sendTask = dataSession.SendAsync(prepared.Batch, sendCts.Token);
+        Task sendTask;
+        Task physicalCompletionTask;
+        OutboundPhysicalSendLease? physicalSendLease;
+        lock (gate)
+        {
+            var repairSend =
+                prepared.Metadata.Priority ||
+                prepared.Metadata.FallbackFrontierRepairContract is not null;
+            if (!TryRegisterOutboundPhysicalSendLeaseLocked(
+                    context,
+                    dataSession,
+                    prepared.StartChunkIndex,
+                    prepared.SegmentCount,
+                    repairSend,
+                    prepared.Metadata.RepairRequestId ?? prepared.Metadata.RequestKey,
+                    out physicalSendLease,
+                    out _))
+            {
+                return PreparedV6ChunkBatchSendOutcome.NotSent;
+            }
+
+            try
+            {
+                if (dataSession is IFileTransferPhysicalSendSubmissionSession physicalSubmissionSession)
+                {
+                    var submission = physicalSubmissionSession.SubmitPhysicalSend(
+                        prepared.Batch,
+                        authority: null,
+                        sendCts.Token);
+                    sendTask = submission.DeliveryTask;
+                    physicalCompletionTask = submission.PhysicalCompletionTask;
+                }
+                else
+                {
+                    sendTask = dataSession.SendAsync(prepared.Batch, sendCts.Token);
+                    physicalCompletionTask = sendTask;
+                }
+            }
+            catch (Exception ex)
+            {
+                sendTask = Task.FromException(ex);
+                physicalCompletionTask = sendTask;
+            }
+        }
+
+        if (physicalSendLease is not null)
+        {
+            _ = ObserveOutboundPhysicalSendLeaseAsync(
+                context,
+                physicalSendLease,
+                physicalCompletionTask);
+        }
+
         if (timeout <= TimeSpan.Zero || timeout == Timeout.InfiniteTimeSpan)
         {
             await sendTask.ConfigureAwait(false);
