@@ -4606,6 +4606,34 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 }
             }
         )
+        function Test-TunaGuiRegularV4SupersededScopeMatch {
+            param(
+                [Parameter(Mandatory = $true)][string]$SourceLine,
+                [Parameter(Mandatory = $true)][string]$CandidateLine
+            )
+            foreach ($field in @(
+                    'session_id', 'transfer_id', 'direction', 'route', 'protocol_version',
+                    'live_route_epoch', 'runtime_generation', 'terminal_generation',
+                    'leg_generation', 'transport_epoch', 'bridge_recovery_generation',
+                    'bridge_decision_generation', 'route_publication_generation',
+                    'route_commit_generation', 'target_transport')) {
+                if (-not (Test-TunaGuiLogLineFieldMatch `
+                        -SourceLine $SourceLine `
+                        -CandidateLine $CandidateLine `
+                        -FieldName $field)) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        function Test-TunaGuiVisibleAuthorityMatch {
+            param([string]$Actual, [string]$Expected)
+            return [string]::IsNullOrWhiteSpace($Actual) -or
+                $Actual -in @('[redacted]', 'redacted') -or
+                [string]::Equals($Actual, $Expected, [System.StringComparison]::OrdinalIgnoreCase)
+        }
+
         $acceptedSettlements = @($indexedLines | Where-Object {
             Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('filetransfer_regular_v4_frontier_repair_settlement_accepted')
         })
@@ -4614,6 +4642,118 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         }
 
         foreach ($accepted in $acceptedSettlements) {
+            $settlementOutcome = Get-TunaGuiLogLineFieldValue -Line $accepted.Line -Name 'outcome'
+            if ($settlementOutcome -eq 'Superseded') {
+                $predecessorAuthority = Get-TunaGuiLogLineFieldValue -Line $accepted.Line -Name 'authority_id'
+                $successorAuthority = Get-TunaGuiLogLineFieldValue -Line $accepted.Line -Name 'successor_authority_id'
+                $successorInstallGeneration = Get-TunaGuiLogLineFieldValue `
+                    -Line $accepted.Line `
+                    -Name 'successor_install_generation'
+                if ([string]::IsNullOrWhiteSpace($predecessorAuthority) -or
+                    [string]::IsNullOrWhiteSpace($successorAuthority) -or
+                    [string]::IsNullOrWhiteSpace($successorInstallGeneration)) {
+                    return $false
+                }
+
+                $successorBinding = @($indexedLines | Where-Object {
+                    $_.Index -lt $accepted.Index -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_regular_v4_frontier_repair_pressure_binding_committed')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq $successorAuthority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'predecessor_authority_id') -eq
+                        $predecessorAuthority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'install_generation') -eq
+                        $successorInstallGeneration -and
+                    (Test-TunaGuiRegularV4SupersededScopeMatch `
+                        -SourceLine $accepted.Line `
+                        -CandidateLine $_.Line)
+                } | Select-Object -Last 1)
+                if ($successorBinding.Count -eq 0) {
+                    return $false
+                }
+
+                $repairKey = Get-TunaGuiLogLineFieldValue -Line $accepted.Line -Name 'repair_request_key'
+                $predecessorBinding = @($indexedLines | Where-Object {
+                    $_.Index -lt $successorBinding[0].Index -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_regular_v4_frontier_repair_pressure_binding_committed')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq
+                        $predecessorAuthority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'repair_request_key') -eq $repairKey -and
+                    (Test-TunaGuiRegularV4SupersededScopeMatch `
+                        -SourceLine $accepted.Line `
+                        -CandidateLine $_.Line)
+                } | Select-Object -Last 1)
+                if ($predecessorBinding.Count -eq 0) {
+                    return $false
+                }
+                $predecessorInstallGeneration = Get-TunaGuiLogLineFieldValue `
+                    -Line $predecessorBinding[0].Line `
+                    -Name 'install_generation'
+
+                $apply = @($indexedLines | Where-Object {
+                    $_.Index -gt $accepted.Index -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'install_generation') -eq
+                        $successorInstallGeneration -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'settlement_outcome') -eq 'Superseded' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'apply_status') -in @('applied', 'idempotent') -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'current_authority_cleared') -eq '0' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'retained_predecessor_cleared') -eq '1' -and
+                    (Test-TunaGuiVisibleAuthorityMatch `
+                        -Actual (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'current_authority_id') `
+                        -Expected $successorAuthority) -and
+                    (Test-TunaGuiVisibleAuthorityMatch `
+                        -Actual (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'retained_predecessor_authority_id') `
+                        -Expected $predecessorAuthority) -and
+                    (Test-TunaGuiVisibleAuthorityMatch `
+                        -Actual (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'successor_authority_id') `
+                        -Expected $successorAuthority) -and
+                    (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'session_id') -and
+                    (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'transfer_id') -and
+                    (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'direction')
+                } | Select-Object -First 1)
+                if ($apply.Count -eq 0) {
+                    return $false
+                }
+
+                $bindingRetired = @($indexedLines | Where-Object {
+                    $_.Index -gt $apply[0].Index -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_regular_v4_frontier_repair_pressure_binding_retired')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq
+                        $predecessorAuthority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'install_generation') -eq
+                        $predecessorInstallGeneration -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'repair_request_key') -eq $repairKey -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'install_boundary') -eq 'settlement' -and
+                    (Test-TunaGuiRegularV4SupersededScopeMatch `
+                        -SourceLine $accepted.Line `
+                        -CandidateLine $_.Line)
+                } | Select-Object -First 1)
+                if ($bindingRetired.Count -eq 0) {
+                    return $false
+                }
+
+                $contractSettled = @($indexedLines | Where-Object {
+                    $_.Index -gt $bindingRetired[0].Index -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_regular_v4_frontier_repair_contract_settled')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq
+                        $predecessorAuthority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'successor_authority_id') -eq
+                        $successorAuthority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'repair_request_key') -eq $repairKey -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'settlement_outcome') -eq 'Superseded'
+                } | Select-Object -First 1)
+                if ($contractSettled.Count -eq 0) {
+                    return $false
+                }
+
+                continue
+            }
+
             $handoff = @($indexedLines | Where-Object {
                 $_.Index -gt $accepted.Index -and
                 (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(

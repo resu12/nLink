@@ -1538,6 +1538,67 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeFailureClassification_SupersededRepairRequiresExactSuccessorCleanup()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = Regex.Replace(guiText, @"(?m)^ {4}", string.Empty);
+        var fieldValueBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Test-TunaGuiLogLineHasEvent");
+        var hasEventBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineHasEvent",
+            "Test-TunaGuiLogLineFieldMatch");
+        var fieldMatchBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineFieldMatch",
+            "Test-TunaGuiRuntimeUnlockFileTransferOwnerRejectionUnresolved");
+        var settlementClosedBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiRegularV4FrontierRepairSettlementClosed",
+            "Test-TunaGuiRegularV4PredecessorSettlementClosedSuccessor");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
+            function Test-TunaGuiLogLineHasEvent { {{hasEventBody}} }
+            function Test-TunaGuiLogLineFieldMatch { {{fieldMatchBody}} }
+            function Test-TunaGuiRegularV4FrontierRepairSettlementClosed { {{settlementClosedBody}} }
+
+            $scope = 'session_id=session-a; transfer_id=transfer-a; direction=outbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn'
+            $predecessor = 'fta2-repair_replay-predecessor'
+            $successor = 'fta2-repair_replay-successor'
+            $repairKey = 'regular_v4_peer_silence_safety_replay:0:0:64:1'
+            $lines = @(
+                "event=filetransfer_regular_v4_frontier_repair_pressure_binding_committed; authority_id=$predecessor; predecessor_authority_id=(none); $scope; repair_request_key=$repairKey; install_generation=1; binding_state=Installed",
+                "event=filetransfer_regular_v4_frontier_repair_pressure_binding_committed; authority_id=$successor; predecessor_authority_id=$predecessor; $scope; repair_request_key=regular_v4_peer_silence_safety_replay:0:0:64:2; install_generation=2; binding_state=Installed",
+                "event=filetransfer_regular_v4_frontier_repair_settlement_accepted; authority_id=$predecessor; successor_authority_id=$successor; successor_install_generation=2; outcome=Superseded; repair_request_key=$repairKey; $scope",
+                "event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided; session_id=session-a; transfer_id=transfer-a; direction=outbound; authority_id=[redacted]; successor_authority_id=[redacted]; current_authority_id=[redacted]; retained_predecessor_authority_id=[redacted]; install_generation=2; settlement_outcome=Superseded; apply_status=applied; current_authority_cleared=0; retained_predecessor_cleared=1",
+                "event=filetransfer_regular_v4_frontier_repair_pressure_binding_retired; authority_id=$predecessor; predecessor_authority_id=(none); $scope; repair_request_key=$repairKey; install_generation=1; binding_state=RetainedPredecessor; install_boundary=settlement",
+                "event=filetransfer_regular_v4_frontier_repair_contract_settled; authority_id=$predecessor; successor_authority_id=$successor; repair_request_key=$repairKey; settlement_outcome=Superseded"
+            )
+            if (-not (Test-TunaGuiRegularV4FrontierRepairSettlementClosed -Lines $lines)) {
+                throw 'exact Superseded cleanup was not accepted'
+            }
+
+            $mutated = @($lines)
+            $mutated[3] = $mutated[3].Replace('current_authority_cleared=0', 'current_authority_cleared=1')
+            if (Test-TunaGuiRegularV4FrontierRepairSettlementClosed -Lines $mutated) {
+                throw 'mutated Superseded apply was accepted'
+            }
+
+            Write-Output 'gui-superseded-cleanup-correlation-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Superseded GUI classification test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-superseded-cleanup-correlation-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task FallbackAuthorityMatcher_CurrentSchemaRequiresCompleteIdentityAndIsolatesLegacy()
     {
         var matcherPath = Path.Combine(FindRepoRoot(), "tools", "FileTransferAuthorityMatching.ps1")

@@ -5340,6 +5340,76 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(false, false, false, "1")]
+    [InlineData(true, false, false, "1")]
+    [InlineData(false, true, false, "0")]
+    [InlineData(true, true, false, "0")]
+    [InlineData(false, false, true, "0")]
+    [InlineData(true, false, true, "0")]
+    public async Task AnalyzeRetained_OneShotRecoveryTimeoutBeforeSoftToHardFallback_ClassifiesExactCommand(
+        bool compact,
+        bool mismatchLegacyWriter,
+        bool mismatchDirection,
+        string expectedUnresolvedCount)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_one_shot_soft_to_hard_timeout";
+        const string writerId = "writer-one-shot-soft-to-hard";
+        const string scope = $"session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=outbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1";
+        var legacyWriterId = mismatchLegacyWriter ? "writer-other" : writerId;
+        var staleScope = mismatchDirection
+            ? scope.Replace("direction=outbound", "direction=inbound", StringComparison.Ordinal)
+            : scope;
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; {scope}; runtime_profile=regular_nkn_v4_fast; frame_family=v4", secondsOffset: 0),
+            LogLine($"event=filetransfer_bridge_recovery_execution_command_issued; {scope}; recovery_liveness_lease_authority_id=fta2-recovery-lease-1; recovery_liveness_lease_generation=1; log_writer_id={writerId}; log_writer_sequence=1", secondsOffset: 1),
+            LogLine($"event=filetransfer_bridge_recovery_execution_start_decided; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=outbound; bridge_recovery_generation=0; bridge_decision_generation=1; status=started; log_writer_id={writerId}; log_writer_sequence=2", secondsOffset: 2),
+            LogLine($"event=nkn_bridge_recovery_execution_completed; {scope}; lease_generation=1; execution_mode=soft; outcome=exhausted; reason=bridge_recovery_execution_timeout; log_writer_id={writerId}; log_writer_sequence=3", secondsOffset: 3),
+            LogLine($"event=filetransfer_bridge_recovery_execution_receipt_decision_observed; {scope}; recovery_liveness_lease_authority_id=fta2-recovery-lease-1; recovery_liveness_lease_generation=1; execution_outcome=exhausted; execution_mode=soft; accepted=1; disposition=accepted; reason=bridge_recovery_execution_receipt_accepted; log_writer_id={writerId}; log_writer_sequence=4", secondsOffset: 4),
+            LogLine($"event=nkn_bridge_receive_stall_recovery_soft_failed_hard_restart; reason=TimeoutException; log_writer_id={legacyWriterId}; log_writer_sequence=5", secondsOffset: 5),
+            LogLine($"event=nkn_bridge_receive_stall_recovery_hard_restart; log_writer_id={legacyWriterId}; log_writer_sequence=6", secondsOffset: 6),
+            LogLine($"event=nkn_bridge_restart_rejected_stale_execution_command; {staleScope}; lease_generation=1; execution_mode=none; outcome=none; reason=bridge_recovery_execution_command_not_current; log_writer_id={writerId}; log_writer_sequence=7", secondsOffset: 7),
+            LogLine($"event=file_transfer_outbound_terminal; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=outbound; state=Failed; error_code=peer_disconnected", secondsOffset: 8)
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "RegularActivationCycle"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        if (expectedUnresolvedCount == "1")
+        {
+            Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
+            Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+            Assert.Equal(
+                "filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing",
+                verdict["first_proof_chain_failure_class"]);
+            Assert.Equal("nkn_bridge_recovery_execution_completed", verdict["first_proof_chain_failure_event"]);
+            Assert.Equal(
+                "bridge_recovery_execution_timeout_before_soft_to_hard_fallback",
+                verdict["first_proof_chain_failure_reason"]);
+        }
+
+        Assert.Equal(expectedUnresolvedCount, verdict["filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_raw_count"]);
+        Assert.Equal(expectedUnresolvedCount, verdict["filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_distinct_count"]);
+        Assert.Equal("0", verdict["filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_recovered_count"]);
+        Assert.Equal(expectedUnresolvedCount, verdict["filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_unresolved_count"]);
+        Assert.Equal(expectedUnresolvedCount == "1" ? "fail" : "none", verdict["filetransfer_bridge_recovery_execution_soft_to_hard_handoff_verdict"]);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task AnalyzeRetained_CurrentArtifactClosureHoldLostAfterSettledRepair_OwnsFirstProofEdge(

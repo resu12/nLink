@@ -84,6 +84,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("0", summary["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count"]);
             Assert.Equal("0", summary["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count"]);
             Assert.Equal("none", summary["runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict"]);
+            Assert.Equal("0", summary["filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_raw_count"]);
+            Assert.Equal("0", summary["filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_distinct_count"]);
+            Assert.Equal("0", summary["filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_recovered_count"]);
+            Assert.Equal("0", summary["filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_unresolved_count"]);
+            Assert.Equal("none", summary["filetransfer_bridge_recovery_execution_soft_to_hard_handoff_verdict"]);
             Assert.Equal("0", summary["runtime_unlock_precommit_fallback_recovery_handoff_suppressed_raw_count"]);
             Assert.Equal("0", summary["runtime_unlock_precommit_fallback_recovery_handoff_suppressed_distinct_count"]);
             Assert.Equal("0", summary["runtime_unlock_precommit_fallback_recovery_handoff_suppressed_recovered_count"]);
@@ -97,6 +102,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.manifest_present"]);
             Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-256mb.cursor_integrity_verdict"]);
             Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.current_runtime_proof"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_raw_count"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_distinct_count"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_recovered_count"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_unresolved_count"]);
+            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.filetransfer_bridge_recovery_execution_soft_to_hard_handoff_verdict"]);
             Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.regular_v4_frontier_repair_missing_range_not_preserved_raw_count"]);
             Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.regular_v4_frontier_repair_missing_range_not_preserved_distinct_count"]);
             Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.regular_v4_frontier_repair_missing_range_not_preserved_recovered_count"]);

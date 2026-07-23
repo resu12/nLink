@@ -1085,6 +1085,59 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
     }
 
     [Theory]
+    [InlineData(false, false, "0")]
+    [InlineData(true, false, "0")]
+    [InlineData(false, true, "1")]
+    [InlineData(true, true, "1")]
+    [Trait("RetainedV4Suite", "SettlementDisposition")]
+    public async Task AnalyzeRetained_SupersededSettlementRequiresExactSuccessorCleanup(
+        bool compact,
+        bool mutateApply,
+        string expectedUnresolvedCount)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_regular_v4_superseded_disposition";
+        const string predecessor = "fta2-repair_replay-predecessor";
+        const string successor = "fta2-repair_replay-successor";
+        const string predecessorKey = "regular_v4_peer_silence_safety_replay:0:0:64:1";
+        const string successorKey = "regular_v4_peer_silence_safety_replay:0:0:64:2";
+        const string scope = "session_id=sess_a; transfer_id=transfer_regular_v4_superseded_disposition; direction=outbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; {scope}; runtime_profile=regular_nkn_v4_fast; frame_family=v4"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_binding_committed; authority_id={predecessor}; predecessor_authority_id=(none); {scope}; repair_request_key={predecessorKey}; install_generation=1; binding_state=Installed"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_binding_committed; authority_id={successor}; predecessor_authority_id={predecessor}; {scope}; repair_request_key={successorKey}; install_generation=2; binding_state=Installed"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_settlement_accepted; {scope}; repair_request_key={predecessorKey}; frontier_chunk_index=0; requested_chunk_count=64; decision_generation=1; authority_id={predecessor}; successor_authority_id={successor}; successor_install_generation=2; outcome=Superseded; settlement_reason=send_timeout_successor_authorized"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided; session_id=sess_a; transfer_id={transferId}; direction=outbound; authority_id=[redacted]; successor_authority_id=[redacted]; current_authority_id=[redacted]; retained_predecessor_authority_id=[redacted]; install_generation=2; settlement_outcome=Superseded; apply_status=applied; current_authority_cleared={(mutateApply ? 1 : 0)}; retained_predecessor_cleared=1"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_binding_retired; authority_id={predecessor}; predecessor_authority_id=(none); {scope}; repair_request_key={predecessorKey}; install_generation=1; binding_state=RetainedPredecessor; install_boundary=settlement"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_contract_settled; authority_id={predecessor}; successor_authority_id={successor}; repair_request_key={predecessorKey}; settlement_outcome=Superseded; dispatch_observed=0"),
+            LogLine($"event=file_transfer_outbound_terminal; session_id=sess_a; transfer_id={transferId}; direction=outbound; state=Failed; error_code=peer_disconnected")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal(
+            expectedUnresolvedCount,
+            verdict["regular_v4_frontier_repair_settlement_disposition_unverifiable_unresolved_count"]);
+        Assert.Equal(
+            expectedUnresolvedCount == "0" ? "pass" : "fail",
+            verdict["regular_v4_frontier_repair_settlement_disposition_verdict"]);
+    }
+
+    [Theory]
     [InlineData(false, "fta2-repair_replay-disposition-valid", "(none)", false, "repair_dispatch_not_observed", "0")]
     [InlineData(true, "fta2-repair_replay-disposition-valid", "(none)", false, "repair_dispatch_not_observed", "0")]
     [InlineData(false, "fta2-repair_replay-disposition-other", "(none)", false, "repair_dispatch_not_observed", "1")]

@@ -1155,6 +1155,11 @@ function New-RouteAcceptanceRunResult {
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = 0
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount = 0
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict = 'none'
+        fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingRawCount = 0
+        fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingDistinctCount = 0
+        fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingRecoveredCount = 0
+        fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingUnresolvedCount = 0
+        fileTransferBridgeRecoveryExecutionSoftToHardHandoffVerdict = 'none'
         runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount = 0
         runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount = 0
         runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount = 0
@@ -2702,6 +2707,11 @@ function Assert-Phase4OperatorVerdict {
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count' -DefaultValue '0')
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count' -DefaultValue '0')
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict' -DefaultValue 'none'
+    $Result.fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_raw_count' -DefaultValue '0')
+    $Result.fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_distinct_count' -DefaultValue '0')
+    $Result.fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_recovered_count' -DefaultValue '0')
+    $Result.fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_unresolved_count' -DefaultValue '0')
+    $Result.fileTransferBridgeRecoveryExecutionSoftToHardHandoffVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_verdict' -DefaultValue 'none'
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_raw_count' -DefaultValue '0')
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_distinct_count' -DefaultValue '0')
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_recovered_count' -DefaultValue '0')
@@ -8282,6 +8292,11 @@ function New-RouteAcceptanceSummaryRunDto {
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict = [string]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict
+        fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingRawCount = [int]$Result.fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingRawCount
+        fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingDistinctCount = [int]$Result.fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingDistinctCount
+        fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingRecoveredCount = [int]$Result.fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingRecoveredCount
+        fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingUnresolvedCount = [int]$Result.fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingUnresolvedCount
+        fileTransferBridgeRecoveryExecutionSoftToHardHandoffVerdict = [string]$Result.fileTransferBridgeRecoveryExecutionSoftToHardHandoffVerdict
         runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount
         runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount
         runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount
@@ -8508,6 +8523,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount = 0
     $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = 0
     $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount = 0
+    $fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingRawCount = 0
+    $fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingDistinctCount = 0
+    $fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingRecoveredCount = 0
+    $fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingUnresolvedCount = 0
     $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount = 0
     $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount = 0
     $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount = 0
@@ -8634,6 +8653,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount
         $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount
         $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount
+        $fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingRawCount += [int]$runDto.fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingRawCount
+        $fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingDistinctCount += [int]$runDto.fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingDistinctCount
+        $fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingRecoveredCount += [int]$runDto.fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingRecoveredCount
+        $fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingUnresolvedCount += [int]$runDto.fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingUnresolvedCount
         $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount
         $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount
         $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount
@@ -9098,6 +9121,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict),
+        ("filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_raw_count={0}" -f $fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingRawCount),
+        ("filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_distinct_count={0}" -f $fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingDistinctCount),
+        ("filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_recovered_count={0}" -f $fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingRecoveredCount),
+        ("filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_unresolved_count={0}" -f $fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingUnresolvedCount),
+        ("filetransfer_bridge_recovery_execution_soft_to_hard_handoff_verdict={0}" -f ($(if ($fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingUnresolvedCount -gt 0) { 'fail' } elseif ($fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingDistinctCount -gt 0) { 'pass' } else { 'none' }))),
         ("runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount),
         ("runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount),
         ("runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount),
@@ -9301,6 +9329,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount)
         $textLines += ("{0}.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount)
         $textLines += ("{0}.runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict)
+        $textLines += ("{0}.filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_raw_count={1}" -f $prefix, $result.fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingRawCount)
+        $textLines += ("{0}.filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_distinct_count={1}" -f $prefix, $result.fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingDistinctCount)
+        $textLines += ("{0}.filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_recovered_count={1}" -f $prefix, $result.fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingRecoveredCount)
+        $textLines += ("{0}.filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_unresolved_count={1}" -f $prefix, $result.fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingUnresolvedCount)
+        $textLines += ("{0}.filetransfer_bridge_recovery_execution_soft_to_hard_handoff_verdict={1}" -f $prefix, $result.fileTransferBridgeRecoveryExecutionSoftToHardHandoffVerdict)
         $textLines += ("{0}.runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_raw_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount)
         $textLines += ("{0}.runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_distinct_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount)
         $textLines += ("{0}.runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_recovered_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount)
@@ -9567,6 +9600,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount = $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict = $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict
+        fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingRawCount = $fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingRawCount
+        fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingDistinctCount = $fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingDistinctCount
+        fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingRecoveredCount = $fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingRecoveredCount
+        fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingUnresolvedCount = $fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingUnresolvedCount
+        fileTransferBridgeRecoveryExecutionSoftToHardHandoffVerdict = if ($fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingUnresolvedCount -gt 0) { 'fail' } elseif ($fileTransferBridgeRecoveryExecutionSoftToHardHandoffMissingDistinctCount -gt 0) { 'pass' } else { 'none' }
         runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount = $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount
         runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount = $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount
         runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount = $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount
