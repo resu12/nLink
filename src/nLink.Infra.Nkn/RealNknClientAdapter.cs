@@ -47,6 +47,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private static readonly TimeSpan BridgeTrafficLogInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ReceiveStallRecoveryCooldown = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan ReceiveStallRecoveryAttemptBudget = TimeSpan.FromSeconds(45);
+    private static readonly TimeSpan FileTransferBridgeRecoveryExecutionBudget = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan ReceiveStallActiveFileTransferExtendedRecoveryCooldown = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan ReceiveStallActiveFileTransferUnprovenRecoveryCooldown = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan ActiveFileTransferRecoveryTombstoneTtl = TimeSpan.FromSeconds(90);
@@ -83,7 +84,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
     internal static async Task RunBoundedReceiveStallRecoveryConnectAsync(
         Func<CancellationToken, Task> connectAsync,
-        TimeSpan attemptBudget)
+        TimeSpan attemptBudget,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(connectAsync);
         if (attemptBudget <= TimeSpan.Zero)
@@ -92,9 +94,16 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         }
 
         using var recoveryBudget = new CancellationTokenSource(attemptBudget);
+        using var linkedBudget = CancellationTokenSource.CreateLinkedTokenSource(
+            recoveryBudget.Token,
+            cancellationToken);
         try
         {
-            await connectAsync(recoveryBudget.Token).ConfigureAwait(false);
+            await connectAsync(linkedBudget.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (OperationCanceledException) when (recoveryBudget.IsCancellationRequested)
         {
@@ -111,7 +120,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private readonly BridgeProtocolEventRouter protocolEventRouter;
     private readonly ConnectAttemptCoordinator connectAttempts = new();
     private TimeSpan? connectReadyTimeoutOverrideForTests;
-    private TimeSpan? fileTransferBridgeRecoveryExecutionTimeoutOverrideForTests;
+    private TimeSpan? fileTransferBridgeRecoverySoftPhaseTimeoutOverrideForTests;
+    private TimeSpan? fileTransferBridgeRecoveryTotalTimeoutOverrideForTests;
     private CancellationTokenSource? pingLoopCts;
     private Task? pingLoopTask;
     private string address;
@@ -121,6 +131,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private int unexpectedRestartLoopActive;
     private bool helloCompleted;
     private bool shuttingDown;
+    private bool explicitShutdownInProgress;
     private bool disposed;
     private string reliabilityModeHint = "Helper";
     private long screenShareBridgeMessageCountSinceLastLog;
@@ -216,9 +227,17 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private RegularV4ControlFeedbackEvidenceState? regularV4ControlFeedbackEvidence;
     private FileTransferBridgeRecoveryExecutionCommand? activeFileTransferBridgeRecoveryExecutionCommand;
     private TaskCompletionSource<FileTransferBridgeRecoveryExecutionReceipt>? activeFileTransferBridgeRecoveryExecutionCompletion;
+    private TaskCompletionSource? activeFileTransferBridgeRecoveryExecutionWorkerTermination;
+    private CancellationTokenSource? activeFileTransferBridgeRecoveryExecutionTotalDeadline;
     private FileTransferBridgeRecoveryExecutionReceipt? lastFileTransferBridgeRecoveryExecutionReceipt;
     private bool activeFileTransferBridgeRecoveryExecutionWorkerStarted;
-    private string activeFileTransferBridgeRecoveryExecutionMode = "none";
+    private long activeFileTransferBridgeRecoveryExecutionStartedTick;
+    internal Action<FileTransferBridgeRecoveryExecutionCommand>?
+        FileTransferBridgeRecoveryBeforeHardRestartCurrentnessForTests { get; set; }
+    internal Action<FileTransferBridgeRecoveryExecutionCommand>?
+        FileTransferBridgeRecoveryAfterHardRestartReservationForTests { get; set; }
+    internal Action<FileTransferBridgeRecoveryExecutionCommand>?
+        FileTransferBridgeRecoveryBeforeTerminalCommitForTests { get; set; }
     private long fileTransferBridgeRecoveryEvaluationGeneration;
     private long activeFileTransferRecoveryTombstoneExpiresTick;
     private readonly object fileTransferBulkPolicyGate = new();
@@ -2210,22 +2229,16 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 "bridge_recovery_execution_disabled");
         }
 
-        if (disposed || shuttingDown)
-        {
-            return RejectedFileTransferBridgeRecoveryExecutionStart(
-                command,
-                "bridge_recovery_adapter_stopping");
-        }
-
-        if (!activeFileTransferDataSessionTransfers.ContainsKey(transferId) &&
-            !activeFileTransferRuntimeTransfers.ContainsKey(transferId))
-        {
-            return RejectedFileTransferBridgeRecoveryExecutionStart(
-                command,
-                "bridge_recovery_transfer_not_active");
-        }
-
         TaskCompletionSource<FileTransferBridgeRecoveryExecutionReceipt> completion;
+        TaskCompletionSource workerTermination;
+        CancellationTokenSource totalDeadline;
+        long executionStartedTick;
+        var softPhaseBudget =
+            fileTransferBridgeRecoverySoftPhaseTimeoutOverrideForTests ??
+            ReceiveStallRecoveryAttemptBudget;
+        var totalExecutionBudget =
+            fileTransferBridgeRecoveryTotalTimeoutOverrideForTests ??
+            FileTransferBridgeRecoveryExecutionBudget;
         lock (gate)
         {
             if (lastFileTransferBridgeRecoveryExecutionReceipt is { } lastReceipt &&
@@ -2270,6 +2283,24 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                     "bridge_recovery_execution_in_progress");
             }
 
+            if (disposed ||
+                shuttingDown ||
+                explicitShutdownInProgress ||
+                Volatile.Read(ref disposeStarted) != 0)
+            {
+                return RejectedFileTransferBridgeRecoveryExecutionStart(
+                    command,
+                    "bridge_recovery_adapter_stopping");
+            }
+
+            if (!activeFileTransferDataSessionTransfers.ContainsKey(transferId) &&
+                !activeFileTransferRuntimeTransfers.ContainsKey(transferId))
+            {
+                return RejectedFileTransferBridgeRecoveryExecutionStart(
+                    command,
+                    "bridge_recovery_transfer_not_active");
+            }
+
             if (Interlocked.CompareExchange(ref receiveStallRecoveryInProgress, 1, 0) != 0)
             {
                 return RejectedFileTransferBridgeRecoveryExecutionStart(
@@ -2279,31 +2310,40 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
             completion = new TaskCompletionSource<FileTransferBridgeRecoveryExecutionReceipt>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
+            workerTermination = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            executionStartedTick = Stopwatch.GetTimestamp();
+            totalDeadline = new CancellationTokenSource(totalExecutionBudget);
             activeFileTransferBridgeRecoveryExecutionCommand = command;
             activeFileTransferBridgeRecoveryExecutionCompletion = completion;
+            activeFileTransferBridgeRecoveryExecutionWorkerTermination =
+                workerTermination;
+            activeFileTransferBridgeRecoveryExecutionTotalDeadline = totalDeadline;
             activeFileTransferBridgeRecoveryExecutionWorkerStarted = false;
-            activeFileTransferBridgeRecoveryExecutionMode =
-                ShouldUseSoftFileTransferReceiveStallRecovery(command.Decision.Reason)
-                    ? "soft"
-                    : "hard";
+            activeFileTransferBridgeRecoveryExecutionStartedTick = executionStartedTick;
         }
 
-        var nowTick = Stopwatch.GetTimestamp();
-        Volatile.Write(ref receiveStallLastRecoveryStartedTick, nowTick);
+        Volatile.Write(ref receiveStallLastRecoveryStartedTick, executionStartedTick);
         var attempt = Interlocked.Increment(ref receiveStallRecoveryCount);
         Volatile.Write(ref receiveStallRecoveryRequiresControlProof, 1);
         Volatile.Write(ref receiveStallRecoveryRequiresBulkProof, 0);
         LogFileTransferBridgeRecoveryExecution(
             "nkn_bridge_recovery_execution_started",
             command,
-            "bridge_recovery_execution_started");
-        var executionTask = Task.Run(
-            () => ExecuteFileTransferBridgeRecoveryCommandAsync(command, completion, attempt),
+            "bridge_recovery_execution_started",
+            softPhaseBudgetMs: (long)softPhaseBudget.TotalMilliseconds,
+            totalExecutionBudgetMs: (long)totalExecutionBudget.TotalMilliseconds);
+        _ = Task.Run(
+            () => ExecuteFileTransferBridgeRecoveryCommandAsync(
+                command,
+                completion,
+                workerTermination,
+                totalDeadline,
+                executionStartedTick,
+                softPhaseBudget,
+                totalExecutionBudget,
+                attempt),
             CancellationToken.None);
-        _ = ObserveFileTransferBridgeRecoveryExecutionTimeoutAsync(
-            command,
-            completion,
-            executionTask);
         return new FileTransferBridgeRecoveryExecutionStartResult(
             command,
             FileTransferBridgeRecoveryExecutionStartStatus.Started,
@@ -2316,6 +2356,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         string reason)
     {
         TaskCompletionSource<FileTransferBridgeRecoveryExecutionReceipt>? completion;
+        CancellationTokenSource? totalDeadlineToCancel;
         var receipt = new FileTransferBridgeRecoveryExecutionReceipt(
             command,
             FileTransferBridgeRecoveryExecutionOutcome.Discarded,
@@ -2346,12 +2387,18 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 }
 
                 completion = activeFileTransferBridgeRecoveryExecutionCompletion;
+                totalDeadlineToCancel =
+                    activeFileTransferBridgeRecoveryExecutionTotalDeadline;
                 activeFileTransferBridgeRecoveryExecutionCommand = null;
                 activeFileTransferBridgeRecoveryExecutionCompletion = null;
+                activeFileTransferBridgeRecoveryExecutionWorkerTermination = null;
+                activeFileTransferBridgeRecoveryExecutionTotalDeadline = null;
+                activeFileTransferBridgeRecoveryExecutionStartedTick = 0;
             }
             else
             {
                 completion = null;
+                totalDeadlineToCancel = null;
             }
 
             lastFileTransferBridgeRecoveryExecutionReceipt = receipt;
@@ -2363,11 +2410,13 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             activeFileTransferBridgeRecoveryExecutionWorkerStarted = false;
         }
 
-        completion?.TrySetResult(receipt);
+        CancelFileTransferBridgeRecoveryExecutionDeadline(
+            totalDeadlineToCancel);
         LogFileTransferBridgeRecoveryExecution(
             "nkn_bridge_recovery_execution_invalidated",
             command,
             receipt.Reason);
+        completion?.TrySetResult(receipt);
         return true;
     }
 
@@ -2468,30 +2517,54 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private void CompleteFileTransferBridgeRecoveryExecution(
         FileTransferBridgeRecoveryExecutionCommand command,
         TaskCompletionSource<FileTransferBridgeRecoveryExecutionReceipt> completion,
+        CancellationTokenSource totalDeadline,
+        long executionStartedTick,
+        TimeSpan softPhaseBudget,
+        TimeSpan totalExecutionBudget,
         FileTransferBridgeRecoveryExecutionOutcome outcome,
         string executionMode,
-        string reason,
-        bool physicalExecutionTerminated = true)
+        string reason)
     {
-        var receipt = new FileTransferBridgeRecoveryExecutionReceipt(
-            command,
-            outcome,
-            NormalizeBridgeRecoveryExecutionReason(executionMode, "soft"),
-            NormalizeBridgeRecoveryExecutionReason(reason, "bridge_recovery_execution_completed"));
+        FileTransferBridgeRecoveryExecutionReceipt receipt;
         var accepted = false;
+        bool totalDeadlineExpired;
+        double elapsedExecutionMs;
         lock (gate)
         {
+            var terminalTick = Stopwatch.GetTimestamp();
+            totalDeadlineExpired = HasBridgeRecoveryTotalDeadlineElapsed(
+                terminalTick,
+                executionStartedTick,
+                totalExecutionBudget);
+            elapsedExecutionMs = executionStartedTick > 0
+                ? Stopwatch.GetElapsedTime(executionStartedTick, terminalTick)
+                    .TotalMilliseconds
+                : -1;
+            var terminalOutcome = totalDeadlineExpired
+                ? FileTransferBridgeRecoveryExecutionOutcome.Exhausted
+                : outcome;
+            var terminalReason = totalDeadlineExpired
+                ? "bridge_recovery_execution_timeout"
+                : reason;
+            receipt = new FileTransferBridgeRecoveryExecutionReceipt(
+                command,
+                terminalOutcome,
+                NormalizeBridgeRecoveryExecutionReason(executionMode, "soft"),
+                NormalizeBridgeRecoveryExecutionReason(
+                    terminalReason,
+                    "bridge_recovery_execution_completed"));
             if (activeFileTransferBridgeRecoveryExecutionCommand is { } activeCommand &&
                 activeCommand.Equals(command) &&
-                ReferenceEquals(activeFileTransferBridgeRecoveryExecutionCompletion, completion))
+                ReferenceEquals(activeFileTransferBridgeRecoveryExecutionCompletion, completion) &&
+                ReferenceEquals(activeFileTransferBridgeRecoveryExecutionTotalDeadline, totalDeadline) &&
+                activeFileTransferBridgeRecoveryExecutionStartedTick == executionStartedTick)
             {
                 activeFileTransferBridgeRecoveryExecutionCommand = null;
                 activeFileTransferBridgeRecoveryExecutionCompletion = null;
-                if (physicalExecutionTerminated ||
-                    !activeFileTransferBridgeRecoveryExecutionWorkerStarted)
-                {
-                    activeFileTransferBridgeRecoveryExecutionWorkerStarted = false;
-                }
+                activeFileTransferBridgeRecoveryExecutionWorkerTermination = null;
+                activeFileTransferBridgeRecoveryExecutionTotalDeadline = null;
+                activeFileTransferBridgeRecoveryExecutionStartedTick = 0;
+                activeFileTransferBridgeRecoveryExecutionWorkerStarted = false;
                 lastFileTransferBridgeRecoveryExecutionReceipt = receipt;
                 accepted = true;
             }
@@ -2502,60 +2575,29 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             LogFileTransferBridgeRecoveryExecution(
                 "nkn_bridge_recovery_execution_completion_late",
                 command,
-                receipt.Reason);
+                receipt.Reason,
+                receipt.ExecutionMode,
+                receipt.Outcome.ToString().ToLowerInvariant(),
+                physicalExecutionTerminated: true,
+                softPhaseBudgetMs: (long)softPhaseBudget.TotalMilliseconds,
+                totalExecutionBudgetMs: (long)totalExecutionBudget.TotalMilliseconds,
+                elapsedExecutionMs: elapsedExecutionMs,
+                totalDeadlineExpired: totalDeadlineExpired);
             return;
         }
 
-        completion.TrySetResult(receipt);
         LogFileTransferBridgeRecoveryExecution(
             "nkn_bridge_recovery_execution_completed",
             command,
             receipt.Reason,
             receipt.ExecutionMode,
-            receipt.Outcome.ToString().ToLowerInvariant());
-    }
-
-    private async Task ObserveFileTransferBridgeRecoveryExecutionTimeoutAsync(
-        FileTransferBridgeRecoveryExecutionCommand command,
-        TaskCompletionSource<FileTransferBridgeRecoveryExecutionReceipt> completion,
-        Task executionTask)
-    {
-        var timeout =
-            fileTransferBridgeRecoveryExecutionTimeoutOverrideForTests ??
-            ReceiveStallRecoveryAttemptBudget;
-        await Task.WhenAny(executionTask, Task.Delay(timeout, CancellationToken.None))
-            .ConfigureAwait(false);
-        if (executionTask.IsCompleted || completion.Task.IsCompleted)
-        {
-            return;
-        }
-
-        string executionMode;
-        lock (gate)
-        {
-            executionMode =
-                activeFileTransferBridgeRecoveryExecutionCommand is { } activeCommand &&
-                activeCommand.Equals(command) &&
-                ReferenceEquals(activeFileTransferBridgeRecoveryExecutionCompletion, completion)
-                    ? activeFileTransferBridgeRecoveryExecutionMode
-                    : "soft";
-        }
-
-        CompleteFileTransferBridgeRecoveryExecution(
-            command,
-            completion,
-            FileTransferBridgeRecoveryExecutionOutcome.Exhausted,
-            executionMode,
-            "bridge_recovery_execution_timeout",
-            physicalExecutionTerminated: false);
-
-        lock (gate)
-        {
-            if (!activeFileTransferBridgeRecoveryExecutionWorkerStarted)
-            {
-                Interlocked.Exchange(ref receiveStallRecoveryInProgress, 0);
-            }
-        }
+            receipt.Outcome.ToString().ToLowerInvariant(),
+            physicalExecutionTerminated: true,
+            softPhaseBudgetMs: (long)softPhaseBudget.TotalMilliseconds,
+            totalExecutionBudgetMs: (long)totalExecutionBudget.TotalMilliseconds,
+            elapsedExecutionMs: elapsedExecutionMs,
+            totalDeadlineExpired: totalDeadlineExpired);
+        completion.TrySetResult(receipt);
     }
 
     private void EmitFileTransferBridgeRecoveryEvaluation(
@@ -2609,12 +2651,97 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         FileTransferBridgeRecoveryExecutionCommand command,
         string reason,
         string executionMode = "none",
-        string outcome = "none")
+        string outcome = "none",
+        bool physicalExecutionTerminated = false,
+        long softPhaseBudgetMs = -1,
+        long totalExecutionBudgetMs = -1,
+        double elapsedExecutionMs = -1,
+        bool totalDeadlineExpired = false)
     {
         var decision = command.Decision;
         var owner = decision.RuntimeOwner;
         Log(
-            $"event={eventName}; session_id={SanitizeLogToken(owner.SessionId)}; transfer_id={SanitizeLogToken(owner.TransferId)}; direction={owner.Direction.ToString().ToLowerInvariant()}; route={decision.CurrentRoute.ToString().ToLowerInvariant()}; protocol_version={decision.CurrentProtocolVersion}; live_route_epoch={decision.CurrentLiveRouteEpoch}; runtime_generation={decision.CurrentRuntimeGeneration}; terminal_generation={decision.CurrentTerminalGeneration}; leg_generation={decision.CurrentLegGeneration}; transport_epoch={decision.TransportEpoch}; bridge_recovery_generation={decision.BridgeRecoveryGeneration}; bridge_decision_generation={decision.BridgeDecisionGeneration}; lease_generation={command.RecoveryLivenessLease?.LeaseGeneration ?? 0}; execution_mode={SanitizeLogToken(executionMode)}; outcome={SanitizeLogToken(outcome)}; reason={SanitizeLogToken(reason)}");
+            $"event={eventName}; session_id={SanitizeLogToken(owner.SessionId)}; transfer_id={SanitizeLogToken(owner.TransferId)}; direction={owner.Direction.ToString().ToLowerInvariant()}; route={decision.CurrentRoute.ToString().ToLowerInvariant()}; protocol_version={decision.CurrentProtocolVersion}; live_route_epoch={decision.CurrentLiveRouteEpoch}; runtime_generation={decision.CurrentRuntimeGeneration}; terminal_generation={decision.CurrentTerminalGeneration}; leg_generation={decision.CurrentLegGeneration}; transport_epoch={decision.TransportEpoch}; bridge_recovery_generation={decision.BridgeRecoveryGeneration}; bridge_decision_generation={decision.BridgeDecisionGeneration}; lease_generation={command.RecoveryLivenessLease?.LeaseGeneration ?? 0}; execution_mode={SanitizeLogToken(executionMode)}; outcome={SanitizeLogToken(outcome)}; physical_execution_terminated={(physicalExecutionTerminated ? 1 : 0)}; soft_phase_budget_ms={softPhaseBudgetMs}; total_execution_budget_ms={totalExecutionBudgetMs}; elapsed_execution_ms={(long)Math.Max(-1, elapsedExecutionMs)}; total_deadline_expired={(totalDeadlineExpired ? 1 : 0)}; reason={SanitizeLogToken(reason)}");
+    }
+
+    private static bool IsBridgeRecoveryTotalDeadlineExpired(
+        CancellationTokenSource totalDeadline,
+        long executionStartedTick,
+        TimeSpan totalExecutionBudget)
+        => totalDeadline.IsCancellationRequested &&
+           HasBridgeRecoveryTotalDeadlineElapsed(
+               Stopwatch.GetTimestamp(),
+               executionStartedTick,
+               totalExecutionBudget);
+
+    private static bool HasBridgeRecoveryTotalDeadlineElapsed(
+        long nowTick,
+        long executionStartedTick,
+        TimeSpan totalExecutionBudget)
+        => executionStartedTick > 0 &&
+           nowTick >= AddStopwatchDuration(
+               executionStartedTick,
+               totalExecutionBudget);
+
+    private static void CancelFileTransferBridgeRecoveryExecutionDeadline(
+        CancellationTokenSource? totalDeadline)
+    {
+        if (totalDeadline is null)
+        {
+            return;
+        }
+
+        lock (totalDeadline)
+        {
+            try
+            {
+                if (!totalDeadline.IsCancellationRequested)
+                {
+                    totalDeadline.Cancel();
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+                // A terminal worker may win immediately before invalidation.
+            }
+        }
+    }
+
+    private static void DisposeFileTransferBridgeRecoveryExecutionDeadline(
+        CancellationTokenSource totalDeadline)
+    {
+        lock (totalDeadline)
+        {
+            try
+            {
+                totalDeadline.Dispose();
+            }
+            catch (ObjectDisposedException)
+            {
+                // Exact duplicate cleanup is diagnostic-only.
+            }
+        }
+    }
+
+    private void LogFileTransferBridgeRecoveryHardRestartDecision(
+        FileTransferBridgeRecoveryExecutionCommand command,
+        string decisionStatus,
+        string reason,
+        string trigger,
+        long executionStartedTick,
+        TimeSpan softPhaseBudget,
+        TimeSpan totalExecutionBudget)
+    {
+        var decision = command.Decision;
+        var owner = decision.RuntimeOwner;
+        var elapsedMs = executionStartedTick > 0
+            ? ElapsedSinceTicksMilliseconds(executionStartedTick) ?? -1
+            : -1d;
+        var remainingMs = elapsedMs < 0
+            ? -1
+            : Math.Max(0, (long)totalExecutionBudget.TotalMilliseconds - (long)elapsedMs);
+        Log(
+            $"event=nkn_bridge_recovery_execution_hard_restart_decided; session_id={SanitizeLogToken(owner.SessionId)}; transfer_id={SanitizeLogToken(owner.TransferId)}; direction={owner.Direction.ToString().ToLowerInvariant()}; route={decision.CurrentRoute.ToString().ToLowerInvariant()}; protocol_version={decision.CurrentProtocolVersion}; live_route_epoch={decision.CurrentLiveRouteEpoch}; runtime_generation={decision.CurrentRuntimeGeneration}; terminal_generation={decision.CurrentTerminalGeneration}; leg_generation={decision.CurrentLegGeneration}; transport_epoch={decision.TransportEpoch}; bridge_recovery_generation={decision.BridgeRecoveryGeneration}; bridge_decision_generation={decision.BridgeDecisionGeneration}; lease_generation={command.RecoveryLivenessLease?.LeaseGeneration ?? 0}; recovery_liveness_lease_authority_id={SanitizeLogToken(command.RecoveryLivenessLease?.AuthorityId.ToString() ?? "none")}; checkpoint_request_id={SanitizeLogToken(command.CheckpointRequestId ?? "none")}; decision_reason={SanitizeLogToken(decision.Reason)}; lease_reason={SanitizeLogToken(command.RecoveryLivenessLease?.Reason ?? "none")}; decision_status={SanitizeLogToken(decisionStatus)}; execution_mode={SanitizeLogToken(string.Equals(trigger, "soft_failed", StringComparison.Ordinal) ? "soft_then_hard" : "hard")}; trigger={SanitizeLogToken(trigger)}; soft_phase_budget_ms={(long)softPhaseBudget.TotalMilliseconds}; total_execution_budget_ms={(long)totalExecutionBudget.TotalMilliseconds}; elapsed_execution_ms={(long)Math.Max(-1d, elapsedMs)}; remaining_total_ms={remainingMs}; reason={SanitizeLogToken(reason)}");
     }
 
     private int GetActiveFileTransferRuntimeTransferCountForDiagnostics()
@@ -3842,10 +3969,14 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         connectReadyTimeoutOverrideForTests = timeout <= TimeSpan.Zero ? null : timeout;
     }
 
-    internal void SetFileTransferBridgeRecoveryExecutionTimeoutForTests(TimeSpan timeout)
+    internal void SetFileTransferBridgeRecoveryExecutionTimeoutsForTests(
+        TimeSpan softPhaseTimeout,
+        TimeSpan totalExecutionTimeout)
     {
-        fileTransferBridgeRecoveryExecutionTimeoutOverrideForTests =
-            timeout <= TimeSpan.Zero ? null : timeout;
+        fileTransferBridgeRecoverySoftPhaseTimeoutOverrideForTests =
+            softPhaseTimeout <= TimeSpan.Zero ? null : softPhaseTimeout;
+        fileTransferBridgeRecoveryTotalTimeoutOverrideForTests =
+            totalExecutionTimeout <= TimeSpan.Zero ? null : totalExecutionTimeout;
     }
 
     internal void HandleStdoutJsonLineForTests(string line)
@@ -4140,6 +4271,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     {
         try
         {
+            FileTransferBridgeRecoveryExecutionCommand? recoveryCommand;
+            Task? recoveryWorkerTermination;
             if (disposed)
             {
                 return;
@@ -4147,16 +4280,32 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
             lock (gate)
             {
+                explicitShutdownInProgress = true;
+                shuttingDown = true;
+                recoveryCommand = activeFileTransferBridgeRecoveryExecutionCommand;
+                recoveryWorkerTermination =
+                    activeFileTransferBridgeRecoveryExecutionWorkerTermination?.Task;
+            }
+
+            try
+            {
+                if (recoveryCommand is { } activeCommand)
+                {
+                    InvalidateFileTransferBridgeRecoveryExecution(
+                        activeCommand,
+                        "bridge_recovery_execution_disconnect");
+                }
+
+                if (recoveryWorkerTermination is not null)
+                {
+                    await recoveryWorkerTermination.ConfigureAwait(false);
+                }
+
                 if (!bridgeSupervisor.IsProcessRunning)
                 {
                     return;
                 }
 
-                shuttingDown = true;
-            }
-
-            try
-            {
                 await StopPingLoopAsync();
                 await bridgeSupervisor.RequestShutdownAndCleanupAsync(
                     sendShutdownAsync: shutdownCt => SendCommandAndWaitAckAsync(
@@ -4171,6 +4320,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             {
                 lock (gate)
                 {
+                    explicitShutdownInProgress = false;
                     shuttingDown = false;
                 }
             }
@@ -5660,22 +5810,32 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private async Task ExecuteFileTransferBridgeRecoveryCommandAsync(
         FileTransferBridgeRecoveryExecutionCommand command,
         TaskCompletionSource<FileTransferBridgeRecoveryExecutionReceipt> completion,
+        TaskCompletionSource workerTermination,
+        CancellationTokenSource totalDeadline,
+        long executionStartedTick,
+        TimeSpan softPhaseBudget,
+        TimeSpan totalExecutionBudget,
         int attempt)
     {
-        lock (gate)
-        {
-            if (activeFileTransferBridgeRecoveryExecutionCommand is not { } activeCommand ||
-                !activeCommand.Equals(command) ||
-                !ReferenceEquals(activeFileTransferBridgeRecoveryExecutionCompletion, completion))
-            {
-                return;
-            }
-
-            activeFileTransferBridgeRecoveryExecutionWorkerStarted = true;
-        }
-
         try
         {
+            lock (gate)
+            {
+                if (activeFileTransferBridgeRecoveryExecutionCommand is not { } activeCommand ||
+                    !activeCommand.Equals(command) ||
+                    !ReferenceEquals(activeFileTransferBridgeRecoveryExecutionCompletion, completion) ||
+                    !ReferenceEquals(
+                        activeFileTransferBridgeRecoveryExecutionWorkerTermination,
+                        workerTermination) ||
+                    !ReferenceEquals(activeFileTransferBridgeRecoveryExecutionTotalDeadline, totalDeadline) ||
+                    activeFileTransferBridgeRecoveryExecutionStartedTick != executionStartedTick)
+                {
+                    return;
+                }
+
+                activeFileTransferBridgeRecoveryExecutionWorkerStarted = true;
+            }
+
             await RecoverFromReceiveStallAsync(
                     "core_filetransfer_request",
                     NormalizeBridgeRecoveryExecutionReason(
@@ -5688,15 +5848,28 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                     -1,
                     -1,
                     command,
-                    completion)
+                    completion,
+                    totalDeadline,
+                    executionStartedTick,
+                    softPhaseBudget,
+                    totalExecutionBudget)
                 .ConfigureAwait(false);
         }
         finally
         {
             lock (gate)
             {
-                activeFileTransferBridgeRecoveryExecutionWorkerStarted = false;
+                if (activeFileTransferBridgeRecoveryExecutionCommand is { } activeCommand &&
+                    activeCommand.Equals(command) &&
+                    ReferenceEquals(activeFileTransferBridgeRecoveryExecutionCompletion, completion) &&
+                    ReferenceEquals(activeFileTransferBridgeRecoveryExecutionTotalDeadline, totalDeadline))
+                {
+                    activeFileTransferBridgeRecoveryExecutionWorkerStarted = false;
+                }
             }
+
+            DisposeFileTransferBridgeRecoveryExecutionDeadline(totalDeadline);
+            workerTermination.TrySetResult();
         }
     }
 
@@ -5710,11 +5883,21 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         long mediaLastReceivedAgeMs,
         long bulkLastReceivedAgeMs,
         FileTransferBridgeRecoveryExecutionCommand? executionCommand = null,
-        TaskCompletionSource<FileTransferBridgeRecoveryExecutionReceipt>? executionCompletion = null)
+        TaskCompletionSource<FileTransferBridgeRecoveryExecutionReceipt>? executionCompletion = null,
+        CancellationTokenSource? executionTotalDeadline = null,
+        long executionStartedTick = 0,
+        TimeSpan? executionSoftPhaseBudget = null,
+        TimeSpan? executionTotalBudget = null)
     {
         var executionMode = "soft";
         var executionOutcome = FileTransferBridgeRecoveryExecutionOutcome.Completed;
         var executionReason = "bridge_recovery_execution_completed";
+        var softPhaseBudget =
+            executionSoftPhaseBudget ?? ReceiveStallRecoveryAttemptBudget;
+        var totalExecutionBudget =
+            executionTotalBudget ?? FileTransferBridgeRecoveryExecutionBudget;
+        var executionToken =
+            executionTotalDeadline?.Token ?? CancellationToken.None;
         Log(
             "event=nkn_bridge_receive_stall_recovery_started; " +
             $"connect_key={connectKey}; stall_reason={stallReason}; attempt={attempt}; max_restarts={ReceiveStallMaxRecoveriesPerSession}; consecutive_zero_receive_windows={consecutiveWindows}; " +
@@ -5766,13 +5949,19 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
             async Task RunHardRestartRecoveryAsync(string trigger)
             {
-                Log(
-                    "event=nkn_bridge_receive_stall_recovery_hard_restart; " +
-                    $"connect_key={connectKey}; stall_reason={stallReason}; attempt={attempt}; trigger={trigger}; core_requested={(coreRequestedFileTransferRecovery ? 1 : 0)}; " +
-                    $"active_file_transfer_sessions={Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions))}; active_file_transfer_runtime_sessions={activeFileTransferRuntimeTransfers.Count}");
                 if (!await RestartBridgeProcessAsync(
                         reconnectAfterRestart: true,
-                        executionCommand)
+                        executionCommand,
+                        executionCompletion,
+                        executionTotalDeadline,
+                        executionStartedTick,
+                        softPhaseBudget,
+                        totalExecutionBudget,
+                        trigger,
+                        () => Log(
+                            "event=nkn_bridge_receive_stall_recovery_hard_restart; " +
+                            $"connect_key={connectKey}; stall_reason={stallReason}; attempt={attempt}; trigger={trigger}; core_requested={(coreRequestedFileTransferRecovery ? 1 : 0)}; " +
+                            $"active_file_transfer_sessions={Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions))}; active_file_transfer_runtime_sessions={activeFileTransferRuntimeTransfers.Count}"))
                     .ConfigureAwait(false))
                 {
                     throw new InvalidOperationException("Bridge hard restart did not reconnect.");
@@ -5787,7 +5976,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 {
                     await RunBoundedReceiveStallRecoveryConnectAsync(
                             ConnectAsync,
-                            ReceiveStallRecoveryAttemptBudget)
+                            softPhaseBudget,
+                            executionToken)
                         .ConfigureAwait(false);
                 }
                 finally
@@ -5810,18 +6000,6 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     executionMode = "soft_then_hard";
-                    if (executionCommand is { } command)
-                    {
-                        lock (gate)
-                        {
-                            if (activeFileTransferBridgeRecoveryExecutionCommand is { } activeCommand &&
-                                activeCommand.Equals(command))
-                            {
-                                activeFileTransferBridgeRecoveryExecutionMode = executionMode;
-                            }
-                        }
-                    }
-
                     Log(
                         "event=nkn_bridge_receive_stall_recovery_soft_failed_hard_restart; " +
                         $"connect_key={connectKey}; stall_reason={stallReason}; attempt={attempt}; reason={ex.GetType().Name}; message={SanitizeLogToken(ex.Message)}; " +
@@ -5834,6 +6012,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 await RunSoftRecoveryConnectAsync().ConfigureAwait(false);
             }
 
+            executionToken.ThrowIfCancellationRequested();
             Interlocked.Exchange(ref receiveStallConsecutiveWindows, 0);
             Interlocked.Exchange(ref receiveStallBulkConsecutiveWindows, 0);
             Interlocked.Exchange(ref receiveStallControlConsecutiveWindows, 0);
@@ -5858,8 +6037,16 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         }
         catch (OperationCanceledException)
         {
-            executionOutcome = FileTransferBridgeRecoveryExecutionOutcome.Discarded;
-            executionReason = "bridge_recovery_execution_canceled";
+            var totalDeadlineExpired =
+                executionTotalDeadline is not null &&
+                IsBridgeRecoveryTotalDeadlineExpired(
+                    executionTotalDeadline,
+                    executionStartedTick,
+                    totalExecutionBudget);
+            executionOutcome = FileTransferBridgeRecoveryExecutionOutcome.Exhausted;
+            executionReason = totalDeadlineExpired
+                ? "bridge_recovery_execution_timeout"
+                : "bridge_recovery_execution_exhausted";
         }
         catch (Exception ex)
         {
@@ -5890,11 +6077,19 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
             Interlocked.Exchange(ref receiveStallRecoveryInProgress, 0);
             TrySchedulePendingPostTunaFallbackUnprovenRecoveryEscalation("recovery_finished");
-            if (executionCommand is { } command && executionCompletion is not null)
+            if (executionCommand is { } command &&
+                executionCompletion is not null &&
+                executionTotalDeadline is not null)
             {
+                FileTransferBridgeRecoveryBeforeTerminalCommitForTests?.Invoke(
+                    command);
                 CompleteFileTransferBridgeRecoveryExecution(
                     command,
                     executionCompletion,
+                    executionTotalDeadline,
+                    executionStartedTick,
+                    softPhaseBudget,
+                    totalExecutionBudget,
                     executionOutcome,
                     executionMode,
                     executionReason);
@@ -6272,9 +6467,27 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
         try
         {
+            FileTransferBridgeRecoveryExecutionCommand? recoveryCommand;
+            Task? recoveryWorkerTermination;
             lock (gate)
             {
+                explicitShutdownInProgress = true;
                 shuttingDown = true;
+                recoveryCommand = activeFileTransferBridgeRecoveryExecutionCommand;
+                recoveryWorkerTermination =
+                    activeFileTransferBridgeRecoveryExecutionWorkerTermination?.Task;
+            }
+
+            if (recoveryCommand is { } activeCommand)
+            {
+                InvalidateFileTransferBridgeRecoveryExecution(
+                    activeCommand,
+                    "bridge_recovery_execution_dispose");
+            }
+
+            if (recoveryWorkerTermination is not null)
+            {
+                recoveryWorkerTermination.GetAwaiter().GetResult();
             }
 
             try
@@ -6332,7 +6545,11 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             connectAttempts.ResetPendingReadyForNewProcessStart();
             helloCompleted = false;
             Interlocked.Exchange(ref disconnectedRaised, 0);
-            shuttingDown = false;
+            if (!explicitShutdownInProgress &&
+                Volatile.Read(ref disposeStarted) == 0)
+            {
+                shuttingDown = false;
+            }
         }
     }
 
@@ -7726,7 +7943,14 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
     private async Task<bool> RestartBridgeProcessAsync(
         bool reconnectAfterRestart = false,
-        FileTransferBridgeRecoveryExecutionCommand? executionCommand = null)
+        FileTransferBridgeRecoveryExecutionCommand? executionCommand = null,
+        TaskCompletionSource<FileTransferBridgeRecoveryExecutionReceipt>? executionCompletion = null,
+        CancellationTokenSource? executionTotalDeadline = null,
+        long executionStartedTick = 0,
+        TimeSpan? executionSoftPhaseBudget = null,
+        TimeSpan? executionTotalBudget = null,
+        string executionTrigger = "planned",
+        Action? onHardRestartReserved = null)
     {
         var activeFileTransfer =
             Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions)) > 0 ||
@@ -7742,43 +7966,101 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             return false;
         }
 
+        var hardRestartReserved = false;
         if (executionCommand is { } command)
         {
+            var decisionStatus = "Rejected";
+            var decisionReason = "bridge_recovery_execution_command_not_current";
+            FileTransferBridgeRecoveryBeforeHardRestartCurrentnessForTests?.Invoke(command);
+            var totalBudget =
+                executionTotalBudget ?? FileTransferBridgeRecoveryExecutionBudget;
+            bool totalDeadlineElapsed;
             lock (gate)
             {
-                if (activeFileTransferBridgeRecoveryExecutionCommand is not { } activeCommand ||
-                    !activeCommand.Equals(command) ||
-                    !activeFileTransferBridgeRecoveryExecutionWorkerStarted)
+                totalDeadlineElapsed = HasBridgeRecoveryTotalDeadlineElapsed(
+                    Stopwatch.GetTimestamp(),
+                    executionStartedTick,
+                    totalBudget);
+                if (activeFileTransferBridgeRecoveryExecutionCommand is { } activeCommand &&
+                    activeCommand.Equals(command) &&
+                    executionCompletion is not null &&
+                    ReferenceEquals(activeFileTransferBridgeRecoveryExecutionCompletion, executionCompletion) &&
+                    executionTotalDeadline is not null &&
+                    ReferenceEquals(activeFileTransferBridgeRecoveryExecutionTotalDeadline, executionTotalDeadline) &&
+                    activeFileTransferBridgeRecoveryExecutionStartedTick == executionStartedTick &&
+                    activeFileTransferBridgeRecoveryExecutionWorkerStarted &&
+                    !executionCompletion.Task.IsCompleted &&
+                    !executionTotalDeadline.IsCancellationRequested &&
+                    !totalDeadlineElapsed)
                 {
-                    LogFileTransferBridgeRecoveryExecution(
-                        "nkn_bridge_restart_rejected_stale_execution_command",
-                        command,
-                        "bridge_recovery_execution_command_not_current");
-                    return false;
+                    shuttingDown = true;
+                    hardRestartReserved = true;
+                    decisionStatus = "Started";
+                    decisionReason = "bridge_recovery_execution_hard_restart_started";
                 }
+                else if (totalDeadlineElapsed)
+                {
+                    decisionReason = "bridge_recovery_execution_total_deadline_expired";
+                }
+            }
+
+            LogFileTransferBridgeRecoveryHardRestartDecision(
+                command,
+                decisionStatus,
+                decisionReason,
+                executionTrigger,
+                executionStartedTick,
+                executionSoftPhaseBudget ?? ReceiveStallRecoveryAttemptBudget,
+                executionTotalBudget ?? FileTransferBridgeRecoveryExecutionBudget);
+            if (!string.Equals(decisionStatus, "Started", StringComparison.Ordinal))
+            {
+                if (executionTotalDeadline?.IsCancellationRequested == true)
+                {
+                    executionTotalDeadline.Token.ThrowIfCancellationRequested();
+                }
+
+                LogFileTransferBridgeRecoveryExecution(
+                    "nkn_bridge_restart_rejected_stale_execution_command",
+                    command,
+                    decisionReason);
+                return false;
             }
         }
 
-        lock (gate)
+        if (!hardRestartReserved)
         {
-            shuttingDown = true;
+            lock (gate)
+            {
+                shuttingDown = true;
+            }
         }
-        bridgeSupervisor.MarkForcedKillRequested();
-        await bridgeSupervisor.CleanupStateAsync(waitForReaders: true, "restart").ConfigureAwait(false);
-
         try
         {
+            executionTotalDeadline?.Token.ThrowIfCancellationRequested();
+            if (hardRestartReserved)
+            {
+                onHardRestartReserved?.Invoke();
+                FileTransferBridgeRecoveryAfterHardRestartReservationForTests?.Invoke(
+                    executionCommand!.Value);
+            }
+
+            executionTotalDeadline?.Token.ThrowIfCancellationRequested();
+            bridgeSupervisor.MarkForcedKillRequested();
+            await bridgeSupervisor.CleanupStateAsync(waitForReaders: true, "restart").ConfigureAwait(false);
+            executionTotalDeadline?.Token.ThrowIfCancellationRequested();
             if (!disposed)
             {
-                await EnsureProcessStartedAsync(CancellationToken.None);
-                await EnsureHelloHandshakeAsync(CancellationToken.None);
+                var executionToken =
+                    executionTotalDeadline?.Token ?? CancellationToken.None;
+                await EnsureProcessStartedAsync(executionToken);
+                await EnsureHelloHandshakeAsync(executionToken);
                 if (reconnectAfterRestart)
                 {
                     connectAttempts.ResetPendingReadyForNewProcessStart();
                     Interlocked.Exchange(ref receiveStallRecoveryConnectActive, 1);
                     try
                     {
-                        await ConnectAsync(CancellationToken.None).ConfigureAwait(false);
+                        await ConnectAsync(executionToken).ConfigureAwait(false);
                     }
                     finally
                     {
@@ -7786,11 +8068,17 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                     }
                 }
 
+                executionTotalDeadline?.Token.ThrowIfCancellationRequested();
                 NknRuntimeDiagnostics.IncrementBridgeRestartCount();
                 return true;
             }
 
             return false;
+        }
+        catch (OperationCanceledException) when (
+            executionTotalDeadline?.IsCancellationRequested == true)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -7801,7 +8089,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         {
             lock (gate)
             {
-                if (!disposed)
+                if (!disposed && !explicitShutdownInProgress)
                 {
                     shuttingDown = false;
                 }
