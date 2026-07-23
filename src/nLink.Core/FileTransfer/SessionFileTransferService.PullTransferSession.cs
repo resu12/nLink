@@ -5338,20 +5338,32 @@ public sealed partial class SessionFileTransferService
         }
 
         RegularV4FrontierRepairContract? pressureContract = null;
-        if (transition.PressureBinding is { } pressureBinding &&
-            !TryGetExactRegularV4PressureRecoveryHandoffContract(
-                context.CurrentRegularV4FrontierRepairContract,
-                pressureBinding,
-                out pressureContract,
-                out var pressureContractRejectionReason))
+        if (transition.PressureBinding is { } pressureBinding)
         {
-            LogRuntimeUnlockUncommittedTunaFallbackHandoff(
-                "runtime_unlock_uncommitted_tuna_fallback_handoff_decided",
-                context,
-                intent,
-                "Rejected",
-                pressureContractRejectionReason);
-            return false;
+            var pressureContractRejectionReason =
+                "regular_v4_frontier_repair_pressure_binding_not_installed";
+            if (!FileTransferCoordinator.TryGetInstalledRegularV4FrontierRepairPressureInstall(
+                    coordinatorState,
+                    pressureBinding.Authority.AuthorityId,
+                    out var installedPressureBinding,
+                    out _,
+                    out var installedPressureReceipt) ||
+                installedPressureBinding != pressureBinding ||
+                !TryGetExactRegularV4PressureRecoveryHandoffContract(
+                    context.CurrentRegularV4FrontierRepairContract,
+                    installedPressureBinding,
+                    installedPressureReceipt,
+                    out pressureContract,
+                    out pressureContractRejectionReason))
+            {
+                LogRuntimeUnlockUncommittedTunaFallbackHandoff(
+                    "runtime_unlock_uncommitted_tuna_fallback_handoff_decided",
+                    context,
+                    intent,
+                    "Rejected",
+                    pressureContractRejectionReason);
+                return false;
+            }
         }
 
         if (prepared.RouteDecision is not { } decision ||
@@ -5913,7 +5925,6 @@ public sealed partial class SessionFileTransferService
             context.PullRegularNknV4PeerSilenceMissingDispatchSettlementContract = null;
         }
         context.PendingRegularV4FrontierRepairPressureInstallRetry = null;
-        ClearPendingRegularV4FrontierRepairPressureInstall(contract);
 
         LocalOperationalLog.Info(
             "FileTransferService",

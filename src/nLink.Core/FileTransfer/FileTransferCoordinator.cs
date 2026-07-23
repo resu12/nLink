@@ -519,15 +519,14 @@ internal readonly record struct RegularV4FrontierRepairAuthorityRequest(
     int FrontierChunkIndex,
     int DurableReceivedHighestChunkIndex,
     int PendingRepairCount,
-    string DecisionReason);
+    string DecisionReason,
+    int? FrontierLagChunks = null);
 
 internal enum RegularV4FrontierRepairPressureBindingState
 {
     Pending = 1,
     Installed = 2,
     RetainedPredecessor = 3,
-    Retired = 4,
-    Invalidated = 5,
 }
 
 internal readonly record struct RegularV4FrontierRepairPressureBinding(
@@ -554,9 +553,38 @@ internal readonly record struct RegularV4FrontierRepairPressureBindingDecision(
     RegularV4FrontierRepairPressureBindingDecisionStatus Status,
     string Reason,
     RegularV4FrontierRepairPressureBinding? Binding,
+    FileTransferRegularV4FrontierRepairPressureInstallCommand? InstallCommand,
     FileTransferRegularV4FrontierRepairPressureSettlementCommand? SettlementCommand)
 {
     public FileTransferCoordinatorState State { get; init; } = null!;
+}
+
+internal readonly record struct RegularV4FrontierRepairPressureSubstate(
+    RegularV4FrontierRepairPressureBinding? PendingBinding = null,
+    FileTransferRegularV4FrontierRepairPressureInstallCommand? PendingInstallCommand = null,
+    RegularV4FrontierRepairPressureBinding? InstalledBinding = null,
+    FileTransferRegularV4FrontierRepairPressureInstallCommand? InstalledInstallCommand = null,
+    FileTransferRegularV4FrontierRepairPressureInstallReceipt? InstalledInstallReceipt = null,
+    RegularV4FrontierRepairPressureBinding? RetainedPredecessorBinding = null,
+    FileTransferRegularV4FrontierRepairPressureInstallCommand? RetainedPredecessorInstallCommand = null,
+    FileTransferRegularV4FrontierRepairPressureInstallReceipt? RetainedPredecessorInstallReceipt = null,
+    FileTransferRegularV4FrontierRepairSettlement? LastSettlement = null,
+    long LastInstallGeneration = 0,
+    FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt? LastSettlementApplyReceipt = null,
+    RegularV4FrontierRepairPressureRecoveryHandoffTransition? LastRecoveryHandoff = null)
+{
+    internal static RegularV4FrontierRepairPressureSubstate Empty => default;
+
+    internal bool HasBinding =>
+        PendingBinding is not null ||
+        InstalledBinding is not null ||
+        RetainedPredecessorBinding is not null;
+}
+
+internal readonly record struct FileTransferCoordinatorPersistentState(
+    RegularV4FrontierRepairPressureSubstate RegularV4FrontierRepairPressure = default)
+{
+    internal static FileTransferCoordinatorPersistentState Empty => default;
 }
 
 internal enum RegularV4FrontierRepairPressureRecoveryHandoffStatus
@@ -764,15 +792,7 @@ internal sealed record FileTransferCoordinatorState(
     bool RuntimeUnlockRecoveryLeaseClosureAvailable = false,
     FallbackTailYieldTransportEpochReauthorization? PendingFallbackTailYieldTransportEpochReauthorization = null,
     int LastFallbackTailYieldTransportEpochReauthorizationGeneration = 0,
-    RegularV4FrontierRepairPressureBinding? PendingRegularV4FrontierRepairPressureBinding = null,
-    RegularV4FrontierRepairPressureBinding? InstalledRegularV4FrontierRepairPressureBinding = null,
-    RegularV4FrontierRepairPressureBinding? RetainedRegularV4FrontierRepairPressurePredecessor = null,
-    FileTransferRegularV4FrontierRepairSettlement? LastRegularV4FrontierRepairPressureSettlement = null,
-    long LastRegularV4FrontierRepairPressureInstallGeneration = 0,
-    FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
-        LastRegularV4FrontierRepairPressureSettlementApplyReceipt = null,
-    RegularV4FrontierRepairPressureRecoveryHandoffTransition?
-        LastRegularV4FrontierRepairPressureRecoveryHandoff = null,
+    FileTransferCoordinatorPersistentState PersistentState = default,
     RuntimeUnlockUncommittedTunaFallbackHandoffTransition?
         LastRuntimeUnlockUncommittedTunaFallbackHandoff = null,
     FileTransferBridgeRecoveryExecutionCommand?
@@ -1073,33 +1093,125 @@ internal static class FileTransferCoordinator
             return MutationRejected(state, reason, "terminal_state", terminalMutationRejected: true);
         }
 
+        var workingState = RequiresClonedCoordinatorGraph(coordinatorEvent.Kind)
+            ? CloneCoordinatorStateGraph(state)
+            : state;
         var decision = coordinatorEvent.Kind switch
         {
-            FileTransferCoordinatorEventKind.StartTransfer => StartTransfer(coordinatorEvent, state, reason),
-            FileTransferCoordinatorEventKind.TunaActivated => TransitionToRoute(coordinatorEvent, state, reason, recoverEpoch: true),
-            FileTransferCoordinatorEventKind.TunaLost => TransitionToRoute(coordinatorEvent, state, reason, recoverEpoch: false),
-            FileTransferCoordinatorEventKind.FallbackCheckpointRequested => MarkFallbackCheckpointRequested(coordinatorEvent, state, reason),
-            FileTransferCoordinatorEventKind.FallbackCheckpointAccepted => MarkFallbackCheckpointAccepted(coordinatorEvent, state, reason),
-            FileTransferCoordinatorEventKind.FallbackCheckpointRetired => RetireFallbackCheckpointRequest(coordinatorEvent, state, reason),
-            FileTransferCoordinatorEventKind.FallbackTailQuiescent => MarkFallbackTailQuiescent(coordinatorEvent, state, reason),
-            FileTransferCoordinatorEventKind.FallbackTailFailed => MarkFallbackTailFailed(coordinatorEvent, state, reason),
-            FileTransferCoordinatorEventKind.BridgeRecoveryStarted => MarkCurrentFallbackLegState(state, FileTransferLegState.RecoveryActive, reason),
-            FileTransferCoordinatorEventKind.BridgeRecoveryCompleted => PassThrough(state, reason),
-            FileTransferCoordinatorEventKind.BridgeRecoveryExhausted => MarkCurrentFallbackLegState(state, FileTransferLegState.BridgeRestartPending, reason),
-            FileTransferCoordinatorEventKind.FallbackControlPlaneSendAuthorized => AuthorizeFallbackControlPlaneSend(coordinatorEvent, state, reason),
-            FileTransferCoordinatorEventKind.FallbackControlPlaneSendCompleted => CompleteFallbackControlPlaneSend(coordinatorEvent, state, reason),
-            FileTransferCoordinatorEventKind.FallbackControlPlanePressureUpdated => UpdateFallbackControlPlanePressure(coordinatorEvent, state, reason),
-            FileTransferCoordinatorEventKind.RuntimeUnlockFallbackSurvivalUpdated => UpdateRuntimeUnlockFallbackSurvival(coordinatorEvent, state, reason),
-            FileTransferCoordinatorEventKind.RuntimeUnlockAdmission => ApplyRuntimeUnlockAdmission(coordinatorEvent, state, reason),
-            FileTransferCoordinatorEventKind.RuntimeUnlockAdmissionRetired => RetireRuntimeUnlockAdmission(state, reason),
-            FileTransferCoordinatorEventKind.RuntimeUnlockPreCommitProbePending => ApplyRuntimeUnlockPreCommitProbePending(coordinatorEvent, state, reason),
-            FileTransferCoordinatorEventKind.RuntimeUnlockPreCommitProbeReplayed => ApplyRuntimeUnlockPreCommitProbeReplayed(coordinatorEvent, state, reason),
-            FileTransferCoordinatorEventKind.RuntimeUnlockPreCommitProbeRetired => RetireRuntimeUnlockPreCommitProbe(coordinatorEvent, state, reason),
-            FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested => ApplyRuntimeUnlockCommit(coordinatorEvent, state, reason),
-            FileTransferCoordinatorEventKind.Terminalized => Terminalize(state, reason),
-            _ => PassThrough(state, reason),
+            FileTransferCoordinatorEventKind.StartTransfer =>
+                StartTransfer(coordinatorEvent, workingState, reason),
+            FileTransferCoordinatorEventKind.TunaActivated =>
+                TransitionToRoute(coordinatorEvent, workingState, reason, recoverEpoch: true),
+            FileTransferCoordinatorEventKind.TunaLost =>
+                TransitionToRoute(coordinatorEvent, workingState, reason, recoverEpoch: false),
+            FileTransferCoordinatorEventKind.FallbackCheckpointRequested =>
+                MarkFallbackCheckpointRequested(coordinatorEvent, workingState, reason),
+            FileTransferCoordinatorEventKind.FallbackCheckpointAccepted =>
+                MarkFallbackCheckpointAccepted(coordinatorEvent, workingState, reason),
+            FileTransferCoordinatorEventKind.FallbackCheckpointRetired =>
+                RetireFallbackCheckpointRequest(coordinatorEvent, workingState, reason),
+            FileTransferCoordinatorEventKind.FallbackTailQuiescent =>
+                MarkFallbackTailQuiescent(coordinatorEvent, workingState, reason),
+            FileTransferCoordinatorEventKind.FallbackTailFailed =>
+                MarkFallbackTailFailed(coordinatorEvent, workingState, reason),
+            FileTransferCoordinatorEventKind.BridgeRecoveryStarted =>
+                MarkCurrentFallbackLegState(workingState, FileTransferLegState.RecoveryActive, reason),
+            FileTransferCoordinatorEventKind.BridgeRecoveryCompleted =>
+                PassThrough(workingState, reason),
+            FileTransferCoordinatorEventKind.BridgeRecoveryExhausted =>
+                MarkCurrentFallbackLegState(
+                    workingState,
+                    FileTransferLegState.BridgeRestartPending,
+                    reason),
+            FileTransferCoordinatorEventKind.FallbackControlPlaneSendAuthorized =>
+                AuthorizeFallbackControlPlaneSend(coordinatorEvent, workingState, reason),
+            FileTransferCoordinatorEventKind.FallbackControlPlaneSendCompleted =>
+                CompleteFallbackControlPlaneSend(coordinatorEvent, workingState, reason),
+            FileTransferCoordinatorEventKind.FallbackControlPlanePressureUpdated =>
+                UpdateFallbackControlPlanePressure(coordinatorEvent, workingState, reason),
+            FileTransferCoordinatorEventKind.RuntimeUnlockFallbackSurvivalUpdated =>
+                UpdateRuntimeUnlockFallbackSurvival(coordinatorEvent, workingState, reason),
+            FileTransferCoordinatorEventKind.RuntimeUnlockAdmission =>
+                ApplyRuntimeUnlockAdmission(coordinatorEvent, workingState, reason),
+            FileTransferCoordinatorEventKind.RuntimeUnlockAdmissionRetired =>
+                RetireRuntimeUnlockAdmission(workingState, reason),
+            FileTransferCoordinatorEventKind.RuntimeUnlockPreCommitProbePending =>
+                ApplyRuntimeUnlockPreCommitProbePending(coordinatorEvent, workingState, reason),
+            FileTransferCoordinatorEventKind.RuntimeUnlockPreCommitProbeReplayed =>
+                ApplyRuntimeUnlockPreCommitProbeReplayed(coordinatorEvent, workingState, reason),
+            FileTransferCoordinatorEventKind.RuntimeUnlockPreCommitProbeRetired =>
+                RetireRuntimeUnlockPreCommitProbe(coordinatorEvent, workingState, reason),
+            FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested =>
+                ApplyRuntimeUnlockCommit(coordinatorEvent, workingState, reason),
+            FileTransferCoordinatorEventKind.Terminalized => Terminalize(workingState, reason),
+            _ => PassThrough(workingState, reason),
         };
+        if (!ReferenceEquals(workingState, state) &&
+            (decision.TerminalMutationRejected || decision.MutationRejectedReason is not null))
+        {
+            decision = decision with
+            {
+                State = state,
+                StartedLiveRouteEpoch = null,
+                RecoveredLiveRouteEpoch = null,
+                StartedLeg = null,
+                FrozenLeg = null,
+                AcceptedCheckpointLeg = null,
+                MutatedLeg = null,
+            };
+        }
+
         return ForwardFallbackRoutePublicationAuthorityAfterLegMutation(state, decision, reason);
+    }
+
+    private static bool RequiresClonedCoordinatorGraph(FileTransferCoordinatorEventKind kind)
+        => kind is
+            FileTransferCoordinatorEventKind.StartTransfer or
+            FileTransferCoordinatorEventKind.TunaActivated or
+            FileTransferCoordinatorEventKind.TunaLost or
+            FileTransferCoordinatorEventKind.FallbackCheckpointRequested or
+            FileTransferCoordinatorEventKind.FallbackCheckpointAccepted or
+            FileTransferCoordinatorEventKind.FallbackCheckpointRetired or
+            FileTransferCoordinatorEventKind.FallbackTailQuiescent or
+            FileTransferCoordinatorEventKind.FallbackTailFailed or
+            FileTransferCoordinatorEventKind.BridgeRecoveryStarted or
+            FileTransferCoordinatorEventKind.BridgeRecoveryExhausted or
+            FileTransferCoordinatorEventKind.Terminalized;
+
+    private static FileTransferCoordinatorState CloneCoordinatorStateGraph(
+        FileTransferCoordinatorState state)
+    {
+        var legHistory = state.LegHistory.Select(CloneLeg).ToList();
+        FileTransferLeg? currentLeg = null;
+        if (state.CurrentLeg is { } sourceCurrentLeg)
+        {
+            for (var index = 0; index < state.LegHistory.Count; index++)
+            {
+                if (ReferenceEquals(state.LegHistory[index], sourceCurrentLeg))
+                {
+                    currentLeg = legHistory[index];
+                    break;
+                }
+            }
+
+            currentLeg ??= legHistory.FirstOrDefault(candidate =>
+                candidate.Generation == sourceCurrentLeg.Generation &&
+                string.Equals(candidate.LegId, sourceCurrentLeg.LegId, StringComparison.Ordinal));
+            if (currentLeg is null)
+            {
+                currentLeg = CloneLeg(sourceCurrentLeg);
+                legHistory.Add(currentLeg);
+            }
+        }
+
+        return state with
+        {
+            CurrentLiveRouteEpoch = state.CurrentLiveRouteEpoch is { } epoch
+                ? CloneLiveRouteEpoch(epoch)
+                : null,
+            CurrentLeg = currentLeg,
+            LegHistory = legHistory,
+        };
     }
 
     private static FileTransferCoordinatorDecision ForwardFallbackRoutePublicationAuthorityAfterLegMutation(
@@ -1734,6 +1846,18 @@ internal static class FileTransferCoordinator
             CanSendData = leg.CanSendData,
             RuntimeUnlockProbeAllowedAfterTransportEpochAdoption =
                 leg.RuntimeUnlockProbeAllowedAfterTransportEpochAdoption,
+        };
+
+    private static LiveRouteEpoch CloneLiveRouteEpoch(LiveRouteEpoch epoch)
+        => new()
+        {
+            RoutePublicationToken = epoch.RoutePublicationToken,
+            EpochId = epoch.EpochId,
+            RouteSelection = epoch.RouteSelection,
+            HandoffKind = epoch.HandoffKind,
+            TargetTransport = epoch.TargetTransport,
+            Reason = epoch.Reason,
+            State = epoch.State,
         };
 
     private static void TerminalizeLeg(FileTransferLeg? leg)
@@ -4215,6 +4339,7 @@ internal static class FileTransferCoordinator
             string pressureReason)
     {
         var normalizedReason = NormalizeReason(pressureReason);
+        var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
         if (state.IsTerminal)
         {
             return RegularV4PressureBindingDecision(
@@ -4244,16 +4369,21 @@ internal static class FileTransferCoordinator
                 issuanceReason);
         }
 
-        if (state.PendingRegularV4FrontierRepairPressureBinding is { } pending)
+        if (pressureState.PendingBinding is { } pending)
         {
+            var repeatedCommand = CreateRegularV4FrontierRepairPressureInstallCommand(
+                pending,
+                authorityRequest);
             if (pending.Authority == issuedAuthority &&
-                string.Equals(pending.PressureReason, normalizedReason, StringComparison.Ordinal))
+                string.Equals(pending.PressureReason, normalizedReason, StringComparison.Ordinal) &&
+                pressureState.PendingInstallCommand == repeatedCommand)
             {
                 return RegularV4PressureBindingDecision(
                     state,
                     RegularV4FrontierRepairPressureBindingDecisionStatus.Idempotent,
                     "regular_v4_frontier_repair_pressure_binding_already_pending",
-                    pending);
+                    pending,
+                    pressureState.PendingInstallCommand);
             }
 
             return RegularV4PressureBindingDecision(
@@ -4262,14 +4392,26 @@ internal static class FileTransferCoordinator
                 "regular_v4_frontier_repair_pressure_binding_pending_conflict");
         }
 
-        var installed = state.InstalledRegularV4FrontierRepairPressureBinding;
+        var installed = pressureState.InstalledBinding;
         if (installed is { } current && current.Authority == issuedAuthority)
         {
+            var repeatedCommand = CreateRegularV4FrontierRepairPressureInstallCommand(
+                current,
+                authorityRequest);
+            if (pressureState.InstalledInstallCommand == repeatedCommand)
+            {
+                return RegularV4PressureBindingDecision(
+                    state,
+                    RegularV4FrontierRepairPressureBindingDecisionStatus.Idempotent,
+                    "regular_v4_frontier_repair_pressure_binding_already_installed",
+                    current,
+                    pressureState.InstalledInstallCommand);
+            }
+
             return RegularV4PressureBindingDecision(
                 state,
-                RegularV4FrontierRepairPressureBindingDecisionStatus.Idempotent,
-                "regular_v4_frontier_repair_pressure_binding_already_installed",
-                current);
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                "regular_v4_frontier_repair_pressure_binding_install_command_mismatch");
         }
 
         if (installed is { } active)
@@ -4291,7 +4433,7 @@ internal static class FileTransferCoordinator
                 "regular_v4_frontier_repair_pressure_binding_predecessor_missing");
         }
 
-        if (state.RetainedRegularV4FrontierRepairPressurePredecessor is not null)
+        if (pressureState.RetainedPredecessorBinding is not null)
         {
             return RegularV4PressureBindingDecision(
                 state,
@@ -4301,7 +4443,7 @@ internal static class FileTransferCoordinator
 
         var nextGeneration = Math.Max(
             1,
-            state.LastRegularV4FrontierRepairPressureInstallGeneration + 1);
+            pressureState.LastInstallGeneration + 1);
         var binding = new RegularV4FrontierRepairPressureBinding(
             issuedAuthority,
             normalizedReason,
@@ -4309,16 +4451,28 @@ internal static class FileTransferCoordinator
             RegularV4FrontierRepairPressureBindingState.Pending,
             issuedAuthority.PredecessorAuthorityId,
             FinalSettlement: null);
+        var installCommand = CreateRegularV4FrontierRepairPressureInstallCommand(
+            binding,
+            authorityRequest);
+        var nextPressureState = pressureState with
+        {
+            PendingBinding = binding,
+            PendingInstallCommand = installCommand,
+            LastInstallGeneration = nextGeneration,
+        };
         var nextState = state with
         {
-            PendingRegularV4FrontierRepairPressureBinding = binding,
-            LastRegularV4FrontierRepairPressureInstallGeneration = nextGeneration,
+            PersistentState = state.PersistentState with
+            {
+                RegularV4FrontierRepairPressure = nextPressureState,
+            },
         };
         return RegularV4PressureBindingDecision(
             nextState,
             RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted,
             "regular_v4_frontier_repair_pressure_binding_staged",
-            binding);
+            binding,
+            installCommand);
     }
 
     internal static RegularV4FrontierRepairPressureBindingDecision
@@ -4326,16 +4480,25 @@ internal static class FileTransferCoordinator
             FileTransferCoordinatorState state,
             FileTransferRegularV4FrontierRepairPressureInstallReceipt receipt)
     {
-        if (state.InstalledRegularV4FrontierRepairPressureBinding is { } installed &&
+        var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
+        if (pressureState.InstalledBinding is { } installed &&
             installed.Authority == receipt.Authority &&
             installed.InstallGeneration == receipt.InstallGeneration &&
             string.Equals(installed.PressureReason, receipt.PressureReason, StringComparison.Ordinal))
         {
-            if (receipt.Status is not (
-                    FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed or
-                    FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent) ||
-                string.IsNullOrWhiteSpace(receipt.Reason) ||
-                !string.Equals(receipt.Reason, NormalizeReason(receipt.Reason), StringComparison.Ordinal))
+            var exactStoredReceipt =
+                pressureState.InstalledInstallReceipt == receipt;
+            var canonicalIdempotentReceipt =
+                pressureState.InstalledInstallCommand is { } installedCommand &&
+                installedCommand.Pressure.RepairAuthority == installed.Authority &&
+                installedCommand.InstallGeneration == installed.InstallGeneration &&
+                receipt.Status ==
+                    FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent &&
+                string.Equals(
+                    receipt.Reason,
+                    "regular_v4_frontier_repair_pressure_install_idempotent",
+                    StringComparison.Ordinal);
+            if (!exactStoredReceipt && !canonicalIdempotentReceipt)
             {
                 return RegularV4PressureBindingDecision(
                     state,
@@ -4347,10 +4510,12 @@ internal static class FileTransferCoordinator
                 state,
                 RegularV4FrontierRepairPressureBindingDecisionStatus.Idempotent,
                 "regular_v4_frontier_repair_pressure_binding_already_committed",
-                installed);
+                installed,
+                pressureState.InstalledInstallCommand);
         }
 
-        if (state.PendingRegularV4FrontierRepairPressureBinding is not { } pending)
+        if (pressureState.PendingBinding is not { } pending ||
+            pressureState.PendingInstallCommand is not { } pendingCommand)
         {
             return RegularV4PressureBindingDecision(
                 state,
@@ -4363,7 +4528,15 @@ internal static class FileTransferCoordinator
                 FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent) ||
             receipt.Authority != pending.Authority ||
             receipt.InstallGeneration != pending.InstallGeneration ||
-            !string.Equals(receipt.PressureReason, pending.PressureReason, StringComparison.Ordinal))
+            !string.Equals(receipt.PressureReason, pending.PressureReason, StringComparison.Ordinal) ||
+            string.IsNullOrWhiteSpace(receipt.Reason) ||
+            !string.Equals(receipt.Reason, NormalizeReason(receipt.Reason), StringComparison.Ordinal) ||
+            receipt.Authority != pendingCommand.Pressure.RepairAuthority ||
+            receipt.InstallGeneration != pendingCommand.InstallGeneration ||
+            !string.Equals(
+                receipt.PressureReason,
+                pendingCommand.Pressure.Reason,
+                StringComparison.Ordinal))
         {
             return RegularV4PressureBindingDecision(
                 state,
@@ -4372,21 +4545,45 @@ internal static class FileTransferCoordinator
         }
 
         var committed = pending with { State = RegularV4FrontierRepairPressureBindingState.Installed };
-        var predecessor = state.InstalledRegularV4FrontierRepairPressureBinding is { } current &&
-                          pending.PredecessorAuthorityId == current.Authority.AuthorityId
-            ? current with { State = RegularV4FrontierRepairPressureBindingState.RetainedPredecessor }
-            : state.RetainedRegularV4FrontierRepairPressurePredecessor;
+        var currentBinding = pressureState.InstalledBinding;
+        var replacesCurrent = currentBinding is { } current &&
+                              pending.PredecessorAuthorityId == current.Authority.AuthorityId;
+        var predecessor = replacesCurrent
+            ? currentBinding!.Value with
+            {
+                State = RegularV4FrontierRepairPressureBindingState.RetainedPredecessor,
+            }
+            : pressureState.RetainedPredecessorBinding;
+        var predecessorCommand = replacesCurrent
+            ? pressureState.InstalledInstallCommand
+            : pressureState.RetainedPredecessorInstallCommand;
+        var predecessorReceipt = replacesCurrent
+            ? pressureState.InstalledInstallReceipt
+            : pressureState.RetainedPredecessorInstallReceipt;
+        var nextPressureState = pressureState with
+        {
+            PendingBinding = null,
+            PendingInstallCommand = null,
+            InstalledBinding = committed,
+            InstalledInstallCommand = pendingCommand,
+            InstalledInstallReceipt = receipt,
+            RetainedPredecessorBinding = predecessor,
+            RetainedPredecessorInstallCommand = predecessorCommand,
+            RetainedPredecessorInstallReceipt = predecessorReceipt,
+        };
         var nextState = state with
         {
-            PendingRegularV4FrontierRepairPressureBinding = null,
-            InstalledRegularV4FrontierRepairPressureBinding = committed,
-            RetainedRegularV4FrontierRepairPressurePredecessor = predecessor,
+            PersistentState = state.PersistentState with
+            {
+                RegularV4FrontierRepairPressure = nextPressureState,
+            },
         };
         return RegularV4PressureBindingDecision(
             nextState,
             RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted,
             "regular_v4_frontier_repair_pressure_binding_committed",
-            committed);
+            committed,
+            pendingCommand);
     }
 
     internal static RegularV4FrontierRepairPressureBindingDecision
@@ -4394,7 +4591,8 @@ internal static class FileTransferCoordinator
             FileTransferCoordinatorState state,
             FileTransferRegularV4FrontierRepairSettlement settlement)
     {
-        if (state.LastRegularV4FrontierRepairPressureSettlement == settlement)
+        var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
+        if (pressureState.LastSettlement == settlement)
         {
             return RegularV4PressureBindingDecision(
                 state,
@@ -4402,8 +4600,8 @@ internal static class FileTransferCoordinator
                 "regular_v4_frontier_repair_pressure_settlement_already_committed");
         }
 
-        var installed = state.InstalledRegularV4FrontierRepairPressureBinding;
-        var retained = state.RetainedRegularV4FrontierRepairPressurePredecessor;
+        var installed = pressureState.InstalledBinding;
+        var retained = pressureState.RetainedPredecessorBinding;
         var settlingRetained = retained is { } predecessor &&
                               predecessor.Authority.AuthorityId == settlement.AuthorityId;
         var settlingCurrent = installed is { } current &&
@@ -4467,7 +4665,7 @@ internal static class FileTransferCoordinator
             RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted,
             "regular_v4_frontier_repair_pressure_settlement_prepared",
             settlingRetained ? retained : installed,
-            command);
+            settlementCommand: command);
     }
 
     internal static RegularV4FrontierRepairPressureBindingDecision
@@ -4475,19 +4673,17 @@ internal static class FileTransferCoordinator
             FileTransferCoordinatorState state,
             FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt receipt)
     {
+        var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
         var prepared = PrepareRegularV4FrontierRepairPressureSettlement(
             state,
             receipt.Command.Settlement);
         if (prepared.Status == RegularV4FrontierRepairPressureBindingDecisionStatus.Idempotent)
         {
-            var committedReceipt = state.LastRegularV4FrontierRepairPressureSettlementApplyReceipt;
+            var committedReceipt = pressureState.LastSettlementApplyReceipt;
             if (committedReceipt is null ||
-                committedReceipt.Command != receipt.Command ||
-                receipt.Status is not (
-                    FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied or
-                    FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent) ||
-                committedReceipt.CurrentAuthorityCleared != receipt.CurrentAuthorityCleared ||
-                committedReceipt.RetainedPredecessorCleared != receipt.RetainedPredecessorCleared)
+                !IsExactOrCanonicalIdempotentRegularV4PressureSettlementReceipt(
+                    committedReceipt,
+                    receipt))
             {
                 return RegularV4PressureBindingDecision(
                     state,
@@ -4511,7 +4707,7 @@ internal static class FileTransferCoordinator
         }
 
         var settlement = receipt.Command.Settlement;
-        var settlingRetained = state.RetainedRegularV4FrontierRepairPressurePredecessor is { } retained &&
+        var settlingRetained = pressureState.RetainedPredecessorBinding is { } retained &&
                               retained.Authority.AuthorityId == settlement.AuthorityId;
         if (settlingRetained &&
             (!receipt.RetainedPredecessorCleared || receipt.CurrentAuthorityCleared))
@@ -4531,25 +4727,52 @@ internal static class FileTransferCoordinator
                 "regular_v4_frontier_repair_pressure_current_clear_scope_mismatch");
         }
 
-        var nextState = settlingRetained
-            ? state with
+        var nextPressureState = settlingRetained
+            ? pressureState with
             {
-                RetainedRegularV4FrontierRepairPressurePredecessor = null,
-                LastRegularV4FrontierRepairPressureSettlement = settlement,
-                LastRegularV4FrontierRepairPressureSettlementApplyReceipt = receipt,
+                RetainedPredecessorBinding = null,
+                RetainedPredecessorInstallCommand = null,
+                RetainedPredecessorInstallReceipt = null,
+                LastSettlement = settlement,
+                LastSettlementApplyReceipt = receipt,
             }
-            : state with
+            : pressureState with
             {
-                InstalledRegularV4FrontierRepairPressureBinding = null,
-                PendingRegularV4FrontierRepairPressureBinding = null,
-                LastRegularV4FrontierRepairPressureSettlement = settlement,
-                LastRegularV4FrontierRepairPressureSettlementApplyReceipt = receipt,
+                InstalledBinding = null,
+                InstalledInstallCommand = null,
+                InstalledInstallReceipt = null,
+                PendingBinding = null,
+                PendingInstallCommand = null,
+                LastSettlement = settlement,
+                LastSettlementApplyReceipt = receipt,
             };
+        var nextState = state with
+        {
+            PersistentState = state.PersistentState with
+            {
+                RegularV4FrontierRepairPressure = nextPressureState,
+            },
+        };
         return RegularV4PressureBindingDecision(
             nextState,
             RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted,
             "regular_v4_frontier_repair_pressure_settlement_committed");
     }
+
+    private static bool IsExactOrCanonicalIdempotentRegularV4PressureSettlementReceipt(
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt committedReceipt,
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt candidateReceipt)
+        => committedReceipt == candidateReceipt ||
+           (committedReceipt.Command == candidateReceipt.Command &&
+            candidateReceipt.Status ==
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent &&
+            string.Equals(
+                candidateReceipt.Reason,
+                "regular_v4_frontier_repair_pressure_settlement_apply_idempotent",
+                StringComparison.Ordinal) &&
+            committedReceipt.CurrentAuthorityCleared == candidateReceipt.CurrentAuthorityCleared &&
+            committedReceipt.RetainedPredecessorCleared ==
+                candidateReceipt.RetainedPredecessorCleared);
 
     internal static RegularV4FrontierRepairPressureRecoveryHandoffDecision
         PrepareRegularV4FrontierRepairPressureRecoveryHandoff(
@@ -4632,9 +4855,18 @@ internal static class FileTransferCoordinator
             transportEpochDecision: null,
             bridgeRecoveryDecision: transition.BridgeRecoveryDecision,
             recoveryLivenessLease: transition.RecoveryLivenessLease,
-            bridgeRecoveryExecutionCommand: transition.BridgeRecoveryExecutionCommand) with
+            bridgeRecoveryExecutionCommand: transition.BridgeRecoveryExecutionCommand);
+        var committedPressureState =
+            committedState.PersistentState.RegularV4FrontierRepairPressure with
+            {
+                LastRecoveryHandoff = transition,
+            };
+        committedState = committedState with
         {
-            LastRegularV4FrontierRepairPressureRecoveryHandoff = transition,
+            PersistentState = committedState.PersistentState with
+            {
+                RegularV4FrontierRepairPressure = committedPressureState,
+            },
         };
         return RegularV4PressureRecoveryHandoffDecision(
             committedState,
@@ -4651,6 +4883,7 @@ internal static class FileTransferCoordinator
     {
         transition = default;
         rejectionReason = "accepted";
+        var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
         if (recoveryRequest.Kind != FileTransferCoordinatorActionKind.BridgeReceiveStallRecovery ||
             recoveryRequest.BridgeRecoveryKind != BridgeRecoveryKind.BridgeReceiveStallRecovery)
         {
@@ -4658,19 +4891,19 @@ internal static class FileTransferCoordinator
             return false;
         }
 
-        if (state.PendingRegularV4FrontierRepairPressureBinding is not null)
+        if (pressureState.PendingBinding is not null)
         {
             rejectionReason = "regular_v4_frontier_repair_pressure_recovery_handoff_binding_pending";
             return false;
         }
 
-        if (state.RetainedRegularV4FrontierRepairPressurePredecessor is not null)
+        if (pressureState.RetainedPredecessorBinding is not null)
         {
             rejectionReason = "regular_v4_frontier_repair_pressure_recovery_handoff_predecessor_pending";
             return false;
         }
 
-        if (state.InstalledRegularV4FrontierRepairPressureBinding is not { } binding ||
+        if (pressureState.InstalledBinding is not { } binding ||
             binding.IsDefault ||
             binding.State != RegularV4FrontierRepairPressureBindingState.Installed)
         {
@@ -4697,12 +4930,22 @@ internal static class FileTransferCoordinator
             return false;
         }
 
+        var projectedPressureState = pressureState with
+        {
+            PendingBinding = null,
+            PendingInstallCommand = null,
+            InstalledBinding = null,
+            InstalledInstallCommand = null,
+            InstalledInstallReceipt = null,
+            LastSettlement = settlement,
+        };
         var projectedState = state with
         {
-            PendingRegularV4FrontierRepairPressureBinding = null,
-            InstalledRegularV4FrontierRepairPressureBinding = null,
             CurrentRepairReplayDecision = null,
-            LastRegularV4FrontierRepairPressureSettlement = settlement,
+            PersistentState = state.PersistentState with
+            {
+                RegularV4FrontierRepairPressure = projectedPressureState,
+            },
         };
         var recoveryDecision = AuthorizeAction(projectedState, recoveryRequest);
         if (!recoveryDecision.Accepted)
@@ -4742,6 +4985,7 @@ internal static class FileTransferCoordinator
         out string rejectionReason)
     {
         rejectionReason = "accepted";
+        var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
         if (state.IsTerminal)
         {
             rejectionReason = "terminal_state";
@@ -4757,19 +5001,19 @@ internal static class FileTransferCoordinator
             return false;
         }
 
-        if (state.PendingRegularV4FrontierRepairPressureBinding is not null)
+        if (pressureState.PendingBinding is not null)
         {
             rejectionReason = "regular_v4_frontier_repair_pressure_recovery_handoff_binding_pending";
             return false;
         }
 
-        if (state.RetainedRegularV4FrontierRepairPressurePredecessor is not null)
+        if (pressureState.RetainedPredecessorBinding is not null)
         {
             rejectionReason = "regular_v4_frontier_repair_pressure_recovery_handoff_predecessor_pending";
             return false;
         }
 
-        if (state.InstalledRegularV4FrontierRepairPressureBinding is not { } binding ||
+        if (pressureState.InstalledBinding is not { } binding ||
             binding.IsDefault ||
             binding.State != RegularV4FrontierRepairPressureBindingState.Installed ||
             binding != transition.PressureBinding)
@@ -4892,19 +5136,17 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         RegularV4FrontierRepairPressureRecoveryHandoffTransition transition,
         FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt receipt)
-        => state.InstalledRegularV4FrontierRepairPressureBinding is null &&
-           state.PendingRegularV4FrontierRepairPressureBinding is null &&
-           state.RetainedRegularV4FrontierRepairPressurePredecessor is null &&
-           state.LastRegularV4FrontierRepairPressureRecoveryHandoff == transition &&
-           state.LastRegularV4FrontierRepairPressureSettlement == transition.Settlement &&
-           state.LastRegularV4FrontierRepairPressureSettlementApplyReceipt is { } committedReceipt &&
+        => state.PersistentState.RegularV4FrontierRepairPressure.InstalledBinding is null &&
+           state.PersistentState.RegularV4FrontierRepairPressure.PendingBinding is null &&
+           state.PersistentState.RegularV4FrontierRepairPressure.RetainedPredecessorBinding is null &&
+           state.PersistentState.RegularV4FrontierRepairPressure.LastRecoveryHandoff == transition &&
+           state.PersistentState.RegularV4FrontierRepairPressure.LastSettlement == transition.Settlement &&
+           state.PersistentState.RegularV4FrontierRepairPressure.LastSettlementApplyReceipt
+               is { } committedReceipt &&
            committedReceipt.Command == transition.SettlementCommand &&
-           receipt.Command == transition.SettlementCommand &&
-           receipt.Status is (
-               FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied or
-               FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent) &&
-           committedReceipt.CurrentAuthorityCleared == receipt.CurrentAuthorityCleared &&
-           committedReceipt.RetainedPredecessorCleared == receipt.RetainedPredecessorCleared &&
+           IsExactOrCanonicalIdempotentRegularV4PressureSettlementReceipt(
+               committedReceipt,
+               receipt) &&
            state.CurrentBridgeRecoveryDecision == transition.BridgeRecoveryDecision &&
            state.CurrentRecoveryLivenessLease == transition.RecoveryLivenessLease;
 
@@ -4945,23 +5187,100 @@ internal static class FileTransferCoordinator
                authority.DecisionGeneration == settlement.DecisionGeneration;
     }
 
-    internal static FileTransferCoordinatorState InvalidateRegularV4FrontierRepairPressureBinding(
+    private static FileTransferRegularV4FrontierRepairPressureInstallCommand
+        CreateRegularV4FrontierRepairPressureInstallCommand(
+            RegularV4FrontierRepairPressureBinding binding,
+            RegularV4FrontierRepairAuthorityRequest request)
+        => new(
+            new FileTransferRegularV4ControlFeedbackPressure(
+                binding.Authority.SessionId,
+                binding.Authority.TransferId,
+                CreditExhaustedTimeMs: 0,
+                request.FrontierLagChunks is >= 0
+                    ? request.FrontierLagChunks.Value
+                    : Math.Max(
+                        0,
+                        binding.Authority.DurableReceivedHighestChunkIndex -
+                        binding.Authority.FrontierChunkIndex +
+                        1),
+                Math.Max(1, request.PendingRepairCount),
+                binding.PressureReason,
+                binding.Authority),
+            binding.InstallGeneration);
+
+    internal static RegularV4FrontierRepairPressureSubstate
+        GetRegularV4FrontierRepairPressureSubstate(FileTransferCoordinatorState state)
+        => state.PersistentState.RegularV4FrontierRepairPressure;
+
+    internal static bool TryGetPendingRegularV4FrontierRepairPressureInstall(
         FileTransferCoordinatorState state,
-        string reason)
-        => state with
+        FileTransferAuthorityId authorityId,
+        out RegularV4FrontierRepairPressureBinding binding,
+        out FileTransferRegularV4FrontierRepairPressureInstallCommand command)
+    {
+        var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
+        if (!authorityId.IsDefault &&
+            pressureState.PendingBinding is { } pending &&
+            pressureState.PendingInstallCommand is { } pendingCommand &&
+            pending.Authority.AuthorityId == authorityId &&
+            pendingCommand.Pressure.RepairAuthority == pending.Authority &&
+            pendingCommand.InstallGeneration == pending.InstallGeneration)
         {
-            PendingRegularV4FrontierRepairPressureBinding = null,
-            InstalledRegularV4FrontierRepairPressureBinding = null,
-            RetainedRegularV4FrontierRepairPressurePredecessor = null,
-        };
+            binding = pending;
+            command = pendingCommand;
+            return true;
+        }
+
+        binding = default;
+        command = null!;
+        return false;
+    }
+
+    internal static bool TryGetInstalledRegularV4FrontierRepairPressureInstall(
+        FileTransferCoordinatorState state,
+        FileTransferAuthorityId authorityId,
+        out RegularV4FrontierRepairPressureBinding binding,
+        out FileTransferRegularV4FrontierRepairPressureInstallCommand command,
+        out FileTransferRegularV4FrontierRepairPressureInstallReceipt receipt)
+    {
+        var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
+        if (!authorityId.IsDefault &&
+            pressureState.InstalledBinding is { } installed &&
+            pressureState.InstalledInstallCommand is { } installedCommand &&
+            pressureState.InstalledInstallReceipt is { } installedReceipt &&
+            installed.Authority.AuthorityId == authorityId &&
+            installedCommand.Pressure.RepairAuthority == installed.Authority &&
+            installedCommand.InstallGeneration == installed.InstallGeneration &&
+            installedReceipt.Authority == installed.Authority &&
+            installedReceipt.InstallGeneration == installed.InstallGeneration &&
+            string.Equals(
+                installedReceipt.PressureReason,
+                installed.PressureReason,
+                StringComparison.Ordinal))
+        {
+            binding = installed;
+            command = installedCommand;
+            receipt = installedReceipt;
+            return true;
+        }
+
+        binding = default;
+        command = null!;
+        receipt = null!;
+        return false;
+    }
 
     private static RegularV4FrontierRepairPressureBindingDecision RegularV4PressureBindingDecision(
         FileTransferCoordinatorState state,
         RegularV4FrontierRepairPressureBindingDecisionStatus status,
         string reason,
         RegularV4FrontierRepairPressureBinding? binding = null,
+        FileTransferRegularV4FrontierRepairPressureInstallCommand? installCommand = null,
         FileTransferRegularV4FrontierRepairPressureSettlementCommand? settlementCommand = null)
-        => new(status, NormalizeReason(reason), binding, settlementCommand) { State = state };
+        => new(status, NormalizeReason(reason), binding, installCommand, settlementCommand)
+        {
+            State = state,
+        };
 
     internal static bool TryIssueFallbackFrontierRepairAuthority(
         RepairReplayDecision repairDecision,
@@ -7622,14 +7941,26 @@ internal static class FileTransferCoordinator
                 rejectionReason);
         }
 
-        var projectedState = transition.PressureSettlementCommand is null
-            ? state
-            : state with
+        var projectedState = state;
+        if (transition.PressureSettlementCommand is not null)
+        {
+            var pressureState = state.PersistentState.RegularV4FrontierRepairPressure with
             {
-                PendingRegularV4FrontierRepairPressureBinding = null,
-                InstalledRegularV4FrontierRepairPressureBinding = null,
-                LastRegularV4FrontierRepairPressureSettlement = transition.PressureSettlement,
+                PendingBinding = null,
+                PendingInstallCommand = null,
+                InstalledBinding = null,
+                InstalledInstallCommand = null,
+                InstalledInstallReceipt = null,
+                LastSettlement = transition.PressureSettlement,
             };
+            projectedState = state with
+            {
+                PersistentState = state.PersistentState with
+                {
+                    RegularV4FrontierRepairPressure = pressureState,
+                },
+            };
+        }
         if (!TryCreateRuntimeUnlockUncommittedTunaFallbackRouteDecision(
                 projectedState,
                 transition,
@@ -7927,6 +8258,7 @@ internal static class FileTransferCoordinator
     {
         transition = default;
         rejectionReason = "accepted";
+        var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
         if (coordinatorEvent.RuntimeUnlockUncommittedTunaFallbackHandoff is not { } handoff ||
             !IsRuntimeUnlockUncommittedTunaFallbackHandoffCurrent(
                 state,
@@ -7942,13 +8274,13 @@ internal static class FileTransferCoordinator
             return false;
         }
 
-        if (state.PendingRegularV4FrontierRepairPressureBinding is not null)
+        if (pressureState.PendingBinding is not null)
         {
             rejectionReason = "uncommitted_tuna_fallback_pressure_binding_pending";
             return false;
         }
 
-        if (state.RetainedRegularV4FrontierRepairPressurePredecessor is not null)
+        if (pressureState.RetainedPredecessorBinding is not null)
         {
             rejectionReason = "uncommitted_tuna_fallback_pressure_predecessor_pending";
             return false;
@@ -7957,7 +8289,7 @@ internal static class FileTransferCoordinator
         RegularV4FrontierRepairPressureBinding? pressureBinding = null;
         FileTransferRegularV4FrontierRepairSettlement? pressureSettlement = null;
         FileTransferRegularV4FrontierRepairPressureSettlementCommand? pressureCommand = null;
-        if (state.InstalledRegularV4FrontierRepairPressureBinding is { } installed)
+        if (pressureState.InstalledBinding is { } installed)
         {
             if (installed.IsDefault ||
                 installed.State != RegularV4FrontierRepairPressureBindingState.Installed)
@@ -8027,6 +8359,7 @@ internal static class FileTransferCoordinator
         RuntimeUnlockUncommittedTunaFallbackHandoffTransition transition,
         FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt? pressureReceipt)
     {
+        var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
         if (state.IsTerminal ||
             state.RouteSelection.Route != FileTransferRoute.PostTunaFallbackV6 ||
             state.RouteSelection.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
@@ -8036,9 +8369,9 @@ internal static class FileTransferCoordinator
             state.CurrentRuntimeUnlockPendingPreCommitProbe is not null ||
             state.CurrentRoutePublicationToken is not { } publication ||
             !IsRoutePublicationTokenCurrent(state, publication, out _) ||
-            state.PendingRegularV4FrontierRepairPressureBinding is not null ||
-            state.InstalledRegularV4FrontierRepairPressureBinding is not null ||
-            state.RetainedRegularV4FrontierRepairPressurePredecessor is not null)
+            pressureState.PendingBinding is not null ||
+            pressureState.InstalledBinding is not null ||
+            pressureState.RetainedPredecessorBinding is not null)
         {
             return false;
         }
@@ -8049,17 +8382,14 @@ internal static class FileTransferCoordinator
         }
 
         return pressureReceipt is not null &&
-               pressureReceipt.Command == transition.PressureSettlementCommand &&
-               pressureReceipt.Status is (
-                   FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied or
-                   FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent) &&
-               pressureReceipt.CurrentAuthorityCleared &&
-               !pressureReceipt.RetainedPredecessorCleared &&
-               state.LastRegularV4FrontierRepairPressureSettlement == transition.PressureSettlement &&
-               state.LastRegularV4FrontierRepairPressureSettlementApplyReceipt is { } committedReceipt &&
+               pressureState.LastSettlement == transition.PressureSettlement &&
+               pressureState.LastSettlementApplyReceipt is { } committedReceipt &&
                committedReceipt.Command == transition.PressureSettlementCommand &&
                committedReceipt.CurrentAuthorityCleared &&
-               !committedReceipt.RetainedPredecessorCleared;
+               !committedReceipt.RetainedPredecessorCleared &&
+               IsExactOrCanonicalIdempotentRegularV4PressureSettlementReceipt(
+                   committedReceipt,
+                   pressureReceipt);
     }
 
     private static RuntimeUnlockUncommittedTunaFallbackHandoffTransitionDecision
@@ -9892,9 +10222,7 @@ internal static class FileTransferCoordinator
                    FileTransferCoordinatorActionKind.RouteCommitPublication;
 
     private static bool HasRegularV4FrontierRepairPressureBinding(FileTransferCoordinatorState state)
-        => state.PendingRegularV4FrontierRepairPressureBinding is not null ||
-           state.InstalledRegularV4FrontierRepairPressureBinding is not null ||
-           state.RetainedRegularV4FrontierRepairPressurePredecessor is not null;
+        => state.PersistentState.RegularV4FrontierRepairPressure.HasBinding;
 
     private static bool ValidateRegularV4FrontierRepairPressureRepairReplayRequest(
         FileTransferCoordinatorState state,
@@ -9910,9 +10238,10 @@ internal static class FileTransferCoordinator
             return true;
         }
 
+        var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
         var governingBinding =
-            state.PendingRegularV4FrontierRepairPressureBinding ??
-            state.InstalledRegularV4FrontierRepairPressureBinding;
+            pressureState.PendingBinding ??
+            pressureState.InstalledBinding;
         if (governingBinding is not { } binding ||
             state.CurrentRepairReplayDecision is not { } currentDecision ||
             !IsRepairReplayDecisionCurrent(state, currentDecision, out _) ||
@@ -9940,21 +10269,21 @@ internal static class FileTransferCoordinator
             return true;
         }
 
-        if (state.PendingRegularV4FrontierRepairPressureBinding is not null)
+        if (pressureState.PendingBinding is not null)
         {
             rejectionReason =
                 "regular_v4_frontier_repair_pressure_binding_repair_replay_pending_conflict";
             return false;
         }
 
-        if (state.RetainedRegularV4FrontierRepairPressurePredecessor is not null)
+        if (pressureState.RetainedPredecessorBinding is not null)
         {
             rejectionReason =
                 "regular_v4_frontier_repair_pressure_binding_predecessor_retirement_pending";
             return false;
         }
 
-        if (state.InstalledRegularV4FrontierRepairPressureBinding is not { } installed ||
+        if (pressureState.InstalledBinding is not { } installed ||
             requestedPredecessor != installed.Authority.AuthorityId)
         {
             rejectionReason =

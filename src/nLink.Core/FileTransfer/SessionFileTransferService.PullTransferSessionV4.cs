@@ -6875,9 +6875,10 @@ public sealed partial class SessionFileTransferService
                 frontierChunkIndex,
                 durableReceivedHighestChunkIndex,
                 pendingRepairCount,
-                decisionReason),
+                decisionReason,
+                Math.Max(0, durableReceivedHighestChunkIndex - frontierChunkIndex + 1)),
             pressureReason);
-        ApplyRegularV4FrontierRepairPressureBindingStateLocked(context, bindingDecision.State);
+        context.CoordinatorPersistentState = bindingDecision.State.PersistentState;
         if (bindingDecision.Status == RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected ||
             bindingDecision.Binding is not { } binding)
         {
@@ -6885,7 +6886,7 @@ public sealed partial class SessionFileTransferService
             return null;
         }
 
-        return CreateRegularV4FrontierRepairContract(decision, binding);
+        return CreateRegularV4FrontierRepairContract(decision, binding.Authority);
     }
 
     private static RegularV4FrontierRepairContract? CreateRegularV4FrontierRepairContract(
@@ -6913,9 +6914,10 @@ public sealed partial class SessionFileTransferService
                 frontierChunkIndex,
                 durableReceivedHighestChunkIndex,
                 pendingRepairCount,
-                decisionReason),
+                decisionReason,
+                Math.Max(0, durableReceivedHighestChunkIndex - frontierChunkIndex + 1)),
             pressureReason);
-        ApplyRegularV4FrontierRepairPressureBindingStateLocked(context, bindingDecision.State);
+        context.CoordinatorPersistentState = bindingDecision.State.PersistentState;
         if (bindingDecision.Status == RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected ||
             bindingDecision.Binding is not { } binding)
         {
@@ -6923,22 +6925,118 @@ public sealed partial class SessionFileTransferService
             return null;
         }
 
-        return CreateRegularV4FrontierRepairContract(decision, binding);
+        return CreateRegularV4FrontierRepairContract(decision, binding.Authority);
     }
 
     private static RegularV4FrontierRepairContract CreateRegularV4FrontierRepairContract(
         RepairReplayDecision decision,
-        RegularV4FrontierRepairPressureBinding binding)
+        FileTransferRegularV4FrontierRepairAuthority authority)
     {
-        var authority = binding.Authority;
         return new RegularV4FrontierRepairContract
         {
             RepairDecision = decision,
             Authority = authority,
             Lifecycle = new FileTransferAuthorityLifecycle<FileTransferRegularV4FrontierRepairSettlementOutcome>(
                 authority.AuthorityId),
-            PressureBinding = binding,
         };
+    }
+
+    private static bool TryGetPendingOrInstalledRegularV4FrontierRepairPressure(
+        FileTransferCoordinatorState state,
+        FileTransferAuthorityId authorityId,
+        out RegularV4FrontierRepairPressureBinding binding,
+        out FileTransferRegularV4FrontierRepairPressureInstallCommand command)
+    {
+        if (FileTransferCoordinator.TryGetPendingRegularV4FrontierRepairPressureInstall(
+                state,
+                authorityId,
+                out var pending,
+                out var pendingCommand))
+        {
+            binding = pending;
+            command = pendingCommand;
+            return true;
+        }
+
+        if (FileTransferCoordinator.TryGetInstalledRegularV4FrontierRepairPressureInstall(
+                state,
+                authorityId,
+                out var installed,
+                out var installedCommand,
+                out _))
+        {
+            binding = installed;
+            command = installedCommand;
+            return true;
+        }
+
+        binding = default;
+        command = default!;
+        return false;
+    }
+
+    private static bool TryGetInstalledRegularV4FrontierRepairPressure(
+        FileTransferCoordinatorState state,
+        FileTransferAuthorityId authorityId,
+        out RegularV4FrontierRepairPressureBinding binding,
+        out FileTransferRegularV4FrontierRepairPressureInstallCommand command,
+        out FileTransferRegularV4FrontierRepairPressureInstallReceipt receipt)
+    {
+        if (FileTransferCoordinator.TryGetInstalledRegularV4FrontierRepairPressureInstall(
+                state,
+                authorityId,
+                out var installed,
+                out var installedCommand,
+                out var installedReceipt))
+        {
+            binding = installed;
+            command = installedCommand;
+            receipt = installedReceipt;
+            return true;
+        }
+
+        binding = default;
+        command = default!;
+        receipt = default!;
+        return false;
+    }
+
+    private static long GetRegularV4FrontierRepairPressureInstallGeneration(
+        FileTransferCoordinatorState state,
+        RegularV4FrontierRepairContract? contract)
+    {
+        if (contract is null)
+        {
+            return 0;
+        }
+
+        if (FileTransferCoordinator.TryGetPendingRegularV4FrontierRepairPressureInstall(
+                state,
+                contract.Authority.AuthorityId,
+                out var pending,
+                out _))
+        {
+            return pending.InstallGeneration;
+        }
+
+        if (FileTransferCoordinator.TryGetInstalledRegularV4FrontierRepairPressureInstall(
+                state,
+                contract.Authority.AuthorityId,
+                out var installed,
+                out _,
+                out _))
+        {
+            return installed.InstallGeneration;
+        }
+
+        var pressure = FileTransferCoordinator.GetRegularV4FrontierRepairPressureSubstate(state);
+        if (pressure.RetainedPredecessorBinding is { } retained &&
+            retained.Authority.AuthorityId == contract.Authority.AuthorityId)
+        {
+            return retained.InstallGeneration;
+        }
+
+        return 0;
     }
 
     private static bool IsRegularV4FrontierRepairContractCurrent(
@@ -7122,9 +7220,7 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        if (!dataSessionPresent ||
-            contract.PressureInstallDataSessionGeneration is not { } expectedDataSessionGeneration ||
-            dataSessionGeneration != expectedDataSessionGeneration)
+        if (!dataSessionPresent)
         {
             rejectionReason = "data_session_generation_mismatch";
             return false;
@@ -7194,21 +7290,18 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        if (contract.PressureBinding is not
-            {
-                State: RegularV4FrontierRepairPressureBindingState.Installed,
-                InstallGeneration: > 0,
-            } installedBinding ||
-            context.InstalledRegularV4FrontierRepairPressureBinding != installedBinding ||
+        var state = CreateCoordinatorStateLocked(context);
+        if (!TryGetInstalledRegularV4FrontierRepairPressure(
+                state,
+                contract.Authority.AuthorityId,
+                out var installedBinding,
+                out _,
+                out var installReceipt) ||
+            installedBinding.State != RegularV4FrontierRepairPressureBindingState.Installed ||
+            installedBinding.InstallGeneration <= 0 ||
             installedBinding.Authority != contract.Authority)
         {
             rejectionReason = "regular_v4_frontier_repair_pressure_binding_not_installed";
-            return false;
-        }
-
-        if (contract.PressureInstallReceipt is not { } installReceipt)
-        {
-            rejectionReason = "regular_v4_frontier_repair_pressure_install_receipt_missing";
             return false;
         }
 
@@ -7220,7 +7313,7 @@ public sealed partial class SessionFileTransferService
 
         if (!IsAcceptedRegularV4FrontierRepairPressureInstallReceipt(
                 contract,
-                contract.PendingPressureInstallPredecessorContract,
+                contract.Authority.PredecessorAuthorityId,
                 installedBinding.PressureReason,
                 installReceipt,
                 out rejectionReason))
@@ -7354,8 +7447,11 @@ public sealed partial class SessionFileTransferService
         return contract is not null &&
                !contract.Lifecycle.IsSettled &&
                (string.IsNullOrWhiteSpace(repairKey) ||
-                string.Equals(contract.Authority.RepairKey, repairKey, StringComparison.Ordinal)) &&
-               IsRegularV4FrontierRepairContractCurrent(context, contract, out _)
+                 string.Equals(contract.Authority.RepairKey, repairKey, StringComparison.Ordinal)) &&
+               IsRegularV4FrontierRepairContractCurrent(context, contract, out _) &&
+               IsCoordinatorInstalledRegularV4FrontierRepairPressureCurrent(
+                   CreateCoordinatorStateLocked(context),
+                   contract)
             ? contract.Authority
             : null;
     }
@@ -7368,26 +7464,63 @@ public sealed partial class SessionFileTransferService
         return contract is not null &&
                !contract.Lifecycle.IsSettled &&
                (string.IsNullOrWhiteSpace(repairKey) ||
-                string.Equals(contract.Authority.RepairKey, repairKey, StringComparison.Ordinal)) &&
-               IsRegularV4FrontierRepairContractCurrent(context, contract, out _)
+                 string.Equals(contract.Authority.RepairKey, repairKey, StringComparison.Ordinal)) &&
+               IsRegularV4FrontierRepairContractCurrent(context, contract, out _) &&
+               IsCoordinatorInstalledRegularV4FrontierRepairPressureCurrent(
+                   CreateCoordinatorStateLocked(context),
+                   contract)
             ? contract.Authority
             : null;
     }
 
-    private static bool TryMarkRegularV4FrontierRepairDispatched(
+    private static bool IsCoordinatorInstalledRegularV4FrontierRepairPressureCurrent(
+        FileTransferCoordinatorState state,
         RegularV4FrontierRepairContract contract)
     {
-        var pressureInstallPredecessor = contract.PendingPressureInstallPredecessorContract;
-        if (!IsAcceptedRegularV4FrontierRepairPressureInstallReceipt(
+        if (!TryGetInstalledRegularV4FrontierRepairPressure(
+                state,
+                contract.Authority.AuthorityId,
+                out var binding,
+                out _,
+                out var receipt) ||
+            binding.State != RegularV4FrontierRepairPressureBindingState.Installed ||
+            binding.InstallGeneration <= 0 ||
+            binding.Authority != contract.Authority)
+        {
+            return false;
+        }
+
+        return IsAcceptedRegularV4FrontierRepairPressureInstallReceipt(
+            contract,
+            contract.Authority.PredecessorAuthorityId,
+            binding.PressureReason,
+            receipt,
+            out _);
+    }
+
+    private bool TryMarkRegularV4FrontierRepairDispatched(
+        OutboundTransferContext context,
+        RegularV4FrontierRepairContract contract)
+    {
+        var pressureInstallPredecessorAuthorityId = contract.Authority.PredecessorAuthorityId;
+        var pressureInstallRejectionReason =
+            "regular_v4_frontier_repair_pressure_binding_not_installed";
+        if (!TryGetInstalledRegularV4FrontierRepairPressure(
+                CreateCoordinatorStateLocked(context),
+                contract.Authority.AuthorityId,
+                out var binding,
+                out _,
+                out var installReceipt) ||
+            !IsAcceptedRegularV4FrontierRepairPressureInstallReceipt(
                 contract,
-                pressureInstallPredecessor,
-                contract.PendingPressureInstallReason ?? string.Empty,
-                contract.PressureInstallReceipt,
-                out var pressureInstallRejectionReason))
+                pressureInstallPredecessorAuthorityId,
+                binding.PressureReason,
+                installReceipt,
+                out pressureInstallRejectionReason))
         {
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_regular_v4_frontier_repair_dispatch_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(contract.Authority.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(pressureInstallPredecessor?.Authority.AuthorityId.ToString() ?? "(none)")}; repair_request_key={FormatProtocolLogValue(contract.Authority.RepairKey)}; decision_reason={FormatProtocolLogValue(pressureInstallRejectionReason)}");
+                $"event=filetransfer_regular_v4_frontier_repair_dispatch_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(contract.Authority.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(pressureInstallPredecessorAuthorityId?.ToString() ?? "(none)")}; repair_request_key={FormatProtocolLogValue(contract.Authority.RepairKey)}; decision_reason={FormatProtocolLogValue(pressureInstallRejectionReason)}");
             return false;
         }
 
@@ -7416,13 +7549,19 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        var pressureInstallPredecessor = contract.PendingPressureInstallPredecessorContract;
-        if (!IsAcceptedRegularV4FrontierRepairPressureInstallReceipt(
+        var pressureInstallPredecessorAuthorityId = contract.Authority.PredecessorAuthorityId;
+        var pressureInstallRejectionReason =
+            "regular_v4_frontier_repair_pressure_binding_not_installed";
+        if (!TryGetInstalledRegularV4FrontierRepairPressureForContract(
                 contract,
-                pressureInstallPredecessor,
-                contract.PendingPressureInstallReason ?? string.Empty,
-                contract.PressureInstallReceipt,
-                out var pressureInstallRejectionReason))
+                out var installedBinding,
+                out var installedReceipt) ||
+            !IsAcceptedRegularV4FrontierRepairPressureInstallReceipt(
+                contract,
+                pressureInstallPredecessorAuthorityId,
+                installedBinding.PressureReason,
+                installedReceipt,
+                out pressureInstallRejectionReason))
         {
             if (outcome is
                 FileTransferRegularV4FrontierRepairSettlementOutcome.AuthorityRejected or
@@ -7432,18 +7571,22 @@ public sealed partial class SessionFileTransferService
             {
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_regular_v4_frontier_repair_pressure_install_retirement_retry_requested; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(contract.Authority.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(pressureInstallPredecessor?.Authority.AuthorityId.ToString() ?? "(none)")}; install_kind={(pressureInstallPredecessor is null ? "initial" : "successor")}; repair_request_key={FormatProtocolLogValue(contract.Authority.RepairKey)}; retirement_outcome={FormatProtocolLogValue(outcome.ToString())}; decision_reason={FormatProtocolLogValue(pressureInstallRejectionReason)}");
+                    $"event=filetransfer_regular_v4_frontier_repair_pressure_install_retirement_retry_requested; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(contract.Authority.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(pressureInstallPredecessorAuthorityId?.ToString() ?? "(none)")}; install_kind={(pressureInstallPredecessorAuthorityId is null ? "initial" : "successor")}; repair_request_key={FormatProtocolLogValue(contract.Authority.RepairKey)}; retirement_outcome={FormatProtocolLogValue(outcome.ToString())}; decision_reason={FormatProtocolLogValue(pressureInstallRejectionReason)}");
                 if (!TryRetryRegularV4FrontierRepairPressureInstallForSettlement(contract) ||
+                    !TryGetInstalledRegularV4FrontierRepairPressureForContract(
+                        contract,
+                        out installedBinding,
+                        out installedReceipt) ||
                     !IsAcceptedRegularV4FrontierRepairPressureInstallReceipt(
                         contract,
-                        pressureInstallPredecessor,
-                        contract.PendingPressureInstallReason ?? string.Empty,
-                        contract.PressureInstallReceipt,
+                        pressureInstallPredecessorAuthorityId,
+                        installedBinding.PressureReason,
+                        installedReceipt,
                         out pressureInstallRejectionReason))
                 {
                     LocalOperationalLog.Info(
                         "FileTransferService",
-                        $"event=filetransfer_regular_v4_frontier_repair_settlement_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(contract.Authority.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(pressureInstallPredecessor?.Authority.AuthorityId.ToString() ?? "(none)")}; install_kind={(pressureInstallPredecessor is null ? "initial" : "successor")}; repair_request_key={FormatProtocolLogValue(contract.Authority.RepairKey)}; attempted_outcome={FormatProtocolLogValue(outcome.ToString())}; decision_reason={FormatProtocolLogValue(pressureInstallRejectionReason)}");
+                        $"event=filetransfer_regular_v4_frontier_repair_settlement_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(contract.Authority.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(pressureInstallPredecessorAuthorityId?.ToString() ?? "(none)")}; install_kind={(pressureInstallPredecessorAuthorityId is null ? "initial" : "successor")}; repair_request_key={FormatProtocolLogValue(contract.Authority.RepairKey)}; attempted_outcome={FormatProtocolLogValue(outcome.ToString())}; decision_reason={FormatProtocolLogValue(pressureInstallRejectionReason)}");
                     return false;
                 }
             }
@@ -7451,7 +7594,7 @@ public sealed partial class SessionFileTransferService
             {
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_regular_v4_frontier_repair_settlement_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(contract.Authority.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(pressureInstallPredecessor?.Authority.AuthorityId.ToString() ?? "(none)")}; install_kind={(pressureInstallPredecessor is null ? "initial" : "successor")}; repair_request_key={FormatProtocolLogValue(contract.Authority.RepairKey)}; attempted_outcome={FormatProtocolLogValue(outcome.ToString())}; decision_reason={FormatProtocolLogValue(pressureInstallRejectionReason)}");
+                    $"event=filetransfer_regular_v4_frontier_repair_settlement_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(contract.Authority.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(pressureInstallPredecessorAuthorityId?.ToString() ?? "(none)")}; install_kind={(pressureInstallPredecessorAuthorityId is null ? "initial" : "successor")}; repair_request_key={FormatProtocolLogValue(contract.Authority.RepairKey)}; attempted_outcome={FormatProtocolLogValue(outcome.ToString())}; decision_reason={FormatProtocolLogValue(pressureInstallRejectionReason)}");
                 return false;
             }
         }
@@ -7488,14 +7631,20 @@ public sealed partial class SessionFileTransferService
                 : null,
         };
 
-        if (contract.PressureBinding is not
-                { State: RegularV4FrontierRepairPressureBindingState.Installed } binding ||
-            binding.Authority != authority ||
-            contract.PressureInstallReceipt?.InstallGeneration != binding.InstallGeneration)
+        var settlingInstalledBinding =
+            installedBinding.State == RegularV4FrontierRepairPressureBindingState.Installed;
+        var settlingRetainedPredecessor =
+            installedBinding.State ==
+                RegularV4FrontierRepairPressureBindingState.RetainedPredecessor &&
+            outcome == FileTransferRegularV4FrontierRepairSettlementOutcome.Superseded &&
+            successorAuthorityId is { IsDefault: false };
+        if ((!settlingInstalledBinding && !settlingRetainedPredecessor) ||
+            installedBinding.Authority != authority ||
+            installedReceipt.InstallGeneration != installedBinding.InstallGeneration)
         {
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_regular_v4_frontier_repair_settlement_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(authority.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(pressureInstallPredecessor?.Authority.AuthorityId.ToString() ?? "(none)")}; install_kind={(pressureInstallPredecessor is null ? "initial" : "successor")}; repair_request_key={FormatProtocolLogValue(authority.RepairKey)}; attempted_outcome={FormatProtocolLogValue(outcome.ToString())}; decision_reason=coordinator_pressure_binding_not_installed");
+                $"event=filetransfer_regular_v4_frontier_repair_settlement_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(authority.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(pressureInstallPredecessorAuthorityId?.ToString() ?? "(none)")}; install_kind={(pressureInstallPredecessorAuthorityId is null ? "initial" : "successor")}; repair_request_key={FormatProtocolLogValue(authority.RepairKey)}; attempted_outcome={FormatProtocolLogValue(outcome.ToString())}; decision_reason=coordinator_pressure_binding_not_installed");
             return false;
         }
 
@@ -7505,7 +7654,7 @@ public sealed partial class SessionFileTransferService
         {
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_regular_v4_frontier_repair_settlement_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(authority.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(pressureInstallPredecessor?.Authority.AuthorityId.ToString() ?? "(none)")}; install_kind={(pressureInstallPredecessor is null ? "initial" : "successor")}; repair_request_key={FormatProtocolLogValue(authority.RepairKey)}; attempted_outcome={FormatProtocolLogValue(outcome.ToString())}; decision_reason={FormatProtocolLogValue(settlementApplyReason)}");
+                $"event=filetransfer_regular_v4_frontier_repair_settlement_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(authority.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(pressureInstallPredecessorAuthorityId?.ToString() ?? "(none)")}; install_kind={(pressureInstallPredecessorAuthorityId is null ? "initial" : "successor")}; repair_request_key={FormatProtocolLogValue(authority.RepairKey)}; attempted_outcome={FormatProtocolLogValue(outcome.ToString())}; decision_reason={FormatProtocolLogValue(settlementApplyReason)}");
             return false;
         }
 
@@ -7606,11 +7755,11 @@ public sealed partial class SessionFileTransferService
                 receipt);
             if (settlement.Direction == FileTransferDirection.Outbound && outboundTransfer is { } currentOutbound)
             {
-                ApplyRegularV4FrontierRepairPressureBindingStateLocked(currentOutbound, committed.State);
+                currentOutbound.CoordinatorPersistentState = committed.State.PersistentState;
             }
             else if (settlement.Direction == FileTransferDirection.Inbound && inboundTransfer is { } currentInbound)
             {
-                ApplyRegularV4FrontierRepairPressureBindingStateLocked(currentInbound, committed.State);
+                currentInbound.CoordinatorPersistentState = committed.State.PersistentState;
             }
 
             if (committed.Status == RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected)
@@ -7659,30 +7808,171 @@ public sealed partial class SessionFileTransferService
         }
     }
 
+    private bool TryGetInstalledRegularV4FrontierRepairPressureForContract(
+        RegularV4FrontierRepairContract contract,
+        out RegularV4FrontierRepairPressureBinding binding,
+        out FileTransferRegularV4FrontierRepairPressureInstallReceipt receipt)
+    {
+        lock (gate)
+        {
+            var state = contract.Authority.Direction switch
+            {
+                FileTransferDirection.Outbound
+                    when outboundTransfer is { } outbound &&
+                         string.Equals(
+                             outbound.SessionId,
+                             contract.Authority.SessionId,
+                             StringComparison.Ordinal) &&
+                         string.Equals(
+                             outbound.TransferId,
+                             contract.Authority.TransferId,
+                             StringComparison.Ordinal)
+                    => CreateCoordinatorStateLocked(outbound),
+                FileTransferDirection.Inbound
+                    when inboundTransfer is { } inbound &&
+                         string.Equals(
+                             inbound.SessionId,
+                             contract.Authority.SessionId,
+                             StringComparison.Ordinal) &&
+                         string.Equals(
+                             inbound.TransferId,
+                             contract.Authority.TransferId,
+                             StringComparison.Ordinal)
+                    => CreateCoordinatorStateLocked(inbound),
+                _ => null,
+            };
+            if (state is not null &&
+                TryGetInstalledRegularV4FrontierRepairPressure(
+                    state,
+                    contract.Authority.AuthorityId,
+                    out binding,
+                    out _,
+                    out receipt))
+            {
+                return true;
+            }
+
+            if (state is not null)
+            {
+                var pressure =
+                    FileTransferCoordinator.GetRegularV4FrontierRepairPressureSubstate(state);
+                if (pressure.RetainedPredecessorBinding is { } retained &&
+                    pressure.RetainedPredecessorInstallReceipt is { } retainedReceipt &&
+                    retained.Authority == contract.Authority &&
+                    retainedReceipt.Authority == contract.Authority &&
+                    retainedReceipt.InstallGeneration == retained.InstallGeneration &&
+                    string.Equals(
+                        retainedReceipt.PressureReason,
+                        retained.PressureReason,
+                        StringComparison.Ordinal))
+                {
+                    binding = retained;
+                    receipt = retainedReceipt;
+                    return true;
+                }
+            }
+        }
+
+        binding = default;
+        receipt = default!;
+        return false;
+    }
+
+    private RegularV4FrontierRepairContract? FindRegularV4FrontierRepairContractForAuthority(
+        FileTransferDirection direction,
+        string sessionId,
+        string transferId,
+        FileTransferAuthorityId authorityId)
+    {
+        lock (gate)
+        {
+            if (direction == FileTransferDirection.Outbound &&
+                outboundTransfer is { } outbound &&
+                string.Equals(outbound.SessionId, sessionId, StringComparison.Ordinal) &&
+                string.Equals(outbound.TransferId, transferId, StringComparison.Ordinal))
+            {
+                if (outbound.CurrentRegularV4FrontierRepairContract is { } current &&
+                    current.Authority.AuthorityId == authorityId)
+                {
+                    return current;
+                }
+
+                if (outbound.CurrentRegularV4FrontierRepairContract?.PredecessorLifecycleContract is
+                        { } currentPredecessor &&
+                    currentPredecessor.Authority.AuthorityId == authorityId)
+                {
+                    return currentPredecessor;
+                }
+
+                if (outbound.PullRegularNknV4PeerSilenceMissingDispatchSettlementContract is
+                        { } missingDispatch &&
+                    missingDispatch.Authority.AuthorityId == authorityId)
+                {
+                    return missingDispatch;
+                }
+
+                return outbound.PullV4SenderPumpRepairRequests.Values
+                    .Select(static candidate => candidate.RegularV4RepairContract)
+                    .FirstOrDefault(candidate =>
+                        candidate?.Authority.AuthorityId == authorityId);
+            }
+
+            if (direction == FileTransferDirection.Inbound &&
+                inboundTransfer is { } inbound &&
+                string.Equals(inbound.SessionId, sessionId, StringComparison.Ordinal) &&
+                string.Equals(inbound.TransferId, transferId, StringComparison.Ordinal))
+            {
+                if (inbound.CurrentRegularV4FrontierRepairContract is { } current &&
+                    current.Authority.AuthorityId == authorityId)
+                {
+                    return current;
+                }
+
+                var retained = new[]
+                {
+                    inbound.V4RegularFrontierRepairProjection?.SourceContract,
+                    inbound.V4RegularFrontierRepairProjectionRefreshSource?.Projection.SourceContract,
+                    inbound.V4RegularFrontierRepairSettledStalledContract,
+                }.FirstOrDefault(candidate =>
+                    candidate?.Authority.AuthorityId == authorityId);
+                if (retained is not null)
+                {
+                    return retained;
+                }
+
+                return inbound.V4ReceiverRepairRequests.Values
+                    .Select(static candidate => candidate.RegularV4RepairContract)
+                    .FirstOrDefault(candidate =>
+                        candidate?.Authority.AuthorityId == authorityId);
+            }
+        }
+
+        return null;
+    }
+
     private static RegularV4FrontierRepairContract?
         FindPendingRegularV4FrontierRepairPressureInstallContractLocked(
             OutboundTransferContext context,
             FileTransferAuthorityId authorityId)
     {
+        if (!FileTransferCoordinator.TryGetPendingRegularV4FrontierRepairPressureInstall(
+                CreateCoordinatorStateLocked(context),
+                authorityId,
+                out _,
+                out _))
+        {
+            return null;
+        }
+
         static bool Matches(
             RegularV4FrontierRepairContract? contract,
             FileTransferAuthorityId expectedAuthorityId)
             => contract is { Lifecycle.IsSettled: false } &&
-               contract.Authority.AuthorityId == expectedAuthorityId &&
-               contract.PressureBinding is
-                   { State: RegularV4FrontierRepairPressureBindingState.Pending } binding &&
-               binding.Authority.AuthorityId == expectedAuthorityId;
+               contract.Authority.AuthorityId == expectedAuthorityId;
 
         if (Matches(context.CurrentRegularV4FrontierRepairContract, authorityId))
         {
             return context.CurrentRegularV4FrontierRepairContract;
-        }
-
-        if (Matches(
-                context.PendingRegularV4FrontierRepairPressureInstallRetry?.RegularV4RepairContract,
-                authorityId))
-        {
-            return context.PendingRegularV4FrontierRepairPressureInstallRetry!.RegularV4RepairContract;
         }
 
         if (Matches(context.PullRegularNknV4PeerSilenceMissingDispatchSettlementContract, authorityId))
@@ -7706,14 +7996,20 @@ public sealed partial class SessionFileTransferService
             InboundTransferContext context,
             FileTransferAuthorityId authorityId)
     {
+        if (!FileTransferCoordinator.TryGetPendingRegularV4FrontierRepairPressureInstall(
+                CreateCoordinatorStateLocked(context),
+                authorityId,
+                out _,
+                out _))
+        {
+            return null;
+        }
+
         static bool Matches(
             RegularV4FrontierRepairContract? contract,
             FileTransferAuthorityId expectedAuthorityId)
             => contract is { Lifecycle.IsSettled: false } &&
-               contract.Authority.AuthorityId == expectedAuthorityId &&
-               contract.PressureBinding is
-                   { State: RegularV4FrontierRepairPressureBindingState.Pending } binding &&
-               binding.Authority.AuthorityId == expectedAuthorityId;
+               contract.Authority.AuthorityId == expectedAuthorityId;
 
         if (Matches(context.CurrentRegularV4FrontierRepairContract, authorityId))
         {
@@ -7770,9 +8066,11 @@ public sealed partial class SessionFileTransferService
                 pendingSettlement);
         }
 
+        var pressure = FileTransferCoordinator.GetRegularV4FrontierRepairPressureSubstate(
+            CreateCoordinatorStateLocked(context));
         if (!TryRetireRegularV4FrontierRepairPressureBindingsLocked(
-                context.RetainedRegularV4FrontierRepairPressurePredecessor,
-                context.InstalledRegularV4FrontierRepairPressureBinding,
+                pressure.RetainedPredecessorBinding,
+                pressure.InstalledBinding,
                 reason,
                 currentOutcome,
                 settlement =>
@@ -7783,9 +8081,11 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        return context.PendingRegularV4FrontierRepairPressureBinding is null &&
-               context.InstalledRegularV4FrontierRepairPressureBinding is null &&
-               context.RetainedRegularV4FrontierRepairPressurePredecessor is null;
+        pressure = FileTransferCoordinator.GetRegularV4FrontierRepairPressureSubstate(
+            CreateCoordinatorStateLocked(context));
+        return pressure.PendingBinding is null &&
+               pressure.InstalledBinding is null &&
+               pressure.RetainedPredecessorBinding is null;
     }
 
     private bool TryRetireRegularV4FrontierRepairPressureForScopeReplacementLocked(
@@ -7810,9 +8110,11 @@ public sealed partial class SessionFileTransferService
                 pendingSettlement);
         }
 
+        var pressure = FileTransferCoordinator.GetRegularV4FrontierRepairPressureSubstate(
+            CreateCoordinatorStateLocked(context));
         if (!TryRetireRegularV4FrontierRepairPressureBindingsLocked(
-                context.RetainedRegularV4FrontierRepairPressurePredecessor,
-                context.InstalledRegularV4FrontierRepairPressureBinding,
+                pressure.RetainedPredecessorBinding,
+                pressure.InstalledBinding,
                 reason,
                 currentOutcome,
                 settlement =>
@@ -7823,9 +8125,11 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        return context.PendingRegularV4FrontierRepairPressureBinding is null &&
-               context.InstalledRegularV4FrontierRepairPressureBinding is null &&
-               context.RetainedRegularV4FrontierRepairPressurePredecessor is null;
+        pressure = FileTransferCoordinator.GetRegularV4FrontierRepairPressureSubstate(
+            CreateCoordinatorStateLocked(context));
+        return pressure.PendingBinding is null &&
+               pressure.InstalledBinding is null &&
+               pressure.RetainedPredecessorBinding is null;
     }
 
     private bool TryInvalidatePendingOnlyRegularV4FrontierRepairPressureForDataSessionReplacementLocked(
@@ -7835,13 +8139,14 @@ public sealed partial class SessionFileTransferService
     {
         invalidatedSettlement = null;
         var state = CreateCoordinatorStateLocked(context);
-        if (state.PendingRegularV4FrontierRepairPressureBinding is null)
+        var pressure = FileTransferCoordinator.GetRegularV4FrontierRepairPressureSubstate(state);
+        if (pressure.PendingBinding is null)
         {
             return true;
         }
 
-        var pending = state.PendingRegularV4FrontierRepairPressureBinding.Value;
-        var installedPredecessor = state.InstalledRegularV4FrontierRepairPressureBinding;
+        var pending = pressure.PendingBinding.Value;
+        var installedPredecessor = pressure.InstalledBinding;
         var contract = FindPendingRegularV4FrontierRepairPressureInstallContractLocked(
             context,
             pending.Authority.AuthorityId);
@@ -7859,12 +8164,14 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        return context.PendingRegularV4FrontierRepairPressureBinding is null &&
-               context.InstalledRegularV4FrontierRepairPressureBinding is { } installed &&
+        pressure = FileTransferCoordinator.GetRegularV4FrontierRepairPressureSubstate(
+            CreateCoordinatorStateLocked(context));
+        return pressure.PendingBinding is null &&
+               pressure.InstalledBinding is { } installed &&
                installed.Authority == pending.Authority &&
                installed.InstallGeneration == pending.InstallGeneration &&
                (installedPredecessor is null ||
-                context.RetainedRegularV4FrontierRepairPressurePredecessor is { } retained &&
+                pressure.RetainedPredecessorBinding is { } retained &&
                 retained.Authority == installedPredecessor.Value.Authority &&
                 retained.InstallGeneration == installedPredecessor.Value.InstallGeneration);
     }
@@ -7876,13 +8183,14 @@ public sealed partial class SessionFileTransferService
     {
         invalidatedSettlement = null;
         var state = CreateCoordinatorStateLocked(context);
-        if (state.PendingRegularV4FrontierRepairPressureBinding is null)
+        var pressure = FileTransferCoordinator.GetRegularV4FrontierRepairPressureSubstate(state);
+        if (pressure.PendingBinding is null)
         {
             return true;
         }
 
-        var pending = state.PendingRegularV4FrontierRepairPressureBinding.Value;
-        var installedPredecessor = state.InstalledRegularV4FrontierRepairPressureBinding;
+        var pending = pressure.PendingBinding.Value;
+        var installedPredecessor = pressure.InstalledBinding;
         var contract = FindPendingRegularV4FrontierRepairPressureInstallContractLocked(
             context,
             pending.Authority.AuthorityId);
@@ -7900,12 +8208,14 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        return context.PendingRegularV4FrontierRepairPressureBinding is null &&
-               context.InstalledRegularV4FrontierRepairPressureBinding is { } installed &&
+        pressure = FileTransferCoordinator.GetRegularV4FrontierRepairPressureSubstate(
+            CreateCoordinatorStateLocked(context));
+        return pressure.PendingBinding is null &&
+               pressure.InstalledBinding is { } installed &&
                installed.Authority == pending.Authority &&
                installed.InstallGeneration == pending.InstallGeneration &&
                (installedPredecessor is null ||
-                context.RetainedRegularV4FrontierRepairPressurePredecessor is { } retained &&
+                pressure.RetainedPredecessorBinding is { } retained &&
                 retained.Authority == installedPredecessor.Value.Authority &&
                 retained.InstallGeneration == installedPredecessor.Value.InstallGeneration);
     }
@@ -8023,6 +8333,10 @@ public sealed partial class SessionFileTransferService
         OutboundTransferContext context,
         FileTransferRegularV4FrontierRepairSettlement settlement)
     {
+        SettleRegularV4FrontierRepairContractLifecycleForDataSessionReplacement(
+            context.CurrentRegularV4FrontierRepairContract?.PredecessorLifecycleContract,
+            settlement);
+
         var currentSettled = SettleRegularV4FrontierRepairContractLifecycleForDataSessionReplacement(
             context.CurrentRegularV4FrontierRepairContract,
             settlement);
@@ -8032,11 +8346,7 @@ public sealed partial class SessionFileTransferService
             context.CurrentRegularV4FrontierRepairContract = null;
         }
 
-        var pendingRetrySettled = SettleRegularV4FrontierRepairContractLifecycleForDataSessionReplacement(
-            context.PendingRegularV4FrontierRepairPressureInstallRetry?.RegularV4RepairContract,
-            settlement);
-        if (pendingRetrySettled &&
-            context.PendingRegularV4FrontierRepairPressureInstallRetry?.RegularV4RepairContract?.Authority.AuthorityId ==
+        if (context.PendingRegularV4FrontierRepairPressureInstallRetry?.AuthorityId ==
             settlement.AuthorityId)
         {
             context.PendingRegularV4FrontierRepairPressureInstallRetry = null;
@@ -8098,13 +8408,10 @@ public sealed partial class SessionFileTransferService
                 settlement.Outcome,
                 settlement.DecisionReason,
                 settlement.SuccessorAuthorityId);
-            ClearPendingRegularV4FrontierRepairPressureInstall(contract);
             return true;
         }
 
-        return SettleRegularV4FrontierRepairContractLifecycleForDataSessionReplacement(
-            contract.PendingPressureInstallPredecessorContract,
-            settlement);
+        return false;
     }
 
     private void RecordCoordinatorIssuedRegularV4RecoverySettlementLocked(
@@ -8159,7 +8466,6 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
-            ClearPendingRegularV4FrontierRepairPressureInstall(contract);
         }
 
         context.CurrentRegularV4FrontierRepairContract = null;
@@ -8189,7 +8495,6 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
-            ClearPendingRegularV4FrontierRepairPressureInstall(contract);
         }
 
         context.CurrentRegularV4FrontierRepairContract = null;
@@ -8213,13 +8518,26 @@ public sealed partial class SessionFileTransferService
         FileTransferRegularV4FrontierRepairSettlementOutcome outcome,
         string reason)
     {
-        if (contract.PendingPressureInstallPredecessorContract is not
-                { Lifecycle.IsSettled: false } predecessorContract ||
+        if (contract.Authority.PredecessorAuthorityId is not { IsDefault: false } predecessorAuthorityId)
+        {
+            return true;
+        }
+
+        var predecessorContract = FindRegularV4FrontierRepairContractForAuthority(
+            contract.Authority.Direction,
+            contract.Authority.SessionId,
+            contract.Authority.TransferId,
+            predecessorAuthorityId);
+        if (predecessorContract is not { Lifecycle.IsSettled: false } ||
+            TryGetInstalledRegularV4FrontierRepairPressureForContract(
+                contract,
+                out var binding,
+                out var receipt) &&
             IsAcceptedRegularV4FrontierRepairPressureInstallReceipt(
                 contract,
-                predecessorContract,
-                contract.PendingPressureInstallReason ?? string.Empty,
-                contract.PressureInstallReceipt,
+                predecessorContract.Authority.AuthorityId,
+                binding.PressureReason,
+                receipt,
                 out _))
         {
             return true;
@@ -8230,18 +8548,6 @@ public sealed partial class SessionFileTransferService
             outcome,
             predecessorContract.Authority.PendingRepairCount,
             reason);
-    }
-
-    private static void ClearPendingRegularV4FrontierRepairPressureInstall(
-        RegularV4FrontierRepairContract contract)
-    {
-        contract.PendingPressureInstallPredecessorContract = null;
-        contract.PendingPressureInstallReason = null;
-        contract.PendingPressureInstallFrontierLagChunks = null;
-        contract.PendingPressureInstallRepairCount = null;
-        contract.PendingPressureInstallBoundary = null;
-        contract.PressureInstallDataSessionGeneration = null;
-        contract.PressureInstallReceipt = null;
     }
 
     private RuntimeUnlockRetryDispatchAuthorityRequest? GetPendingRuntimeUnlockRetryDispatchAuthorityRequest(
@@ -9365,7 +9671,9 @@ public sealed partial class SessionFileTransferService
                                     Math.Max(-1, repairSend.RemoteNextExpectedChunkIndex - 1),
                                     repairSend.RequestedChunkCount,
                                     ambiguousRegularContract.Authority,
-                                    ambiguousRegularContract.PressureBinding?.InstallGeneration ?? 0,
+                                    GetRegularV4FrontierRepairPressureInstallGeneration(
+                                        CreateCoordinatorStateLocked(context),
+                                        ambiguousRegularContract),
                                     repairSend.FirstStartChunkIndex,
                                     repairSend.LastEndChunkExclusive,
                                     "ambiguous_attached_contracts");
@@ -9416,7 +9724,9 @@ public sealed partial class SessionFileTransferService
                                         Math.Max(-1, repairSend.RemoteNextExpectedChunkIndex - 1),
                                         repairSend.RequestedChunkCount,
                                         regularV4RepairContractForDispatch.Authority,
-                                        regularV4RepairContractForDispatch.PressureBinding?.InstallGeneration ?? 0,
+                                        GetRegularV4FrontierRepairPressureInstallGeneration(
+                                            CreateCoordinatorStateLocked(context),
+                                            regularV4RepairContractForDispatch),
                                         repairSend.FirstStartChunkIndex,
                                         repairSend.LastEndChunkExclusive,
                                         "attached_installed_contract");
@@ -9432,7 +9742,9 @@ public sealed partial class SessionFileTransferService
                                 {
                                     regularV4RepairAuthorityForDispatch = regularV4RepairContractForDispatch.Authority;
                                     regularV4RepairInstallGenerationForDispatch =
-                                        regularV4RepairContractForDispatch.PressureBinding?.InstallGeneration ?? 0;
+                                        GetRegularV4FrontierRepairPressureInstallGeneration(
+                                            CreateCoordinatorStateLocked(context),
+                                            regularV4RepairContractForDispatch);
                                     regularV4ScheduledDispatchForDispatch =
                                         regularV4RepairContractForDispatch.ScheduledDispatch;
                                     repairChunkIndicesForDispatch =
@@ -9474,7 +9786,10 @@ public sealed partial class SessionFileTransferService
                                     Math.Max(-1, repairSend.RemoteNextExpectedChunkIndex - 1),
                                     repairSend.RequestedChunkCount,
                                     authority: missingAttachedContract?.Authority,
-                                    installGeneration: missingAttachedContract?.PressureBinding?.InstallGeneration ?? 0,
+                                    installGeneration:
+                                        GetRegularV4FrontierRepairPressureInstallGeneration(
+                                            CreateCoordinatorStateLocked(context),
+                                            missingAttachedContract),
                                     scheduledStartChunkIndex: repairSend.FirstStartChunkIndex,
                                     scheduledEndChunkExclusive: repairSend.LastEndChunkExclusive,
                                     dispatchAuthoritySource: "attached_installed_contract_missing");
@@ -9650,6 +9965,7 @@ public sealed partial class SessionFileTransferService
                             repairSend.RegularV4RepairContract is { } currentRegularContract)
                         {
                             regularV4DispatchMarked = TryMarkRegularV4FrontierRepairDispatched(
+                                context,
                                 currentRegularContract);
                             if (regularV4DispatchMarked)
                             {
@@ -10258,9 +10574,12 @@ public sealed partial class SessionFileTransferService
         }
 
         var authority = contract.Authority;
+        var installGeneration = GetRegularV4FrontierRepairPressureInstallGeneration(
+            CreateCoordinatorStateLocked(context),
+            contract);
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_regular_v4_peer_silence_replay_cursor_retained; {FormatOutboundRegularV4PeerSilenceReplayCursorTuple(cursor)}; authority_id={FormatProtocolLogValue(authority.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(authority.PredecessorAuthorityId?.ToString() ?? "(none)")}; install_generation={contract.PressureBinding?.InstallGeneration ?? 0}; repair_generation={authority.DecisionGeneration}; repair_request_key={FormatProtocolLogValue(authority.RepairKey)}; scheduled_start_chunk_index={scheduledStartChunkIndex}; scheduled_end_chunk_exclusive={scheduledEndChunkExclusive}; dispatch_authority_source=attached_installed_contract; dispatch_observed={(contract.Lifecycle.DispatchObserved ? 1 : 0)}; settlement_outcome={FormatProtocolLogValue(contract.Lifecycle.SettlementOutcome?.ToString() ?? "(none)")}; decision_reason={FormatProtocolLogValue(reason)}");
+            $"event=filetransfer_regular_v4_peer_silence_replay_cursor_retained; {FormatOutboundRegularV4PeerSilenceReplayCursorTuple(cursor)}; authority_id={FormatProtocolLogValue(authority.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(authority.PredecessorAuthorityId?.ToString() ?? "(none)")}; install_generation={installGeneration}; repair_generation={authority.DecisionGeneration}; repair_request_key={FormatProtocolLogValue(authority.RepairKey)}; scheduled_start_chunk_index={scheduledStartChunkIndex}; scheduled_end_chunk_exclusive={scheduledEndChunkExclusive}; dispatch_authority_source=attached_installed_contract; dispatch_observed={(contract.Lifecycle.DispatchObserved ? 1 : 0)}; settlement_outcome={FormatProtocolLogValue(contract.Lifecycle.SettlementOutcome?.ToString() ?? "(none)")}; decision_reason={FormatProtocolLogValue(reason)}");
         return cursor;
     }
 
@@ -10321,9 +10640,12 @@ public sealed partial class SessionFileTransferService
         };
         context.LastOutboundRegularV4PeerSilenceReplayCursorGeneration = cursorGeneration;
         context.OutboundRegularV4PeerSilenceReplayCursor = advanced;
+        var installGeneration = GetRegularV4FrontierRepairPressureInstallGeneration(
+            CreateCoordinatorStateLocked(context),
+            contract);
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_regular_v4_peer_silence_replay_cursor_advanced; {FormatOutboundRegularV4PeerSilenceReplayCursorTuple(advanced)}; authority_id={FormatProtocolLogValue(contract.Authority.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(contract.Authority.PredecessorAuthorityId?.ToString() ?? "(none)")}; install_generation={contract.PressureBinding?.InstallGeneration ?? 0}; repair_generation={contract.Authority.DecisionGeneration}; repair_request_key={FormatProtocolLogValue(contract.Authority.RepairKey)}; dispatched_start_chunk_index={repairSend.FirstStartChunkIndex}; dispatched_end_chunk_exclusive={repairSend.LastEndChunkExclusive}; dispatched_chunk_count={chunkIndices.Count}; dispatch_authority_source=attached_installed_contract; decision_reason=dispatch_observed_contiguous_range");
+            $"event=filetransfer_regular_v4_peer_silence_replay_cursor_advanced; {FormatOutboundRegularV4PeerSilenceReplayCursorTuple(advanced)}; authority_id={FormatProtocolLogValue(contract.Authority.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(contract.Authority.PredecessorAuthorityId?.ToString() ?? "(none)")}; install_generation={installGeneration}; repair_generation={contract.Authority.DecisionGeneration}; repair_request_key={FormatProtocolLogValue(contract.Authority.RepairKey)}; dispatched_start_chunk_index={repairSend.FirstStartChunkIndex}; dispatched_end_chunk_exclusive={repairSend.LastEndChunkExclusive}; dispatched_chunk_count={chunkIndices.Count}; dispatch_authority_source=attached_installed_contract; decision_reason=dispatch_observed_contiguous_range");
         return true;
     }
 
@@ -10332,33 +10654,33 @@ public sealed partial class SessionFileTransferService
         out bool handled)
     {
         handled = false;
-        if (context.PendingRegularV4FrontierRepairPressureInstallRetry is not { } repairSend)
+        if (context.PendingRegularV4FrontierRepairPressureInstallRetry is not { } executionIdentity ||
+            executionIdentity.DataSessionGeneration != context.DataSessionGeneration ||
+            context.CurrentRegularV4FrontierRepairContract is not
+                { Lifecycle.IsSettled: false } stagedContract ||
+            stagedContract.Authority.AuthorityId != executionIdentity.AuthorityId ||
+            !FileTransferCoordinator.TryGetPendingRegularV4FrontierRepairPressureInstall(
+                CreateCoordinatorStateLocked(context),
+                executionIdentity.AuthorityId,
+                out var pendingBinding,
+                out _) ||
+            pendingBinding.InstallGeneration != executionIdentity.InstallGeneration ||
+            CreatePendingRegularV4FrontierRepairSend(context, stagedContract) is not { } repairSend)
         {
             return false;
         }
 
-        if (repairSend.RegularV4RepairContract is { } initialContract &&
-            ReferenceEquals(context.CurrentRegularV4FrontierRepairContract, initialContract) &&
-            initialContract.PendingPressureInstallPredecessorContract is null)
+        if (stagedContract.Authority.PredecessorAuthorityId is null)
         {
             handled = true;
-            if (ResolveRepairReplayKind(repairSend) != RepairReplayKind.PeerSilenceReplay &&
-                !string.Equals(
-                    repairSend.DeliveryEscalationReason,
-                    "file_tuna_v4_post_tuna_frontier_replay",
-                    StringComparison.Ordinal))
-            {
-                return false;
-            }
-
             if (!IsRegularV4FrontierRepairPressureInstallScopeCurrentLocked(
                     context,
-                    initialContract,
+                    stagedContract,
                     out _) ||
-                !TryRetryRegularV4FrontierRepairPressureInstallLocked(context, initialContract))
+                !TryRetryRegularV4FrontierRepairPressureInstallLocked(context, stagedContract))
             {
                 if (context.IsTerminal ||
-                    !ReferenceEquals(context.CurrentRegularV4FrontierRepairContract, initialContract))
+                    !ReferenceEquals(context.CurrentRegularV4FrontierRepairContract, stagedContract))
                 {
                     context.PendingRegularV4FrontierRepairPressureInstallRetry = null;
                 }
@@ -10379,18 +10701,25 @@ public sealed partial class SessionFileTransferService
         }
 
         handled = true;
-        if (repairSend.RegularV4RepairContract is not { } predecessorContract ||
-            context.CurrentRegularV4FrontierRepairContract is not { Lifecycle.IsSettled: false } stagedSuccessor ||
-            !ReferenceEquals(stagedSuccessor.PendingPressureInstallPredecessorContract, predecessorContract) ||
+        var predecessorContract = FindRegularV4FrontierRepairContractForAuthority(
+            stagedContract.Authority.Direction,
+            stagedContract.Authority.SessionId,
+            stagedContract.Authority.TransferId,
+            stagedContract.Authority.PredecessorAuthorityId!.Value);
+        if (predecessorContract is null ||
             !IsRegularV4FrontierRepairPressureInstallScopeCurrentLocked(
                 context,
-                stagedSuccessor,
+                stagedContract,
                 out _))
         {
             context.PendingRegularV4FrontierRepairPressureInstallRetry = null;
             return false;
         }
 
+        repairSend = repairSend with
+        {
+            RegularV4RepairContract = predecessorContract,
+        };
         var settlementObserved = false;
         var requeued = TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked(
             context,
@@ -10412,12 +10741,82 @@ public sealed partial class SessionFileTransferService
             context.PendingRegularV4FrontierRepairPressureInstallRetry = null;
         }
         else if (context.IsTerminal ||
-                 !ReferenceEquals(context.CurrentRegularV4FrontierRepairContract, stagedSuccessor))
+                 !ReferenceEquals(context.CurrentRegularV4FrontierRepairContract, stagedContract))
         {
             context.PendingRegularV4FrontierRepairPressureInstallRetry = null;
         }
 
         return requeued;
+    }
+
+    private static PullV4QueuedRepairSend? CreatePendingRegularV4FrontierRepairSend(
+        OutboundTransferContext context,
+        RegularV4FrontierRepairContract contract)
+    {
+        if (contract.ScheduledDispatch is not { } scheduled ||
+            scheduled.ChunkIndices.IsDefaultOrEmpty)
+        {
+            return null;
+        }
+
+        var chunkIndices = scheduled.ChunkIndices.ToList();
+        var deliveryReason = scheduled.RepairReplayKind switch
+        {
+            RepairReplayKind.PeerSilenceReplay => "regular_v4_peer_silence_safety_replay",
+            RepairReplayKind.TransportRebindSafetyReplay => "file_tuna_v4_post_tuna_frontier_replay",
+            _ => "first_send",
+        };
+        return new PullV4QueuedRepairSend(
+            chunkIndices,
+            RangeCount: 1,
+            RequestedChunkCount: chunkIndices.Count,
+            FirstStartChunkIndex: scheduled.StartChunkIndex,
+            LastEndChunkExclusive: scheduled.EndChunkExclusive,
+            RemoteNextExpectedChunkIndex: contract.Authority.FrontierChunkIndex,
+            ChunksAcceptedForTransport: context.ChunksAcceptedForTransport,
+            SkippedObsoleteCount: 0,
+            SkippedFutureCount: Math.Max(0, contract.Authority.PendingRepairCount - chunkIndices.Count),
+            SkippedOutOfBoundsCount: 0,
+            RepairRequestKey: scheduled.RepairKey,
+            ProtocolRepairRequestId: null,
+            ProtocolPriority: null,
+            ProtocolRecoveryMode: null,
+            FrontierRepair: true,
+            FrontierTailRepair: scheduled.StartChunkIndex == contract.Authority.FrontierChunkIndex,
+            EmergencyCreditRepair: false,
+            DeliveryMode: FileTransferV4RepairDeliveryMode.ControlBulkRedundant,
+            DeliveryEscalationReason: deliveryReason,
+            CreditExhaustedTimeMsAtDecision: -1,
+            RuntimeOwner: contract.RepairDecision.RuntimeOwner,
+            RegularV4RepairContract: contract,
+            CoordinatorBackedRegularV4PeerSilenceReplay:
+                scheduled.RepairReplayKind == RepairReplayKind.PeerSilenceReplay);
+    }
+
+    private static bool RetainPendingRegularV4FrontierRepairPressureInstallRetry(
+        OutboundTransferContext context,
+        RegularV4FrontierRepairContract contract)
+    {
+        if (!FileTransferCoordinator.TryGetPendingRegularV4FrontierRepairPressureInstall(
+                CreateCoordinatorStateLocked(context),
+                contract.Authority.AuthorityId,
+                out var pendingBinding,
+                out _))
+        {
+            return false;
+        }
+
+        var identity = new RegularV4FrontierRepairPressureInstallExecutionIdentity(
+            contract.Authority.AuthorityId,
+            pendingBinding.InstallGeneration,
+            context.DataSessionGeneration);
+        if (context.PendingRegularV4FrontierRepairPressureInstallRetry is null)
+        {
+            context.PendingRegularV4FrontierRepairPressureInstallRetry = identity;
+            return true;
+        }
+
+        return context.PendingRegularV4FrontierRepairPressureInstallRetry == identity;
     }
 
     private bool TryCompleteOutboundInitialRegularV4FrontierRepairPressureInstallLocked(
@@ -10427,9 +10826,15 @@ public sealed partial class SessionFileTransferService
     {
         if (repairSend.RegularV4RepairContract is not { } contract ||
             !ReferenceEquals(context.CurrentRegularV4FrontierRepairContract, contract) ||
-            contract.PendingPressureInstallPredecessorContract is not null ||
-            contract.PressureBinding is not { State: RegularV4FrontierRepairPressureBindingState.Installed } installedBinding ||
-            context.InstalledRegularV4FrontierRepairPressureBinding != installedBinding ||
+            contract.Authority.PredecessorAuthorityId is not null ||
+            !TryGetInstalledRegularV4FrontierRepairPressure(
+                CreateCoordinatorStateLocked(context),
+                contract.Authority.AuthorityId,
+                out var installedBinding,
+                out _,
+                out _) ||
+            installedBinding.State != RegularV4FrontierRepairPressureBindingState.Installed ||
+            installedBinding.Authority != contract.Authority ||
             contract.Lifecycle.IsSettled ||
             repairSend.RuntimeOwner != context.CurrentRuntimeOwner ||
             repairSend.ChunkIndices.Count == 0 ||
@@ -10744,7 +11149,6 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        regularContract.PressureInstallDataSessionGeneration = context.DataSessionGeneration;
         context.CurrentRegularV4FrontierRepairContract = regularContract;
         var queuedRepair = new PullV4QueuedRepairSend(
             chunkIndices,
@@ -10789,7 +11193,9 @@ public sealed partial class SessionFileTransferService
                 "regular_v4_peer_silence_safety_replay",
                 "outbound_peer_silence_initial"))
         {
-            context.PendingRegularV4FrontierRepairPressureInstallRetry ??= queuedRepair;
+            _ = RetainPendingRegularV4FrontierRepairPressureInstallRetry(
+                context,
+                regularContract);
             return false;
         }
 
@@ -10926,7 +11332,6 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        fileTunaContract.PressureInstallDataSessionGeneration = context.DataSessionGeneration;
         context.CurrentRegularV4FrontierRepairContract = fileTunaContract;
         var queuedRepair = new PullV4QueuedRepairSend(
             chunkIndices,
@@ -10971,7 +11376,9 @@ public sealed partial class SessionFileTransferService
                 "file_tuna_v4_post_tuna_frontier_replay",
                 "outbound_file_tuna_replay_initial"))
         {
-            context.PendingRegularV4FrontierRepairPressureInstallRetry ??= queuedRepair;
+            _ = RetainPendingRegularV4FrontierRepairPressureInstallRetry(
+                context,
+                fileTunaContract);
             return false;
         }
 
@@ -11105,8 +11512,8 @@ public sealed partial class SessionFileTransferService
         if (!ReferenceEquals(currentContract, predecessorContract))
         {
             var stagedSuccessor = currentContract;
-            if (!ReferenceEquals(stagedSuccessor.PendingPressureInstallPredecessorContract, predecessorContract) ||
-                stagedSuccessor.Authority.PredecessorAuthorityId != predecessorContract.Authority.AuthorityId ||
+            if (stagedSuccessor.Authority.PredecessorAuthorityId !=
+                    predecessorContract.Authority.AuthorityId ||
                 !string.Equals(stagedSuccessor.Authority.RepairKey, repairKey, StringComparison.Ordinal) ||
                 stagedSuccessor.Authority.FrontierChunkIndex != remoteFrontier ||
                 stagedSuccessor.Authority.DurableReceivedHighestChunkIndex != Math.Max(-1, remoteFrontier - 1) ||
@@ -11167,8 +11574,7 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
-            regularContract.PendingPressureInstallPredecessorContract = predecessorContract;
-            regularContract.PressureInstallDataSessionGeneration = context.DataSessionGeneration;
+            regularContract.PredecessorLifecycleContract = predecessorContract;
             context.CurrentRegularV4FrontierRepairContract = regularContract;
         }
 
@@ -11204,7 +11610,9 @@ public sealed partial class SessionFileTransferService
                 "regular_v4_frontier_repair_successor_authorized",
                 "outbound_peer_silence_timeout_successor"))
         {
-            context.PendingRegularV4FrontierRepairPressureInstallRetry ??= repairSend;
+            _ = RetainPendingRegularV4FrontierRepairPressureInstallRetry(
+                context,
+                regularContract);
             settlementObserved = true;
             return false;
         }
@@ -11230,7 +11638,9 @@ public sealed partial class SessionFileTransferService
             rangeCount: 1,
             requestedChunkCount: requeued.Count,
             scheduledChunkCount: requeued.Count,
-            installGeneration: regularContract.PressureBinding?.InstallGeneration ?? 0,
+            installGeneration: GetRegularV4FrontierRepairPressureInstallGeneration(
+                CreateCoordinatorStateLocked(context),
+                regularContract),
             scheduledStartChunkIndex: requeued[0],
             scheduledEndChunkExclusive: requeued[^1] + 1,
             dispatchAuthoritySource: "attached_installed_contract");
@@ -13388,17 +13798,28 @@ public sealed partial class SessionFileTransferService
         out PullV4QueuedRepairSend? pendingRepair,
         out RegularV4FrontierRepairContract? pendingContract)
     {
-        pendingRepair = context.PendingRegularV4FrontierRepairPressureInstallRetry;
-        pendingContract = pendingRepair?.RegularV4RepairContract;
-        if (pendingRepair is null ||
+        pendingContract = context.CurrentRegularV4FrontierRepairContract;
+        pendingRepair = pendingContract is null
+            ? null
+            : CreatePendingRegularV4FrontierRepairSend(context, pendingContract);
+        if (context.PendingRegularV4FrontierRepairPressureInstallRetry is not { } executionIdentity ||
+            executionIdentity.DataSessionGeneration != context.DataSessionGeneration ||
+            pendingRepair is null ||
             pendingContract is null ||
+            executionIdentity.AuthorityId != pendingContract.Authority.AuthorityId ||
             !ReferenceEquals(context.CurrentRegularV4FrontierRepairContract, pendingContract) ||
             pendingContract.Lifecycle.IsSettled ||
-            pendingContract.PendingPressureInstallPredecessorContract is not null ||
-            pendingContract.PressureBinding is not { State: RegularV4FrontierRepairPressureBindingState.Pending } ||
+            pendingContract.Authority.PredecessorAuthorityId is not null ||
+            !FileTransferCoordinator.TryGetPendingRegularV4FrontierRepairPressureInstall(
+                CreateCoordinatorStateLocked(context),
+                pendingContract.Authority.AuthorityId,
+                out var pendingBinding,
+                out var pendingCommand) ||
+            pendingBinding.InstallGeneration != executionIdentity.InstallGeneration ||
+            pendingBinding.Authority != pendingContract.Authority ||
             pendingContract.RepairDecision.RepairKind != repairKind ||
             !string.Equals(
-                pendingContract.PendingPressureInstallReason,
+                pendingCommand.Pressure.Reason,
                 "regular_v4_sender_frontier_repair_due",
                 StringComparison.Ordinal) ||
             !string.Equals(pendingRepair.DeliveryEscalationReason, "first_send", StringComparison.Ordinal) ||
@@ -13741,7 +14162,9 @@ public sealed partial class SessionFileTransferService
                 normalizedRanges.Count,
                 requestedChunkCount,
                 chunkIndices.Count,
-                retainedInitialPressureContract.PressureBinding?.InstallGeneration ?? 0,
+                GetRegularV4FrontierRepairPressureInstallGeneration(
+                    CreateCoordinatorStateLocked(context),
+                    retainedInitialPressureContract),
                 firstStart,
                 lastEndExclusive,
                 "attached_installed_contract");
@@ -13762,8 +14185,16 @@ public sealed partial class SessionFileTransferService
             if (regularContract is { } contract)
             {
                 var authority = contract.Authority;
-                contract.PressureInstallDataSessionGeneration = context.DataSessionGeneration;
                 context.CurrentRegularV4FrontierRepairContract = contract;
+                var pendingQueuedRepair = queuedRepair with { RegularV4RepairContract = contract };
+                if (!TryBindRegularV4FrontierRepairScheduledDispatch(
+                        contract,
+                        pendingQueuedRepair,
+                        scheduleRepairReplayKind,
+                        out _))
+                {
+                    return;
+                }
                 if (!TryInstallRegularV4FrontierRepairPressureLocked(
                         context,
                         contract,
@@ -13773,8 +14204,9 @@ public sealed partial class SessionFileTransferService
                         "regular_v4_sender_frontier_repair_due",
                         "outbound_repair_schedule_initial"))
                 {
-                    context.PendingRegularV4FrontierRepairPressureInstallRetry ??=
-                        queuedRepair with { RegularV4RepairContract = contract };
+                    _ = RetainPendingRegularV4FrontierRepairPressureInstallRetry(
+                        context,
+                        contract);
                     return;
                 }
                 regularScheduleContractForSettlement = contract;
@@ -13789,7 +14221,9 @@ public sealed partial class SessionFileTransferService
                     normalizedRanges.Count,
                     requestedChunkCount,
                     chunkIndices.Count,
-                    contract.PressureBinding?.InstallGeneration ?? 0,
+                    GetRegularV4FrontierRepairPressureInstallGeneration(
+                        CreateCoordinatorStateLocked(context),
+                        contract),
                     firstStart,
                     lastEndExclusive,
                     "attached_installed_contract");
@@ -14683,7 +15117,9 @@ public sealed partial class SessionFileTransferService
                 regularV4FrontierRepairContract.Authority.DurableReceivedHighestChunkIndex,
                 regularV4FrontierRepairContract.Authority.PendingRepairCount,
                 regularV4FrontierRepairContract.Authority,
-                regularV4FrontierRepairContract.PressureBinding?.InstallGeneration ?? 0,
+                GetRegularV4FrontierRepairPressureInstallGeneration(
+                    CreateCoordinatorStateLocked(context),
+                    regularV4FrontierRepairContract),
                 regularV4ScheduledDispatch?.StartChunkIndex ?? -1,
                 regularV4ScheduledDispatch?.EndChunkExclusive ?? -1,
                 "attached_installed_contract");
@@ -15324,7 +15760,7 @@ public sealed partial class SessionFileTransferService
                         {
                             LocalOperationalLog.Info(
                                 "FileTransferService",
-                                $"event=filetransfer_regular_v4_repair_transport_callback_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(regularV4FrontierRepairContract.Authority.AuthorityId.ToString())}; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={FormatProtocolLogValue(regularV4FrontierRepairContract.Authority.RepairKey)}; start_chunk_index={pendingSend.Prepared.StartChunkIndex}; batch_chunk_count={pendingSend.Prepared.ChunkCount}; timed_out={(timedOutForBoundTransport ? 1 : 0)}; install_generation={regularV4FrontierRepairContract.PressureBinding?.InstallGeneration ?? 0}; decision_reason={FormatProtocolLogValue(regularCompletionRejectionReason)}");
+                                $"event=filetransfer_regular_v4_repair_transport_callback_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(regularV4FrontierRepairContract.Authority.AuthorityId.ToString())}; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={FormatProtocolLogValue(regularV4FrontierRepairContract.Authority.RepairKey)}; start_chunk_index={pendingSend.Prepared.StartChunkIndex}; batch_chunk_count={pendingSend.Prepared.ChunkCount}; timed_out={(timedOutForBoundTransport ? 1 : 0)}; install_generation={GetRegularV4FrontierRepairPressureInstallGeneration(CreateCoordinatorStateLocked(context), regularV4FrontierRepairContract)}; decision_reason={FormatProtocolLogValue(regularCompletionRejectionReason)}");
                         }
                         return;
                     }
@@ -16760,11 +17196,16 @@ public sealed partial class SessionFileTransferService
 
         if (!pressureReason.EndsWith("_sender_remote_frontier_pressure", StringComparison.Ordinal) &&
             context.CurrentRegularV4FrontierRepairContract is { } currentContract &&
-            currentContract.PressureInstallReceipt is { } installReceipt &&
+            TryGetInstalledRegularV4FrontierRepairPressure(
+                CreateCoordinatorStateLocked(context),
+                currentContract.Authority.AuthorityId,
+                out var installedBinding,
+                out _,
+                out var installReceipt) &&
             IsAcceptedRegularV4FrontierRepairPressureInstallReceipt(
                 currentContract,
-                currentContract.PendingPressureInstallPredecessorContract,
-                installReceipt.PressureReason,
+                currentContract.Authority.PredecessorAuthorityId,
+                installedBinding.PressureReason,
                 installReceipt,
                 out _))
         {
@@ -16812,11 +17253,16 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
-            if (currentContract.PressureInstallReceipt is { } installReceipt &&
+            if (TryGetInstalledRegularV4FrontierRepairPressure(
+                    CreateCoordinatorStateLocked(context),
+                    currentContract.Authority.AuthorityId,
+                    out var installedBinding,
+                    out _,
+                    out var installReceipt) &&
                 IsAcceptedRegularV4FrontierRepairPressureInstallReceipt(
                     currentContract,
-                    currentContract.PendingPressureInstallPredecessorContract,
-                    installReceipt.PressureReason,
+                    currentContract.Authority.PredecessorAuthorityId,
+                    installedBinding.PressureReason,
                     installReceipt,
                     out _))
             {
@@ -17003,21 +17449,6 @@ public sealed partial class SessionFileTransferService
         string pressureReason,
         string installBoundary)
     {
-        if (!TryRetainRegularV4FrontierRepairPressureInstallAttempt(
-                contract,
-                predecessorContract,
-                frontierLagChunks,
-                pendingRepairCount,
-                pressureReason,
-                installBoundary))
-        {
-            return false;
-        }
-        frontierLagChunks = contract.PendingPressureInstallFrontierLagChunks!.Value;
-        pendingRepairCount = contract.PendingPressureInstallRepairCount!.Value;
-        pressureReason = contract.PendingPressureInstallReason!;
-        installBoundary = contract.PendingPressureInstallBoundary!;
-
         if (!IsRegularV4FrontierRepairPressureInstallScopeCurrentLocked(
                 context,
                 contract,
@@ -17038,10 +17469,14 @@ public sealed partial class SessionFileTransferService
                 context,
                 contract,
                 pressureReason,
-                installBoundary))
+                installBoundary,
+                out var installCommand))
         {
             return false;
         }
+        frontierLagChunks = installCommand.Pressure.FrontierLagChunks;
+        pendingRepairCount = installCommand.Pressure.PendingRepairCount;
+        pressureReason = installCommand.Pressure.Reason;
 
         if (!TryInstallRegularV4FrontierRepairPressureCoreLocked(
             contract,
@@ -17049,7 +17484,9 @@ public sealed partial class SessionFileTransferService
             frontierLagChunks,
             pendingRepairCount,
             pressureReason,
-            installBoundary))
+            installBoundary,
+            installCommand,
+            out var installReceipt))
         {
             return false;
         }
@@ -17057,6 +17494,7 @@ public sealed partial class SessionFileTransferService
         return TryCommitRegularV4FrontierRepairPressureBindingLocked(
             context,
             contract,
+            installReceipt,
             installBoundary);
     }
 
@@ -17069,21 +17507,6 @@ public sealed partial class SessionFileTransferService
         string pressureReason,
         string installBoundary)
     {
-        if (!TryRetainRegularV4FrontierRepairPressureInstallAttempt(
-                contract,
-                predecessorContract,
-                frontierLagChunks,
-                pendingRepairCount,
-                pressureReason,
-                installBoundary))
-        {
-            return false;
-        }
-        frontierLagChunks = contract.PendingPressureInstallFrontierLagChunks!.Value;
-        pendingRepairCount = contract.PendingPressureInstallRepairCount!.Value;
-        pressureReason = contract.PendingPressureInstallReason!;
-        installBoundary = contract.PendingPressureInstallBoundary!;
-
         if (!IsRegularV4FrontierRepairPressureInstallScopeCurrentLocked(
                 context,
                 contract,
@@ -17104,10 +17527,14 @@ public sealed partial class SessionFileTransferService
                 context,
                 contract,
                 pressureReason,
-                installBoundary))
+                installBoundary,
+                out var installCommand))
         {
             return false;
         }
+        frontierLagChunks = installCommand.Pressure.FrontierLagChunks;
+        pendingRepairCount = installCommand.Pressure.PendingRepairCount;
+        pressureReason = installCommand.Pressure.Reason;
 
         if (!TryInstallRegularV4FrontierRepairPressureCoreLocked(
             contract,
@@ -17115,7 +17542,9 @@ public sealed partial class SessionFileTransferService
             frontierLagChunks,
             pendingRepairCount,
             pressureReason,
-            installBoundary))
+            installBoundary,
+            installCommand,
+            out var installReceipt))
         {
             return false;
         }
@@ -17123,134 +17552,110 @@ public sealed partial class SessionFileTransferService
         return TryCommitRegularV4FrontierRepairPressureBindingLocked(
             context,
             contract,
+            installReceipt,
             installBoundary);
     }
 
-    private static bool TryRetainRegularV4FrontierRepairPressureInstallAttempt(
-        RegularV4FrontierRepairContract contract,
-        RegularV4FrontierRepairContract? predecessorContract,
-        int frontierLagChunks,
-        int pendingRepairCount,
-        string pressureReason,
-        string installBoundary)
+    private bool TryRetryRegularV4FrontierRepairPressureInstallLocked(
+        OutboundTransferContext context,
+        RegularV4FrontierRepairContract contract)
     {
-        var normalizedPressureReason = string.IsNullOrWhiteSpace(pressureReason)
-            ? predecessorContract is null
-                ? "regular_v4_frontier_repair_initial_pressure"
-                : "regular_v4_frontier_repair_successor_pressure"
-            : pressureReason.Trim();
-        var normalizedFrontierLagChunks = Math.Max(0, frontierLagChunks);
-        var normalizedPendingRepairCount = Math.Max(1, pendingRepairCount);
-        var normalizedInstallBoundary = string.IsNullOrWhiteSpace(installBoundary)
-            ? "unknown"
-            : installBoundary.Trim();
-
-        if (contract.PendingPressureInstallBoundary is null)
+        if (!FileTransferCoordinator.TryGetPendingRegularV4FrontierRepairPressureInstall(
+                CreateCoordinatorStateLocked(context),
+                contract.Authority.AuthorityId,
+                out _,
+                out var command))
         {
-            contract.PendingPressureInstallPredecessorContract = predecessorContract;
-            contract.PendingPressureInstallReason = normalizedPressureReason;
-            contract.PendingPressureInstallFrontierLagChunks = normalizedFrontierLagChunks;
-            contract.PendingPressureInstallRepairCount = normalizedPendingRepairCount;
-            contract.PendingPressureInstallBoundary = normalizedInstallBoundary;
-            return true;
+            return false;
         }
 
-        var retainedPredecessorAuthorityId =
-            contract.PendingPressureInstallPredecessorContract?.Authority.AuthorityId;
-        var requestedPredecessorAuthorityId = predecessorContract?.Authority.AuthorityId;
-        if (retainedPredecessorAuthorityId == requestedPredecessorAuthorityId &&
-            string.Equals(
-                contract.PendingPressureInstallReason,
-                normalizedPressureReason,
-                StringComparison.Ordinal) &&
-            string.Equals(
-                contract.PendingPressureInstallBoundary,
-                normalizedInstallBoundary,
-                StringComparison.Ordinal))
-        {
-            return true;
-        }
-
-        LogRegularV4FrontierRepairPressureBinding(
-            "filetransfer_regular_v4_frontier_repair_pressure_binding_invalidated",
-            contract.Authority,
-            contract.PressureBinding,
-            normalizedInstallBoundary,
-            "regular_v4_frontier_repair_pressure_install_attempt_mismatch");
-        return false;
+        return TryInstallRegularV4FrontierRepairPressureLocked(
+            context,
+            contract,
+            contract.Authority.PredecessorAuthorityId is { IsDefault: false } predecessorAuthorityId
+                ? FindRegularV4FrontierRepairContractForAuthority(
+                    contract.Authority.Direction,
+                    contract.Authority.SessionId,
+                    contract.Authority.TransferId,
+                    predecessorAuthorityId)
+                : null,
+            command.Pressure.FrontierLagChunks,
+            command.Pressure.PendingRepairCount,
+            command.Pressure.Reason,
+            "coordinator_pending_install_retry");
     }
 
     private bool TryRetryRegularV4FrontierRepairPressureInstallLocked(
-        OutboundTransferContext context,
-        RegularV4FrontierRepairContract contract)
-        => contract.PendingPressureInstallFrontierLagChunks is { } frontierLagChunks &&
-           contract.PendingPressureInstallRepairCount is { } pendingRepairCount &&
-           contract.PendingPressureInstallReason is { } pressureReason &&
-           contract.PendingPressureInstallBoundary is { } installBoundary &&
-           TryInstallRegularV4FrontierRepairPressureLocked(
-               context,
-               contract,
-               contract.PendingPressureInstallPredecessorContract,
-               frontierLagChunks,
-               pendingRepairCount,
-               pressureReason,
-               installBoundary);
-
-    private bool TryRetryRegularV4FrontierRepairPressureInstallLocked(
         InboundTransferContext context,
         RegularV4FrontierRepairContract contract)
-        => contract.PendingPressureInstallFrontierLagChunks is { } frontierLagChunks &&
-           contract.PendingPressureInstallRepairCount is { } pendingRepairCount &&
-           contract.PendingPressureInstallReason is { } pressureReason &&
-           contract.PendingPressureInstallBoundary is { } installBoundary &&
-           TryInstallRegularV4FrontierRepairPressureLocked(
-               context,
-               contract,
-               contract.PendingPressureInstallPredecessorContract,
-               frontierLagChunks,
-               pendingRepairCount,
-               pressureReason,
-               installBoundary);
+    {
+        if (!FileTransferCoordinator.TryGetPendingRegularV4FrontierRepairPressureInstall(
+                CreateCoordinatorStateLocked(context),
+                contract.Authority.AuthorityId,
+                out _,
+                out var command))
+        {
+            return false;
+        }
+
+        return TryInstallRegularV4FrontierRepairPressureLocked(
+            context,
+            contract,
+            contract.Authority.PredecessorAuthorityId is { IsDefault: false } predecessorAuthorityId
+                ? FindRegularV4FrontierRepairContractForAuthority(
+                    contract.Authority.Direction,
+                    contract.Authority.SessionId,
+                    contract.Authority.TransferId,
+                    predecessorAuthorityId)
+                : null,
+            command.Pressure.FrontierLagChunks,
+            command.Pressure.PendingRepairCount,
+            command.Pressure.Reason,
+            "coordinator_pending_install_retry");
+    }
 
     private bool TryStageRegularV4FrontierRepairPressureBindingLocked(
         OutboundTransferContext context,
         RegularV4FrontierRepairContract contract,
         string pressureReason,
-        string installBoundary)
+        string installBoundary,
+        out FileTransferRegularV4FrontierRepairPressureInstallCommand installCommand)
         => TryUseCoordinatorStagedRegularV4FrontierRepairPressureBinding(
             CreateCoordinatorStateLocked(context),
             contract,
             pressureReason,
-            installBoundary);
+            installBoundary,
+            out installCommand);
 
     private bool TryStageRegularV4FrontierRepairPressureBindingLocked(
         InboundTransferContext context,
         RegularV4FrontierRepairContract contract,
         string pressureReason,
-        string installBoundary)
+        string installBoundary,
+        out FileTransferRegularV4FrontierRepairPressureInstallCommand installCommand)
         => TryUseCoordinatorStagedRegularV4FrontierRepairPressureBinding(
             CreateCoordinatorStateLocked(context),
             contract,
             pressureReason,
-            installBoundary);
+            installBoundary,
+            out installCommand);
 
     private static bool TryUseCoordinatorStagedRegularV4FrontierRepairPressureBinding(
         FileTransferCoordinatorState state,
         RegularV4FrontierRepairContract contract,
         string pressureReason,
-        string installBoundary)
+        string installBoundary,
+        out FileTransferRegularV4FrontierRepairPressureInstallCommand installCommand)
     {
+        installCommand = null!;
         var normalizedPressureReason = string.IsNullOrWhiteSpace(pressureReason)
             ? "unknown"
             : pressureReason.Trim();
-        var binding = state.PendingRegularV4FrontierRepairPressureBinding is { } pending &&
-                      pending == contract.PressureBinding
-            ? pending
-            : state.InstalledRegularV4FrontierRepairPressureBinding is { } installed &&
-              installed == contract.PressureBinding
-                ? installed
-                : (RegularV4FrontierRepairPressureBinding?)null;
-        if (binding is not { } currentBinding ||
+        if (!TryGetPendingOrInstalledRegularV4FrontierRepairPressure(
+                state,
+                contract.Authority.AuthorityId,
+                out var currentBinding,
+                out var currentCommand) ||
             currentBinding.Authority != contract.Authority ||
             !string.Equals(
                 currentBinding.PressureReason,
@@ -17260,13 +17665,13 @@ public sealed partial class SessionFileTransferService
             LogRegularV4FrontierRepairPressureBinding(
                 "filetransfer_regular_v4_frontier_repair_pressure_binding_invalidated",
                 contract.Authority,
-                binding,
+                binding: null,
                 installBoundary,
                 "regular_v4_frontier_repair_pressure_binding_not_current");
             return false;
         }
 
-        contract.PressureBinding = currentBinding;
+        installCommand = currentCommand;
         LogRegularV4FrontierRepairPressureBinding(
             "filetransfer_regular_v4_frontier_repair_pressure_binding_staged",
             contract.Authority,
@@ -17281,17 +17686,13 @@ public sealed partial class SessionFileTransferService
     private bool TryCommitRegularV4FrontierRepairPressureBindingLocked(
         OutboundTransferContext context,
         RegularV4FrontierRepairContract contract,
+        FileTransferRegularV4FrontierRepairPressureInstallReceipt receipt,
         string installBoundary)
     {
-        if (contract.PressureInstallReceipt is not { } receipt)
-        {
-            return false;
-        }
-
         var decision = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureBinding(
             CreateCoordinatorStateLocked(context),
             receipt);
-        ApplyRegularV4FrontierRepairPressureBindingStateLocked(context, decision.State);
+        context.CoordinatorPersistentState = decision.State.PersistentState;
         return CommitRegularV4FrontierRepairPressureBindingDecision(
             contract,
             decision,
@@ -17301,17 +17702,13 @@ public sealed partial class SessionFileTransferService
     private bool TryCommitRegularV4FrontierRepairPressureBindingLocked(
         InboundTransferContext context,
         RegularV4FrontierRepairContract contract,
+        FileTransferRegularV4FrontierRepairPressureInstallReceipt receipt,
         string installBoundary)
     {
-        if (contract.PressureInstallReceipt is not { } receipt)
-        {
-            return false;
-        }
-
         var decision = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureBinding(
             CreateCoordinatorStateLocked(context),
             receipt);
-        ApplyRegularV4FrontierRepairPressureBindingStateLocked(context, decision.State);
+        context.CoordinatorPersistentState = decision.State.PersistentState;
         return CommitRegularV4FrontierRepairPressureBindingDecision(
             contract,
             decision,
@@ -17327,7 +17724,6 @@ public sealed partial class SessionFileTransferService
             decision.Binding is not { } binding ||
             binding.State != RegularV4FrontierRepairPressureBindingState.Installed)
         {
-            contract.PressureInstallReceipt = null;
             LogRegularV4FrontierRepairPressureBinding(
                 "filetransfer_regular_v4_frontier_repair_pressure_binding_invalidated",
                 contract.Authority,
@@ -17337,7 +17733,6 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        contract.PressureBinding = binding;
         LogRegularV4FrontierRepairPressureBinding(
             "filetransfer_regular_v4_frontier_repair_pressure_binding_committed",
             contract.Authority,
@@ -17368,23 +17763,24 @@ public sealed partial class SessionFileTransferService
         string installBoundary,
         string rejectionReason)
     {
+        var predecessorAuthorityId =
+            predecessorContract?.Authority.AuthorityId ??
+            contract.Authority.PredecessorAuthorityId;
         var normalizedPressureReason = string.IsNullOrWhiteSpace(pressureReason)
-            ? predecessorContract is null
+            ? predecessorAuthorityId is null
                 ? "regular_v4_frontier_repair_initial_pressure"
                 : "regular_v4_frontier_repair_successor_pressure"
             : pressureReason.Trim();
-        contract.PendingPressureInstallPredecessorContract = predecessorContract;
-        contract.PendingPressureInstallReason = normalizedPressureReason;
         LogRegularV4FrontierRepairPressureInstallRequested(
             contract.Authority,
-            predecessorContract?.Authority.AuthorityId,
+            predecessorAuthorityId,
             Math.Max(0, frontierLagChunks),
             Math.Max(1, pendingRepairCount),
             normalizedPressureReason,
             installBoundary);
         LogRegularV4FrontierRepairPressureInstallDecided(
             contract.Authority,
-            predecessorContract?.Authority.AuthorityId,
+            predecessorAuthorityId,
             Math.Max(0, frontierLagChunks),
             Math.Max(1, pendingRepairCount),
             normalizedPressureReason,
@@ -17399,27 +17795,20 @@ public sealed partial class SessionFileTransferService
         int frontierLagChunks,
         int pendingRepairCount,
         string pressureReason,
-        string installBoundary)
+        string installBoundary,
+        FileTransferRegularV4FrontierRepairPressureInstallCommand installCommand,
+        out FileTransferRegularV4FrontierRepairPressureInstallReceipt installReceipt)
     {
+        installReceipt = null!;
         var authority = contract.Authority;
-        var predecessorAuthorityId = predecessorContract?.Authority.AuthorityId;
+        var predecessorAuthorityId =
+            predecessorContract?.Authority.AuthorityId ??
+            authority.PredecessorAuthorityId;
         var normalizedPressureReason = string.IsNullOrWhiteSpace(pressureReason)
-            ? predecessorContract is null
+            ? predecessorAuthorityId is null
                 ? "regular_v4_frontier_repair_initial_pressure"
                 : "regular_v4_frontier_repair_successor_pressure"
             : pressureReason.Trim();
-        contract.PendingPressureInstallPredecessorContract = predecessorContract;
-        contract.PendingPressureInstallReason = normalizedPressureReason;
-
-        if (contract.PressureInstallReceipt is { } retainedReceipt)
-        {
-            return IsAcceptedRegularV4FrontierRepairPressureInstallReceipt(
-                contract,
-                predecessorContract,
-                normalizedPressureReason,
-                retainedReceipt,
-                out _);
-        }
 
         LogRegularV4FrontierRepairPressureInstallRequested(
             authority,
@@ -17446,17 +17835,7 @@ public sealed partial class SessionFileTransferService
         FileTransferRegularV4FrontierRepairPressureInstallReceipt? receipt;
         try
         {
-            receipt = bridge.InstallRegularV4FrontierRepairPressure(
-                new FileTransferRegularV4FrontierRepairPressureInstallCommand(
-                    new FileTransferRegularV4ControlFeedbackPressure(
-                        authority.SessionId,
-                        authority.TransferId,
-                        CreditExhaustedTimeMs: 0,
-                        Math.Max(0, frontierLagChunks),
-                        Math.Max(1, pendingRepairCount),
-                        normalizedPressureReason,
-                        authority),
-                    contract.PressureBinding?.InstallGeneration ?? 0));
+            receipt = bridge.InstallRegularV4FrontierRepairPressure(installCommand);
         }
         catch (Exception ex)
         {
@@ -17474,7 +17853,7 @@ public sealed partial class SessionFileTransferService
 
         var accepted = IsAcceptedRegularV4FrontierRepairPressureInstallReceipt(
             contract,
-            predecessorContract,
+            predecessorContract?.Authority.AuthorityId,
             normalizedPressureReason,
             receipt,
             out var rejectionReason);
@@ -17487,13 +17866,16 @@ public sealed partial class SessionFileTransferService
             installBoundary,
             receipt,
             accepted ? receipt!.Reason : rejectionReason);
-        contract.PressureInstallReceipt = accepted ? receipt : null;
+        if (accepted)
+        {
+            installReceipt = receipt!;
+        }
         return accepted;
     }
 
     private static bool IsAcceptedRegularV4FrontierRepairPressureInstallReceipt(
         RegularV4FrontierRepairContract contract,
-        RegularV4FrontierRepairContract? predecessorContract,
+        FileTransferAuthorityId? predecessorAuthorityId,
         string pressureReason,
         FileTransferRegularV4FrontierRepairPressureInstallReceipt? receipt,
         out string rejectionReason)
@@ -17511,7 +17893,7 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        if (predecessorContract is null)
+        if (predecessorAuthorityId is null)
         {
             if (authority.PredecessorAuthorityId is not null)
             {
@@ -17520,7 +17902,7 @@ public sealed partial class SessionFileTransferService
             }
         }
         else if (authority.PredecessorAuthorityId is not { IsDefault: false } authorityPredecessorId ||
-                 authorityPredecessorId != predecessorContract.Authority.AuthorityId)
+                 authorityPredecessorId != predecessorAuthorityId)
         {
             rejectionReason = "regular_v4_frontier_repair_pressure_install_predecessor_mismatch";
             return false;
@@ -17596,7 +17978,7 @@ public sealed partial class SessionFileTransferService
             : "filetransfer_regular_v4_frontier_repair_successor_pressure_install_decided";
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event={eventName}; {FormatRegularV4FrontierRepairPressureInstallAuthorityTuple(authority, predecessorAuthorityId, frontierLagChunks, pendingRepairCount, pressureReason, installBoundary)}; install_status={FormatProtocolLogValue(receipt?.Status.ToString() ?? FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected.ToString())}; install_generation={receipt?.InstallGeneration ?? 0}; retained_predecessor_authority_id={FormatProtocolLogValue(receipt?.Status is FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed or FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent ? predecessorAuthorityId?.ToString() ?? "(none)" : "(none)")}; receipt_pressure_reason={FormatProtocolLogValue(receipt?.PressureReason ?? "(none)")}; receipt_authority_id={FormatProtocolLogValue(receipt?.Authority.AuthorityId.ToString() ?? "(none)")}; decision_reason={FormatProtocolLogValue(decisionReason)}");
+            $"event={eventName}; {FormatRegularV4FrontierRepairPressureInstallAuthorityTuple(authority, predecessorAuthorityId, frontierLagChunks, pendingRepairCount, pressureReason, installBoundary)}; install_status={FormatProtocolLogValue(receipt?.Status.ToString() ?? FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected.ToString())}; install_generation={receipt?.InstallGeneration ?? 0}; retained_predecessor_authority_id={FormatProtocolLogValue(receipt?.Status is FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed or FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent ? predecessorAuthorityId?.ToString() ?? "(none)" : "(none)")}; receipt_pressure_reason={FormatProtocolLogValue(receipt?.PressureReason ?? "(none)")}; receipt_authority_id={FormatProtocolLogValue(receipt?.Authority?.AuthorityId.ToString() ?? "(none)")}; decision_reason={FormatProtocolLogValue(decisionReason)}");
     }
 
     private static string FormatRegularV4FrontierRepairPressureInstallAuthorityTuple(
@@ -17644,11 +18026,16 @@ public sealed partial class SessionFileTransferService
 
         if (context.CurrentRegularV4FrontierRepairContract is { } currentContract &&
             string.Equals(currentContract.Authority.RepairKey, repairRequestKey, StringComparison.Ordinal) &&
-            currentContract.PressureInstallReceipt is { } installReceipt &&
+            TryGetInstalledRegularV4FrontierRepairPressure(
+                CreateCoordinatorStateLocked(context),
+                currentContract.Authority.AuthorityId,
+                out var installedBinding,
+                out _,
+                out var installReceipt) &&
             IsAcceptedRegularV4FrontierRepairPressureInstallReceipt(
                 currentContract,
-                currentContract.PendingPressureInstallPredecessorContract,
-                installReceipt.PressureReason,
+                currentContract.Authority.PredecessorAuthorityId,
+                installedBinding.PressureReason,
                 installReceipt,
                 out _))
         {
@@ -17736,12 +18123,17 @@ public sealed partial class SessionFileTransferService
 
         if (stalledRepairContractNewlyIssued)
         {
-            stalledRepairContract.PressureInstallDataSessionGeneration = context.DataSessionGeneration;
             context.CurrentRegularV4FrontierRepairContract = stalledRepairContract;
         }
 
-        if (stalledRepairContract.PressureBinding is not
-            { State: RegularV4FrontierRepairPressureBindingState.Installed })
+        if (!TryGetInstalledRegularV4FrontierRepairPressure(
+                CreateCoordinatorStateLocked(context),
+                stalledRepairContract.Authority.AuthorityId,
+                out var stalledBinding,
+                out _,
+                out _) ||
+            stalledBinding.State != RegularV4FrontierRepairPressureBindingState.Installed ||
+            stalledBinding.Authority != stalledRepairContract.Authority)
         {
             var pressureInstalled = stalledRepairContractNewlyIssued
                 ? TryInstallRegularV4FrontierRepairPressureLocked(
@@ -22916,6 +23308,12 @@ public sealed partial class SessionFileTransferService
                 context,
                 repairState,
                 state.MissingRanges,
+                out _) ||
+            !TryGetInstalledRegularV4FrontierRepairPressure(
+                CreateCoordinatorStateLocked(context),
+                contract.Authority.AuthorityId,
+                out var installedBinding,
+                out _,
                 out _))
         {
             return false;
@@ -22925,7 +23323,7 @@ public sealed partial class SessionFileTransferService
         stateAuthority = new InboundRegularV4FrontierTailRepairStateAuthority(
             contract,
             contract.Authority,
-            contract.PressureBinding!.Value.InstallGeneration,
+            installedBinding.InstallGeneration,
             repairState.RepairRequestKey,
             ranges,
             CreateInboundRegularV4FrontierRepairProjectionRangeFingerprint(
@@ -22947,21 +23345,22 @@ public sealed partial class SessionFileTransferService
         rejectionReason = "accepted";
         if (!ReferenceEquals(context.CurrentRegularV4FrontierRepairContract, contract) ||
             contract.Lifecycle.IsSettled ||
-            contract.PressureBinding is not
-                { State: RegularV4FrontierRepairPressureBindingState.Installed } binding ||
+            !TryGetInstalledRegularV4FrontierRepairPressure(
+                CreateCoordinatorStateLocked(context),
+                contract.Authority.AuthorityId,
+                out var binding,
+                out _,
+                out var receipt) ||
+            binding.State != RegularV4FrontierRepairPressureBindingState.Installed ||
             binding.Authority != contract.Authority ||
             binding.InstallGeneration <= 0 ||
-            context.InstalledRegularV4FrontierRepairPressureBinding != binding ||
-            contract.PressureInstallReceipt is not { } receipt ||
             receipt.InstallGeneration != binding.InstallGeneration ||
-            contract.PendingPressureInstallReason is not { } pressureReason ||
             !IsAcceptedRegularV4FrontierRepairPressureInstallReceipt(
                 contract,
-                contract.PendingPressureInstallPredecessorContract,
-                pressureReason,
+                contract.Authority.PredecessorAuthorityId,
+                binding.PressureReason,
                 receipt,
-                out _) ||
-            contract.PressureInstallDataSessionGeneration != context.DataSessionGeneration)
+                out _))
         {
             rejectionReason = "repair_pressure_binding_not_current";
             return false;
@@ -23048,7 +23447,14 @@ public sealed partial class SessionFileTransferService
         if (!context.V4ReceiverRepairRequests.TryGetValue(stateAuthority.RepairRequestKey, out var repairState) ||
             !ReferenceEquals(repairState.RegularV4RepairContract, stateAuthority.Contract) ||
             stateAuthority.Contract.Authority != stateAuthority.Authority ||
-            stateAuthority.Contract.PressureBinding is not { State: RegularV4FrontierRepairPressureBindingState.Installed } binding ||
+            !TryGetInstalledRegularV4FrontierRepairPressure(
+                CreateCoordinatorStateLocked(context),
+                stateAuthority.Contract.Authority.AuthorityId,
+                out var binding,
+                out _,
+                out _) ||
+            binding.State != RegularV4FrontierRepairPressureBindingState.Installed ||
+            binding.Authority != stateAuthority.Contract.Authority ||
             binding.InstallGeneration != stateAuthority.InstallGeneration)
         {
             rejectionReason = "attempt_authority_replaced";
@@ -23698,24 +24104,19 @@ public sealed partial class SessionFileTransferService
                         ? "file_tuna_v4_receiver_frontier_repair_due"
                         : "regular_v4_receiver_frontier_repair_due",
                     out _);
-                if (repairState.RegularV4RepairContract is { } successorContract &&
-                    predecessorProjectionContract is not null)
-                {
-                    successorContract.PendingPressureInstallPredecessorContract = predecessorProjectionContract;
-                }
-                if (repairState.RegularV4RepairContract is { } authorizedContract)
-                {
-                    authorizedContract.PressureInstallDataSessionGeneration = context.DataSessionGeneration;
-                }
                 context.CurrentRegularV4FrontierRepairContract = repairState.RegularV4RepairContract;
             }
         }
 
         if (predecessorProjectionContract is null &&
-            repairState.RegularV4RepairContract?.PendingPressureInstallPredecessorContract is
-                { Lifecycle.IsSettled: false } pendingInstallPredecessor)
+            repairState.RegularV4RepairContract?.Authority.PredecessorAuthorityId is
+                { IsDefault: false } pendingPredecessorAuthorityId)
         {
-            predecessorProjectionContract = pendingInstallPredecessor;
+            predecessorProjectionContract = FindRegularV4FrontierRepairContractForAuthority(
+                FileTransferDirection.Inbound,
+                context.SessionId,
+                context.TransferId,
+                pendingPredecessorAuthorityId);
         }
 
         var recoveryProjectionPressureObserved = false;

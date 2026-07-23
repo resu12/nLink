@@ -416,7 +416,7 @@ internal enum FileTransferRegularV4FrontierRepairPressureInstallStatus
 }
 
 internal sealed record FileTransferRegularV4FrontierRepairPressureInstallReceipt(
-    FileTransferRegularV4FrontierRepairAuthority Authority,
+    FileTransferRegularV4FrontierRepairAuthority? Authority,
     FileTransferRegularV4FrontierRepairPressureInstallStatus Status,
     string Reason,
     long InstallGeneration,

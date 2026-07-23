@@ -345,6 +345,61 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     [Fact]
+    public void RegularV4Pressure_AttachedContractDoesNotEstablishCurrentnessWithoutInstalledCoordinatorBinding()
+    {
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport(
+            "session_regular_v4_attached_contract_not_authority");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            "transfer_regular_v4_attached_contract_not_authority",
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        SetPrivateProperty(context, "PullSourceCanSeek", true);
+        SetPrivateProperty(
+            context,
+            "PullV4LastPeerFrameReceivedUtc",
+            DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        typeof(SessionFileTransferService)
+            .GetMethod(
+                "MaybeQueueOutboundRegularNknV4PeerSilenceSafetyReplayLocked",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "regular_v4_sender_wait"]);
+
+        var contract = GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract");
+        Assert.NotNull(contract);
+        Assert.False(GetPrivateProperty<bool>(GetPrivatePropertyValue(contract!, "Lifecycle")!, "IsSettled"));
+        var getCurrentAuthority = typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(method =>
+                string.Equals(
+                    method.Name,
+                    "GetCurrentRegularV4FrontierRepairAuthority",
+                    StringComparison.Ordinal) &&
+                method.GetParameters() is
+                [
+                    { ParameterType: var contextType },
+                    { ParameterType: var repairKeyType },
+                ] &&
+                contextType == context.GetType() &&
+                repairKeyType == typeof(string));
+        Assert.NotNull(getCurrentAuthority.Invoke(null, [context, null]));
+
+        SetPrivateProperty(
+            context,
+            "CoordinatorPersistentState",
+            FileTransferCoordinatorPersistentState.Empty);
+
+        Assert.Null(getCurrentAuthority.Invoke(null, [context, null]));
+        Assert.False(GetPrivateProperty<bool>(GetPrivatePropertyValue(contract!, "Lifecycle")!, "IsSettled"));
+    }
+
+    [Fact]
     public void RegularNknV4PeerSilenceSafetyReplay_DoesNotQueueBeforeSilenceWindow()
     {
         using var service = new SessionFileTransferService();
@@ -1913,7 +1968,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.NotNull(nextAuthority);
         var expectedAuthorityId = GetPrivatePropertyValue(nextAuthority!, "AuthorityId");
         var expectedInstallGeneration = GetPrivateProperty<long>(
-            GetPrivatePropertyValue(nextContract, "PressureBinding")!,
+            GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding")!,
             "InstallGeneration");
 
         await RunPumpOnceAsync();
@@ -2256,7 +2311,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var schedule = typeof(SessionFileTransferService)
             .GetMethod("MaybeQueueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!;
         var markDispatched = typeof(SessionFileTransferService)
-            .GetMethod("TryMarkRegularV4FrontierRepairDispatched", BindingFlags.Static | BindingFlags.NonPublic)!;
+            .GetMethod("TryMarkRegularV4FrontierRepairDispatched", BindingFlags.Instance | BindingFlags.NonPublic)!;
         var advanceCursor = typeof(SessionFileTransferService)
             .GetMethod("TryAdvanceOutboundRegularV4PeerSilenceReplayCursorLocked", BindingFlags.Instance | BindingFlags.NonPublic)!;
         var settle = typeof(SessionFileTransferService)
@@ -2275,7 +2330,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         {
             var contract = GetPrivatePropertyValue(replay, "RegularV4RepairContract");
             Assert.NotNull(contract);
-            Assert.True((bool)markDispatched.Invoke(null, [contract])!);
+            Assert.True((bool)markDispatched.Invoke(service, [context, contract])!);
             Assert.True((bool)advanceCursor.Invoke(service, [context, replay, contract])!);
             Assert.True((bool)settle.Invoke(
                 service,
@@ -2362,8 +2417,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         }
 
         Assert.True((bool)typeof(SessionFileTransferService)
-            .GetMethod("TryMarkRegularV4FrontierRepairDispatched", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [contract])!);
+            .GetMethod("TryMarkRegularV4FrontierRepairDispatched", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, contract])!);
         Assert.False((bool)typeof(SessionFileTransferService)
             .GetMethod("TryAdvanceOutboundRegularV4PeerSilenceReplayCursorLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, replay, contract])!);
@@ -2932,11 +2987,30 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Equal(1, GetPrivateProperty<int>(context, "PullRegularNknV4PeerSilenceSafetyReplayCount"));
         Assert.False(GetPrivateProperty<bool>(GetPrivatePropertyValue(predecessorContract!, "Lifecycle")!, "IsSettled"));
         Assert.Empty(GetQueuedV4RepairSends(context));
-        Assert.Same(dequeuedRepair, GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureInstallRetry"));
+        var pendingInstallIdentity =
+            GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureInstallRetry");
+        Assert.NotNull(pendingInstallIdentity);
+        Assert.Equal(
+            stagedAuthority.AuthorityId,
+            GetPrivateProperty<FileTransferAuthorityId>(pendingInstallIdentity!, "AuthorityId"));
+        Assert.True(GetPrivateProperty<long>(pendingInstallIdentity!, "InstallGeneration") > 0);
+        Assert.Equal(
+            GetPrivateProperty<long>(context, "DataSessionGeneration"),
+            GetPrivateProperty<long>(pendingInstallIdentity!, "DataSessionGeneration"));
+        var stagedPendingBinding = GetPrivatePropertyValue(
+            context,
+            "PendingRegularV4FrontierRepairPressureBinding");
+        Assert.NotNull(stagedPendingBinding);
+        Assert.NotEqual(
+            stagedAuthority.DecisionReason,
+            GetPrivateProperty<string>(stagedPendingBinding!, "PressureReason"));
 
-        Assert.True((bool)typeof(SessionFileTransferService)
+        var resumed = (bool)typeof(SessionFileTransferService)
             .GetMethod("MaybeQueueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, "later_matching_scheduling_boundary"])!);
+            .Invoke(service, [context, "later_matching_scheduling_boundary"])!;
+        Assert.True(
+            resumed,
+            $"install_attempt={installAttempt}; receipt_count={transport.RegularV4PressureInstallReceipts.Count()}; settlement_count={transport.RegularV4FrontierRepairSettlements.Count}; predecessor_settled={GetPrivateProperty<bool>(GetPrivatePropertyValue(predecessorContract!, "Lifecycle")!, "IsSettled")}; pending_identity={GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureInstallRetry")}; queued_count={GetQueuedV4RepairSends(context).Count()}");
         Assert.Equal(2, installAttempt);
         Assert.Same(stagedSuccessor, GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
         var successorInstallReceipts = transport.RegularV4PressureInstallReceipts
@@ -3049,9 +3123,20 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Empty(transport.RegularV4FrontierRepairSettlements);
         Assert.False(GetPrivateProperty<bool>(GetPrivatePropertyValue(predecessorContract!, "Lifecycle")!, "IsSettled"));
         Assert.False(GetPrivateProperty<bool>(GetPrivatePropertyValue(successorContract!, "Lifecycle")!, "IsSettled"));
-        Assert.Same(predecessorContract, GetPrivatePropertyValue(successorContract!, "PendingPressureInstallPredecessorContract"));
+        Assert.Equal(
+            predecessorAuthority.AuthorityId,
+            successorAuthority.PredecessorAuthorityId);
         Assert.Same(successorContract, GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
-        Assert.Same(dequeuedRepair, GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureInstallRetry"));
+        var pendingInstallIdentity =
+            GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureInstallRetry");
+        Assert.NotNull(pendingInstallIdentity);
+        Assert.Equal(
+            successorAuthority.AuthorityId,
+            GetPrivateProperty<FileTransferAuthorityId>(pendingInstallIdentity!, "AuthorityId"));
+        Assert.True(GetPrivateProperty<long>(pendingInstallIdentity!, "InstallGeneration") > 0);
+        Assert.Equal(
+            GetPrivateProperty<long>(context, "DataSessionGeneration"),
+            GetPrivateProperty<long>(pendingInstallIdentity!, "DataSessionGeneration"));
         var pendingBinding = GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureBinding");
         var installedBinding = GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding");
         Assert.Equal(successorAuthority.AuthorityId, GetPrivateProperty<FileTransferRegularV4FrontierRepairAuthority>(pendingBinding!, "Authority").AuthorityId);
@@ -4230,8 +4315,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var initialContract = GetPrivatePropertyValue(initial, "RegularV4RepairContract");
         Assert.NotNull(initialContract);
         Assert.True((bool)typeof(SessionFileTransferService)
-            .GetMethod("TryMarkRegularV4FrontierRepairDispatched", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [initialContract])!);
+            .GetMethod("TryMarkRegularV4FrontierRepairDispatched", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, initialContract])!);
         Assert.True((bool)typeof(SessionFileTransferService)
             .GetMethod("TryAdvanceOutboundRegularV4PeerSilenceReplayCursorLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, initial, initialContract])!);
@@ -4635,16 +4720,78 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
     private static T GetPrivateProperty<T>(object target, string propertyName)
     {
-        var property = target.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-        Assert.NotNull(property);
-        return Assert.IsType<T>(property!.GetValue(target));
+        return Assert.IsType<T>(GetPrivatePropertyValue(target, propertyName));
     }
 
     private static object? GetPrivatePropertyValue(object target, string propertyName)
     {
         var property = target.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        if (property is null &&
+            TryGetCoordinatorRegularV4PressureProperty(target, propertyName, out var pressureValue))
+        {
+            return pressureValue;
+        }
+
         Assert.NotNull(property);
         return property!.GetValue(target);
+    }
+
+    private static FileTransferLeg GetCurrentContextLeg(object context)
+    {
+        var currentLeg = Assert.IsType<FileTransferLeg>(
+            GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        var legHistory = GetPrivateProperty<List<FileTransferLeg>>(
+            context,
+            "TransferLegHistory");
+        Assert.Same(
+            currentLeg,
+            Assert.Single(
+                legHistory,
+                candidate =>
+                    candidate.Generation == currentLeg.Generation &&
+                    string.Equals(candidate.LegId, currentLeg.LegId, StringComparison.Ordinal)));
+        return currentLeg;
+    }
+
+    private static bool TryGetCoordinatorRegularV4PressureProperty(
+        object target,
+        string propertyName,
+        out object? value)
+    {
+        var pressurePropertyName = propertyName switch
+        {
+            "PendingRegularV4FrontierRepairPressureBinding" => "PendingBinding",
+            "InstalledRegularV4FrontierRepairPressureBinding" => "InstalledBinding",
+            "RetainedRegularV4FrontierRepairPressurePredecessor" => "RetainedPredecessorBinding",
+            "LastRegularV4FrontierRepairPressureSettlement" => "LastSettlement",
+            "LastRegularV4FrontierRepairPressureInstallGeneration" => "LastInstallGeneration",
+            "LastRegularV4FrontierRepairPressureSettlementApplyReceipt" => "LastSettlementApplyReceipt",
+            "LastRegularV4FrontierRepairPressureRecoveryHandoff" => "LastRecoveryHandoff",
+            _ => null,
+        };
+        if (pressurePropertyName is null)
+        {
+            value = null;
+            return false;
+        }
+
+        var persistentState = target.GetType()
+            .GetProperty(
+                "CoordinatorPersistentState",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)?
+            .GetValue(target);
+        var pressureState = persistentState?.GetType()
+            .GetProperty(
+                "RegularV4FrontierRepairPressure",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)?
+            .GetValue(persistentState);
+        var pressureProperty = pressureState?.GetType()
+            .GetProperty(
+                pressurePropertyName,
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        Assert.NotNull(pressureProperty);
+        value = pressureProperty!.GetValue(pressureState);
+        return true;
     }
 
     private static IReadOnlyList<FileTransferDataPathSendAuthority> GetOutboundDataPathSendAuthorities(
@@ -14523,7 +14670,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         serviceType
             .GetMethod("AdoptOutboundFallbackLegTransportEpochLocked", BindingFlags.Static | BindingFlags.NonPublic)!
             .Invoke(null, [context, 2L, "bridge_receive_stall"]);
-        Assert.Equal(2L, originalLeg.TransportEpochId);
+        Assert.Equal(2L, GetCurrentContextLeg(context).TransportEpochId);
         var pendingRequest = Assert.IsType<FallbackTailYieldTransportEpochReauthorizationRequest>(
             GetPrivatePropertyValue(context, "PendingFallbackTailYieldTransportEpochReauthorizationRequest"));
         Assert.Equal(predecessor, pendingRequest.PredecessorDecision);
@@ -14588,7 +14735,9 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.True((bool)serviceType
             .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, activeCheckpoint, "reauthorization_checkpoint_barrier"])!);
-        Assert.Equal(activeCheckpoint.RepairRequestId, firstRecoveryLeg.CheckpointRequestId);
+        var checkpointLeg = GetCurrentContextLeg(context);
+        Assert.NotSame(firstRecoveryLeg, checkpointLeg);
+        Assert.Equal(activeCheckpoint.RepairRequestId, checkpointLeg.CheckpointRequestId);
         Assert.Equal(
             pending,
             GetPrivatePropertyValue(context, "PendingFallbackTailYieldTransportEpochReauthorization"));
@@ -14600,8 +14749,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         serviceType
             .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, "duplicate_epoch_2_recovery_callback"]);
-        Assert.Same(firstRecoveryLeg, GetPrivatePropertyValue(context, "CurrentTransferLeg"));
-        Assert.Equal(activeCheckpoint.RepairRequestId, firstRecoveryLeg.CheckpointRequestId);
+        Assert.Same(checkpointLeg, GetCurrentContextLeg(context));
+        Assert.Equal(activeCheckpoint.RepairRequestId, checkpointLeg.CheckpointRequestId);
         Assert.Equal(
             activeCheckpointLease,
             GetPrivatePropertyValue(context, "CurrentFallbackCheckpointLease"));
@@ -14621,9 +14770,15 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, "newer_authorized_transport_epoch"]);
         var recoveryLeg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
-        Assert.NotSame(firstRecoveryLeg, recoveryLeg);
+        Assert.NotSame(checkpointLeg, recoveryLeg);
         Assert.Equal(3L, recoveryLeg.TransportEpochId);
-        Assert.Null(firstRecoveryLeg.CheckpointRequestId);
+        var legHistory = GetPrivateProperty<List<FileTransferLeg>>(context, "TransferLegHistory");
+        var retiredCheckpointLeg = Assert.Single(
+            legHistory,
+            candidate =>
+                candidate.Generation == checkpointLeg.Generation &&
+                string.Equals(candidate.LegId, checkpointLeg.LegId, StringComparison.Ordinal));
+        Assert.Null(retiredCheckpointLeg.CheckpointRequestId);
         var rebound = Assert.IsType<FallbackTailYieldTransportEpochReauthorization>(
             GetPrivatePropertyValue(context, "PendingFallbackTailYieldTransportEpochReauthorization"));
         Assert.Equal(predecessor.AuthorityId, rebound.PredecessorDecision.AuthorityId);
@@ -14700,7 +14855,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             GetPrivatePropertyValue(context, "LastFallbackTailYieldDecision"));
         Assert.Equal(predecessor.AuthorityId, successor.PredecessorAuthorityId);
         Assert.Equal(predecessor.YieldGeneration + 1, successor.YieldGeneration);
-        Assert.Equal(3L, recoveryLeg.TransportEpochId);
+        Assert.Equal(3L, GetCurrentContextLeg(context).TransportEpochId);
         var log = ReadOperationalLogTail(logStart);
         var successorIssuedIndex = log.IndexOf(
             "event=filetransfer_fallback_tail_transport_epoch_reauthorization_successor_issued;",
@@ -14794,6 +14949,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         serviceType
             .GetMethod("AdoptOutboundFallbackLegTransportEpochLocked", BindingFlags.Static | BindingFlags.NonPublic)!
             .Invoke(null, [context, 2L, "bridge_receive_stall"]);
+        var adoptedLeg = GetCurrentContextLeg(context);
         var pendingRequest = Assert.IsType<FallbackTailYieldTransportEpochReauthorizationRequest>(
             GetPrivatePropertyValue(context, "PendingFallbackTailYieldTransportEpochReauthorizationRequest"));
         var originalOwner = GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner");
@@ -14813,7 +14969,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, "publication_replaced_before_reauthorization_start"]);
 
-        Assert.Same(originalLeg, GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        var currentLeg = GetCurrentContextLeg(context);
+        Assert.Same(adoptedLeg, currentLeg);
         Assert.Equal(originalOwner, GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner"));
         Assert.Equal(
             replacementPublication,
@@ -14823,7 +14980,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Null(GetPrivatePropertyValue(context, "RequiredFallbackTailYieldTransportEpochReauthorization"));
         Assert.False(GetPrivateProperty<bool>(context, "PullPostTunaRecoveryActive"));
         Assert.False(GetPrivateProperty<bool>(context, "PullTransportFrontierOnlyRepairActive"));
-        Assert.Null(originalLeg.CheckpointRequestId);
+        Assert.Null(currentLeg.CheckpointRequestId);
 
         var log = ReadOperationalLogTail(logStart);
         Assert.DoesNotContain(
@@ -15093,7 +15250,9 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
         if (!dataSessionInitiallyAvailable)
         {
-            Assert.Same(originalLeg, GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+            var adoptedLegBeforeRestart = GetCurrentContextLeg(context);
+            Assert.NotSame(originalLeg, adoptedLegBeforeRestart);
+            Assert.Equal(2L, adoptedLegBeforeRestart.TransportEpochId);
             Assert.NotNull(GetPrivatePropertyValue(
                 context,
                 "PendingFallbackTailYieldTransportEpochReauthorizationRequest"));
@@ -15163,10 +15322,11 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                     service,
                     [dataSession, matchingAvailability])!;
 
-                Assert.Same(originalLeg, GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+                var invalidatedLeg = GetCurrentContextLeg(context);
+                Assert.Equal(2L, invalidatedLeg.TransportEpochId);
                 Assert.Equal(
                     replacementCheckpointId,
-                    adoptedLeg.CheckpointRequestId);
+                    invalidatedLeg.CheckpointRequestId);
                 Assert.Equal(
                     replacementLease,
                     GetPrivatePropertyValue(context, "CurrentFallbackCheckpointLease"));
@@ -15716,6 +15876,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             var successor = Assert.IsType<FallbackTailYieldDecision>(successorArgs[^1]);
             Assert.Equal(predecessor.AuthorityId, successor.PredecessorAuthorityId);
             Assert.Equal(predecessor.YieldGeneration + 1, successor.YieldGeneration);
+            var currentRecoveryLeg = GetCurrentContextLeg(context);
             Assert.True((bool)serviceType
                 .GetMethod(
                     $"Record{directionName}FallbackTailLocalYieldLocked",
@@ -15724,13 +15885,13 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                     service,
                     [
                         context,
-                        recoveryLeg,
+                        currentRecoveryLeg,
                         successor,
-                        recoveryLeg.ProvenCommittedChunkIndex,
-                        recoveryLeg.ProvenHighestObservedChunkIndex,
+                        currentRecoveryLeg.ProvenCommittedChunkIndex,
+                        currentRecoveryLeg.ProvenHighestObservedChunkIndex,
                         "transport_epoch_reauthorization",
                     ])!);
-            return (predecessor, successor, recoveryLeg);
+            return (predecessor, successor, GetCurrentContextLeg(context));
         }
 
         var senderYield = IssueEpoch2Successor(sender, senderContext, "Outbound");
@@ -16015,6 +16176,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.True(GetPrivateProperty<bool>(context, "PeerFallbackTailYieldGranted"));
         Assert.NotNull(GetPrivatePropertyValue(context, "PeerFallbackTailYieldProof"));
 
+        leg = GetCurrentContextLeg(context);
         leg.BridgeRecoveryGeneration++;
         var reauthorizedOwnerKey = FileTransferCoordinator.BuildFallbackTailYieldOwnerKey(
             $"session_{transferId}",
@@ -16036,6 +16198,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Equal(leg.BridgeRecoveryGeneration, yieldDecision.CurrentBridgeRecoveryGeneration);
         Assert.Equal(reauthorizedOwnerKey, yieldDecision.OwnerKey);
         Assert.Equal(pairKey, yieldDecision.PairKey);
+        leg = GetCurrentContextLeg(context);
         serviceType
             .GetMethod("RecordOutboundFallbackTailLocalYieldLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, leg, yieldDecision, 1810, 1809, "fallback_tail_quiescent"]);
@@ -16450,7 +16613,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         await transport.RequestCaptured.Task.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.True(transport.LastValidationAccepted);
 
-        leg.BridgeRecoveryGeneration++;
+        var replacedLeg = GetCurrentContextLeg(context);
+        replacedLeg.BridgeRecoveryGeneration++;
         transport.ReleaseCompletion.TrySetResult();
         await sendTask.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -16464,7 +16628,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 StringComparison.Ordinal));
         Assert.Contains("direction=outbound;", staleProofLog, StringComparison.Ordinal);
         Assert.Contains(
-            $"bridge_recovery_generation={leg.BridgeRecoveryGeneration}; peer_bridge_recovery_generation={frame.BridgeRecoveryGeneration};",
+            $"bridge_recovery_generation={replacedLeg.BridgeRecoveryGeneration}; peer_bridge_recovery_generation={frame.BridgeRecoveryGeneration};",
             staleProofLog,
             StringComparison.Ordinal);
         Assert.Contains(
@@ -16608,11 +16772,12 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Equal(canonicalOwnerKey, GetPrivateProperty<string>(context, "PeerFallbackTailYieldOwnerKey"));
         Assert.True(GetPrivateProperty<bool>(context, "LocalFallbackTailYieldGranted"));
         Assert.Equal(canonicalOwnerKey, GetPrivateProperty<string>(context, "LocalFallbackTailYieldOwnerKey"));
-        Assert.True(leg.CanSendData);
-        Assert.Equal(FileTransferLegState.Active, leg.State);
-        Assert.Null(leg.CheckpointRequestId);
-        Assert.Equal(1810, leg.ProvenCommittedChunkIndex);
-        Assert.Equal(1809, leg.ProvenHighestObservedChunkIndex);
+        var currentLeg = GetCurrentContextLeg(context);
+        Assert.True(currentLeg.CanSendData);
+        Assert.Equal(FileTransferLegState.Active, currentLeg.State);
+        Assert.Null(currentLeg.CheckpointRequestId);
+        Assert.Equal(1810, currentLeg.ProvenCommittedChunkIndex);
+        Assert.Equal(1809, currentLeg.ProvenHighestObservedChunkIndex);
         SetPrivateProperty(context, "LocalFallbackTailYieldPeerVisible", true);
         serviceType
             .GetMethod("TryGrantPairedOutboundFallbackTailYieldLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -16926,9 +17091,10 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Equal(canonicalOwnerKey, GetPrivateProperty<string>(context, "PeerFallbackTailYieldOwnerKey"));
         Assert.True(GetPrivateProperty<bool>(context, "LocalFallbackTailYieldGranted"));
         Assert.Equal(canonicalOwnerKey, GetPrivateProperty<string>(context, "LocalFallbackTailYieldOwnerKey"));
-        Assert.True(leg.CanSendData);
-        Assert.Equal(FileTransferLegState.Active, leg.State);
-        Assert.Null(leg.CheckpointRequestId);
+        var currentLeg = GetCurrentContextLeg(context);
+        Assert.True(currentLeg.CanSendData);
+        Assert.Equal(FileTransferLegState.Active, currentLeg.State);
+        Assert.Null(currentLeg.CheckpointRequestId);
 
         Assert.Contains("event=filetransfer_fallback_tail_yield_owner_snapshot; direction=outbound;", log, StringComparison.Ordinal);
         Assert.Contains("checkpoint_request_id_snapshot=(none)", log, StringComparison.Ordinal);
@@ -17040,9 +17206,10 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.True(GetPrivateProperty<bool>(context, "LocalFallbackTailYieldGranted"));
         Assert.Equal(canonicalOwnerKey, GetPrivateProperty<string>(context, "LocalFallbackTailYieldOwnerKey"));
         Assert.Equal(canonicalPairKey, GetPrivateProperty<string>(context, "LocalFallbackTailYieldPairKey"));
-        Assert.True(leg.CanSendData);
-        Assert.Equal(FileTransferLegState.Active, leg.State);
-        Assert.Null(leg.CheckpointRequestId);
+        var currentLeg = GetCurrentContextLeg(context);
+        Assert.True(currentLeg.CanSendData);
+        Assert.Equal(FileTransferLegState.Active, currentLeg.State);
+        Assert.Null(currentLeg.CheckpointRequestId);
 
         Assert.Contains("event=filetransfer_fallback_tail_yield_proof_received; direction=outbound;", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_fallback_tail_yield_owner_snapshot; direction=outbound;", log, StringComparison.Ordinal);
@@ -17837,7 +18004,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         serviceType
             .GetMethod("AdoptInboundFallbackLegTransportEpochLocked", BindingFlags.Static | BindingFlags.NonPublic)!
             .Invoke(null, [context, 2L, "paired_same_leg_transport_carry_forward"]);
-        Assert.Equal(2L, leg.TransportEpochId);
+        var adoptedLeg = GetCurrentContextLeg(context);
+        Assert.Equal(2L, adoptedLeg.TransportEpochId);
         Assert.True((bool)hasPairedYieldForCurrentOwner.Invoke(null, [context])!);
 
         var logStart = GetOperationalLogLength();
@@ -17845,7 +18013,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, "bridge_receive_stall"]);
 
-        Assert.Same(leg, GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        Assert.Same(adoptedLeg, GetCurrentContextLeg(context));
         Assert.False(GetPrivateProperty<bool>(context, "PullPostTunaRecoveryActive"));
         Assert.Null(GetPrivatePropertyValue(context, "PendingFallbackTailYieldTransportEpochReauthorization"));
         Assert.Null(GetPrivatePropertyValue(context, "PendingFallbackTailYieldTransportEpochReauthorizationRequest"));
@@ -18047,9 +18215,10 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetMethod("ApplyOutboundV6ReceiverState", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, receiverState, FileTransferTransportKind.RegularNkn])!;
 
-        Assert.Equal(FileTransferLegState.Active, GetPrivateProperty<FileTransferLegState>(leg, "State"));
-        Assert.True(GetPrivateProperty<bool>(leg, "CanSendData"));
-        Assert.Null(GetPrivatePropertyValue(leg, "CheckpointRequestId"));
+        var currentLeg = GetCurrentContextLeg(context);
+        Assert.Equal(FileTransferLegState.Active, currentLeg.State);
+        Assert.True(currentLeg.CanSendData);
+        Assert.Null(currentLeg.CheckpointRequestId);
         Assert.False(GetPrivateProperty<bool>(context, "PullPostTunaRecoveryActive"));
         Assert.Null(GetPrivatePropertyValue(context, "V6RegularNknFrontierPressureEnteredUtc"));
 
@@ -18182,7 +18351,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetMethod("ApplyOutboundV4State", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, receiverState]);
 
-        Assert.Equal(FileTransferLegState.Active, GetPrivateProperty<FileTransferLegState>(leg, "State"));
+        Assert.Equal(FileTransferLegState.Active, GetCurrentContextLeg(context).State);
         Assert.False(GetPrivateProperty<bool>(context, "PullPostTunaRecoveryActive"));
         Assert.False(GetPrivateProperty<bool>(context, "PullTransportFrontierOnlyRepairActive"));
         Assert.Null(GetPrivatePropertyValue(context, "V6TransportHandoff"));
@@ -18277,7 +18446,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetMethod("ApplyOutboundV4State", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, receiverState]);
 
-        Assert.Equal(FileTransferLegState.Active, GetPrivateProperty<FileTransferLegState>(leg, "State"));
+        Assert.Equal(FileTransferLegState.Active, GetCurrentContextLeg(context).State);
         Assert.False(GetPrivateProperty<bool>(context, "PullPostTunaRecoveryActive"));
         Assert.False(GetPrivateProperty<bool>(context, "PullTransportFrontierOnlyRepairActive"));
         Assert.Null(GetPrivatePropertyValue(context, "V6TransportHandoff"));
@@ -18361,7 +18530,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
         Assert.True(yielded);
         Assert.False(Assert.IsType<bool>(args[4]));
-        Assert.Equal(FileTransferLegState.Active, GetPrivateProperty<FileTransferLegState>(leg, "State"));
+        Assert.Equal(FileTransferLegState.Active, GetCurrentContextLeg(context).State);
         Assert.False(GetPrivateProperty<bool>(context, "PullPostTunaRecoveryActive"));
         Assert.False(GetPrivateProperty<bool>(context, "PullTransportFrontierOnlyRepairActive"));
         Assert.Null(GetPrivatePropertyValue(context, "V6TransportHandoff"));
@@ -18421,7 +18590,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .Invoke(service, [context, 2L, "receiver_state_sparse_runtime"])!;
 
         Assert.True(yielded);
-        Assert.Equal(FileTransferLegState.Active, GetPrivateProperty<FileTransferLegState>(leg, "State"));
+        Assert.Equal(FileTransferLegState.Active, GetCurrentContextLeg(context).State);
         Assert.False(GetPrivateProperty<bool>(context, "PullPostTunaRecoveryActive"));
         Assert.Null(GetPrivatePropertyValue(context, "V6TransportHandoff"));
         Assert.False(GetPrivateProperty<bool>(context, "V6PostTunaFallbackProofReplayReceiverStatePending"));
@@ -18547,7 +18716,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .Invoke(service, [context, 2L, "receiver_state_sparse_runtime"])!;
 
         Assert.True(yielded);
-        Assert.Equal(FileTransferLegState.Active, GetPrivateProperty<FileTransferLegState>(leg, "State"));
+        Assert.Equal(FileTransferLegState.Active, GetCurrentContextLeg(context).State);
         Assert.False(GetPrivateProperty<bool>(context, "PullPostTunaRecoveryActive"));
         Assert.Null(GetPrivatePropertyValue(context, "V6TransportHandoff"));
         Assert.False(GetPrivateProperty<bool>(context, "V6PostTunaFallbackProofReplayReceiverStatePending"));
@@ -18666,7 +18835,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetMethod("ApplyOutboundV4State", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, receiverState]);
 
-        Assert.Equal(FileTransferLegState.Active, GetPrivateProperty<FileTransferLegState>(leg, "State"));
+        Assert.Equal(FileTransferLegState.Active, GetCurrentContextLeg(context).State);
         Assert.False(GetPrivateProperty<bool>(context, "RuntimeUnlockActivationWindowGranted"));
         Assert.Null(GetPrivatePropertyValue(context, "V6TransportHandoff"));
 
@@ -18808,7 +18977,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 ])!;
 
         Assert.Equal(FileTransferTransferState.Completed, GetPrivateProperty<FileTransferTransferState>(context, "State"));
-        Assert.Equal(FileTransferLegState.Terminal, GetPrivateProperty<FileTransferLegState>(leg, "State"));
+        Assert.Equal(FileTransferLegState.Terminal, GetCurrentContextLeg(context).State);
         Assert.False(GetPrivateProperty<bool>(context, "PullPostTunaRecoveryActive"));
         Assert.False(GetPrivateProperty<bool>(context, "V6PostTunaFallbackProofReplayReceiverStatePending"));
         Assert.False(GetPrivateProperty<bool>(context, "V6PostTunaFallbackProofReplayFrontierRequestPending"));

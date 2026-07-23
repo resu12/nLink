@@ -2167,6 +2167,18 @@ public sealed partial class SessionFileTransferV4SenderTests
         var owner = GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner");
         var publication = GetPrivateProperty<RoutePublicationToken>(context, "CurrentRoutePublicationToken");
         var leg = GetPrivateProperty<FileTransferLeg>(context, "CurrentTransferLeg");
+        var legScope = (
+            leg.LegId,
+            leg.Generation,
+            leg.RouteSelection,
+            leg.ProtocolVersion,
+            leg.LiveRouteEpochId,
+            leg.TransportEpochId,
+            leg.BridgeRecoveryGeneration,
+            leg.State,
+            leg.CanSendData,
+            leg.CheckpointRequestId,
+            leg.CheckpointGeneration);
 
         ReportRuntimeUnlockPreCommitProbeFailure(
             service,
@@ -2181,7 +2193,36 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Equal(0L, GetPrivateProperty<long>(context, "LastCompletedRuntimeUnlockRegularV4RouteCommitDrainGeneration"));
         Assert.Equal(owner, GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner"));
         Assert.Equal(publication, GetPrivateProperty<RoutePublicationToken>(context, "CurrentRoutePublicationToken"));
-        Assert.Same(leg, GetPrivateProperty<FileTransferLeg>(context, "CurrentTransferLeg"));
+        var currentLeg = GetPrivateProperty<FileTransferLeg>(context, "CurrentTransferLeg");
+        Assert.NotSame(leg, currentLeg);
+        Assert.Equal(
+            legScope,
+            (
+                currentLeg.LegId,
+                currentLeg.Generation,
+                currentLeg.RouteSelection,
+                currentLeg.ProtocolVersion,
+                currentLeg.LiveRouteEpochId,
+                currentLeg.TransportEpochId,
+                currentLeg.BridgeRecoveryGeneration,
+                currentLeg.State,
+                currentLeg.CanSendData,
+                currentLeg.CheckpointRequestId,
+                currentLeg.CheckpointGeneration));
+        Assert.Equal(
+            legScope,
+            (
+                leg.LegId,
+                leg.Generation,
+                leg.RouteSelection,
+                leg.ProtocolVersion,
+                leg.LiveRouteEpochId,
+                leg.TransportEpochId,
+                leg.BridgeRecoveryGeneration,
+                leg.State,
+                leg.CanSendData,
+                leg.CheckpointRequestId,
+                leg.CheckpointGeneration));
         Assert.Null(GetPrivatePropertyValue(context, "RuntimeUnlockRouteCommitToken"));
     }
 

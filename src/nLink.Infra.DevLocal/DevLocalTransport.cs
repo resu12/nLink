@@ -86,11 +86,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     private readonly Dictionary<string, FileTransferTransportState> fileTransferStates = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TransportFileTransferDataSession> fileTransferDataSessions = new(StringComparer.Ordinal);
     private readonly object regularV4RepairPressureGate = new();
-    private readonly Dictionary<string, DevLocalRegularV4RepairPressureState> regularV4RepairPressures = new(StringComparer.Ordinal);
-    private readonly Dictionary<
-        string,
-        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt>
-        regularV4RepairPressureSettlementReceipts = [];
+    private readonly Dictionary<string, DevLocalRegularV4RepairPressureShadow> regularV4RepairPressures = new(StringComparer.Ordinal);
     private const bool LocalRemoteControlSupported = true;
     private const bool LocalScreenShareCursorOverlaySupported = true;
     private readonly DevLocalImpairmentPolicy? impairmentPolicy;
@@ -134,49 +130,74 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             FileTransferRegularV4FrontierRepairPressureInstallCommand command)
     {
         var pressure = command.Pressure;
-        var authority = pressure.RepairAuthority ??
-                        throw new ArgumentException("Regular-V4 repair authority is required.", nameof(pressure));
-        var pressureReason = string.IsNullOrWhiteSpace(pressure.Reason)
-            ? "regular_v4_frontier_repair_pressure"
-            : pressure.Reason.Trim();
+        var authority = pressure.RepairAuthority;
+        var pressureReason = pressure.Reason;
+        if (authority is null)
+        {
+            return new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                Authority: null,
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected,
+                "repair_authority_missing",
+                Math.Max(0, command.InstallGeneration),
+                pressureReason);
+        }
+
         var key = GetRegularV4RepairPressureKey(
             authority.SessionId,
             authority.TransferId,
             authority.Direction);
+        var expectedTargetTransport =
+            string.Equals(authority.RouteToken, "file_tuna_v4", StringComparison.Ordinal)
+                ? FileTransferTransportKind.Tuna
+                : string.Equals(authority.RouteToken, "regular_nkn_v4_fast", StringComparison.Ordinal)
+                    ? FileTransferTransportKind.RegularNkn
+                    : FileTransferTransportKind.Unknown;
 
-        if (command.InstallGeneration <= 0)
+        if (command.InstallGeneration <= 0 ||
+            string.IsNullOrWhiteSpace(pressure.SessionId) ||
+            string.IsNullOrWhiteSpace(pressure.TransferId) ||
+            string.IsNullOrWhiteSpace(pressure.Reason) ||
+            !string.Equals(pressure.SessionId, authority.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(pressure.TransferId, authority.TransferId, StringComparison.Ordinal) ||
+            authority.AuthorityId.IsDefault ||
+            authority.PredecessorAuthorityId is { IsDefault: true } ||
+            authority.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            expectedTargetTransport == FileTransferTransportKind.Unknown ||
+            authority.TargetTransport != expectedTargetTransport ||
+            authority.RuntimeGeneration <= 0 ||
+            authority.LegGeneration <= 0 ||
+            authority.RoutePublicationGeneration <= 0 ||
+            authority.DecisionGeneration <= 0)
         {
             return new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
                 authority,
                 FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected,
-                "regular_v4_frontier_repair_install_generation_invalid",
+                command.InstallGeneration <= 0
+                    ? "regular_v4_frontier_repair_install_generation_invalid"
+                    : "repair_authority_invalid",
                 Math.Max(0, command.InstallGeneration),
                 pressureReason);
         }
 
         lock (regularV4RepairPressureGate)
         {
-            regularV4RepairPressures.TryGetValue(key, out var current);
-            if (current is not null && Equals(current.Authority, authority))
+            regularV4RepairPressures.TryGetValue(key, out var existing);
+            var shadow = existing ?? DevLocalRegularV4RepairPressureShadow.Empty;
+            var current = shadow.Current;
+            if (current is not null && Equals(current.Command, command))
             {
-                var exactDuplicate = string.Equals(
-                    current.PressureReason,
-                    pressureReason,
-                    StringComparison.Ordinal) &&
-                    current.InstallGeneration == command.InstallGeneration;
                 return new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
                     authority,
-                    exactDuplicate
-                        ? FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent
-                        : FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected,
-                    exactDuplicate
-                        ? "regular_v4_frontier_repair_pressure_install_idempotent"
-                        : "regular_v4_frontier_repair_pressure_reason_mismatch",
+                    FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent,
+                    "regular_v4_frontier_repair_pressure_install_idempotent",
                     command.InstallGeneration,
                     pressureReason);
             }
 
-            if (current is not null && current.Authority.AuthorityId == authority.AuthorityId)
+            if (current?.Authority.AuthorityId == authority.AuthorityId ||
+                shadow.RetainedPredecessor?.Authority.AuthorityId == authority.AuthorityId ||
+                shadow.LastPredecessorSettlement?.Command.Settlement.AuthorityId == authority.AuthorityId ||
+                shadow.LastFinalSettlement?.Command.Settlement.AuthorityId == authority.AuthorityId)
             {
                 return new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
                     authority,
@@ -186,10 +207,17 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                     pressureReason);
             }
 
-            var initialInstall = authority.PredecessorAuthorityId is null && current is null;
+            var initialInstall =
+                authority.PredecessorAuthorityId is null &&
+                current is null &&
+                shadow.RetainedPredecessor is null;
             var successorInstall = authority.PredecessorAuthorityId is { IsDefault: false } predecessorAuthorityId &&
                                    current is not null &&
-                                   current.Authority.AuthorityId == predecessorAuthorityId;
+                                   current.Authority.AuthorityId == predecessorAuthorityId &&
+                                   shadow.RetainedPredecessor is null &&
+                                   DevLocalRegularV4RepairSuccessorScopeMatches(
+                                       current.Authority,
+                                       authority);
             if (!initialInstall && !successorInstall)
             {
                 return new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
@@ -197,17 +225,16 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                     FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected,
                     authority.PredecessorAuthorityId is null
                         ? "regular_v4_frontier_repair_initial_pressure_conflict"
-                        : "regular_v4_frontier_repair_predecessor_missing",
+                        : current is not null &&
+                          current.Authority.AuthorityId == authority.PredecessorAuthorityId
+                            ? "regular_v4_frontier_repair_successor_scope_mismatch"
+                            : "regular_v4_frontier_repair_predecessor_missing",
                     command.InstallGeneration,
                     pressureReason);
             }
 
             var installGeneration = command.InstallGeneration;
-            regularV4RepairPressures[key] = new DevLocalRegularV4RepairPressureState(
-                authority,
-                pressureReason,
-                installGeneration);
-            return new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+            var receipt = new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
                 authority,
                 FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
                 initialInstall
@@ -215,6 +242,15 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                     : "regular_v4_frontier_repair_successor_pressure_installed",
                 installGeneration,
                 pressureReason);
+            var installed = new DevLocalRegularV4RepairInstalledCommandShadow(command, receipt);
+            regularV4RepairPressures[key] = shadow with
+            {
+                Current = installed,
+                RetainedPredecessor = successorInstall ? current : null,
+                LastPredecessorSettlement = initialInstall ? null : shadow.LastPredecessorSettlement,
+                LastFinalSettlement = null,
+            };
+            return receipt;
         }
     }
 
@@ -229,19 +265,31 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             settlement.Direction);
         lock (regularV4RepairPressureGate)
         {
-            if (regularV4RepairPressureSettlementReceipts.TryGetValue(key, out var previousReceipt) &&
-                Equals(previousReceipt.Command, command))
+            regularV4RepairPressures.TryGetValue(key, out var existing);
+            var shadow = existing ?? DevLocalRegularV4RepairPressureShadow.Empty;
+            if (shadow.LastFinalSettlement is { } previousFinalReceipt &&
+                Equals(previousFinalReceipt.Command, command))
             {
-                return previousReceipt with
+                return previousFinalReceipt with
+                {
+                    Status = FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent,
+                    Reason = "regular_v4_frontier_repair_pressure_settlement_apply_idempotent",
+                };
+            }
+            if (shadow.LastPredecessorSettlement is { } previousPredecessorReceipt &&
+                Equals(previousPredecessorReceipt.Command, command))
+            {
+                return previousPredecessorReceipt with
                 {
                     Status = FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent,
                     Reason = "regular_v4_frontier_repair_pressure_settlement_apply_idempotent",
                 };
             }
 
-            if (!regularV4RepairPressures.TryGetValue(key, out var current) ||
+            var current = shadow.Current;
+            if (current is null ||
                 current.Authority.AuthorityId != command.CurrentAuthorityId ||
-                current.InstallGeneration != command.InstallGeneration)
+                current.Receipt.InstallGeneration != command.InstallGeneration)
             {
                 return new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
                     command,
@@ -250,10 +298,24 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                     CurrentAuthorityCleared: false,
                     RetainedPredecessorCleared: false);
             }
+            if (shadow.RetainedPredecessor?.Authority.AuthorityId !=
+                command.RetainedPredecessorAuthorityId)
+            {
+                return new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                    command,
+                    FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+                    "regular_v4_frontier_repair_pressure_settlement_predecessor_binding_mismatch",
+                    CurrentAuthorityCleared: false,
+                    RetainedPredecessorCleared: false);
+            }
 
             if (settlement.Outcome == FileTransferRegularV4FrontierRepairSettlementOutcome.Superseded)
             {
                 var predecessorMatches =
+                    shadow.RetainedPredecessor is { } retainedPredecessor &&
+                    DevLocalRegularV4RepairAuthorityMatchesSettlement(
+                        retainedPredecessor.Authority,
+                        settlement) &&
                     current.Authority.PredecessorAuthorityId == settlement.AuthorityId &&
                     settlement.SuccessorAuthorityId == current.Authority.AuthorityId &&
                     command.RetainedPredecessorAuthorityId == settlement.AuthorityId;
@@ -269,13 +331,19 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                     RetainedPredecessorCleared: predecessorMatches);
                 if (predecessorMatches)
                 {
-                    regularV4RepairPressureSettlementReceipts[key] = receipt;
+                    regularV4RepairPressures[key] = shadow with
+                    {
+                        RetainedPredecessor = null,
+                        LastPredecessorSettlement = receipt,
+                    };
                 }
 
                 return receipt;
             }
 
-            if (current.Authority.AuthorityId != settlement.AuthorityId)
+            if (!DevLocalRegularV4RepairAuthorityMatchesSettlement(
+                    current.Authority,
+                    settlement))
             {
                 return new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
                     command,
@@ -284,15 +352,30 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                     CurrentAuthorityCleared: false,
                     RetainedPredecessorCleared: false);
             }
+            if (current.Authority.PredecessorAuthorityId is { IsDefault: false } predecessorAuthorityId &&
+                (shadow.RetainedPredecessor is not null ||
+                 shadow.LastPredecessorSettlement?.Command.Settlement.AuthorityId != predecessorAuthorityId))
+            {
+                return new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                    command,
+                    FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+                    "regular_v4_frontier_repair_predecessor_pressure_not_retired",
+                    CurrentAuthorityCleared: false,
+                    RetainedPredecessorCleared: false);
+            }
 
-            regularV4RepairPressures.Remove(key);
             var finalReceipt = new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
                 command,
                 FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
                 "regular_v4_frontier_repair_pressure_settlement_applied",
                 CurrentAuthorityCleared: true,
                 RetainedPredecessorCleared: false);
-            regularV4RepairPressureSettlementReceipts[key] = finalReceipt;
+            regularV4RepairPressures[key] = shadow with
+            {
+                Current = null,
+                RetainedPredecessor = null,
+                LastFinalSettlement = finalReceipt,
+            };
             return finalReceipt;
         }
     }
@@ -308,6 +391,49 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         string transferId,
         FileTransferDirection direction)
         => $"{sessionId}\u001f{transferId}\u001f{direction}";
+
+    private static bool DevLocalRegularV4RepairAuthorityMatchesSettlement(
+        FileTransferRegularV4FrontierRepairAuthority authority,
+        FileTransferRegularV4FrontierRepairSettlement settlement)
+        => authority.AuthorityId == settlement.AuthorityId &&
+           string.Equals(authority.SessionId, settlement.SessionId, StringComparison.Ordinal) &&
+           string.Equals(authority.TransferId, settlement.TransferId, StringComparison.Ordinal) &&
+           authority.Direction == settlement.Direction &&
+           string.Equals(authority.RouteToken, settlement.RouteToken, StringComparison.Ordinal) &&
+           authority.ProtocolVersion == settlement.ProtocolVersion &&
+           authority.LiveRouteEpoch == settlement.LiveRouteEpoch &&
+           authority.RuntimeGeneration == settlement.RuntimeGeneration &&
+           authority.TerminalGeneration == settlement.TerminalGeneration &&
+           authority.LegGeneration == settlement.LegGeneration &&
+           authority.TransportEpoch == settlement.TransportEpoch &&
+           authority.BridgeRecoveryGeneration == settlement.BridgeRecoveryGeneration &&
+           authority.BridgeDecisionGeneration == settlement.BridgeDecisionGeneration &&
+           authority.RoutePublicationGeneration == settlement.RoutePublicationGeneration &&
+           authority.RouteCommitGeneration == settlement.RouteCommitGeneration &&
+           authority.TargetTransport == settlement.TargetTransport &&
+           string.Equals(authority.RepairKey, settlement.RepairKey, StringComparison.Ordinal) &&
+           authority.FrontierChunkIndex == settlement.FrontierChunkIndex &&
+           authority.DurableReceivedHighestChunkIndex == settlement.DurableReceivedHighestChunkIndex &&
+           authority.PendingRepairCount == settlement.RequestedChunkCount &&
+           authority.DecisionGeneration == settlement.DecisionGeneration;
+
+    private static bool DevLocalRegularV4RepairSuccessorScopeMatches(
+        FileTransferRegularV4FrontierRepairAuthority predecessor,
+        FileTransferRegularV4FrontierRepairAuthority successor)
+        => string.Equals(predecessor.SessionId, successor.SessionId, StringComparison.Ordinal) &&
+           string.Equals(predecessor.TransferId, successor.TransferId, StringComparison.Ordinal) &&
+           predecessor.Direction == successor.Direction &&
+           string.Equals(predecessor.RouteToken, successor.RouteToken, StringComparison.Ordinal) &&
+           predecessor.ProtocolVersion == successor.ProtocolVersion &&
+           predecessor.LiveRouteEpoch == successor.LiveRouteEpoch &&
+           predecessor.RuntimeGeneration == successor.RuntimeGeneration &&
+           predecessor.TerminalGeneration == successor.TerminalGeneration &&
+           predecessor.LegGeneration == successor.LegGeneration &&
+           predecessor.TransportEpoch == successor.TransportEpoch &&
+           predecessor.BridgeRecoveryGeneration == successor.BridgeRecoveryGeneration &&
+           predecessor.RoutePublicationGeneration == successor.RoutePublicationGeneration &&
+           predecessor.RouteCommitGeneration == successor.RouteCommitGeneration &&
+           predecessor.TargetTransport == successor.TargetTransport;
 
     public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
     public event EventHandler<IncomingHelpRequestEventArgs>? IncomingHelpRequest;
@@ -4679,8 +4805,20 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         SessionId? SessionId,
         CapabilityGrant RequestedCapabilities);
 
-    private sealed record DevLocalRegularV4RepairPressureState(
-        FileTransferRegularV4FrontierRepairAuthority Authority,
-        string PressureReason,
-        long InstallGeneration);
+    private sealed record DevLocalRegularV4RepairInstalledCommandShadow(
+        FileTransferRegularV4FrontierRepairPressureInstallCommand Command,
+        FileTransferRegularV4FrontierRepairPressureInstallReceipt Receipt)
+    {
+        public FileTransferRegularV4FrontierRepairAuthority Authority => Receipt.Authority!;
+    }
+
+    private sealed record DevLocalRegularV4RepairPressureShadow(
+        DevLocalRegularV4RepairInstalledCommandShadow? Current,
+        DevLocalRegularV4RepairInstalledCommandShadow? RetainedPredecessor,
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt? LastPredecessorSettlement,
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt? LastFinalSettlement)
+    {
+        public static DevLocalRegularV4RepairPressureShadow Empty { get; } =
+            new(null, null, null, null);
+    }
 }

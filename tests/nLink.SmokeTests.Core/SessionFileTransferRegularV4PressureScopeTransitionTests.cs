@@ -8,6 +8,150 @@ public sealed partial class SessionFileTransferV4SenderTests
 {
     [Fact]
     [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public void RegularV4Pressure_CoreContextsAndContractsDoNotMirrorCoordinatorAuthority()
+    {
+        using var service = new SessionFileTransferService();
+        var inboundContext = CreateProjectionInboundContext(
+            "transfer_regular_v4_pressure_structural_inbound");
+        var outboundContext = CreateRegularNknV4OutboundContext(
+            "transfer_regular_v4_pressure_structural_outbound",
+            remoteNextExpectedChunkIndex: 0,
+            chunksAcceptedForTransport: 0,
+            remoteGrantedUntilExclusive: 0,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow);
+        var bindingFlags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+        var removedContextProperties = new[]
+        {
+            "PendingRegularV4FrontierRepairPressureBinding",
+            "InstalledRegularV4FrontierRepairPressureBinding",
+            "RetainedRegularV4FrontierRepairPressurePredecessor",
+            "LastRegularV4FrontierRepairPressureSettlement",
+            "LastRegularV4FrontierRepairPressureInstallGeneration",
+            "LastRegularV4FrontierRepairPressureSettlementApplyReceipt",
+            "LastRegularV4FrontierRepairPressureRecoveryHandoff",
+        };
+
+        foreach (var context in new[] { inboundContext, outboundContext })
+        {
+            Assert.NotNull(context.GetType().GetProperty("CoordinatorPersistentState", bindingFlags));
+            foreach (var propertyName in removedContextProperties)
+            {
+                Assert.Null(context.GetType().GetProperty(propertyName, bindingFlags));
+            }
+        }
+
+        var contractType = typeof(SessionFileTransferService).GetNestedType(
+            "RegularV4FrontierRepairContract",
+            BindingFlags.NonPublic);
+        Assert.NotNull(contractType);
+        Assert.Null(contractType!.GetProperty("PressureBinding", bindingFlags));
+        Assert.Null(contractType.GetProperty("PressureInstallReceipt", bindingFlags));
+        foreach (var propertyName in new[]
+                 {
+                     "PendingPressureInstallPredecessorContract",
+                     "PendingPressureInstallReason",
+                     "PendingPressureInstallFrontierLagChunks",
+                     "PendingPressureInstallRepairCount",
+                     "PendingPressureInstallBoundary",
+                     "PressureInstallDataSessionGeneration",
+                 })
+        {
+            Assert.Null(contractType.GetProperty(propertyName, bindingFlags));
+        }
+
+        var pendingRetryProperty = outboundContext.GetType().GetProperty(
+            "PendingRegularV4FrontierRepairPressureInstallRetry",
+            bindingFlags);
+        Assert.NotNull(pendingRetryProperty);
+        Assert.Equal(
+            "RegularV4FrontierRepairPressureInstallExecutionIdentity",
+            pendingRetryProperty!.PropertyType.Name);
+        Assert.Equal(
+            new[] { "AuthorityId", "DataSessionGeneration", "InstallGeneration" },
+            pendingRetryProperty.PropertyType
+                .GetProperties(BindingFlags.Instance | BindingFlags.Public)
+                .Select(static property => property.Name)
+                .OrderBy(static name => name)
+                .ToArray());
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public void FileTransferCoordinatorSnapshot_CoreApplicationClonesEpochAndLegGraph()
+    {
+        using var service = new SessionFileTransferService();
+        var inboundContext = CreateProjectionInboundContext(
+            "transfer_coordinator_snapshot_core_inbound");
+        var outboundContext = CreateRegularNknV4OutboundContext(
+            "transfer_coordinator_snapshot_core_outbound",
+            remoteNextExpectedChunkIndex: 0,
+            chunksAcceptedForTransport: 0,
+            remoteGrantedUntilExclusive: 0,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow);
+        SeedCurrentRuntimeOwnerForTest(
+            inboundContext,
+            FileTransferDirection.Inbound,
+            "coordinator_snapshot_core_inbound");
+        SeedCurrentRuntimeOwnerForTest(
+            outboundContext,
+            FileTransferDirection.Outbound,
+            "coordinator_snapshot_core_outbound");
+
+        foreach (var context in new[] { inboundContext, outboundContext })
+        {
+            var sourceState = CreateCoordinatorStateForTest(context);
+            var sourceEpoch = Assert.IsType<LiveRouteEpoch>(sourceState.CurrentLiveRouteEpoch);
+            var sourceLeg = Assert.IsType<FileTransferLeg>(sourceState.CurrentLeg);
+            var sourceEpochState = sourceEpoch.State;
+            var sourceLegState = sourceLeg.State;
+            var decision = new FileTransferCoordinatorDecision(
+                sourceState,
+                RouteChanged: false,
+                TerminalMutationRejected: false,
+                StartedLiveRouteEpoch: null,
+                RecoveredLiveRouteEpoch: null,
+                StartedLeg: null,
+                FrozenLeg: null,
+                AcceptedCheckpointLeg: null,
+                FallbackCheckpointRequired: false,
+                Reason: "unit_test_core_snapshot_application");
+            var apply = typeof(SessionFileTransferService)
+                .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+                .Single(candidate =>
+                    candidate.Name == "ApplyCoordinatorDecisionToContextLocked" &&
+                    candidate.GetParameters()[0].ParameterType == context.GetType());
+            var arguments = apply.GetParameters().Length == 3
+                ? new object?[] { context, decision, true }
+                : new object?[] { context, decision };
+
+            apply.Invoke(null, arguments);
+
+            var appliedEpoch = Assert.IsType<LiveRouteEpoch>(
+                GetPrivatePropertyValue(context, "CurrentLiveRouteEpoch"));
+            var appliedLeg = Assert.IsType<FileTransferLeg>(
+                GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+            var appliedHistory = GetPrivateProperty<List<FileTransferLeg>>(
+                context,
+                "TransferLegHistory");
+            Assert.NotSame(sourceEpoch, appliedEpoch);
+            Assert.NotSame(sourceLeg, appliedLeg);
+            Assert.Same(
+                appliedLeg,
+                Assert.Single(
+                    appliedHistory,
+                    candidate =>
+                        candidate.Generation == appliedLeg.Generation &&
+                        string.Equals(candidate.LegId, appliedLeg.LegId, StringComparison.Ordinal)));
+
+            sourceEpoch.State = "mutated_after_core_application";
+            sourceLeg.State = FileTransferLegState.Terminal;
+            Assert.Equal(sourceEpochState, appliedEpoch.State);
+            Assert.Equal(sourceLegState, appliedLeg.State);
+        }
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
     public void RegularV4Pressure_StartTransferRetiresExactBindingBeforeScopeReplacement()
     {
         const string transferId = "transfer_regular_v4_pressure_start_transfer";

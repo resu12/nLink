@@ -3287,27 +3287,29 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Assert.Equal("regular_v4_control_feedback_pressure", blockerReason);
 
             Thread.Sleep(25);
-            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out var remainingBeforeDuplicateMs));
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out var evidenceAgeBeforeDuplicateMs));
             var duplicate = InstallRegularV4FrontierRepairPressure(adapter, pressure, installGeneration: 1);
             Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent, duplicate.Status);
             Assert.Equal(installed.InstallGeneration, duplicate.InstallGeneration);
-            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out var remainingAfterDuplicateMs));
-            Assert.True(remainingAfterDuplicateMs <= remainingBeforeDuplicateMs);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out var evidenceAgeAfterDuplicateMs));
+            Assert.True(evidenceAgeAfterDuplicateMs >= evidenceAgeBeforeDuplicateMs);
 
-            var installedBinding = GetPrivateField(adapter, "regularV4FrontierRepairPressure");
+            var installedBinding = GetRegularV4FrontierRepairPressureCurrent(adapter);
             Assert.NotNull(installedBinding);
-            var expiredEvidenceTick = Stopwatch.GetTimestamp() - 1;
-            installedBinding.GetType().GetProperty("ExpiresTick")!.SetValue(
-                installedBinding,
+            var installedEvidence = GetRegularV4FrontierRepairPressureEvidence(adapter);
+            Assert.NotNull(installedEvidence);
+            var expiredEvidenceTick = Stopwatch.GetTimestamp() - (Stopwatch.Frequency * 30);
+            installedEvidence.GetType().GetProperty("ObservedTick")!.SetValue(
+                installedEvidence,
                 expiredEvidenceTick);
-            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out var expiredEvidenceRemainingMs));
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out var expiredEvidenceAgeMs));
             Assert.Equal("regular_v4_control_feedback_pressure", blockerReason);
-            Assert.Equal(0, expiredEvidenceRemainingMs);
+            Assert.True(expiredEvidenceAgeMs >= 20_000);
             var expiredEvidenceDuplicate = InstallRegularV4FrontierRepairPressure(adapter, pressure, installGeneration: 1);
             Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent, expiredEvidenceDuplicate.Status);
             Assert.Equal(
                 expiredEvidenceTick,
-                Assert.IsType<long>(installedBinding.GetType().GetProperty("ExpiresTick")!.GetValue(installedBinding)));
+                Assert.IsType<long>(installedEvidence.GetType().GetProperty("ObservedTick")!.GetValue(installedEvidence)));
 
             var mutated = InstallRegularV4FrontierRepairPressure(
                 adapter,
@@ -3399,7 +3401,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out _));
             Assert.Equal("regular_v4_control_feedback_pressure", blockerReason);
             Assert.False(adapter.IsRegularV4FrontierRepairSettlementApplied(settlement));
-            var restoredBinding = GetPrivateField(adapter, "regularV4FrontierRepairPressure");
+            var restoredBinding = GetRegularV4FrontierRepairPressureCurrent(adapter);
             Assert.NotNull(restoredBinding);
             Assert.Equal(
                 authority.AuthorityId,
@@ -3495,11 +3497,14 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed, installReceipt.Status);
             AssertCoordinatorBindingRetained();
 
-            var installedBinding = GetPrivateField(adapter, "regularV4FrontierRepairPressure");
+            var installedBinding = GetRegularV4FrontierRepairPressureCurrent(adapter);
             Assert.NotNull(installedBinding);
-            installedBinding.GetType().GetProperty("ExpiresTick")!.SetValue(
-                installedBinding,
-                Stopwatch.GetTimestamp() - 1);
+            var installedEvidence = GetRegularV4FrontierRepairPressureEvidence(adapter);
+            Assert.NotNull(installedEvidence);
+            var expiredEvidenceTick = Stopwatch.GetTimestamp() - (Stopwatch.Frequency * 30);
+            installedEvidence.GetType().GetProperty("ObservedTick")!.SetValue(
+                installedEvidence,
+                expiredEvidenceTick);
             AssertCoordinatorBindingRetained(evidenceExpired: true);
 
             adapter.MarkActiveFileTransferPostTunaFallbackRuntime(transferId, "test_post_tuna_scope");
@@ -3519,14 +3524,25 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             adapter.UnregisterActiveFileTransferRuntime(transferId);
             adapter.UnregisterActiveFileTransferDataSession(transferId);
 
-            Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
-            Assert.NotNull(GetPrivateField(adapter, "regularV4FrontierRepairPressure"));
+            AssertCoordinatorBindingRetained(evidenceExpired: true);
+            var duplicateAfterLocalTeardown = InstallRegularV4FrontierRepairPressure(
+                adapter,
+                pressure,
+                installGeneration: 19);
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent,
+                duplicateAfterLocalTeardown.Status);
+            Assert.Equal(installReceipt.InstallGeneration, duplicateAfterLocalTeardown.InstallGeneration);
+            Assert.Equal(
+                expiredEvidenceTick,
+                Assert.IsType<long>(
+                    installedEvidence.GetType().GetProperty("ObservedTick")!.GetValue(installedEvidence)));
+            AssertCoordinatorBindingRetained(evidenceExpired: true);
 
             var observerTransferId = $"{transferId}-observer";
             adapter.RegisterActiveFileTransferDataSession(observerTransferId);
             adapter.RegisterActiveFileTransferRuntime(observerTransferId);
-            Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
-            Assert.NotNull(GetPrivateField(adapter, "regularV4FrontierRepairPressure"));
+            AssertCoordinatorBindingRetained(evidenceExpired: true);
             adapter.UnregisterActiveFileTransferRuntime(observerTransferId);
             adapter.UnregisterActiveFileTransferDataSession(observerTransferId);
 
@@ -3571,7 +3587,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
                 settlementReceipt.Status);
             Assert.True(settlementReceipt.CurrentAuthorityCleared);
-            Assert.Null(GetPrivateField(adapter, "regularV4FrontierRepairPressure"));
+            Assert.Null(GetRegularV4FrontierRepairPressureCurrent(adapter));
             Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
 
             var logText = LocalOperationalLog.GetRecentLogText();
@@ -3589,17 +3605,17 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
             void AssertCoordinatorBindingRetained(bool evidenceExpired = false)
             {
-                Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out var blockerReason, out var remainingMs));
+                Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out var blockerReason, out var evidenceAgeMs));
                 Assert.Equal("regular_v4_control_feedback_pressure", blockerReason);
                 if (evidenceExpired)
                 {
-                    Assert.Equal(0, remainingMs);
+                    Assert.True(evidenceAgeMs >= 20_000);
                 }
                 else
                 {
-                    Assert.True(remainingMs > 0);
+                    Assert.True(evidenceAgeMs >= 0);
                 }
-                var currentBinding = GetPrivateField(adapter, "regularV4FrontierRepairPressure");
+                var currentBinding = GetRegularV4FrontierRepairPressureCurrent(adapter);
                 Assert.NotNull(currentBinding);
                 Assert.Equal(
                     authority.AuthorityId,
@@ -3756,14 +3772,16 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Assert.True(installReceipt.InstallGeneration > 0);
             Assert.Equal(successorPressure.Reason, installReceipt.PressureReason);
             Thread.Sleep(25);
-            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out var remainingBeforeDuplicateMs));
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out var evidenceAgeBeforeDuplicateMs));
 
             var duplicateInstallReceipt = InstallRegularV4FrontierRepairPressure(adapter, successorPressure, installGeneration: 2);
 
             Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent, duplicateInstallReceipt.Status);
             Assert.Equal(installReceipt.InstallGeneration, duplicateInstallReceipt.InstallGeneration);
-            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out var remainingAfterDuplicateMs));
-            Assert.True(remainingAfterDuplicateMs <= remainingBeforeDuplicateMs, $"duplicate install refreshed TTL from {remainingBeforeDuplicateMs}ms to {remainingAfterDuplicateMs}ms");
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out var evidenceAgeAfterDuplicateMs));
+            Assert.True(
+                evidenceAgeAfterDuplicateMs >= evidenceAgeBeforeDuplicateMs,
+                $"duplicate install refreshed pressure evidence from age {evidenceAgeBeforeDuplicateMs}ms to {evidenceAgeAfterDuplicateMs}ms");
 
             var sameIdMutation = successor with
             {
@@ -4005,10 +4023,10 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
             var logText = LocalOperationalLog.GetRecentLogText();
             Assert.True(
-                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_successor_pressure_install_accepted", "install_status=installed", "install_generation=2", "ttl_refreshed=1"),
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_successor_pressure_install_accepted", "install_status=installed", "install_generation=2", "evidence_observed=1"),
                 logText);
             Assert.True(
-                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_successor_pressure_install_idempotent", "install_status=idempotent", "install_generation=2", "ttl_refreshed=0"),
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_successor_pressure_install_idempotent", "install_status=idempotent", "install_generation=2", "evidence_observed=0"),
                 logText);
             Assert.True(
                 ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_predecessor_pressure_retired", "successor_install_generation=2", "cleared_predecessor=1", "cleared_pressure=0"),
@@ -4398,8 +4416,9 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
     }
 
     [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "RegularV4FrontierRepairPressure")]
     [Fact]
-    public async Task Bridge_ReceiveStallRecovery_ControlOnlyOverrideReconnectsWhenRegularV4PressureMarked()
+    public async Task Bridge_ReceiveStallRecovery_ControlOnlyLegacyRegularV4PressureIsEvidenceOnlyAndDoesNotRestart()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -4453,7 +4472,12 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             var options = LoadNknOptionsWithOverrides(keyPath, "control-regular-v4-pressure");
             var identity = new NknIdentity("control-regular-v4-pressure", "control-regular-v4-pressure.fake");
             using var adapter = new RealNknClientAdapter(identity, options);
+            var evaluations =
+                new ConcurrentQueue<FileTransferBridgeRecoveryEvaluationRequest>();
+            adapter.BridgeRecoveryEvaluationRequested +=
+                (_, args) => evaluations.Enqueue(args.Request);
             adapter.RegisterActiveFileTransferDataSession("transfer-control-regular-v4-pressure");
+            var logBaseline = LocalOperationalLog.GetRecentLogText().Length;
             adapter.ReportRegularV4ControlFeedbackPressure(
                 "transfer-control-regular-v4-pressure",
                 "test_regular_v4_credit_frontier_pressure",
@@ -4467,27 +4491,30 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             await WaitUntilAsync(
                 () =>
                 {
-                    var text = LocalOperationalLog.GetRecentLogText();
-                    if (!text.Contains("event=nkn_bridge_control_receive_recovery_allowed", StringComparison.Ordinal) ||
-                        !text.Contains("reason=regular_v4_control_feedback_pressure", StringComparison.Ordinal) ||
-                        !text.Contains("event=nkn_bridge_receive_stall_recovery_started", StringComparison.Ordinal))
-                    {
-                        return false;
-                    }
-
-                    return TryReadIntFileShared(countFile, out var count) &&
-                           count > 1;
+                    var text = GetRecentLogTextSince(logBaseline);
+                    return text.Contains(
+                        "event=nkn_bridge_control_receive_recovery_suppressed",
+                        StringComparison.Ordinal);
                 },
                 TimeSpan.FromSeconds(5));
 
-            var logText = LocalOperationalLog.GetRecentLogText();
-            Assert.Contains("event=filetransfer_regular_v4_control_feedback_pressure_marked", logText, StringComparison.Ordinal);
-            Assert.Contains("event=nkn_bridge_control_receive_recovery_allowed", logText, StringComparison.Ordinal);
-            Assert.Contains("event=nkn_bridge_receive_stall_recovery_started", logText, StringComparison.Ordinal);
-            Assert.Contains("stall_reason=control_receive_stalled", logText, StringComparison.Ordinal);
+            var logText = GetRecentLogTextSince(logBaseline);
+            Assert.Contains(
+                "event=filetransfer_regular_v4_control_feedback_pressure_observed",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains("observation_disposition=evidence_only", logText, StringComparison.Ordinal);
+            Assert.Contains("binding_mutated=0", logText, StringComparison.Ordinal);
+            Assert.Contains(
+                "event=nkn_bridge_control_receive_recovery_suppressed",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Empty(evaluations);
+            Assert.DoesNotContain("event=nkn_bridge_recovery_evaluation_requested", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_started", logText, StringComparison.Ordinal);
             Assert.True(File.Exists(countFile));
             Assert.True(TryReadIntFileShared(countFile, out var finalCount));
-            Assert.True(finalCount > 1);
+            Assert.Equal(1, finalCount);
 
             adapter.UnregisterActiveFileTransferDataSession("transfer-control-regular-v4-pressure");
             await adapter.DisconnectAsync();
@@ -9650,5 +9677,14 @@ rl.on('line', (line) => {{
             new FileTransferRegularV4FrontierRepairPressureInstallCommand(
                 pressure,
                 installGeneration));
+
+    private static object? GetRegularV4FrontierRepairPressureCurrent(RealNknClientAdapter adapter)
+    {
+        var shadow = GetPrivateField(adapter, "regularV4FrontierRepairPressureShadow");
+        return shadow?.GetType().GetProperty("Current")?.GetValue(shadow);
+    }
+
+    private static object? GetRegularV4FrontierRepairPressureEvidence(RealNknClientAdapter adapter)
+        => GetPrivateField(adapter, "regularV4FrontierRepairPressureEvidence");
 
 }
