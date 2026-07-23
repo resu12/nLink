@@ -5243,6 +5243,105 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task AnalyzeRetained_OneShotRecoveryReceiptClosureRejected_ClassifiesAllExactCommands(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildOneShotRecoveryReceiptClosureRejectedCurrentArtifactFixture(),
+            ["-LiveRouteProofMode", "RegularActivationCycle"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
+        Assert.Equal("fail", verdict["runtime_correctness_verdict"]);
+        Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+        Assert.Equal(
+            "runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved",
+            verdict["recovery_failure_class"]);
+        Assert.Equal(
+            "runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved",
+            verdict["first_proof_chain_failure_class"]);
+        Assert.Equal(
+            "runtime_unlock_regular_v4_recovery_lease_closure_rejected",
+            verdict["first_proof_chain_failure_event"]);
+        Assert.Equal(
+            "coordinator_recovery_liveness_lease_stale",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("1785", verdict["first_proof_chain_failure_sequence"]);
+        Assert.Equal("1274", verdict["first_proof_chain_failure_writer_sequence"]);
+        Assert.Equal("3", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count"]);
+        Assert.Equal("3", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count"]);
+        Assert.Equal("3", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count"]);
+        Assert.Equal("fail", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict"]);
+
+        var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
+        Assert.Equal(verdict["recovery_failure_class"], stability["recovery_failure_class"]);
+        Assert.Equal("1785", stability["first_proof_chain_failure_sequence"]);
+        Assert.Equal("3", stability["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_OneShotRecoveryReceiptRejectedThenExactClosureRetained_RecoversBoundary(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_one_shot_recovery_receipt_recovered";
+        const string writerId = "writer-one-shot-recovery";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; selection_reason=regular_nkn_default_v4", secondsOffset: 0),
+            LogLine(BridgeRecoveryExecutionCommandIssuedLine(transferId, 1, writerId, 1), secondsOffset: 1),
+            LogLine(BridgeRecoveryExecutionStartDecidedLine(transferId, 1, writerId, 2), secondsOffset: 2),
+            LogLine(BridgeRecoveryExecutionCompletedLine(transferId, 1, writerId, 3), secondsOffset: 3),
+            LogLine(BridgeRecoveryExecutionLifecycleDecidedLine(transferId, 1, writerId, 4), secondsOffset: 4),
+            LogLine(BridgeRecoveryExecutionClosureRejectedLine(transferId, 1, writerId, 5), secondsOffset: 5),
+            LogLine(BridgeRecoveryExecutionCompletionDecidedLine(transferId, 1, writerId, 6), secondsOffset: 6),
+            LogLine(BridgeRecoveryExecutionClosureRetainedLine(transferId, 1, writerId, 7), secondsOffset: 7),
+            LogLine($"event=file_transfer_inbound_terminal; direction=inbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; state=Completed; error_code=(none); sha256_match=1; integrity_ok=1", secondsOffset: 8)
+        };
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.NotEqual(
+            "runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved",
+            verdict["recovery_failure_class"]);
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_distinct_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count"]);
+        Assert.Equal("pass", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task AnalyzeRetained_CurrentArtifactClosureHoldLostAfterSettledRepair_OwnsFirstProofEdge(
         bool compact)
     {
@@ -9145,6 +9244,139 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         string transferId,
         long maximumDeadlineUtcMs = 1700000090000)
         => $"event=runtime_unlock_regular_v4_recovery_lease_closure_liveness_deferral_rejected; direction=outbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; action_kind=RecoveryLeaseClosureLivenessDeferral; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; transport_epoch=2; bridge_recovery_generation=3; bridge_decision_generation=5; regular_v4_liveness_generation=3; recovery_liveness_lease_authority_id=fta2-recovery-lease-1; recovery_liveness_lease_generation=3; recovery_liveness_lease_state=Retired; lifecycle_outcome=Completed; lifecycle_decision_status=Accepted; lifecycle_decision_reason=regular_v4_recovery_lifecycle_accepted; requested_liveness_deferral_deadline_utc_ms=1700000090000; maximum_liveness_deferral_deadline_utc_ms={maximumDeadlineUtcMs}; local_recovery_state=BridgeRecoveryCompletedAwaitingProof; rejection_reason=recovery_liveness_lease_missing; decision_reason=recovery_liveness_lease_missing";
+
+    private static string BridgeRecoveryExecutionCommandIssuedLine(
+        string transferId,
+        int generation,
+        string writerId,
+        int writerSequence)
+        => $"event=filetransfer_bridge_recovery_execution_command_issued; direction=inbound; transfer_id={transferId}; session_id=sess_runtime_unlock_dispatch_proof; action_kind=BridgeReceiveStallRecovery; source=filetransfer_receive_recovery; attempted_action=control_receive_stalled; reason=control_receive_stalled; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation={generation}; bridge_recovery_kind=BridgeReceiveStallRecovery; recovery_liveness_lease_authority_id=fta2-recovery-lease-{generation}; recovery_liveness_lease_generation={generation}; checkpoint_request_id=(none); log_writer_id={writerId}; log_writer_sequence={writerSequence}";
+
+    private static string BridgeRecoveryExecutionStartDecidedLine(
+        string transferId,
+        int generation,
+        string writerId,
+        int writerSequence)
+        => $"event=filetransfer_bridge_recovery_execution_start_decided; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=inbound; bridge_decision_generation={generation}; bridge_recovery_generation=0; status=started; reason=bridge_recovery_execution_started; log_writer_id={writerId}; log_writer_sequence={writerSequence}";
+
+    private static string BridgeRecoveryExecutionCompletedLine(
+        string transferId,
+        int generation,
+        string writerId,
+        int writerSequence)
+        => $"event=nkn_bridge_recovery_execution_completed; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=inbound; route=regularnknv4fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation={generation}; lease_generation={generation}; execution_mode=hard; outcome=completed; reason=bridge_recovery_execution_completed; log_writer_id={writerId}; log_writer_sequence={writerSequence}";
+
+    private static string BridgeRecoveryExecutionLifecycleDecidedLine(
+        string transferId,
+        int generation,
+        string writerId,
+        int writerSequence)
+        => $"event=runtime_unlock_regular_v4_recovery_lifecycle_decided; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation={generation}; regular_v4_liveness_generation={generation}; lifecycle_outcome=Completed; lifecycle_reason=bridge_recovery_execution_completed; decision_status=Accepted; decision_reason=regular_v4_recovery_lifecycle_accepted; log_writer_id={writerId}; log_writer_sequence={writerSequence}";
+
+    private static string BridgeRecoveryExecutionClosureRejectedLine(
+        string transferId,
+        int generation,
+        string writerId,
+        int writerSequence)
+        => $"event=runtime_unlock_regular_v4_recovery_lease_closure_rejected; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; regular_v4_liveness_generation={generation}; lifecycle_outcome=Completed; decision_status=Accepted; mismatch_kind=coordinator_recovery_liveness_lease_stale; decision_reason=regular_v4_recovery_lifecycle_report_not_pending; log_writer_id={writerId}; log_writer_sequence={writerSequence}";
+
+    private static string BridgeRecoveryExecutionCompletionDecidedLine(
+        string transferId,
+        int generation,
+        string writerId,
+        int writerSequence)
+        => $"event=filetransfer_bridge_recovery_execution_completion_decided; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=inbound; execution_outcome=Completed; execution_mode=hard; execution_reason=bridge_recovery_execution_completed; decision_status=Accepted; decision_reason=bridge_recovery_execution_receipt_accepted; lifecycle_status=Accepted; lifecycle_reason=regular_v4_recovery_lifecycle_accepted; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; bridge_recovery_generation=0; transport_epoch=0; checkpoint_request_id=(none); authority_reason=control_receive_stalled; bridge_decision_generation={generation}; recovery_liveness_lease_authority_id=fta2-recovery-lease-{generation}; recovery_liveness_lease_generation={generation}; recovery_liveness_lease_state=Active; log_writer_id={writerId}; log_writer_sequence={writerSequence}";
+
+    private static string BridgeRecoveryExecutionClosureRetainedLine(
+        string transferId,
+        int generation,
+        string writerId,
+        int writerSequence)
+        => $"event=runtime_unlock_regular_v4_recovery_lease_closure_retained; direction=inbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation={generation}; regular_v4_liveness_generation={generation}; lease_authority_id=fta2-recovery-lease-{generation}; lease_generation={generation}; lease_state=Retired; lifecycle_outcome=Completed; lifecycle_reason=bridge_recovery_execution_completed; lifecycle_decision_status=Accepted; lifecycle_decision_reason=regular_v4_recovery_lifecycle_accepted; decision_reason=coordinator_lease_closure_accepted; log_writer_id={writerId}; log_writer_sequence={writerSequence}";
+
+    private static string[] BuildOneShotRecoveryReceiptClosureRejectedCurrentArtifactFixture()
+    {
+        const string sessionId = "sess_runtime_unlock_dispatch_proof";
+        const string transferId = "transfer_one_shot_recovery_receipt_closure_rejected";
+        const string writerId = "writer-one-shot-recovery";
+        var lines = new List<string>
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; session_id={sessionId}; transfer_id={transferId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; selection_reason=regular_nkn_default_v4", secondsOffset: 0),
+            LogLine(BridgeRecoveryExecutionCommandIssuedLine(transferId, 1, writerId, 1218), secondsOffset: 1),
+            LogLine(BridgeRecoveryExecutionStartDecidedLine(transferId, 1, writerId, 1226), secondsOffset: 2),
+            LogLine(BridgeRecoveryExecutionCompletedLine(transferId, 1, writerId, 1272), secondsOffset: 3),
+            LogLine(BridgeRecoveryExecutionLifecycleDecidedLine(transferId, 1, writerId, 1273), secondsOffset: 4)
+        };
+
+        while (lines.Count < 1784)
+        {
+            lines.Add(LogLine(
+                $"diagnostic=bridge_recovery_receipt_padding; session_id={sessionId}; transfer_id={transferId}; sample_index={lines.Count + 1}",
+                secondsOffset: lines.Count));
+        }
+
+        lines.Add(LogLine(
+            BridgeRecoveryExecutionClosureRejectedLine(transferId, 1, writerId, 1274),
+            secondsOffset: lines.Count));
+        lines.Add(LogLine(
+            BridgeRecoveryExecutionCompletionDecidedLine(transferId, 1, writerId, 1277),
+            secondsOffset: lines.Count));
+
+        for (var generation = 2; generation <= 3; generation++)
+        {
+            var writerSequence = generation == 2 ? 1342 : 1550;
+            lines.Add(LogLine(
+                BridgeRecoveryExecutionCommandIssuedLine(
+                    transferId,
+                    generation,
+                    writerId,
+                    writerSequence),
+                secondsOffset: lines.Count));
+            lines.Add(LogLine(
+                BridgeRecoveryExecutionStartDecidedLine(
+                    transferId,
+                    generation,
+                    writerId,
+                    writerSequence + 8),
+                secondsOffset: lines.Count));
+            lines.Add(LogLine(
+                BridgeRecoveryExecutionCompletedLine(
+                    transferId,
+                    generation,
+                    writerId,
+                    writerSequence + 61),
+                secondsOffset: lines.Count));
+            lines.Add(LogLine(
+                BridgeRecoveryExecutionLifecycleDecidedLine(
+                    transferId,
+                    generation,
+                    writerId,
+                    writerSequence + 62),
+                secondsOffset: lines.Count));
+            lines.Add(LogLine(
+                BridgeRecoveryExecutionClosureRejectedLine(
+                    transferId,
+                    generation,
+                    writerId,
+                    writerSequence + 63),
+                secondsOffset: lines.Count));
+            lines.Add(LogLine(
+                BridgeRecoveryExecutionCompletionDecidedLine(
+                    transferId,
+                    generation,
+                    writerId,
+                    writerSequence + 66),
+                secondsOffset: lines.Count));
+        }
+
+        lines.Add(LogLine(
+            $"event=file_transfer_inbound_terminal; direction=inbound; role=Helper; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=peer_disconnected; route=regular_nkn_v4_fast; protocol_version=4",
+            secondsOffset: lines.Count));
+        lines.Add(LogLine(
+            $"event=file_transfer_outbound_terminal; direction=outbound; role=Helpee; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=peer_disconnected; route=regular_nkn_v4_fast; protocol_version=4",
+            secondsOffset: lines.Count));
+        return lines.ToArray();
+    }
 
     private static string[] BuildRuntimeUnlockRegularV4ClosureWindowLivenessCurrentArtifactFixture()
     {
