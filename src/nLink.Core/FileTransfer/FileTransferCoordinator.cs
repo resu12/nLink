@@ -231,53 +231,6 @@ internal readonly record struct RuntimeUnlockPendingPreCommitProbeDecision(
     int CurrentLegGeneration,
     RuntimeUnlockPendingPreCommitProbeRequest? PendingRequest);
 
-internal readonly record struct RuntimeUnlockUncommittedTunaFallbackHandoff(
-    RuntimeOwnerToken SourceRuntimeOwner,
-    RoutePublicationToken SourceRoutePublication,
-    RuntimeUnlockAdmissionToken RuntimeUnlockAdmission,
-    RuntimeUnlockPendingPreCommitProbeRequest PendingPreCommitProbe,
-    RuntimeUnlockRouteCommitSnapshot PreCommitSnapshot,
-    int SourceTerminalGeneration,
-    long SourceLegGeneration,
-    long SourceTransportEpoch,
-    int SourceBridgeRecoveryGeneration,
-    long SourceDataSessionGeneration,
-    long DrainGeneration,
-    long CompletedDrainGeneration,
-    PostTunaFallbackPeerProofEvidence PeerProofEvidence,
-    long ProofTransportEpoch,
-    int HandoffGeneration,
-    string Reason)
-{
-    public RegularV4ToTunaRouteTransitionAuthority? RouteTransitionAuthority { get; init; }
-
-    public RegularV4ToTunaPhysicalDrainReceipt? PhysicalDrainReceipt { get; init; }
-}
-
-internal enum RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus
-{
-    Prepared,
-    Committed,
-    Idempotent,
-    Rejected,
-}
-
-internal readonly record struct RuntimeUnlockUncommittedTunaFallbackHandoffTransition(
-    FileTransferCoordinatorEvent CoordinatorEvent,
-    RuntimeUnlockUncommittedTunaFallbackHandoff Handoff,
-    RegularV4FrontierRepairPressureBinding? PressureBinding,
-    FileTransferRegularV4FrontierRepairSettlement? PressureSettlement,
-    FileTransferRegularV4FrontierRepairPressureSettlementCommand? PressureSettlementCommand);
-
-internal readonly record struct RuntimeUnlockUncommittedTunaFallbackHandoffTransitionDecision(
-    RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus Status,
-    string Reason,
-    RuntimeUnlockUncommittedTunaFallbackHandoffTransition? Transition,
-    FileTransferCoordinatorDecision? RouteDecision)
-{
-    public FileTransferCoordinatorState State { get; init; } = null!;
-}
-
 internal readonly record struct RouteCommitToken(
     string SessionId,
     string TransferId,
@@ -630,6 +583,7 @@ internal sealed record FileTransferFallbackTransitionProofBoundary(
     PostTunaFallbackPeerProofEvidence PeerProofEvidence,
     PostTunaFallbackPeerProofFrameIdentity RetainedFrameIdentity,
     long TargetTransportEpoch,
+    int TargetBridgeRecoveryGeneration,
     FileTransferAuthorityId? PredecessorTransitionAuthorityId = null)
     : FileTransferRouteTransitionProofBoundary
 {
@@ -638,6 +592,7 @@ internal sealed record FileTransferFallbackTransitionProofBoundary(
         RetainedFrameIdentity is not { IsComplete: true } ||
         PeerProofEvidence.FrameIdentity != RetainedFrameIdentity ||
         TargetTransportEpoch <= 0 ||
+        TargetBridgeRecoveryGeneration <= 0 ||
         (SourceRouteCommit is null &&
          (PredecessorTransitionAuthorityId is null ||
           PredecessorTransitionAuthorityId.Value.IsDefault));
@@ -736,7 +691,10 @@ internal readonly record struct FileTransferRouteTransitionAuthority(
 }
 
 internal readonly record struct FileTransferRouteTransitionPauseBindCommand(
-    FileTransferRouteTransitionAuthority Authority);
+    FileTransferRouteTransitionAuthority Authority)
+{
+    public FileTransferRouteTransitionAuthority? PredecessorAuthority { get; init; }
+}
 
 internal enum FileTransferRouteTransitionPauseBindStatus
 {
@@ -800,6 +758,24 @@ internal readonly record struct FileTransferRouteTransitionDispositionReceipt(
     FileTransferRouteTransitionDispositionApplyStatus Status,
     string Reason);
 
+internal readonly record struct FileTransferRouteTransitionRetainedFrameApplyCommand(
+    FileTransferRouteTransitionAuthority Authority,
+    RuntimeOwnerToken TargetRuntimeOwner,
+    RoutePublicationToken TargetRoutePublication,
+    PostTunaFallbackPeerProofFrameIdentity FrameIdentity);
+
+internal enum FileTransferRouteTransitionRetainedFrameApplyStatus
+{
+    Applied,
+    Idempotent,
+    Rejected,
+}
+
+internal readonly record struct FileTransferRouteTransitionRetainedFrameApplyReceipt(
+    FileTransferRouteTransitionRetainedFrameApplyCommand Command,
+    FileTransferRouteTransitionRetainedFrameApplyStatus Status,
+    string Reason);
+
 internal readonly record struct FileTransferRouteTransitionOperation(
     FileTransferRouteTransitionAuthority Authority,
     FileTransferRouteTransitionState State,
@@ -812,7 +788,9 @@ internal readonly record struct FileTransferRouteTransitionOperation(
     RouteCommitToken? RouteCommitToken = null,
     RoutePublicationToken? RoutePublicationToken = null,
     FileTransferRouteTransitionDispositionCommand? DispositionCommand = null,
-    FileTransferRouteTransitionDispositionReceipt? DispositionReceipt = null);
+    FileTransferRouteTransitionDispositionReceipt? DispositionReceipt = null,
+    FileTransferRouteTransitionRetainedFrameApplyCommand? RetainedFrameApplyCommand = null,
+    FileTransferRouteTransitionRetainedFrameApplyReceipt? RetainedFrameApplyReceipt = null);
 
 internal readonly record struct FileTransferRouteTransitionSupersession(
     FileTransferRouteTransitionAuthority PredecessorAuthority,
@@ -847,199 +825,11 @@ internal readonly record struct FileTransferRouteTransitionDecision(
     FileTransferRouteTransitionPauseBindCommand? PauseBindCommand = null,
     FileTransferRouteTransitionPhysicalDrainCommand? DrainCommand = null,
     FileTransferRouteTransitionDispositionCommand? DispositionCommand = null,
+    FileTransferRouteTransitionRetainedFrameApplyCommand?
+        RetainedFrameApplyCommand = null,
     FileTransferCoordinatorDecision? RouteDecision = null)
 {
     public FileTransferCoordinatorState State { get; init; } = null!;
-}
-
-internal enum RegularV4ToTunaRouteTransitionState
-{
-    Prepared = 1,
-    Draining = 2,
-    Committed = 3,
-    Invalidated = 4,
-}
-
-internal readonly record struct RegularV4ToTunaDurableCheckpoint(
-    RuntimeOwnerToken SourceRuntimeOwner,
-    RoutePublicationToken SourceRoutePublication,
-    int SourceTerminalGeneration,
-    int SourceLegGeneration,
-    long SourceTransportEpoch,
-    int SourceBridgeRecoveryGeneration,
-    long DataSessionGeneration,
-    int StateEpoch,
-    int ContiguousCommittedChunkIndex,
-    int DurableHighestChunkIndex,
-    int ChunkCount,
-    int CheckpointGeneration)
-{
-    public bool IsDefault =>
-        SourceRuntimeOwner.IsDefault ||
-        SourceRoutePublication.IsDefault ||
-        SourceLegGeneration <= 0 ||
-        SourceTransportEpoch < 0 ||
-        SourceBridgeRecoveryGeneration < 0 ||
-        DataSessionGeneration <= 0 ||
-        StateEpoch < 0 ||
-        ContiguousCommittedChunkIndex < 0 ||
-        DurableHighestChunkIndex < ContiguousCommittedChunkIndex - 1 ||
-        ChunkCount < 0 ||
-        ContiguousCommittedChunkIndex > ChunkCount ||
-        DurableHighestChunkIndex >= ChunkCount ||
-        CheckpointGeneration <= 0;
-}
-
-internal readonly record struct RegularV4ToTunaRouteTransitionPrepareRequest(
-    RuntimeOwnerToken SourceRuntimeOwner,
-    RoutePublicationToken SourceRoutePublication,
-    RuntimeUnlockAdmissionToken RuntimeUnlockAdmission,
-    RuntimeUnlockPendingPreCommitProbeRequest PendingPreCommitProbe,
-    RuntimeUnlockRouteCommitProof AcceptedLaunchBoundary,
-    long LaunchGeneration,
-    RegularV4ToTunaDurableCheckpoint DurableCheckpoint,
-    string Reason);
-
-internal readonly record struct RegularV4ToTunaRouteTransitionAuthority(
-    string SessionId,
-    string TransferId,
-    FileTransferDirection Direction,
-    RuntimeOwnerToken SourceRuntimeOwner,
-    RoutePublicationToken SourceRoutePublication,
-    int SourceTerminalGeneration,
-    int SourceLiveRouteEpoch,
-    int SourceLegGeneration,
-    long SourceTransportEpoch,
-    int SourceBridgeRecoveryGeneration,
-    long DataSessionGeneration,
-    RuntimeUnlockAdmissionToken RuntimeUnlockAdmission,
-    RuntimeUnlockPendingPreCommitProbeRequest PendingPreCommitProbe,
-    RuntimeUnlockRouteCommitProof AcceptedLaunchBoundary,
-    long LaunchGeneration,
-    RegularV4ToTunaDurableCheckpoint DurableCheckpoint,
-    FileTransferRoute TargetRoute,
-    int TargetProtocolVersion,
-    FileTransferTransportKind TargetTransport,
-    FileTransferTransportHandoffKind HandoffKind,
-    long TransitionGeneration,
-    FileTransferAuthorityId AuthorityId,
-    string Reason)
-{
-    public bool IsDefault =>
-        string.IsNullOrWhiteSpace(SessionId) ||
-        string.IsNullOrWhiteSpace(TransferId) ||
-        SourceRuntimeOwner.IsDefault ||
-        SourceRoutePublication.IsDefault ||
-        RuntimeUnlockAdmission.IsDefault ||
-        PendingPreCommitProbe.IsDefault ||
-        DurableCheckpoint.IsDefault ||
-        AuthorityId.IsDefault ||
-        AcceptedLaunchBoundary.AdmissionToken != RuntimeUnlockAdmission ||
-        AcceptedLaunchBoundary.TransactionGeneration <= 0 ||
-        AcceptedLaunchBoundary.OfferGeneration <= 0 ||
-        AcceptedLaunchBoundary.TunaPathLeaseGeneration <= 0 ||
-        AcceptedLaunchBoundary.TargetRoute != FileTransferRoute.FileTunaV4 ||
-        AcceptedLaunchBoundary.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
-        AcceptedLaunchBoundary.TargetTransport != FileTransferTransportKind.Tuna ||
-        AcceptedLaunchBoundary.HandoffKind !=
-            FileTransferTransportHandoffKind.NormalToTunaActivation ||
-        SourceLegGeneration <= 0 ||
-        SourceTransportEpoch < 0 ||
-        SourceBridgeRecoveryGeneration < 0 ||
-        DataSessionGeneration <= 0 ||
-        LaunchGeneration <= 0 ||
-        TargetRoute != FileTransferRoute.FileTunaV4 ||
-        TargetProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
-        TargetTransport != FileTransferTransportKind.Tuna ||
-        HandoffKind != FileTransferTransportHandoffKind.NormalToTunaActivation ||
-        TransitionGeneration <= 0;
-}
-
-internal readonly record struct RegularV4ToTunaActivationPauseBindCommand(
-    RegularV4ToTunaRouteTransitionAuthority Authority);
-
-internal enum RegularV4ToTunaActivationPauseBindStatus
-{
-    Installed,
-    Idempotent,
-    Rejected,
-}
-
-internal readonly record struct RegularV4ToTunaActivationPauseBindReceipt(
-    RegularV4ToTunaActivationPauseBindCommand Command,
-    RegularV4ToTunaActivationPauseBindStatus Status,
-    string Reason);
-
-internal readonly record struct RegularV4ToTunaPhysicalDrainCommand(
-    RegularV4ToTunaRouteTransitionAuthority Authority,
-    long CapturedThroughPhysicalSendGeneration,
-    IReadOnlyList<long> CapturedPhysicalSendLeaseIds,
-    int CapturedPhysicalSendCount,
-    string CapturedPhysicalSendFingerprint);
-
-internal enum RegularV4ToTunaPhysicalDrainOutcome
-{
-    Completed,
-}
-
-internal readonly record struct RegularV4ToTunaPhysicalDrainReceipt(
-    RegularV4ToTunaPhysicalDrainCommand Command,
-    IReadOnlyList<long> CompletedPhysicalSendLeaseIds,
-    int CompletedPhysicalSendCount,
-    string CompletedPhysicalSendFingerprint,
-    RegularV4ToTunaPhysicalDrainOutcome Outcome,
-    string Reason);
-
-internal enum RegularV4ToTunaRouteTransitionDispositionKind
-{
-    Committed,
-    RolledBack,
-    TerminalInvalidated,
-    Superseded,
-}
-
-internal readonly record struct RegularV4ToTunaRouteTransitionDispositionCommand(
-    RegularV4ToTunaRouteTransitionAuthority Authority,
-    RegularV4ToTunaRouteTransitionDispositionKind Kind,
-    RouteCommitToken? RouteCommitToken,
-    RoutePublicationToken? RoutePublicationToken,
-    string Reason)
-{
-    public RuntimeUnlockRouteCommitProof? FinalProof { get; init; }
-}
-
-internal enum RegularV4ToTunaRouteTransitionDispositionApplyStatus
-{
-    Applied,
-    Idempotent,
-    Rejected,
-}
-
-internal readonly record struct RegularV4ToTunaRouteTransitionDispositionReceipt(
-    RegularV4ToTunaRouteTransitionDispositionCommand Command,
-    RegularV4ToTunaRouteTransitionDispositionApplyStatus Status,
-    string Reason);
-
-internal readonly record struct RegularV4ToTunaRouteTransitionOperation(
-    RegularV4ToTunaRouteTransitionAuthority Authority,
-    RegularV4ToTunaRouteTransitionState State,
-    RegularV4ToTunaActivationPauseBindReceipt? PauseBindReceipt = null,
-    RegularV4ToTunaPhysicalDrainCommand? DrainCommand = null,
-    RegularV4ToTunaPhysicalDrainReceipt? DrainReceipt = null,
-    RuntimeUnlockRouteCommitProof? FinalProof = null,
-    FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
-        PressureSettlementReceipt = null,
-    RouteCommitToken? RouteCommitToken = null,
-    RoutePublicationToken? RoutePublicationToken = null,
-    RegularV4ToTunaRouteTransitionDispositionCommand? DispositionCommand = null,
-    RegularV4ToTunaRouteTransitionDispositionReceipt? DispositionReceipt = null);
-
-internal readonly record struct RegularV4ToTunaRouteTransitionSubstate(
-    RegularV4ToTunaRouteTransitionOperation? CurrentOperation = null,
-    RegularV4ToTunaRouteTransitionOperation? LastTerminalOperation = null,
-    long LastTransitionGeneration = 0)
-{
-    internal static RegularV4ToTunaRouteTransitionSubstate Empty => default;
 }
 
 internal readonly record struct FileTransferCoordinatorPersistentState(
@@ -1047,303 +837,6 @@ internal readonly record struct FileTransferCoordinatorPersistentState(
     FileTransferRouteTransitionSubstate FileTransferRouteTransition = default)
 {
     internal static FileTransferCoordinatorPersistentState Empty => default;
-
-    // Compatibility projection for the Slice-3 Core and Infra surfaces. The
-    // persistent value is the generic transition aggregate; callers cannot
-    // establish a second route-transition authority through this projection.
-    internal RegularV4ToTunaRouteTransitionSubstate RegularV4ToTunaRouteTransition
-    {
-        get => FileTransferRouteTransitionCompatibility.ToRegularV4ToTuna(
-            FileTransferRouteTransition);
-        init => FileTransferRouteTransition =
-            FileTransferRouteTransitionCompatibility.FromRegularV4ToTuna(value);
-    }
-}
-
-internal enum RegularV4ToTunaRouteTransitionDecisionStatus
-{
-    Prepared,
-    Draining,
-    Committed,
-    Invalidated,
-    Idempotent,
-    Rejected,
-}
-
-internal readonly record struct RegularV4ToTunaRouteTransitionDecision(
-    RegularV4ToTunaRouteTransitionDecisionStatus Status,
-    string Reason,
-    RegularV4ToTunaRouteTransitionAuthority? Authority = null,
-    RegularV4ToTunaActivationPauseBindCommand? PauseBindCommand = null,
-    RegularV4ToTunaPhysicalDrainCommand? DrainCommand = null,
-    RegularV4ToTunaRouteTransitionDispositionCommand? DispositionCommand = null,
-    FileTransferCoordinatorDecision? RouteDecision = null)
-{
-    public FileTransferCoordinatorState State { get; init; } = null!;
-}
-
-internal static class FileTransferRouteTransitionCompatibility
-{
-    internal static FileTransferRouteTransitionSubstate FromRegularV4ToTuna(
-        RegularV4ToTunaRouteTransitionSubstate source)
-        => new(
-            source.CurrentOperation is { } current
-                ? FromRegularV4ToTuna(current)
-                : null,
-            PendingSupersession: null,
-            source.LastTerminalOperation is { } terminal
-                ? FromRegularV4ToTuna(terminal)
-                : null,
-            source.LastTransitionGeneration);
-
-    internal static RegularV4ToTunaRouteTransitionSubstate ToRegularV4ToTuna(
-        FileTransferRouteTransitionSubstate source)
-        => new(
-            source.CurrentOperation is { } current &&
-            current.Authority.Kind == FileTransferRouteTransitionKind.RegularV4ToTunaV4
-                ? ToRegularV4ToTuna(current)
-                : null,
-            source.LastTerminalOperation is { } terminal &&
-            terminal.Authority.Kind == FileTransferRouteTransitionKind.RegularV4ToTunaV4
-                ? ToRegularV4ToTuna(terminal)
-                : null,
-            source.LastTransitionGeneration);
-
-    internal static FileTransferRouteTransitionAuthority FromRegularV4ToTuna(
-        RegularV4ToTunaRouteTransitionAuthority source)
-        => new(
-            FileTransferRouteTransitionKind.RegularV4ToTunaV4,
-            source.SessionId,
-            source.TransferId,
-            source.Direction,
-            source.SourceRuntimeOwner,
-            source.SourceRoutePublication,
-            SourceRouteCommit: null,
-            FileTransferRoute.RegularNknV4Fast,
-            FileTransferProtocol.ProtocolVersionV4,
-            FileTransferTransportKind.RegularNkn,
-            source.SourceTerminalGeneration,
-            source.SourceLiveRouteEpoch,
-            source.SourceLegGeneration,
-            source.SourceTransportEpoch,
-            source.SourceBridgeRecoveryGeneration,
-            source.DataSessionGeneration,
-            new FileTransferTunaActivationTransitionProofBoundary(
-                source.RuntimeUnlockAdmission,
-                source.PendingPreCommitProbe,
-                source.AcceptedLaunchBoundary,
-                source.LaunchGeneration),
-            FromRegularV4ToTuna(source.DurableCheckpoint),
-            source.TargetRoute,
-            source.TargetProtocolVersion,
-            source.TargetTransport,
-            source.HandoffKind,
-            source.TransitionGeneration,
-            source.AuthorityId,
-            PredecessorTransitionAuthorityId: null,
-            source.Reason);
-
-    internal static RegularV4ToTunaRouteTransitionAuthority ToRegularV4ToTuna(
-        FileTransferRouteTransitionAuthority source)
-    {
-        if (source.Kind != FileTransferRouteTransitionKind.RegularV4ToTunaV4 ||
-            source.ProofBoundary is not FileTransferTunaActivationTransitionProofBoundary proof)
-        {
-            throw new InvalidOperationException(
-                "The generic route transition is not a regular-V4-to-Tuna transition.");
-        }
-
-        return new RegularV4ToTunaRouteTransitionAuthority(
-            source.SessionId,
-            source.TransferId,
-            source.Direction,
-            source.SourceRuntimeOwner,
-            source.SourceRoutePublication,
-            source.SourceTerminalGeneration,
-            source.SourceLiveRouteEpoch,
-            source.SourceLegGeneration,
-            source.SourceTransportEpoch,
-            source.SourceBridgeRecoveryGeneration,
-            source.DataSessionGeneration,
-            proof.RuntimeUnlockAdmission,
-            proof.PendingPreCommitProbe,
-            proof.AcceptedLaunchBoundary,
-            proof.LaunchGeneration,
-            ToRegularV4ToTuna(source.DurableCheckpoint),
-            source.TargetRoute,
-            source.TargetProtocolVersion,
-            source.TargetTransport,
-            source.HandoffKind,
-            source.TransitionGeneration,
-            source.AuthorityId,
-            source.Reason);
-    }
-
-    internal static FileTransferRouteTransitionDurableCheckpoint FromRegularV4ToTuna(
-        RegularV4ToTunaDurableCheckpoint source)
-        => new(
-            source.SourceRuntimeOwner,
-            source.SourceRoutePublication,
-            source.SourceTerminalGeneration,
-            source.SourceLegGeneration,
-            source.SourceTransportEpoch,
-            source.SourceBridgeRecoveryGeneration,
-            source.DataSessionGeneration,
-            source.StateEpoch,
-            source.ContiguousCommittedChunkIndex,
-            source.DurableHighestChunkIndex,
-            source.ChunkCount,
-            source.CheckpointGeneration);
-
-    internal static RegularV4ToTunaDurableCheckpoint ToRegularV4ToTuna(
-        FileTransferRouteTransitionDurableCheckpoint source)
-        => new(
-            source.SourceRuntimeOwner,
-            source.SourceRoutePublication,
-            source.SourceTerminalGeneration,
-            source.SourceLegGeneration,
-            source.SourceTransportEpoch,
-            source.SourceBridgeRecoveryGeneration,
-            source.DataSessionGeneration,
-            source.StateEpoch,
-            source.ContiguousCommittedChunkIndex,
-            source.DurableHighestChunkIndex,
-            source.ChunkCount,
-            source.CheckpointGeneration);
-
-    private static FileTransferRouteTransitionOperation FromRegularV4ToTuna(
-        RegularV4ToTunaRouteTransitionOperation source)
-        => new(
-            FromRegularV4ToTuna(source.Authority),
-            (FileTransferRouteTransitionState)(int)source.State,
-            source.PauseBindReceipt is { } pause
-                ? new FileTransferRouteTransitionPauseBindReceipt(
-                    new FileTransferRouteTransitionPauseBindCommand(
-                        FromRegularV4ToTuna(pause.Command.Authority)),
-                    (FileTransferRouteTransitionPauseBindStatus)(int)pause.Status,
-                    pause.Reason)
-                : null,
-            source.DrainCommand is { } drain
-                ? FromRegularV4ToTuna(drain)
-                : null,
-            source.DrainReceipt is { } drainReceipt
-                ? FromRegularV4ToTuna(drainReceipt)
-                : null,
-            source.FinalProof,
-            source.PressureSettlementReceipt,
-            source.RouteCommitToken,
-            source.RoutePublicationToken,
-            source.DispositionCommand is { } disposition
-                ? FromRegularV4ToTuna(disposition)
-                : null,
-            source.DispositionReceipt is { } dispositionReceipt
-                ? FromRegularV4ToTuna(dispositionReceipt)
-                : null);
-
-    private static RegularV4ToTunaRouteTransitionOperation ToRegularV4ToTuna(
-        FileTransferRouteTransitionOperation source)
-        => new(
-            ToRegularV4ToTuna(source.Authority),
-            (RegularV4ToTunaRouteTransitionState)(int)source.State,
-            source.PauseBindReceipt is { } pause
-                ? new RegularV4ToTunaActivationPauseBindReceipt(
-                    new RegularV4ToTunaActivationPauseBindCommand(
-                        ToRegularV4ToTuna(pause.Command.Authority)),
-                    (RegularV4ToTunaActivationPauseBindStatus)(int)pause.Status,
-                    pause.Reason)
-                : null,
-            source.DrainCommand is { } drain
-                ? ToRegularV4ToTuna(drain)
-                : null,
-            source.DrainReceipt is { } drainReceipt
-                ? ToRegularV4ToTuna(drainReceipt)
-                : null,
-            source.FinalProof,
-            source.PressureSettlementReceipt,
-            source.RouteCommitToken,
-            source.RoutePublicationToken,
-            source.DispositionCommand is { } disposition
-                ? ToRegularV4ToTuna(disposition)
-                : null,
-            source.DispositionReceipt is { } dispositionReceipt
-                ? ToRegularV4ToTuna(dispositionReceipt)
-                : null);
-
-    private static FileTransferRouteTransitionPhysicalDrainCommand FromRegularV4ToTuna(
-        RegularV4ToTunaPhysicalDrainCommand source)
-        => new(
-            FromRegularV4ToTuna(source.Authority),
-            source.CapturedThroughPhysicalSendGeneration,
-            source.CapturedPhysicalSendLeaseIds,
-            source.CapturedPhysicalSendCount,
-            source.CapturedPhysicalSendFingerprint);
-
-    private static RegularV4ToTunaPhysicalDrainCommand ToRegularV4ToTuna(
-        FileTransferRouteTransitionPhysicalDrainCommand source)
-        => new(
-            ToRegularV4ToTuna(source.Authority),
-            source.CapturedThroughPhysicalSendGeneration,
-            source.CapturedPhysicalSendLeaseIds,
-            source.CapturedPhysicalSendCount,
-            source.CapturedPhysicalSendFingerprint);
-
-    private static FileTransferRouteTransitionPhysicalDrainReceipt FromRegularV4ToTuna(
-        RegularV4ToTunaPhysicalDrainReceipt source)
-        => new(
-            FromRegularV4ToTuna(source.Command),
-            source.CompletedPhysicalSendLeaseIds,
-            source.CompletedPhysicalSendCount,
-            source.CompletedPhysicalSendFingerprint,
-            (FileTransferRouteTransitionPhysicalDrainOutcome)(int)source.Outcome,
-            source.Reason);
-
-    private static RegularV4ToTunaPhysicalDrainReceipt ToRegularV4ToTuna(
-        FileTransferRouteTransitionPhysicalDrainReceipt source)
-        => new(
-            ToRegularV4ToTuna(source.Command),
-            source.CompletedPhysicalSendLeaseIds,
-            source.CompletedPhysicalSendCount,
-            source.CompletedPhysicalSendFingerprint,
-            (RegularV4ToTunaPhysicalDrainOutcome)(int)source.Outcome,
-            source.Reason);
-
-    private static FileTransferRouteTransitionDispositionCommand FromRegularV4ToTuna(
-        RegularV4ToTunaRouteTransitionDispositionCommand source)
-        => new(
-            FromRegularV4ToTuna(source.Authority),
-            (FileTransferRouteTransitionDispositionKind)(int)source.Kind,
-            source.RouteCommitToken,
-            source.RoutePublicationToken,
-            source.Reason)
-        {
-            FinalProof = source.FinalProof,
-        };
-
-    private static RegularV4ToTunaRouteTransitionDispositionCommand ToRegularV4ToTuna(
-        FileTransferRouteTransitionDispositionCommand source)
-        => new(
-            ToRegularV4ToTuna(source.Authority),
-            (RegularV4ToTunaRouteTransitionDispositionKind)(int)source.Kind,
-            source.RouteCommitToken,
-            source.RoutePublicationToken,
-            source.Reason)
-        {
-            FinalProof = source.FinalProof,
-        };
-
-    private static FileTransferRouteTransitionDispositionReceipt FromRegularV4ToTuna(
-        RegularV4ToTunaRouteTransitionDispositionReceipt source)
-        => new(
-            FromRegularV4ToTuna(source.Command),
-            (FileTransferRouteTransitionDispositionApplyStatus)(int)source.Status,
-            source.Reason);
-
-    private static RegularV4ToTunaRouteTransitionDispositionReceipt ToRegularV4ToTuna(
-        FileTransferRouteTransitionDispositionReceipt source)
-        => new(
-            ToRegularV4ToTuna(source.Command),
-            (RegularV4ToTunaRouteTransitionDispositionApplyStatus)(int)source.Status,
-            source.Reason);
 }
 
 internal enum RegularV4FrontierRepairPressureRecoveryHandoffStatus
@@ -1552,8 +1045,6 @@ internal sealed record FileTransferCoordinatorState(
     FallbackTailYieldTransportEpochReauthorization? PendingFallbackTailYieldTransportEpochReauthorization = null,
     int LastFallbackTailYieldTransportEpochReauthorizationGeneration = 0,
     FileTransferCoordinatorPersistentState PersistentState = default,
-    RuntimeUnlockUncommittedTunaFallbackHandoffTransition?
-        LastRuntimeUnlockUncommittedTunaFallbackHandoff = null,
     FileTransferBridgeRecoveryExecutionCommand?
         CurrentBridgeRecoveryExecutionCommand = null,
     FileTransferBridgeRecoveryExecutionState?
@@ -1598,9 +1089,7 @@ internal readonly record struct FileTransferCoordinatorEvent(
     FallbackTailYieldTransportEpochReauthorizationRequest?
         FallbackTailYieldTransportEpochReauthorizationRequest = null,
     FallbackTailYieldTransportEpochReauthorization?
-        FallbackTailYieldTransportEpochReauthorization = null,
-    RuntimeUnlockUncommittedTunaFallbackHandoff?
-        RuntimeUnlockUncommittedTunaFallbackHandoff = null);
+        FallbackTailYieldTransportEpochReauthorization = null);
 
 internal readonly record struct FileTransferCoordinatorActionRequest(
     FileTransferCoordinatorActionKind Kind,
@@ -1875,7 +1364,8 @@ internal static class FileTransferCoordinator
             {
                 DispositionCommand: { } pending,
                 DispositionReceipt: null,
-            })
+            } &&
+            pending.Kind != FileTransferRouteTransitionDispositionKind.Superseded)
         {
             command = pending;
             return true;
@@ -1887,29 +1377,128 @@ internal static class FileTransferCoordinator
 
     internal static string CreateFileTransferRouteTransitionPhysicalDrainFingerprint(
         IReadOnlyList<long> capturedPhysicalSendLeaseIds)
-        => CreateRegularV4ToTunaPhysicalDrainFingerprint(capturedPhysicalSendLeaseIds);
+    {
+        ArgumentNullException.ThrowIfNull(capturedPhysicalSendLeaseIds);
+        var canonical = string.Join(
+            ",",
+            capturedPhysicalSendLeaseIds.Select(id =>
+                id.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture)));
+        var hash = System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(canonical));
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    internal static bool IsFileTransferRouteTransitionDispositionCommandValid(
+        FileTransferRouteTransitionDispositionCommand command)
+    {
+        var authority = command.Authority;
+        if (authority.IsDefault ||
+            string.IsNullOrWhiteSpace(command.Reason) ||
+            !string.Equals(
+                command.Reason,
+                NormalizeReason(command.Reason),
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (command.Kind is
+            FileTransferRouteTransitionDispositionKind.RolledBack or
+            FileTransferRouteTransitionDispositionKind.TerminalInvalidated)
+        {
+            return command.RouteCommitToken is null &&
+                   command.RoutePublicationToken is null &&
+                   command.FinalProof is null;
+        }
+
+        if (command.Kind == FileTransferRouteTransitionDispositionKind.Superseded)
+        {
+            return command.RouteCommitToken is null &&
+                   command.RoutePublicationToken is null &&
+                   command.FinalProof is null;
+        }
+
+        if (command.Kind != FileTransferRouteTransitionDispositionKind.Committed ||
+            command.RoutePublicationToken is not { IsDefault: false } publication ||
+            publication.RuntimeOwner.Route != authority.TargetRoute ||
+            publication.Route != authority.TargetRoute ||
+            publication.ProtocolVersion != authority.TargetProtocolVersion ||
+            publication.TargetRoute != authority.TargetRoute ||
+            publication.TargetProtocolVersion != authority.TargetProtocolVersion ||
+            publication.TargetTransport != authority.TargetTransport)
+        {
+            return false;
+        }
+
+        if (authority.TargetRoute == FileTransferRoute.PostTunaFallbackV6)
+        {
+            return command.RouteCommitToken is null &&
+                   command.FinalProof is null &&
+                   publication.ActionKind ==
+                       FileTransferCoordinatorActionKind.RoutePublication;
+        }
+
+        return authority.TargetRoute == FileTransferRoute.FileTunaV4 &&
+               command.RouteCommitToken is { IsDefault: false } commit &&
+               command.FinalProof is
+                   { PathProbeState: RuntimeUnlockPathProbeState.Acked } proof &&
+               commit.RuntimeOwner == publication.RuntimeOwner &&
+               commit.CommitGeneration == publication.RouteCommitGeneration &&
+               commit.RuntimeUnlockAdmission == proof.AdmissionToken &&
+               commit.TargetRoute == authority.TargetRoute &&
+               commit.TargetProtocolVersion == authority.TargetProtocolVersion &&
+               commit.TargetTransport == authority.TargetTransport &&
+               publication.ActionKind ==
+                   FileTransferCoordinatorActionKind.RouteCommitPublication;
+    }
+
+    internal static bool IsFileTransferRouteTransitionRetainedFrameApplyCommandValid(
+        FileTransferRouteTransitionRetainedFrameApplyCommand command)
+    {
+        var authority = command.Authority;
+        return !authority.IsDefault &&
+               authority.TargetRoute == FileTransferRoute.PostTunaFallbackV6 &&
+               authority.TargetProtocolVersion ==
+                   FileTransferProtocol.ProtocolVersionV6 &&
+               authority.TargetTransport == FileTransferTransportKind.RegularNkn &&
+               authority.ProofBoundary is
+                   FileTransferFallbackTransitionProofBoundary fallback &&
+               fallback.RetainedFrameIdentity == command.FrameIdentity &&
+               command.FrameIdentity.IsComplete &&
+               !command.TargetRuntimeOwner.IsDefault &&
+               !command.TargetRoutePublication.IsDefault &&
+               string.Equals(
+                   command.TargetRuntimeOwner.SessionId,
+                   authority.SessionId,
+                   StringComparison.Ordinal) &&
+               string.Equals(
+                   command.TargetRuntimeOwner.TransferId,
+                   authority.TransferId,
+                   StringComparison.Ordinal) &&
+               command.TargetRuntimeOwner.Direction == authority.Direction &&
+               command.TargetRuntimeOwner.Route == authority.TargetRoute &&
+               command.TargetRuntimeOwner.ProtocolVersion ==
+                   authority.TargetProtocolVersion &&
+               command.TargetRoutePublication.RuntimeOwner ==
+                   command.TargetRuntimeOwner &&
+               command.TargetRoutePublication.Route == authority.TargetRoute &&
+               command.TargetRoutePublication.ProtocolVersion ==
+                   authority.TargetProtocolVersion &&
+               command.TargetRoutePublication.TargetRoute ==
+                   authority.TargetRoute &&
+               command.TargetRoutePublication.TargetProtocolVersion ==
+                   authority.TargetProtocolVersion &&
+               command.TargetRoutePublication.TargetTransport ==
+                   authority.TargetTransport &&
+               command.TargetRoutePublication.ActionKind ==
+                   FileTransferCoordinatorActionKind.RoutePublication;
+    }
 
     internal static FileTransferRouteTransitionDecision PrepareFileTransferRouteTransition(
         FileTransferCoordinatorState state,
         FileTransferRouteTransitionPrepareRequest request)
     {
-        if (request.Kind == FileTransferRouteTransitionKind.RegularV4ToTunaV4)
-        {
-            if (!TryConvertRegularV4ToTunaPrepareRequest(
-                    request,
-                    out var compatibilityRequest,
-                    out var conversionRejection))
-            {
-                return FileTransferRouteTransitionDecisionFor(
-                    state,
-                    FileTransferRouteTransitionDecisionStatus.Rejected,
-                    conversionRejection);
-            }
-
-            return FromRegularV4ToTunaDecision(
-                PrepareRegularV4ToTunaRouteTransition(state, compatibilityRequest));
-        }
-
         var transitionState = state.PersistentState.FileTransferRouteTransition;
         if (transitionState.CurrentOperation is { } current)
         {
@@ -1919,7 +1508,12 @@ internal static class FileTransferCoordinator
                 IsFileTransferRouteTransitionSourceScopeCurrent(
                     state,
                     current.Authority,
-                    out _))
+                    out _) &&
+                TryValidateFileTransferRouteTransitionPrepareRequest(
+                    state,
+                    request,
+                    out _,
+                    allowCurrentOperation: true))
             {
                 return FileTransferRouteTransitionDecisionFor(
                     state,
@@ -1934,6 +1528,49 @@ internal static class FileTransferCoordinator
                 state,
                 FileTransferRouteTransitionDecisionStatus.Rejected,
                 "filetransfer_route_transition_conflict");
+        }
+
+        if (transitionState.LastTerminalOperation is
+            {
+                State: FileTransferRouteTransitionState.Committed,
+            } committed &&
+            FileTransferRouteTransitionPrepareRequestMatchesAuthority(
+                request,
+                committed.Authority) &&
+            IsCommittedFileTransferRouteTransitionTerminalEvidenceValid(
+                committed))
+        {
+            return FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Idempotent,
+                "filetransfer_route_transition_already_committed",
+                committed.Authority,
+                dispositionCommand: committed.DispositionCommand,
+                retainedFrameApplyCommand:
+                    committed.RetainedFrameApplyCommand);
+        }
+
+        if (transitionState.LastTerminalOperation is
+            {
+                State: FileTransferRouteTransitionState.Invalidated,
+                DispositionCommand:
+                {
+                    Kind:
+                        FileTransferRouteTransitionDispositionKind
+                            .TerminalInvalidated,
+                },
+            } terminalInvalidated &&
+            FileTransferRouteTransitionPrepareRequestMatchesAuthority(
+                request,
+                terminalInvalidated.Authority))
+        {
+            return FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Idempotent,
+                "filetransfer_route_transition_terminally_invalidated",
+                terminalInvalidated.Authority,
+                dispositionCommand:
+                    terminalInvalidated.DispositionCommand);
         }
 
         if (transitionState.LastTerminalOperation is
@@ -2028,39 +1665,6 @@ internal static class FileTransferCoordinator
             IReadOnlyList<long> capturedPhysicalSendLeaseIds,
             string capturedPhysicalSendFingerprint)
     {
-        if (authority.Kind == FileTransferRouteTransitionKind.RegularV4ToTunaV4)
-        {
-            var compatibilityAuthority =
-                FileTransferRouteTransitionCompatibility.ToRegularV4ToTuna(authority);
-            var compatibilityReceipt = new RegularV4ToTunaActivationPauseBindReceipt(
-                new RegularV4ToTunaActivationPauseBindCommand(compatibilityAuthority),
-                (RegularV4ToTunaActivationPauseBindStatus)(int)pauseBindReceipt.Status,
-                pauseBindReceipt.Status switch
-                {
-                    FileTransferRouteTransitionPauseBindStatus.Installed
-                        when string.Equals(
-                            pauseBindReceipt.Reason,
-                            "filetransfer_route_transition_pause_bound",
-                            StringComparison.Ordinal) =>
-                        "regular_v4_to_tuna_activation_pause_bound",
-                    FileTransferRouteTransitionPauseBindStatus.Idempotent
-                        when string.Equals(
-                            pauseBindReceipt.Reason,
-                            "filetransfer_route_transition_pause_bind_idempotent",
-                            StringComparison.Ordinal) =>
-                        "regular_v4_to_tuna_activation_pause_bind_idempotent",
-                    _ => pauseBindReceipt.Reason,
-                });
-            return FromRegularV4ToTunaDecision(
-                BeginRegularV4ToTunaPhysicalDrain(
-                    state,
-                    compatibilityAuthority,
-                    compatibilityReceipt,
-                    capturedThroughPhysicalSendGeneration,
-                    capturedPhysicalSendLeaseIds,
-                    capturedPhysicalSendFingerprint));
-        }
-
         var transitionState = state.PersistentState.FileTransferRouteTransition;
         if (transitionState.CurrentOperation is not { } current ||
             current.Authority != authority)
@@ -2113,8 +1717,14 @@ internal static class FileTransferCoordinator
                     : rejectionReason);
         }
 
-        var expectedPauseCommand = new FileTransferRouteTransitionPauseBindCommand(authority);
+        var expectedPauseCommand = current.PauseBindReceipt is { } retainedPauseReceipt
+            ? retainedPauseReceipt.Command
+            : new FileTransferRouteTransitionPauseBindCommand(authority);
         if (pauseBindReceipt.Command != expectedPauseCommand ||
+            current.PauseBindReceipt is { } committedPauseReceipt &&
+            !IsExactOrCanonicalIdempotentFileTransferRouteTransitionPauseBindReceipt(
+                committedPauseReceipt,
+                pauseBindReceipt) ||
             pauseBindReceipt.Status is not (
                 FileTransferRouteTransitionPauseBindStatus.Installed or
                 FileTransferRouteTransitionPauseBindStatus.Idempotent) ||
@@ -2186,7 +1796,18 @@ internal static class FileTransferCoordinator
             if (pending.PredecessorAuthority == predecessorAuthority &&
                 FileTransferRouteTransitionPrepareRequestMatchesAuthority(
                     successorRequest,
-                    pending.SuccessorAuthority))
+                    pending.SuccessorAuthority) &&
+                transitionState.CurrentOperation is { } currentPredecessor &&
+                currentPredecessor.Authority == predecessorAuthority &&
+                IsFileTransferRouteTransitionSourceScopeCurrent(
+                    state,
+                    predecessorAuthority,
+                    out _) &&
+                TryValidateFileTransferRouteTransitionPrepareRequest(
+                    state,
+                    successorRequest,
+                    out _,
+                    allowCurrentOperation: true))
             {
                 return FileTransferRouteTransitionDecisionFor(
                     state,
@@ -2242,7 +1863,10 @@ internal static class FileTransferCoordinator
             state,
             successorRequest,
             transitionGeneration);
-        var pauseRebind = new FileTransferRouteTransitionPauseBindCommand(successor);
+        var pauseRebind = new FileTransferRouteTransitionPauseBindCommand(successor)
+        {
+            PredecessorAuthority = predecessorAuthority,
+        };
         var staged = new FileTransferRouteTransitionSupersession(
             predecessorAuthority,
             successor,
@@ -2272,6 +1896,36 @@ internal static class FileTransferCoordinator
             FileTransferRouteTransitionPauseBindReceipt pauseRebindReceipt)
     {
         var transitionState = state.PersistentState.FileTransferRouteTransition;
+        if (transitionState.PendingSupersession is null &&
+            transitionState.CurrentOperation is { } installedSuccessor &&
+            transitionState.LastTerminalOperation is
+                {
+                    State: FileTransferRouteTransitionState.Invalidated,
+                    DispositionCommand.Kind:
+                        FileTransferRouteTransitionDispositionKind.Superseded,
+                } supersededPredecessor &&
+            installedSuccessor.Authority ==
+                pauseRebindReceipt.Command.Authority &&
+            installedSuccessor.Authority.Kind ==
+                FileTransferRouteTransitionKind
+                    .UncommittedTunaToPostTunaFallbackV6 &&
+            pauseRebindReceipt.Command.PredecessorAuthority ==
+                supersededPredecessor.Authority &&
+            installedSuccessor.PauseBindReceipt is { } installedReceipt &&
+            IsExactOrCanonicalIdempotentFileTransferRouteTransitionPauseBindReceipt(
+                installedReceipt,
+                pauseRebindReceipt))
+        {
+            return FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Idempotent,
+                "filetransfer_route_transition_supersession_already_committed",
+                installedSuccessor.Authority,
+                pauseRebindReceipt.Command,
+                installedSuccessor.DrainCommand,
+                supersededPredecessor.DispositionCommand);
+        }
+
         if (transitionState.PendingSupersession is not { } pending ||
             transitionState.CurrentOperation is not { } predecessor ||
             predecessor.Authority != pending.PredecessorAuthority)
@@ -2282,8 +1936,20 @@ internal static class FileTransferCoordinator
                 "filetransfer_route_transition_supersession_not_pending");
         }
 
+        if (!IsFileTransferRouteTransitionSourceScopeCurrent(
+                state,
+                predecessor.Authority,
+                out var supersessionScopeRejection))
+        {
+            return FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Rejected,
+                supersessionScopeRejection);
+        }
+
         var expectedCommand = pending.PauseRebindCommand;
         if (pauseRebindReceipt.Command != expectedCommand ||
+            expectedCommand.PredecessorAuthority != pending.PredecessorAuthority ||
             pauseRebindReceipt.Status is not (
                 FileTransferRouteTransitionPauseBindStatus.Installed or
                 FileTransferRouteTransitionPauseBindStatus.Idempotent) ||
@@ -2301,6 +1967,14 @@ internal static class FileTransferCoordinator
             RouteCommitToken: null,
             RoutePublicationToken: null,
             "filetransfer_route_transition_superseded");
+        if (!IsFileTransferRouteTransitionDispositionCommandValid(
+                supersededDisposition))
+        {
+            return FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Rejected,
+                "filetransfer_route_transition_supersession_disposition_invalid");
+        }
         var superseded = predecessor with
         {
             State = FileTransferRouteTransitionState.Invalidated,
@@ -2328,12 +2002,511 @@ internal static class FileTransferCoordinator
         };
         return FileTransferRouteTransitionDecisionFor(
             nextState,
-            FileTransferRouteTransitionDecisionStatus.Prepared,
+            successor.State == FileTransferRouteTransitionState.Draining
+                ? FileTransferRouteTransitionDecisionStatus.Draining
+                : FileTransferRouteTransitionDecisionStatus.Prepared,
             "filetransfer_route_transition_supersession_committed",
             successor.Authority,
             expectedCommand,
             successorDrain,
             supersededDisposition);
+    }
+
+    internal static RegularV4FrontierRepairPressureBindingDecision
+        PrepareFileTransferRouteTransitionPressureSettlement(
+            FileTransferCoordinatorState state,
+            FileTransferRouteTransitionAuthority authority,
+            FileTransferRouteTransitionPhysicalDrainReceipt drainReceipt,
+            RuntimeUnlockRouteCommitProof? finalProof = null)
+    {
+        if (!TryValidateFileTransferRouteTransitionDrainReceipt(
+                state,
+                authority,
+                drainReceipt,
+                out var rejectionReason) ||
+            !TryValidateFileTransferRouteTransitionCommitProof(
+                state,
+                authority,
+                finalProof,
+                out rejectionReason))
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                rejectionReason);
+        }
+
+        var pressureState =
+            state.PersistentState.RegularV4FrontierRepairPressure;
+        if (pressureState.PendingBinding is not null ||
+            pressureState.RetainedPredecessorBinding is not null)
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                "filetransfer_route_transition_pressure_lineage_pending");
+        }
+
+        if (pressureState.InstalledBinding is not { } installed)
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Idempotent,
+                "filetransfer_route_transition_pressure_not_installed");
+        }
+
+        return PrepareRegularV4FrontierRepairPressureSettlement(
+            state,
+            CreateFileTransferRouteTransitionPressureSettlement(
+                installed.Authority));
+    }
+
+    internal static FileTransferRouteTransitionDecision CommitFileTransferRouteTransition(
+        FileTransferCoordinatorState state,
+        FileTransferRouteTransitionAuthority authority,
+        FileTransferRouteTransitionPhysicalDrainReceipt drainReceipt,
+        RuntimeUnlockRouteCommitProof? finalProof = null,
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
+            pressureSettlementReceipt = null)
+    {
+        var transitionState = state.PersistentState.FileTransferRouteTransition;
+        if (transitionState.LastTerminalOperation is
+            {
+                State: FileTransferRouteTransitionState.Committed,
+                DrainReceipt: { } committedDrain,
+            } terminal &&
+            terminal.Authority == authority &&
+            IsExactOrCanonicalIdempotentFileTransferRouteTransitionDrainReceipt(
+                committedDrain,
+                drainReceipt) &&
+            terminal.FinalProof == finalProof &&
+            IsExactFileTransferRouteTransitionPressureReceiptDuplicate(
+                terminal.PressureSettlementReceipt,
+                pressureSettlementReceipt) &&
+            IsCommittedFileTransferRouteTransitionTerminalEvidenceValid(terminal))
+        {
+            return FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Idempotent,
+                "filetransfer_route_transition_already_committed",
+                authority,
+                drainCommand: terminal.DrainCommand,
+                dispositionCommand: terminal.DispositionCommand,
+                retainedFrameApplyCommand: terminal.RetainedFrameApplyCommand);
+        }
+
+        if (!TryValidateFileTransferRouteTransitionDrainReceipt(
+                state,
+                authority,
+                drainReceipt,
+                out var rejectionReason) ||
+            !TryValidateFileTransferRouteTransitionCommitProof(
+                state,
+                authority,
+                finalProof,
+                out rejectionReason))
+        {
+            return FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Rejected,
+                rejectionReason);
+        }
+
+        var projectedState = state;
+        var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
+        if (pressureState.PendingBinding is not null ||
+            pressureState.RetainedPredecessorBinding is not null)
+        {
+            return FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Rejected,
+                "filetransfer_route_transition_pressure_lineage_pending");
+        }
+
+        if (pressureState.InstalledBinding is { } installed)
+        {
+            var expectedSettlement =
+                CreateFileTransferRouteTransitionPressureSettlement(
+                    installed.Authority);
+            var preparedPressure =
+                PrepareRegularV4FrontierRepairPressureSettlement(state, expectedSettlement);
+            if (pressureSettlementReceipt is null ||
+                preparedPressure.Status !=
+                    RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted ||
+                preparedPressure.SettlementCommand is not { } expectedCommand ||
+                pressureSettlementReceipt.Command != expectedCommand ||
+                !IsCanonicalFileTransferRouteTransitionPressureSettlementReceipt(
+                    pressureSettlementReceipt))
+            {
+                return FileTransferRouteTransitionDecisionFor(
+                    state,
+                    FileTransferRouteTransitionDecisionStatus.Rejected,
+                    "filetransfer_route_transition_pressure_apply_receipt_missing");
+            }
+
+            var pressureCommit = CommitRegularV4FrontierRepairPressureSettlement(
+                state,
+                pressureSettlementReceipt);
+            if (pressureCommit.Status !=
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted)
+            {
+                return FileTransferRouteTransitionDecisionFor(
+                    state,
+                    FileTransferRouteTransitionDecisionStatus.Rejected,
+                    pressureCommit.Reason);
+            }
+
+            projectedState =
+                pressureCommit.State.CurrentRepairReplayDecision is { } currentRepair &&
+                currentRepair.AuthorityId == installed.Authority.AuthorityId
+                    ? pressureCommit.State with { CurrentRepairReplayDecision = null }
+                    : pressureCommit.State;
+        }
+        else if (pressureSettlementReceipt is not null)
+        {
+            return FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Rejected,
+                "filetransfer_route_transition_pressure_apply_receipt_unexpected");
+        }
+
+        projectedState = CloneCoordinatorStateGraph(projectedState);
+        projectedState = projectedState with
+        {
+            PersistentState = projectedState.PersistentState with
+            {
+                FileTransferRouteTransition = transitionState with
+                {
+                    CurrentOperation = null,
+                    PendingSupersession = null,
+                },
+            },
+        };
+        var targetSelection = FileTransferRouteResolver.Resolve(authority.TargetRoute);
+        var toTuna = authority.TargetRoute == FileTransferRoute.FileTunaV4;
+        var fallbackProof =
+            authority.ProofBoundary as FileTransferFallbackTransitionProofBoundary;
+        var coordinatorEvent = new FileTransferCoordinatorEvent(
+            toTuna
+                ? FileTransferCoordinatorEventKind.TunaActivated
+                : FileTransferCoordinatorEventKind.TunaLost,
+            targetSelection,
+            authority.HandoffKind,
+            authority.TargetTransport,
+            NormalizeReason(authority.Reason),
+            toTuna ? FileTransferLegState.Active : FileTransferLegState.CheckpointPending,
+            CanSendData: toTuna,
+            authority.DurableCheckpoint.ContiguousCommittedChunkIndex,
+            authority.DurableCheckpoint.DurableHighestChunkIndex,
+            TransportEpochId:
+                toTuna ? 0 : fallbackProof!.TargetTransportEpoch,
+            BridgeRecoveryGeneration:
+                toTuna ? 0 : fallbackProof!.TargetBridgeRecoveryGeneration);
+        var routeDecision = TransitionToRoute(
+            coordinatorEvent,
+            projectedState,
+            NormalizeReason(authority.Reason),
+            recoverEpoch: toTuna);
+        if (routeDecision.MutationRejectedReason is { } routeRejection)
+        {
+            return FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Rejected,
+                routeRejection);
+        }
+
+        var committedState = routeDecision.State;
+        if (committedState.CurrentRuntimeOwner is not { } runtimeOwner ||
+            committedState.CurrentLeg is not { } targetLeg)
+        {
+            return FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Rejected,
+                "filetransfer_route_transition_target_scope_missing");
+        }
+
+        RouteCommitToken? routeCommitToken = null;
+        RoutePublicationToken publicationToken;
+        if (toTuna)
+        {
+            var proof = finalProof!.Value;
+            var activation =
+                (FileTransferTunaActivationTransitionProofBoundary)
+                authority.ProofBoundary;
+            var commitGeneration = Math.Max(1, state.LastRouteCommitGeneration + 1);
+            routeCommitToken = new RouteCommitToken(
+                committedState.SessionId,
+                committedState.TransferId,
+                committedState.Direction,
+                runtimeOwner,
+                activation.RuntimeUnlockAdmission,
+                committedState.RouteSelection.Route,
+                committedState.RouteSelection.TelemetryToken,
+                committedState.RouteSelection.ProtocolVersion,
+                committedState.CurrentLiveRouteEpoch?.EpochId ?? 0,
+                runtimeOwner.RuntimeGeneration,
+                committedState.TerminalGeneration,
+                targetLeg.Generation,
+                proof.TransactionGeneration,
+                proof.OfferGeneration,
+                proof.TunaPathLeaseGeneration,
+                proof.TunaPathLeaseListenerRunId,
+                proof.SamePathTunaProbeAckId ?? proof.PathProbeId ?? string.Empty,
+                authority.TargetRoute,
+                authority.TargetProtocolVersion,
+                authority.TargetTransport,
+                commitGeneration,
+                NormalizeReason(authority.Reason));
+            committedState = committedState with
+            {
+                CurrentRouteCommit = routeCommitToken,
+                LastRouteCommitGeneration = commitGeneration,
+                CurrentRuntimeUnlockAdmission = null,
+                CurrentRuntimeUnlockPendingPreCommitProbe = null,
+                CurrentRuntimeUnlockRetryDispatchAuthority = null,
+            };
+            var publicationRequest = new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RouteCommitPublication,
+                Source: "filetransfer_route_transition",
+                Reason: authority.Reason,
+                RuntimeOwner: runtimeOwner,
+                Route: committedState.RouteSelection.Route,
+                ProtocolVersion: committedState.RouteSelection.ProtocolVersion,
+                LiveRouteEpoch: committedState.CurrentLiveRouteEpoch?.EpochId ?? 0,
+                LegGeneration: targetLeg.Generation,
+                RuntimeGeneration: runtimeOwner.RuntimeGeneration,
+                TerminalGeneration: committedState.TerminalGeneration,
+                RuntimeUnlockAdmissionToken: activation.RuntimeUnlockAdmission,
+                RouteCommitToken: routeCommitToken,
+                RuntimeUnlockTransactionGeneration: proof.TransactionGeneration,
+                RuntimeUnlockOfferGeneration: proof.OfferGeneration,
+                RuntimeUnlockTunaPathLeaseGeneration: proof.TunaPathLeaseGeneration,
+                RuntimeUnlockTunaPathLeaseListenerRunId:
+                    proof.TunaPathLeaseListenerRunId,
+                RuntimeUnlockProbeId: proof.PathProbeId,
+                RuntimeUnlockSamePathTunaProbeAckId:
+                    proof.SamePathTunaProbeAckId,
+                RouteCommitGeneration: commitGeneration,
+                TargetRoute: authority.TargetRoute,
+                TargetProtocolVersion: authority.TargetProtocolVersion,
+                TargetTransport: authority.TargetTransport);
+            publicationToken = IssueRoutePublicationToken(
+                committedState,
+                publicationRequest,
+                Math.Max(1, state.LastRoutePublicationGeneration + 1))!.Value;
+            committedState = ApplyIssuedRoutePublicationAuthority(
+                committedState,
+                CreateRoutePublicationDecision(
+                    committedState,
+                    FileTransferCoordinatorActionKind.RouteCommitPublication,
+                    accepted: true,
+                    rejectionReason: "accepted",
+                    publicationToken));
+        }
+        else
+        {
+            committedState = committedState with
+            {
+                CurrentRouteCommit = null,
+                CurrentRuntimeUnlockAdmission = null,
+                CurrentRuntimeUnlockPendingPreCommitProbe = null,
+                CurrentRuntimeUnlockRetryDispatchAuthority = null,
+            };
+            var publicationRequest = new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "filetransfer_route_transition",
+                Reason: authority.Reason,
+                RuntimeOwner: runtimeOwner,
+                Route: committedState.RouteSelection.Route,
+                ProtocolVersion: committedState.RouteSelection.ProtocolVersion,
+                LiveRouteEpoch: committedState.CurrentLiveRouteEpoch?.EpochId ?? 0,
+                LegGeneration: targetLeg.Generation,
+                RuntimeGeneration: runtimeOwner.RuntimeGeneration,
+                TerminalGeneration: committedState.TerminalGeneration,
+                TargetRoute: authority.TargetRoute,
+                TargetProtocolVersion: authority.TargetProtocolVersion,
+                TargetTransport: authority.TargetTransport);
+            publicationToken = IssueRoutePublicationToken(
+                committedState,
+                publicationRequest,
+                Math.Max(1, state.LastRoutePublicationGeneration + 1))!.Value;
+            committedState = ApplyIssuedRoutePublicationAuthority(
+                committedState,
+                CreateRoutePublicationDecision(
+                    committedState,
+                    FileTransferCoordinatorActionKind.RoutePublication,
+                    accepted: true,
+                    rejectionReason: "accepted",
+                    publicationToken));
+        }
+
+        var disposition = new FileTransferRouteTransitionDispositionCommand(
+            authority,
+            FileTransferRouteTransitionDispositionKind.Committed,
+            routeCommitToken,
+            publicationToken,
+            "filetransfer_route_transition_committed")
+        {
+            FinalProof = finalProof,
+        };
+        FileTransferRouteTransitionRetainedFrameApplyCommand? frameApplyCommand =
+            fallbackProof is null
+                ? null
+                : new FileTransferRouteTransitionRetainedFrameApplyCommand(
+                    authority,
+                    runtimeOwner,
+                    publicationToken,
+                    fallbackProof.RetainedFrameIdentity);
+        if (!IsFileTransferRouteTransitionDispositionCommandValid(disposition) ||
+            frameApplyCommand is { } retainedFrameCommand &&
+            !IsFileTransferRouteTransitionRetainedFrameApplyCommandValid(
+                retainedFrameCommand))
+        {
+            return FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Rejected,
+                "filetransfer_route_transition_commit_evidence_invalid");
+        }
+        var terminalOperation =
+            transitionState.CurrentOperation!.Value with
+            {
+                State = FileTransferRouteTransitionState.Committed,
+                DrainReceipt =
+                    SnapshotFileTransferRouteTransitionDrainReceipt(drainReceipt),
+                FinalProof = finalProof,
+                PressureSettlementReceipt = pressureSettlementReceipt,
+                RouteCommitToken = routeCommitToken,
+                RoutePublicationToken = publicationToken,
+                DispositionCommand = disposition,
+                RetainedFrameApplyCommand = frameApplyCommand,
+            };
+        committedState = committedState with
+        {
+            PersistentState = committedState.PersistentState with
+            {
+                FileTransferRouteTransition = transitionState with
+                {
+                    CurrentOperation = null,
+                    PendingSupersession = null,
+                    LastTerminalOperation = terminalOperation,
+                },
+            },
+        };
+        routeDecision = routeDecision with
+        {
+            State = committedState,
+            RuntimeUnlockCommitAccepted = toTuna,
+            RuntimeUnlockCommitRejectedReason = null,
+            RouteCommitToken = routeCommitToken,
+        };
+        return FileTransferRouteTransitionDecisionFor(
+            committedState,
+            FileTransferRouteTransitionDecisionStatus.Committed,
+            "filetransfer_route_transition_committed",
+            authority,
+            drainCommand: terminalOperation.DrainCommand,
+            dispositionCommand: disposition,
+            retainedFrameApplyCommand: frameApplyCommand,
+            routeDecision: routeDecision);
+    }
+
+    internal static FileTransferRouteTransitionDecision
+        ApplyFileTransferRouteTransitionRetainedFrameReceipt(
+            FileTransferCoordinatorState state,
+            FileTransferRouteTransitionRetainedFrameApplyReceipt receipt)
+    {
+        var transitionState = state.PersistentState.FileTransferRouteTransition;
+        if (!IsFileTransferRouteTransitionRetainedFrameApplyCommandValid(
+                receipt.Command) ||
+            transitionState.LastTerminalOperation is not
+            {
+                State: FileTransferRouteTransitionState.Committed,
+                RetainedFrameApplyCommand: { } expectedCommand,
+            } terminal ||
+            receipt.Command != expectedCommand ||
+            terminal.Authority.TargetRoute != FileTransferRoute.PostTunaFallbackV6)
+        {
+            return FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Rejected,
+                "filetransfer_route_transition_retained_frame_receipt_not_current");
+        }
+
+        if (terminal.RetainedFrameApplyReceipt is { } applied)
+        {
+            if (receipt == applied ||
+                receipt.Command == applied.Command &&
+                receipt.Status ==
+                    FileTransferRouteTransitionRetainedFrameApplyStatus.Idempotent &&
+                string.Equals(
+                    receipt.Reason,
+                    "filetransfer_route_transition_retained_frame_apply_idempotent",
+                    StringComparison.Ordinal))
+            {
+                return FileTransferRouteTransitionDecisionFor(
+                    state,
+                    FileTransferRouteTransitionDecisionStatus.Idempotent,
+                    "filetransfer_route_transition_retained_frame_already_applied",
+                    terminal.Authority,
+                    drainCommand: terminal.DrainCommand,
+                    dispositionCommand: terminal.DispositionCommand,
+                    retainedFrameApplyCommand: expectedCommand);
+            }
+
+            return FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Rejected,
+                "filetransfer_route_transition_retained_frame_duplicate_mismatch");
+        }
+
+        if (receipt.Status is not (
+                FileTransferRouteTransitionRetainedFrameApplyStatus.Applied or
+                FileTransferRouteTransitionRetainedFrameApplyStatus.Idempotent) ||
+            !string.Equals(
+                receipt.Reason,
+                receipt.Status ==
+                    FileTransferRouteTransitionRetainedFrameApplyStatus.Applied
+                    ? "filetransfer_route_transition_retained_frame_applied"
+                    : "filetransfer_route_transition_retained_frame_apply_idempotent",
+                StringComparison.Ordinal) ||
+            state.CurrentRuntimeOwner != expectedCommand.TargetRuntimeOwner ||
+            state.CurrentRoutePublicationToken !=
+                expectedCommand.TargetRoutePublication ||
+            !IsRuntimeOwnerCurrent(
+                state,
+                expectedCommand.TargetRuntimeOwner,
+                out _) ||
+            !IsRoutePublicationTokenCurrent(
+                state,
+                expectedCommand.TargetRoutePublication,
+                out _))
+        {
+            return FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Rejected,
+                "filetransfer_route_transition_retained_frame_receipt_rejected");
+        }
+
+        var terminalWithReceipt =
+            terminal with { RetainedFrameApplyReceipt = receipt };
+        var nextState = state with
+        {
+            PersistentState = state.PersistentState with
+            {
+                FileTransferRouteTransition = transitionState with
+                {
+                    LastTerminalOperation = terminalWithReceipt,
+                },
+            },
+        };
+        return FileTransferRouteTransitionDecisionFor(
+            nextState,
+            FileTransferRouteTransitionDecisionStatus.Committed,
+            "filetransfer_route_transition_retained_frame_receipt_applied",
+            terminal.Authority,
+            drainCommand: terminal.DrainCommand,
+            dispositionCommand: terminal.DispositionCommand,
+            retainedFrameApplyCommand: expectedCommand);
     }
 
     internal static FileTransferRouteTransitionDecision
@@ -2343,16 +2516,6 @@ internal static class FileTransferCoordinator
             bool terminalInvalidation,
             string reason)
     {
-        if (authority.Kind == FileTransferRouteTransitionKind.RegularV4ToTunaV4)
-        {
-            return FromRegularV4ToTunaDecision(
-                InvalidateRegularV4ToTunaRouteTransition(
-                    state,
-                    FileTransferRouteTransitionCompatibility.ToRegularV4ToTuna(authority),
-                    terminalInvalidation,
-                    reason));
-        }
-
         var transitionState = state.PersistentState.FileTransferRouteTransition;
         var normalizedReason = NormalizeReason(reason);
         var kind = terminalInvalidation
@@ -2444,28 +2607,12 @@ internal static class FileTransferCoordinator
             FileTransferCoordinatorState state,
             FileTransferRouteTransitionDispositionReceipt receipt)
     {
-        if (receipt.Command.Authority.Kind ==
-            FileTransferRouteTransitionKind.RegularV4ToTunaV4)
+        if (!IsFileTransferRouteTransitionDispositionCommandValid(receipt.Command))
         {
-            var authority =
-                FileTransferRouteTransitionCompatibility.ToRegularV4ToTuna(
-                    receipt.Command.Authority);
-            var command = new RegularV4ToTunaRouteTransitionDispositionCommand(
-                authority,
-                (RegularV4ToTunaRouteTransitionDispositionKind)(int)receipt.Command.Kind,
-                receipt.Command.RouteCommitToken,
-                receipt.Command.RoutePublicationToken,
-                receipt.Command.Reason)
-            {
-                FinalProof = receipt.Command.FinalProof,
-            };
-            return FromRegularV4ToTunaDecision(
-                ApplyRegularV4ToTunaRouteTransitionDispositionReceipt(
-                    state,
-                    new RegularV4ToTunaRouteTransitionDispositionReceipt(
-                        command,
-                        (RegularV4ToTunaRouteTransitionDispositionApplyStatus)(int)receipt.Status,
-                        receipt.Reason)));
+            return FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Rejected,
+                "filetransfer_route_transition_disposition_command_invalid");
         }
 
         var transitionState = state.PersistentState.FileTransferRouteTransition;
@@ -2554,989 +2701,6 @@ internal static class FileTransferCoordinator
             dispositionCommand: expectedCommand);
     }
 
-    internal static RegularV4ToTunaRouteTransitionSubstate
-        GetRegularV4ToTunaRouteTransitionSubstate(FileTransferCoordinatorState state)
-        => state.PersistentState.RegularV4ToTunaRouteTransition;
-
-    internal static bool IsRegularV4ToTunaRouteTransitionDispositionCommandValid(
-        RegularV4ToTunaRouteTransitionDispositionCommand command)
-    {
-        var authority = command.Authority;
-        if (authority.IsDefault ||
-            string.IsNullOrWhiteSpace(command.Reason) ||
-            !string.Equals(
-                command.Reason,
-                NormalizeReason(command.Reason),
-                StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        if (command.Kind is
-            RegularV4ToTunaRouteTransitionDispositionKind.RolledBack or
-            RegularV4ToTunaRouteTransitionDispositionKind.TerminalInvalidated)
-        {
-            return command.RouteCommitToken is null &&
-                   command.RoutePublicationToken is null &&
-                   command.FinalProof is null;
-        }
-
-        if (command.Kind == RegularV4ToTunaRouteTransitionDispositionKind.Superseded)
-        {
-            return command.RouteCommitToken is null &&
-                   command.FinalProof is null &&
-                   command.RoutePublicationToken is { IsDefault: false } fallback &&
-                   string.Equals(
-                       fallback.SessionId,
-                       authority.SessionId,
-                       StringComparison.Ordinal) &&
-                   string.Equals(
-                       fallback.TransferId,
-                       authority.TransferId,
-                       StringComparison.Ordinal) &&
-                   fallback.Direction == authority.Direction &&
-                   fallback.RuntimeOwner.SessionId == fallback.SessionId &&
-                   fallback.RuntimeOwner.TransferId == fallback.TransferId &&
-                   fallback.RuntimeOwner.Direction == fallback.Direction &&
-                   fallback.RuntimeOwner.Route == fallback.Route &&
-                   string.Equals(
-                       fallback.RuntimeOwner.RouteToken,
-                       fallback.RouteToken,
-                       StringComparison.Ordinal) &&
-                   fallback.RuntimeOwner.ProtocolVersion == fallback.ProtocolVersion &&
-                   fallback.RuntimeOwner.LiveRouteEpoch == fallback.LiveRouteEpoch &&
-                   fallback.RuntimeOwner.RuntimeGeneration == fallback.RuntimeGeneration &&
-                   fallback.RuntimeOwner.TerminalGeneration == fallback.TerminalGeneration &&
-                   fallback.TerminalGeneration == authority.SourceTerminalGeneration &&
-                   fallback.Route == FileTransferRoute.PostTunaFallbackV6 &&
-                   fallback.ProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
-                   fallback.TargetRoute == FileTransferRoute.PostTunaFallbackV6 &&
-                   fallback.TargetProtocolVersion ==
-                       FileTransferProtocol.ProtocolVersionV6 &&
-                   fallback.TargetTransport == FileTransferTransportKind.RegularNkn &&
-                   fallback.ActionKind ==
-                       FileTransferCoordinatorActionKind.RoutePublication &&
-                   fallback.RouteCommitGeneration is null;
-        }
-
-        if (command.Kind != RegularV4ToTunaRouteTransitionDispositionKind.Committed ||
-            command.RouteCommitToken is not { IsDefault: false } commit ||
-            command.RoutePublicationToken is not { IsDefault: false } publication ||
-            command.FinalProof is not { } finalProof ||
-            !RegularV4ToTunaProofMatchesTarget(finalProof) ||
-            finalProof.PathProbeState != RuntimeUnlockPathProbeState.Acked)
-        {
-            return false;
-        }
-
-        var expectedProbeId =
-            finalProof.SamePathTunaProbeAckId ??
-            finalProof.PathProbeId ??
-            string.Empty;
-        return finalProof.AdmissionToken == authority.RuntimeUnlockAdmission &&
-               finalProof.TransactionGeneration ==
-                   authority.AcceptedLaunchBoundary.TransactionGeneration &&
-               finalProof.OfferGeneration ==
-                   authority.AcceptedLaunchBoundary.OfferGeneration &&
-               finalProof.TunaPathLeaseGeneration ==
-                   authority.AcceptedLaunchBoundary.TunaPathLeaseGeneration &&
-               string.Equals(
-                   finalProof.TunaPathLeaseListenerRunId,
-                   authority.AcceptedLaunchBoundary.TunaPathLeaseListenerRunId,
-                   StringComparison.Ordinal) &&
-               string.Equals(commit.SessionId, authority.SessionId, StringComparison.Ordinal) &&
-               string.Equals(commit.TransferId, authority.TransferId, StringComparison.Ordinal) &&
-               commit.Direction == authority.Direction &&
-               commit.RuntimeOwner.SessionId == commit.SessionId &&
-               commit.RuntimeOwner.TransferId == commit.TransferId &&
-               commit.RuntimeOwner.Direction == commit.Direction &&
-               commit.RuntimeOwner.Route == commit.Route &&
-               string.Equals(
-                   commit.RuntimeOwner.RouteToken,
-                   commit.RouteToken,
-                   StringComparison.Ordinal) &&
-               commit.RuntimeOwner.ProtocolVersion == commit.ProtocolVersion &&
-               commit.RuntimeOwner.LiveRouteEpoch == commit.LiveRouteEpoch &&
-               commit.RuntimeOwner.RuntimeGeneration == commit.RuntimeGeneration &&
-               commit.RuntimeOwner.TerminalGeneration == commit.TerminalGeneration &&
-               commit.RuntimeUnlockAdmission == authority.RuntimeUnlockAdmission &&
-               commit.TransactionGeneration == finalProof.TransactionGeneration &&
-               commit.OfferGeneration == finalProof.OfferGeneration &&
-               commit.TunaPathLeaseGeneration == finalProof.TunaPathLeaseGeneration &&
-               string.Equals(
-                   commit.TunaPathLeaseListenerRunId,
-                   finalProof.TunaPathLeaseListenerRunId,
-                   StringComparison.Ordinal) &&
-               string.Equals(
-                   commit.SamePathTunaProbeAckId,
-                   expectedProbeId,
-                   StringComparison.Ordinal) &&
-               commit.TerminalGeneration == authority.SourceTerminalGeneration &&
-               commit.Route == authority.TargetRoute &&
-               commit.ProtocolVersion == authority.TargetProtocolVersion &&
-               commit.TargetRoute == authority.TargetRoute &&
-               commit.TargetProtocolVersion == authority.TargetProtocolVersion &&
-               commit.TargetTransport == authority.TargetTransport &&
-               publication.RuntimeOwner == commit.RuntimeOwner &&
-               string.Equals(
-                   publication.SessionId,
-                   commit.SessionId,
-                   StringComparison.Ordinal) &&
-               string.Equals(
-                   publication.TransferId,
-                   commit.TransferId,
-                   StringComparison.Ordinal) &&
-               publication.Direction == commit.Direction &&
-               publication.Route == commit.Route &&
-               publication.ProtocolVersion == commit.ProtocolVersion &&
-               publication.LiveRouteEpoch == commit.LiveRouteEpoch &&
-               publication.RuntimeGeneration == commit.RuntimeGeneration &&
-               publication.TerminalGeneration == commit.TerminalGeneration &&
-               publication.LegGeneration == commit.LegGeneration &&
-               publication.RouteCommitGeneration == commit.CommitGeneration &&
-               publication.TargetRoute == authority.TargetRoute &&
-               publication.TargetProtocolVersion == authority.TargetProtocolVersion &&
-               publication.TargetTransport == authority.TargetTransport &&
-               publication.ActionKind ==
-                   FileTransferCoordinatorActionKind.RouteCommitPublication;
-    }
-
-    internal static bool IsRegularV4ToTunaRouteTransitionCurrent(
-        FileTransferCoordinatorState state,
-        RegularV4ToTunaRouteTransitionAuthority authority,
-        out string rejectionReason)
-    {
-        rejectionReason = "accepted";
-        var operation = state.PersistentState.RegularV4ToTunaRouteTransition.CurrentOperation;
-        if (operation is null || operation.Value.Authority != authority)
-        {
-            rejectionReason = "regular_v4_to_tuna_transition_authority_not_current";
-            return false;
-        }
-
-        return IsRegularV4ToTunaRouteTransitionSourceScopeCurrent(
-            state,
-            authority,
-            out rejectionReason);
-    }
-
-    internal static bool IsRegularV4ToTunaRouteTransitionDraining(
-        FileTransferCoordinatorState state,
-        out RegularV4ToTunaRouteTransitionAuthority authority)
-    {
-        if (state.PersistentState.RegularV4ToTunaRouteTransition.CurrentOperation is
-            {
-                State: RegularV4ToTunaRouteTransitionState.Draining,
-            } operation &&
-            IsRegularV4ToTunaRouteTransitionSourceScopeCurrent(
-                state,
-                operation.Authority,
-                out _))
-        {
-            authority = operation.Authority;
-            return true;
-        }
-
-        authority = default;
-        return false;
-    }
-
-    internal static bool TryGetPendingRegularV4ToTunaRouteTransitionDisposition(
-        FileTransferCoordinatorState state,
-        out RegularV4ToTunaRouteTransitionDispositionCommand command)
-    {
-        if (state.PersistentState.RegularV4ToTunaRouteTransition.LastTerminalOperation is
-            {
-                DispositionCommand: { } pending,
-                DispositionReceipt: null,
-            })
-        {
-            command = pending;
-            return true;
-        }
-
-        command = default;
-        return false;
-    }
-
-    internal static string CreateRegularV4ToTunaPhysicalDrainFingerprint(
-        IReadOnlyList<long> capturedPhysicalSendLeaseIds)
-    {
-        ArgumentNullException.ThrowIfNull(capturedPhysicalSendLeaseIds);
-        var canonical = string.Join(
-            ",",
-            capturedPhysicalSendLeaseIds.Select(id =>
-                id.ToString(System.Globalization.CultureInfo.InvariantCulture)));
-        var hash = System.Security.Cryptography.SHA256.HashData(
-            System.Text.Encoding.UTF8.GetBytes(canonical));
-        return Convert.ToHexString(hash).ToLowerInvariant();
-    }
-
-    internal static RegularV4ToTunaRouteTransitionDecision
-        PrepareRegularV4ToTunaRouteTransition(
-            FileTransferCoordinatorState state,
-            RegularV4ToTunaRouteTransitionPrepareRequest request)
-    {
-        var transitionState = state.PersistentState.RegularV4ToTunaRouteTransition;
-        if (transitionState.CurrentOperation is { } current)
-        {
-            if (RegularV4ToTunaPrepareRequestMatchesAuthority(request, current.Authority) &&
-                IsRegularV4ToTunaRouteTransitionSourceScopeCurrent(
-                    state,
-                    current.Authority,
-                    out _))
-            {
-                return RegularV4ToTunaDecision(
-                    state,
-                    RegularV4ToTunaRouteTransitionDecisionStatus.Idempotent,
-                    "regular_v4_to_tuna_transition_already_prepared",
-                    current.Authority,
-                    new RegularV4ToTunaActivationPauseBindCommand(current.Authority),
-                    current.DrainCommand);
-            }
-
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
-                "regular_v4_to_tuna_transition_conflict");
-        }
-
-        if (transitionState.LastTerminalOperation is
-            {
-                State: RegularV4ToTunaRouteTransitionState.Committed,
-            } terminal &&
-            RegularV4ToTunaPrepareRequestMatchesAuthority(request, terminal.Authority))
-        {
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Idempotent,
-                "regular_v4_to_tuna_transition_already_committed",
-                terminal.Authority,
-                dispositionCommand: terminal.DispositionCommand,
-                routeDecision: null);
-        }
-
-        if (transitionState.LastTerminalOperation is
-            {
-                State: RegularV4ToTunaRouteTransitionState.Invalidated,
-                DispositionCommand:
-                {
-                    Kind:
-                        RegularV4ToTunaRouteTransitionDispositionKind.TerminalInvalidated,
-                },
-            } terminalInvalidated &&
-            RegularV4ToTunaPrepareRequestMatchesAuthority(
-                request,
-                terminalInvalidated.Authority))
-        {
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Idempotent,
-                "regular_v4_to_tuna_transition_terminally_invalidated",
-                terminalInvalidated.Authority,
-                dispositionCommand: terminalInvalidated.DispositionCommand);
-        }
-
-        if (transitionState.LastTerminalOperation is
-            {
-                DispositionCommand: { } pendingDisposition,
-                DispositionReceipt: null,
-            } pendingTerminal)
-        {
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
-                "regular_v4_to_tuna_transition_disposition_receipt_pending",
-                pendingTerminal.Authority,
-                drainCommand: pendingTerminal.DrainCommand,
-                dispositionCommand: pendingDisposition);
-        }
-
-        if (!TryValidateRegularV4ToTunaPrepareRequest(
-                state,
-                request,
-                out var rejectionReason))
-        {
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
-                rejectionReason);
-        }
-
-        var owner = state.CurrentRuntimeOwner!.Value;
-        var leg = state.CurrentLeg!;
-        var transitionGeneration = Math.Max(
-            1,
-            transitionState.LastTransitionGeneration + 1);
-        var authority = new RegularV4ToTunaRouteTransitionAuthority(
-            state.SessionId,
-            state.TransferId,
-            state.Direction,
-            owner,
-            request.SourceRoutePublication,
-            state.TerminalGeneration,
-            state.CurrentLiveRouteEpoch?.EpochId ?? 0,
-            leg.Generation,
-            leg.TransportEpochId,
-            leg.BridgeRecoveryGeneration,
-            request.DurableCheckpoint.DataSessionGeneration,
-            request.RuntimeUnlockAdmission,
-            request.PendingPreCommitProbe,
-            request.AcceptedLaunchBoundary,
-            request.LaunchGeneration,
-            request.DurableCheckpoint,
-            FileTransferRoute.FileTunaV4,
-            FileTransferProtocol.ProtocolVersionV4,
-            FileTransferTransportKind.Tuna,
-            FileTransferTransportHandoffKind.NormalToTunaActivation,
-            transitionGeneration,
-            IssueAuthorityId(
-                "regular_v4_to_tuna_transition",
-                state,
-                checked((int)Math.Min(int.MaxValue, transitionGeneration))),
-            NormalizeReason(request.Reason));
-        var operation = new RegularV4ToTunaRouteTransitionOperation(
-            authority,
-            RegularV4ToTunaRouteTransitionState.Prepared);
-        var nextState = state with
-        {
-            PersistentState = state.PersistentState with
-            {
-                RegularV4ToTunaRouteTransition = transitionState with
-                {
-                    CurrentOperation = operation,
-                    LastTransitionGeneration = transitionGeneration,
-                },
-            },
-        };
-        return RegularV4ToTunaDecision(
-            nextState,
-            RegularV4ToTunaRouteTransitionDecisionStatus.Prepared,
-            "regular_v4_to_tuna_transition_prepared",
-            authority,
-            new RegularV4ToTunaActivationPauseBindCommand(authority));
-    }
-
-    internal static RegularV4ToTunaRouteTransitionDecision
-        BeginRegularV4ToTunaPhysicalDrain(
-            FileTransferCoordinatorState state,
-            RegularV4ToTunaRouteTransitionAuthority authority,
-            RegularV4ToTunaActivationPauseBindReceipt pauseBindReceipt,
-            long capturedThroughPhysicalSendGeneration,
-            IReadOnlyList<long> capturedPhysicalSendLeaseIds,
-            string capturedPhysicalSendFingerprint)
-    {
-        var transitionState = state.PersistentState.RegularV4ToTunaRouteTransition;
-        if (transitionState.CurrentOperation is not { } current ||
-            current.Authority != authority)
-        {
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
-                "regular_v4_to_tuna_transition_authority_not_current");
-        }
-
-        if (current.State == RegularV4ToTunaRouteTransitionState.Draining &&
-            current.DrainCommand is { } existingCommand &&
-            current.PauseBindReceipt is { } existingPauseReceipt &&
-            IsExactOrCanonicalIdempotentRegularV4ToTunaPauseBindReceipt(
-                existingPauseReceipt,
-                pauseBindReceipt) &&
-            existingCommand.CapturedThroughPhysicalSendGeneration ==
-                capturedThroughPhysicalSendGeneration &&
-            existingCommand.CapturedPhysicalSendCount ==
-                capturedPhysicalSendLeaseIds.Count &&
-            CapturedLeaseSetsEqual(
-                existingCommand.CapturedPhysicalSendLeaseIds,
-                capturedPhysicalSendLeaseIds) &&
-            string.Equals(
-                existingCommand.CapturedPhysicalSendFingerprint,
-                capturedPhysicalSendFingerprint,
-                StringComparison.Ordinal))
-        {
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Idempotent,
-                "regular_v4_to_tuna_transition_drain_already_started",
-                authority,
-                pauseBindReceipt.Command,
-                existingCommand);
-        }
-
-        if (current.State != RegularV4ToTunaRouteTransitionState.Prepared)
-        {
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
-                "regular_v4_to_tuna_transition_not_prepared");
-        }
-
-        if (!IsRegularV4ToTunaRouteTransitionSourceScopeCurrent(
-                state,
-                authority,
-                out var rejectionReason))
-        {
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
-                rejectionReason);
-        }
-
-        var expectedPauseCommand = new RegularV4ToTunaActivationPauseBindCommand(authority);
-        if (pauseBindReceipt.Command != expectedPauseCommand ||
-            pauseBindReceipt.Status is not (
-                RegularV4ToTunaActivationPauseBindStatus.Installed or
-                RegularV4ToTunaActivationPauseBindStatus.Idempotent) ||
-            !IsCanonicalRegularV4ToTunaPauseBindReceipt(pauseBindReceipt))
-        {
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
-                "regular_v4_to_tuna_transition_pause_bind_receipt_mismatch");
-        }
-
-        if (!TryValidateCapturedPhysicalSendLeaseSet(
-                capturedThroughPhysicalSendGeneration,
-                capturedPhysicalSendLeaseIds,
-                capturedPhysicalSendFingerprint,
-                out rejectionReason))
-        {
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
-                rejectionReason);
-        }
-
-        var capturedLeaseSnapshot = Array.AsReadOnly(
-            capturedPhysicalSendLeaseIds.ToArray());
-        var drainCommand = new RegularV4ToTunaPhysicalDrainCommand(
-            authority,
-            capturedThroughPhysicalSendGeneration,
-            capturedLeaseSnapshot,
-            capturedLeaseSnapshot.Count,
-            capturedPhysicalSendFingerprint);
-        var drainingOperation = current with
-        {
-            State = RegularV4ToTunaRouteTransitionState.Draining,
-            PauseBindReceipt = pauseBindReceipt,
-            DrainCommand = drainCommand,
-        };
-        var nextState = state with
-        {
-            PersistentState = state.PersistentState with
-            {
-                RegularV4ToTunaRouteTransition = transitionState with
-                {
-                    CurrentOperation = drainingOperation,
-                },
-            },
-        };
-        return RegularV4ToTunaDecision(
-            nextState,
-            RegularV4ToTunaRouteTransitionDecisionStatus.Draining,
-            "regular_v4_to_tuna_transition_draining",
-            authority,
-            expectedPauseCommand,
-            drainCommand);
-    }
-
-    internal static RegularV4FrontierRepairPressureBindingDecision
-        PrepareRegularV4ToTunaRouteTransitionPressureSettlement(
-            FileTransferCoordinatorState state,
-            RegularV4ToTunaRouteTransitionAuthority authority,
-            RegularV4ToTunaPhysicalDrainReceipt drainReceipt,
-            RuntimeUnlockRouteCommitProof finalProof)
-    {
-        if (!TryValidateRegularV4ToTunaDrainReceipt(
-                state,
-                authority,
-                drainReceipt,
-                out var rejectionReason) ||
-            !TryValidateRegularV4ToTunaFinalProof(
-                state,
-                authority,
-                finalProof,
-                out rejectionReason))
-        {
-            return RegularV4PressureBindingDecision(
-                state,
-                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
-                rejectionReason);
-        }
-
-        var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
-        if (pressureState.PendingBinding is not null ||
-            pressureState.RetainedPredecessorBinding is not null)
-        {
-            return RegularV4PressureBindingDecision(
-                state,
-                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
-                "regular_v4_to_tuna_transition_pressure_lineage_pending");
-        }
-
-        if (pressureState.InstalledBinding is not { } installed)
-        {
-            return RegularV4PressureBindingDecision(
-                state,
-                RegularV4FrontierRepairPressureBindingDecisionStatus.Idempotent,
-                "regular_v4_to_tuna_transition_pressure_not_installed");
-        }
-
-        return PrepareRegularV4FrontierRepairPressureSettlement(
-            state,
-            CreateRegularV4ToTunaTransitionPressureSettlement(installed.Authority));
-    }
-
-    internal static RegularV4ToTunaRouteTransitionDecision
-        CommitRegularV4ToTunaRouteTransition(
-            FileTransferCoordinatorState state,
-            RegularV4ToTunaRouteTransitionAuthority authority,
-            RegularV4ToTunaPhysicalDrainReceipt drainReceipt,
-            RuntimeUnlockRouteCommitProof finalProof,
-            FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
-                pressureSettlementReceipt = null)
-    {
-        var transitionState = state.PersistentState.RegularV4ToTunaRouteTransition;
-        if (transitionState.LastTerminalOperation is
-            {
-                State: RegularV4ToTunaRouteTransitionState.Committed,
-            } terminal &&
-            terminal.Authority == authority &&
-            terminal.DrainReceipt is { } committedDrainReceipt &&
-            IsExactOrCanonicalIdempotentRegularV4ToTunaDrainReceipt(
-                committedDrainReceipt,
-                drainReceipt) &&
-            terminal.FinalProof == finalProof &&
-            IsExactRegularV4ToTunaPressureReceiptDuplicate(
-                terminal.PressureSettlementReceipt,
-                pressureSettlementReceipt))
-        {
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Idempotent,
-                "regular_v4_to_tuna_transition_already_committed",
-                authority,
-                drainCommand: terminal.DrainCommand,
-                dispositionCommand: terminal.DispositionCommand);
-        }
-
-        if (!TryValidateRegularV4ToTunaDrainReceipt(
-                state,
-                authority,
-                drainReceipt,
-                out var rejectionReason) ||
-            !TryValidateRegularV4ToTunaFinalProof(
-                state,
-                authority,
-                finalProof,
-                out rejectionReason))
-        {
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
-                rejectionReason);
-        }
-
-        var projectedState = state;
-        var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
-        if (pressureState.PendingBinding is not null ||
-            pressureState.RetainedPredecessorBinding is not null)
-        {
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
-                "regular_v4_to_tuna_transition_pressure_lineage_pending");
-        }
-
-        if (pressureState.InstalledBinding is { } installed)
-        {
-            var expectedSettlement =
-                CreateRegularV4ToTunaTransitionPressureSettlement(installed.Authority);
-            var preparedPressure =
-                PrepareRegularV4FrontierRepairPressureSettlement(state, expectedSettlement);
-            if (pressureSettlementReceipt is null ||
-                preparedPressure.Status !=
-                    RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted ||
-                preparedPressure.SettlementCommand is not { } expectedCommand ||
-                pressureSettlementReceipt.Command != expectedCommand ||
-                !IsCanonicalRegularV4ToTunaPressureSettlementReceipt(
-                    pressureSettlementReceipt))
-            {
-                return RegularV4ToTunaDecision(
-                    state,
-                    RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
-                    "regular_v4_to_tuna_transition_pressure_apply_receipt_missing");
-            }
-
-            var pressureCommit = CommitRegularV4FrontierRepairPressureSettlement(
-                state,
-                pressureSettlementReceipt);
-            if (pressureCommit.Status !=
-                RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted)
-            {
-                return RegularV4ToTunaDecision(
-                    state,
-                    RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
-                    pressureCommit.Reason);
-            }
-
-            projectedState =
-                pressureCommit.State.CurrentRepairReplayDecision is { } currentRepair &&
-                currentRepair.AuthorityId == installed.Authority.AuthorityId
-                    ? pressureCommit.State with { CurrentRepairReplayDecision = null }
-                    : pressureCommit.State;
-        }
-        else if (pressureSettlementReceipt is not null)
-        {
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
-                "regular_v4_to_tuna_transition_pressure_apply_receipt_unexpected");
-        }
-
-        var targetSelection = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
-        var coordinatorEvent = new FileTransferCoordinatorEvent(
-            FileTransferCoordinatorEventKind.TunaActivated,
-            targetSelection,
-            FileTransferTransportHandoffKind.NormalToTunaActivation,
-            FileTransferTransportKind.Tuna,
-            NormalizeReason(authority.Reason),
-            FileTransferLegState.Active,
-            CanSendData: true,
-            authority.DurableCheckpoint.ContiguousCommittedChunkIndex,
-            authority.DurableCheckpoint.DurableHighestChunkIndex,
-            TransportEpochId: 0,
-            BridgeRecoveryGeneration: 0);
-        projectedState = CloneCoordinatorStateGraph(projectedState);
-        projectedState = projectedState with
-        {
-            PersistentState = projectedState.PersistentState with
-            {
-                RegularV4ToTunaRouteTransition = transitionState with
-                {
-                    CurrentOperation = null,
-                },
-            },
-        };
-        var routeDecision = TransitionToRoute(
-            coordinatorEvent,
-            projectedState,
-            NormalizeReason(authority.Reason),
-            recoverEpoch: true);
-        if (routeDecision.MutationRejectedReason is { } routeRejectionReason)
-        {
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
-                routeRejectionReason);
-        }
-
-        if (routeDecision.State.CurrentRuntimeOwner is not { } runtimeOwner ||
-            routeDecision.State.CurrentLeg is not { } targetLeg)
-        {
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
-                "regular_v4_to_tuna_transition_target_scope_missing");
-        }
-
-        var commitGeneration = Math.Max(1, state.LastRouteCommitGeneration + 1);
-        var routeCommitToken = new RouteCommitToken(
-            routeDecision.State.SessionId,
-            routeDecision.State.TransferId,
-            routeDecision.State.Direction,
-            runtimeOwner,
-            authority.RuntimeUnlockAdmission,
-            routeDecision.State.RouteSelection.Route,
-            routeDecision.State.RouteSelection.TelemetryToken,
-            routeDecision.State.RouteSelection.ProtocolVersion,
-            routeDecision.State.CurrentLiveRouteEpoch?.EpochId ?? 0,
-            runtimeOwner.RuntimeGeneration,
-            routeDecision.State.TerminalGeneration,
-            targetLeg.Generation,
-            finalProof.TransactionGeneration,
-            finalProof.OfferGeneration,
-            finalProof.TunaPathLeaseGeneration,
-            finalProof.TunaPathLeaseListenerRunId,
-            finalProof.SamePathTunaProbeAckId ?? finalProof.PathProbeId ?? string.Empty,
-            finalProof.TargetRoute,
-            finalProof.ProtocolVersion,
-            finalProof.TargetTransport,
-            commitGeneration,
-            NormalizeReason(authority.Reason));
-        var committedRouteState = routeDecision.State with
-        {
-            CurrentRouteCommit = routeCommitToken,
-            LastRouteCommitGeneration = commitGeneration,
-            CurrentRuntimeUnlockAdmission = null,
-            CurrentRuntimeUnlockPendingPreCommitProbe = null,
-        };
-        var publicationRequest = new FileTransferCoordinatorActionRequest(
-            FileTransferCoordinatorActionKind.RouteCommitPublication,
-            Source: "regular_v4_to_tuna_transition",
-            Reason: authority.Reason,
-            RuntimeOwner: runtimeOwner,
-            Route: committedRouteState.RouteSelection.Route,
-            ProtocolVersion: committedRouteState.RouteSelection.ProtocolVersion,
-            LiveRouteEpoch: committedRouteState.CurrentLiveRouteEpoch?.EpochId ?? 0,
-            LegGeneration: targetLeg.Generation,
-            RuntimeGeneration: runtimeOwner.RuntimeGeneration,
-            TerminalGeneration: committedRouteState.TerminalGeneration,
-            RuntimeUnlockAdmissionToken: authority.RuntimeUnlockAdmission,
-            RouteCommitToken: routeCommitToken,
-            RuntimeUnlockTransactionGeneration: finalProof.TransactionGeneration,
-            RuntimeUnlockOfferGeneration: finalProof.OfferGeneration,
-            RuntimeUnlockTunaPathLeaseGeneration: finalProof.TunaPathLeaseGeneration,
-            RuntimeUnlockTunaPathLeaseListenerRunId: finalProof.TunaPathLeaseListenerRunId,
-            RuntimeUnlockProbeId: finalProof.PathProbeId,
-            RuntimeUnlockSamePathTunaProbeAckId: finalProof.SamePathTunaProbeAckId,
-            RouteCommitGeneration: commitGeneration,
-            TargetRoute: FileTransferRoute.FileTunaV4,
-            TargetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
-            TargetTransport: FileTransferTransportKind.Tuna);
-        var publicationToken = IssueRoutePublicationToken(
-            committedRouteState,
-            publicationRequest,
-            Math.Max(1, state.LastRoutePublicationGeneration + 1))!.Value;
-        committedRouteState = ApplyIssuedRoutePublicationAuthority(
-            committedRouteState,
-            CreateRoutePublicationDecision(
-                committedRouteState,
-                FileTransferCoordinatorActionKind.RouteCommitPublication,
-                accepted: true,
-                rejectionReason: "accepted",
-                publicationToken));
-        var dispositionCommand = new RegularV4ToTunaRouteTransitionDispositionCommand(
-            authority,
-            RegularV4ToTunaRouteTransitionDispositionKind.Committed,
-            routeCommitToken,
-            publicationToken,
-            "regular_v4_to_tuna_transition_committed")
-        {
-            FinalProof = finalProof,
-        };
-        if (!IsRegularV4ToTunaRouteTransitionDispositionCommandValid(
-                dispositionCommand))
-        {
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
-                "regular_v4_to_tuna_transition_disposition_invalid");
-        }
-
-        var retainedDrainReceipt = SnapshotRegularV4ToTunaDrainReceipt(drainReceipt);
-        var terminalOperation =
-            transitionState.CurrentOperation!.Value with
-            {
-                State = RegularV4ToTunaRouteTransitionState.Committed,
-                DrainReceipt = retainedDrainReceipt,
-                FinalProof = finalProof,
-                PressureSettlementReceipt = pressureSettlementReceipt,
-                RouteCommitToken = routeCommitToken,
-                RoutePublicationToken = publicationToken,
-                DispositionCommand = dispositionCommand,
-            };
-        committedRouteState = committedRouteState with
-        {
-            PersistentState = committedRouteState.PersistentState with
-            {
-                RegularV4ToTunaRouteTransition = transitionState with
-                {
-                    CurrentOperation = null,
-                    LastTerminalOperation = terminalOperation,
-                },
-            },
-        };
-        routeDecision = routeDecision with
-        {
-            State = committedRouteState,
-            RuntimeUnlockCommitAccepted = true,
-            RuntimeUnlockCommitRejectedReason = null,
-            RouteCommitToken = routeCommitToken,
-        };
-        return RegularV4ToTunaDecision(
-            committedRouteState,
-            RegularV4ToTunaRouteTransitionDecisionStatus.Committed,
-            "regular_v4_to_tuna_transition_committed",
-            authority,
-            drainCommand: terminalOperation.DrainCommand,
-            dispositionCommand: dispositionCommand,
-            routeDecision: routeDecision);
-    }
-
-    internal static RegularV4ToTunaRouteTransitionDecision
-        InvalidateRegularV4ToTunaRouteTransition(
-            FileTransferCoordinatorState state,
-            RegularV4ToTunaRouteTransitionAuthority authority,
-            bool terminalInvalidation,
-            string reason)
-    {
-        var transitionState = state.PersistentState.RegularV4ToTunaRouteTransition;
-        var normalizedReason = NormalizeReason(reason);
-        var expectedDispositionKind = terminalInvalidation
-            ? RegularV4ToTunaRouteTransitionDispositionKind.TerminalInvalidated
-            : RegularV4ToTunaRouteTransitionDispositionKind.RolledBack;
-        if (transitionState.LastTerminalOperation is
-            {
-                State: RegularV4ToTunaRouteTransitionState.Invalidated,
-            } terminal &&
-            terminal.Authority == authority &&
-            terminal.DispositionCommand is { } terminalDisposition)
-        {
-            if (terminalDisposition.Kind != expectedDispositionKind ||
-                !string.Equals(
-                    terminalDisposition.Reason,
-                    normalizedReason,
-                    StringComparison.Ordinal))
-            {
-                return RegularV4ToTunaDecision(
-                    state,
-                    RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
-                    "regular_v4_to_tuna_transition_invalidation_duplicate_mismatch");
-            }
-
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Idempotent,
-                "regular_v4_to_tuna_transition_already_invalidated",
-                authority,
-                drainCommand: terminal.DrainCommand,
-                dispositionCommand: terminal.DispositionCommand);
-        }
-
-        if (transitionState.CurrentOperation is not { } current ||
-            current.Authority != authority)
-        {
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
-                "regular_v4_to_tuna_transition_authority_not_current");
-        }
-
-        if (!terminalInvalidation &&
-            !IsRegularV4ToTunaRouteTransitionSourceScopeCurrent(
-                state,
-                authority,
-                out var rejectionReason))
-        {
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
-                rejectionReason);
-        }
-
-        var dispositionCommand = new RegularV4ToTunaRouteTransitionDispositionCommand(
-            authority,
-            expectedDispositionKind,
-            RouteCommitToken: null,
-            RoutePublicationToken: null,
-            normalizedReason);
-        if (!IsRegularV4ToTunaRouteTransitionDispositionCommandValid(
-                dispositionCommand))
-        {
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
-                "regular_v4_to_tuna_transition_disposition_invalid");
-        }
-
-        var invalidated = current with
-        {
-            State = RegularV4ToTunaRouteTransitionState.Invalidated,
-            DispositionCommand = dispositionCommand,
-        };
-        var nextState = state with
-        {
-            CurrentRuntimeUnlockAdmission = null,
-            CurrentRuntimeUnlockPendingPreCommitProbe = null,
-            PersistentState = state.PersistentState with
-            {
-                RegularV4ToTunaRouteTransition = transitionState with
-                {
-                    CurrentOperation = null,
-                    LastTerminalOperation = invalidated,
-                },
-            },
-        };
-        return RegularV4ToTunaDecision(
-            nextState,
-            RegularV4ToTunaRouteTransitionDecisionStatus.Invalidated,
-            normalizedReason,
-            authority,
-            drainCommand: invalidated.DrainCommand,
-            dispositionCommand: dispositionCommand);
-    }
-
-    internal static RegularV4ToTunaRouteTransitionDecision
-        ApplyRegularV4ToTunaRouteTransitionDispositionReceipt(
-            FileTransferCoordinatorState state,
-            RegularV4ToTunaRouteTransitionDispositionReceipt receipt)
-    {
-        var transitionState = state.PersistentState.RegularV4ToTunaRouteTransition;
-        if (transitionState.LastTerminalOperation is not
-            {
-                DispositionCommand: { } expectedCommand,
-            } terminal ||
-            receipt.Command != expectedCommand)
-        {
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
-                "regular_v4_to_tuna_transition_disposition_receipt_not_current");
-        }
-
-        if (terminal.DispositionReceipt is { } appliedReceipt)
-        {
-            if (receipt == appliedReceipt ||
-                IsCanonicalIdempotentRegularV4ToTunaDispositionReceipt(
-                    appliedReceipt,
-                    receipt))
-            {
-                return RegularV4ToTunaDecision(
-                    state,
-                    RegularV4ToTunaRouteTransitionDecisionStatus.Idempotent,
-                    "regular_v4_to_tuna_transition_disposition_receipt_already_applied",
-                    terminal.Authority,
-                    drainCommand: terminal.DrainCommand,
-                    dispositionCommand: expectedCommand);
-            }
-
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
-                "regular_v4_to_tuna_transition_disposition_receipt_duplicate_mismatch");
-        }
-
-        if (!IsCanonicalAcceptedRegularV4ToTunaDispositionReceipt(receipt))
-        {
-            return RegularV4ToTunaDecision(
-                state,
-                RegularV4ToTunaRouteTransitionDecisionStatus.Rejected,
-                "regular_v4_to_tuna_transition_disposition_receipt_rejected");
-        }
-
-        var terminalWithReceipt = terminal with { DispositionReceipt = receipt };
-        var nextState = state with
-        {
-            PersistentState = state.PersistentState with
-            {
-                RegularV4ToTunaRouteTransition = transitionState with
-                {
-                    LastTerminalOperation = terminalWithReceipt,
-                },
-            },
-        };
-        return RegularV4ToTunaDecision(
-            nextState,
-            terminal.State == RegularV4ToTunaRouteTransitionState.Committed
-                ? RegularV4ToTunaRouteTransitionDecisionStatus.Committed
-                : RegularV4ToTunaRouteTransitionDecisionStatus.Invalidated,
-            "regular_v4_to_tuna_transition_disposition_receipt_applied",
-            terminal.Authority,
-            drainCommand: terminal.DrainCommand,
-            dispositionCommand: expectedCommand);
-    }
-
     public static FileTransferCoordinatorDecision Apply(
         FileTransferCoordinatorEvent coordinatorEvent,
         FileTransferCoordinatorState state)
@@ -3572,10 +2736,12 @@ internal static class FileTransferCoordinator
         {
             FileTransferCoordinatorEventKind.StartTransfer =>
                 StartTransfer(coordinatorEvent, workingState, reason),
-            FileTransferCoordinatorEventKind.TunaActivated =>
-                TransitionToRoute(coordinatorEvent, workingState, reason, recoverEpoch: true),
+            FileTransferCoordinatorEventKind.TunaActivated or
             FileTransferCoordinatorEventKind.TunaLost =>
-                TransitionToRoute(coordinatorEvent, workingState, reason, recoverEpoch: false),
+                MutationRejected(
+                    state,
+                    reason,
+                    "filetransfer_route_transition_commit_required"),
             FileTransferCoordinatorEventKind.FallbackCheckpointRequested =>
                 MarkFallbackCheckpointRequested(coordinatorEvent, workingState, reason),
             FileTransferCoordinatorEventKind.FallbackCheckpointAccepted =>
@@ -3639,8 +2805,6 @@ internal static class FileTransferCoordinator
     private static bool RequiresClonedCoordinatorGraph(FileTransferCoordinatorEventKind kind)
         => kind is
             FileTransferCoordinatorEventKind.StartTransfer or
-            FileTransferCoordinatorEventKind.TunaActivated or
-            FileTransferCoordinatorEventKind.TunaLost or
             FileTransferCoordinatorEventKind.FallbackCheckpointRequested or
             FileTransferCoordinatorEventKind.FallbackCheckpointAccepted or
             FileTransferCoordinatorEventKind.FallbackCheckpointRetired or
@@ -9544,6 +8708,144 @@ internal static class FileTransferCoordinator
             coordinatorDecisionReason ?? token.Reason);
     }
 
+    internal static bool
+        TryCreateFallbackPairedTailYieldRuntimeUnlockRetryDispatchRequest(
+            FileTransferCoordinatorState state,
+            FallbackTailYieldDecision tailYield,
+            FallbackPairedTailYieldReleaseEvidence pairedYieldEvidence,
+            string retryReason,
+            string recoveryReason,
+            out RuntimeUnlockRetryDispatchAuthorityRequest request,
+            out string rejectionReason)
+    {
+        request = default;
+        rejectionReason = "accepted";
+        if (state.IsTerminal)
+        {
+            rejectionReason = "terminal_state";
+            return false;
+        }
+
+        if (state.RouteSelection.Route !=
+                FileTransferRoute.PostTunaFallbackV6 ||
+            state.RouteSelection.ProtocolVersion !=
+                FileTransferProtocol.ProtocolVersionV6 ||
+            state.CurrentRuntimeOwner is not { } owner ||
+            state.CurrentLeg is not { } leg ||
+            state.CurrentRoutePublicationToken is not { } publication ||
+            publication.TargetTransport != FileTransferTransportKind.RegularNkn ||
+            !IsRuntimeOwnerCurrent(state, owner, out rejectionReason) ||
+            !IsRoutePublicationTokenCurrent(
+                state,
+                publication,
+                out rejectionReason))
+        {
+            if (string.Equals(
+                    rejectionReason,
+                    "accepted",
+                    StringComparison.Ordinal))
+            {
+                rejectionReason =
+                    "fallback_retry_source_publication_not_current";
+            }
+
+            return false;
+        }
+
+        if (state.PersistentState.FileTransferRouteTransition.CurrentOperation
+                is not null)
+        {
+            rejectionReason = "filetransfer_route_transition_conflict";
+            return false;
+        }
+
+        if (state.CurrentRuntimeUnlockRetryDispatchAuthority is not null)
+        {
+            rejectionReason = "retry_dispatch_predecessor_active";
+            return false;
+        }
+
+        if (tailYield.IsDefault ||
+            state.LastFallbackTailYieldDecision != tailYield ||
+            tailYield.YieldKind != FallbackTailYieldKind.Quiescent ||
+            !IsFallbackTailYieldDecisionCurrent(
+                state,
+                tailYield,
+                out rejectionReason))
+        {
+            if (string.Equals(
+                    rejectionReason,
+                    "accepted",
+                    StringComparison.Ordinal))
+            {
+                rejectionReason = "fallback_tail_yield_not_current";
+            }
+
+            return false;
+        }
+
+        if (!TryValidateFallbackPairedTailYieldReleaseEvidence(
+                state,
+                tailYield,
+                pairedYieldEvidence,
+                out rejectionReason))
+        {
+            return false;
+        }
+
+        if (state.CurrentFallbackCheckpointLease is not null ||
+            state.CurrentFallbackControlPlaneToken is not null ||
+            state.CurrentFallbackControlPlanePressureToken is not null)
+        {
+            rejectionReason = "fallback_owner_work_pending";
+            return false;
+        }
+
+        var sourcePublication = CreateRoutePublicationAuthority(
+            publication,
+            "fallback_paired_tail_yield");
+        if (sourcePublication is null)
+        {
+            rejectionReason = "fallback_retry_source_publication_not_current";
+            return false;
+        }
+
+        request = new RuntimeUnlockRetryDispatchAuthorityRequest(
+            state.SessionId,
+            state.TransferId,
+            state.Direction,
+            sourcePublication,
+            RecoveryContractGeneration: Math.Max(
+                1,
+                state.LastRuntimeUnlockRetryDispatchAuthorityGeneration + 1L),
+            RetiredOfferGeneration: 0,
+            DispatchAttemptGeneration: 1,
+            RetryReason: NormalizeReason(retryReason),
+            RecoveryReason: NormalizeReason(recoveryReason),
+            RegularV4LivenessGeneration: 0,
+            BridgeDecisionGeneration: 0,
+            PredecessorAuthorityId: null,
+            RequestActivePredecessorSupersession: false,
+            MissingDispatchSuccessorGeneration: 0)
+        {
+            FallbackPairedTailYieldEvidence = pairedYieldEvidence,
+        };
+        if (!TryValidateRuntimeUnlockRetryRelease(
+                state,
+                request,
+                RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield,
+                tailYield.AuthorityId,
+                tailYield.YieldGeneration,
+                FallbackTailYieldKind.Quiescent.ToString(),
+                out rejectionReason))
+        {
+            request = default;
+            return false;
+        }
+
+        return true;
+    }
+
     private static bool TryValidateRuntimeUnlockRetryRelease(
         FileTransferCoordinatorState state,
         RuntimeUnlockRetryDispatchAuthorityRequest request,
@@ -9729,9 +9031,18 @@ internal static class FileTransferCoordinator
             return false;
         }
 
-        if (!state.RuntimeUnlockFallbackSurvivalState.PairedFallbackYieldGranted)
+        if (request.FallbackPairedTailYieldEvidence is not { } pairedYieldEvidence)
         {
             rejectionReason = "fallback_paired_tail_yield_pending";
+            return false;
+        }
+
+        if (!TryValidateFallbackPairedTailYieldReleaseEvidence(
+                state,
+                tailYield,
+                pairedYieldEvidence,
+                out rejectionReason))
+        {
             return false;
         }
 
@@ -9740,6 +9051,106 @@ internal static class FileTransferCoordinator
             state.CurrentFallbackControlPlanePressureToken is not null)
         {
             rejectionReason = "fallback_owner_work_pending";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool TryValidateFallbackPairedTailYieldReleaseEvidence(
+        FileTransferCoordinatorState state,
+        FallbackTailYieldDecision tailYield,
+        FallbackPairedTailYieldReleaseEvidence evidence,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (evidence.IsDefault)
+        {
+            rejectionReason = "fallback_paired_tail_yield_pending";
+            return false;
+        }
+
+        if (state.CurrentRuntimeOwner is not { } owner ||
+            state.CurrentLeg is not { } leg ||
+            state.LastFallbackTailYieldDecision != tailYield ||
+            evidence.LocalDecision != tailYield ||
+            !tailYield.Accepted ||
+            tailYield.YieldKind != FallbackTailYieldKind.Quiescent ||
+            tailYield.CurrentRoute != state.RouteSelection.Route ||
+            tailYield.CurrentProtocolVersion != state.RouteSelection.ProtocolVersion ||
+            tailYield.CurrentLiveRouteEpoch !=
+                (state.CurrentLiveRouteEpoch?.EpochId ?? 0) ||
+            tailYield.CurrentRuntimeGeneration != owner.RuntimeGeneration ||
+            tailYield.CurrentTerminalGeneration != state.TerminalGeneration ||
+            tailYield.CurrentLegGeneration != leg.Generation)
+        {
+            rejectionReason = "retry_dispatch_predecessor_release_invalid";
+            return false;
+        }
+
+        if (!FileTransferAuthorityIdParser.TryNormalizeFallbackTailYield(
+                evidence.PeerAuthorityId.ToString(),
+                out _) ||
+            evidence.PeerAuthorityId == tailYield.AuthorityId ||
+            (evidence.PeerPredecessorAuthorityId is { IsDefault: false } predecessor &&
+             (!FileTransferAuthorityIdParser.TryNormalizeFallbackTailYield(
+                  predecessor.ToString(),
+                  out _) ||
+              predecessor == evidence.PeerAuthorityId)))
+        {
+            rejectionReason = "retry_dispatch_predecessor_release_invalid";
+            return false;
+        }
+
+        var expectedPeerDirection =
+            state.Direction == FileTransferDirection.Outbound
+                ? FileTransferDirection.Inbound.ToString().ToLowerInvariant()
+                : FileTransferDirection.Outbound.ToString().ToLowerInvariant();
+        var expectedPeerOwnerKey = BuildFallbackTailYieldOwnerKey(
+            state.SessionId,
+            state.TransferId,
+            tailYield.CurrentRoute == FileTransferRoute.PostTunaFallbackV6
+                ? FileTransferRouteResolver.PostTunaFallbackV6Token
+                : state.RouteSelection.TelemetryToken,
+            tailYield.CurrentProtocolVersion,
+            evidence.PeerLiveRouteEpoch,
+            evidence.PeerLegGeneration,
+            evidence.PeerBridgeRecoveryGeneration,
+            evidence.PeerTransportEpoch,
+            evidence.PeerCheckpointRequestIdSnapshot);
+        var expectedPeerPairKey = BuildFallbackTailYieldPairKey(
+            state.SessionId,
+            state.TransferId,
+            tailYield.CurrentRoute == FileTransferRoute.PostTunaFallbackV6
+                ? FileTransferRouteResolver.PostTunaFallbackV6Token
+                : state.RouteSelection.TelemetryToken,
+            tailYield.CurrentProtocolVersion,
+            evidence.PeerLiveRouteEpoch,
+            evidence.PeerTransportEpoch,
+            evidence.PeerCheckpointRequestIdSnapshot);
+        if (!string.Equals(
+                evidence.PeerDirection,
+                expectedPeerDirection,
+                StringComparison.Ordinal) ||
+            evidence.PeerLiveRouteEpoch != tailYield.CurrentLiveRouteEpoch ||
+            !string.Equals(
+                evidence.PeerCheckpointRequestIdSnapshot,
+                tailYield.CheckpointRequestIdSnapshot,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                evidence.PeerOwnerKey,
+                expectedPeerOwnerKey,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                evidence.PeerPairKey,
+                expectedPeerPairKey,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                evidence.PeerPairKey,
+                tailYield.PairKey,
+                StringComparison.Ordinal))
+        {
+            rejectionReason = "retry_dispatch_predecessor_release_invalid";
             return false;
         }
 
@@ -10142,13 +9553,13 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         string reason)
     {
-        if (state.PersistentState.RegularV4ToTunaRouteTransition.CurrentOperation
+        if (state.PersistentState.FileTransferRouteTransition.CurrentOperation
             is not null)
         {
             return MutationRejected(
                 state,
                 reason,
-                "regular_v4_to_tuna_transition_invalidation_required");
+                "filetransfer_route_transition_invalidation_required");
         }
 
         var reauthorizationRequest =
@@ -10415,584 +9826,19 @@ internal static class FileTransferCoordinator
         return true;
     }
 
-    internal static RuntimeUnlockUncommittedTunaFallbackHandoffTransitionDecision
-        PrepareRuntimeUnlockUncommittedTunaFallbackHandoff(
-            FileTransferCoordinatorState state,
-            FileTransferCoordinatorEvent coordinatorEvent)
-    {
-        if (!TryCreateRuntimeUnlockUncommittedTunaFallbackHandoffTransition(
-                state,
-                coordinatorEvent,
-                out var transition,
-                out var rejectionReason))
-        {
-            return RuntimeUnlockUncommittedTunaFallbackDecision(
-                state,
-                RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus.Rejected,
-                rejectionReason);
-        }
-
-        var projectedState = state;
-        if (transition.PressureSettlementCommand is not null)
-        {
-            var pressureState = state.PersistentState.RegularV4FrontierRepairPressure with
-            {
-                PendingBinding = null,
-                PendingInstallCommand = null,
-                InstalledBinding = null,
-                InstalledInstallCommand = null,
-                InstalledInstallReceipt = null,
-                LastSettlement = transition.PressureSettlement,
-            };
-            projectedState = state with
-            {
-                PersistentState = state.PersistentState with
-                {
-                    RegularV4FrontierRepairPressure = pressureState,
-                },
-            };
-        }
-        if (!TryCreateRuntimeUnlockUncommittedTunaFallbackRouteDecision(
-                projectedState,
-                transition,
-                out var routeDecision,
-                out rejectionReason))
-        {
-            return RuntimeUnlockUncommittedTunaFallbackDecision(
-                state,
-                RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus.Rejected,
-                rejectionReason);
-        }
-
-        return RuntimeUnlockUncommittedTunaFallbackDecision(
-            state,
-            RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus.Prepared,
-            "uncommitted_tuna_fallback_handoff_prepared",
-            transition,
-            routeDecision);
-    }
-
-    internal static RuntimeUnlockUncommittedTunaFallbackHandoffTransitionDecision
-        CommitRuntimeUnlockUncommittedTunaFallbackHandoff(
-            FileTransferCoordinatorState state,
-            RuntimeUnlockUncommittedTunaFallbackHandoffTransition transition,
-            RuntimeUnlockUncommittedTunaFallbackHandoff currentHandoff,
-            RuntimeUnlockUncommittedTunaFallbackAdoptionStageReceipt adoptionStageReceipt,
-            RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationReceipt preparationReceipt)
-    {
-        if (!IsRuntimeUnlockUncommittedTunaFallbackAdoptionStageReceiptValid(
-                transition.Handoff,
-                adoptionStageReceipt) ||
-            !IsRuntimeUnlockUncommittedTunaFallbackAdoptionPreparationReceiptValid(
-                transition,
-                adoptionStageReceipt,
-                preparationReceipt))
-        {
-            return RuntimeUnlockUncommittedTunaFallbackDecision(
-                state,
-                RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus.Rejected,
-                "uncommitted_tuna_fallback_adoption_stage_receipt_mismatch");
-        }
-
-        var pressureReceipt = preparationReceipt.PressureSettlementReceipt;
-
-        if (state.LastRuntimeUnlockUncommittedTunaFallbackHandoff == transition)
-        {
-            if (currentHandoff != transition.Handoff ||
-                !IsRuntimeUnlockUncommittedTunaFallbackHandoffCommitted(
-                    state,
-                    transition,
-                    pressureReceipt))
-            {
-                return RuntimeUnlockUncommittedTunaFallbackDecision(
-                    state,
-                    RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus.Rejected,
-                    "uncommitted_tuna_fallback_handoff_duplicate_mismatch");
-            }
-
-            return RuntimeUnlockUncommittedTunaFallbackDecision(
-                state,
-                RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus.Idempotent,
-                "uncommitted_tuna_fallback_handoff_already_committed",
-                transition);
-        }
-
-        var currentEvent = transition.CoordinatorEvent with
-        {
-            RuntimeUnlockUncommittedTunaFallbackHandoff = currentHandoff,
-        };
-        if (!TryCreateRuntimeUnlockUncommittedTunaFallbackHandoffTransition(
-                state,
-                currentEvent,
-                out var expectedTransition,
-                out var rejectionReason) ||
-            currentHandoff != transition.Handoff ||
-            expectedTransition != transition)
-        {
-            return RuntimeUnlockUncommittedTunaFallbackDecision(
-                state,
-                RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus.Rejected,
-                string.Equals(rejectionReason, "accepted", StringComparison.Ordinal)
-                    ? "uncommitted_tuna_fallback_handoff_transition_mismatch"
-                    : rejectionReason);
-        }
-
-        var projectedState = state;
-        if (transition.PressureSettlementCommand is { } pressureCommand)
-        {
-            if (pressureReceipt is null ||
-                pressureReceipt.Command != pressureCommand ||
-                pressureReceipt.Status is not (
-                    FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied or
-                    FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent) ||
-                string.IsNullOrWhiteSpace(pressureReceipt.Reason) ||
-                !string.Equals(
-                    pressureReceipt.Reason,
-                    NormalizeReason(pressureReceipt.Reason),
-                    StringComparison.Ordinal) ||
-                !pressureReceipt.CurrentAuthorityCleared ||
-                pressureReceipt.RetainedPredecessorCleared)
-            {
-                return RuntimeUnlockUncommittedTunaFallbackDecision(
-                    state,
-                    RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus.Rejected,
-                    "uncommitted_tuna_fallback_pressure_apply_receipt_mismatch");
-            }
-
-            var pressureCommit = CommitRegularV4FrontierRepairPressureSettlement(
-                state,
-                pressureReceipt);
-            if (pressureCommit.Status != RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted)
-            {
-                return RuntimeUnlockUncommittedTunaFallbackDecision(
-                    state,
-                    RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus.Rejected,
-                    pressureCommit.Reason);
-            }
-
-            projectedState = pressureCommit.State;
-        }
-        else if (pressureReceipt is not null)
-        {
-            return RuntimeUnlockUncommittedTunaFallbackDecision(
-                state,
-                RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus.Rejected,
-                "uncommitted_tuna_fallback_pressure_apply_receipt_unexpected");
-        }
-
-        if (!TryCreateRuntimeUnlockUncommittedTunaFallbackRouteDecision(
-                projectedState,
-                transition,
-                out var routeDecision,
-                out var routeRejectionReason))
-        {
-            return RuntimeUnlockUncommittedTunaFallbackDecision(
-                state,
-                RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus.Rejected,
-                routeRejectionReason);
-        }
-
-        if (!IsRuntimeUnlockUncommittedTunaFallbackProjectedTargetValid(
-                routeDecision,
-                adoptionStageReceipt.Stage))
-        {
-            return RuntimeUnlockUncommittedTunaFallbackDecision(
-                state,
-                RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus.Rejected,
-                "uncommitted_tuna_fallback_projected_target_mismatch");
-        }
-
-        var committedState = routeDecision.State;
-        return RuntimeUnlockUncommittedTunaFallbackDecision(
-            committedState,
-            RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus.Committed,
-            "uncommitted_tuna_fallback_handoff_committed",
-            transition,
-            routeDecision);
-    }
-
-    private static bool TryCreateRuntimeUnlockUncommittedTunaFallbackRouteDecision(
-        FileTransferCoordinatorState projectedState,
-        RuntimeUnlockUncommittedTunaFallbackHandoffTransition transition,
-        out FileTransferCoordinatorDecision routeDecision,
-        out string rejectionReason)
-    {
-        rejectionReason = "accepted";
-        var routeTransitionState =
-            projectedState.PersistentState.RegularV4ToTunaRouteTransition;
-        if (transition.Handoff.RouteTransitionAuthority is not { } transitionAuthority ||
-            transition.Handoff.PhysicalDrainReceipt is not { } drainReceipt ||
-            routeTransitionState.CurrentOperation is not
-            {
-                State: RegularV4ToTunaRouteTransitionState.Draining,
-            } currentOperation ||
-            currentOperation.Authority != transitionAuthority ||
-            !TryValidateRegularV4ToTunaDrainReceipt(
-                projectedState,
-                transitionAuthority,
-                drainReceipt,
-                out rejectionReason))
-        {
-            routeDecision = Decision(projectedState, transition.CoordinatorEvent.Reason);
-            if (string.Equals(rejectionReason, "accepted", StringComparison.Ordinal))
-            {
-                rejectionReason =
-                    "uncommitted_tuna_fallback_route_transition_authority_mismatch";
-            }
-
-            return false;
-        }
-
-        projectedState = CloneCoordinatorStateGraph(projectedState);
-        routeDecision = TransitionToRoute(
-            transition.CoordinatorEvent,
-            projectedState,
-            NormalizeReason(transition.CoordinatorEvent.Reason),
-            recoverEpoch: false);
-        if (routeDecision.MutationRejectedReason is { } routeRejectionReason)
-        {
-            rejectionReason = routeRejectionReason;
-            return false;
-        }
-
-        var routeState = routeDecision.State;
-        var runtimeOwner = routeState.CurrentRuntimeOwner!.Value;
-        var leg = routeState.CurrentLeg!;
-        var publicationRequest = new FileTransferCoordinatorActionRequest(
-            FileTransferCoordinatorActionKind.RoutePublication,
-            Source: "uncommitted_tuna_fallback_handoff",
-            Reason: transition.Handoff.Reason,
-            RuntimeOwner: runtimeOwner,
-            Route: routeState.RouteSelection.Route,
-            ProtocolVersion: routeState.RouteSelection.ProtocolVersion,
-            LiveRouteEpoch: routeState.CurrentLiveRouteEpoch?.EpochId ?? 0,
-            LegGeneration: leg.Generation,
-            RuntimeGeneration: runtimeOwner.RuntimeGeneration,
-            TerminalGeneration: routeState.TerminalGeneration,
-            TargetRoute: FileTransferRoute.PostTunaFallbackV6,
-            TargetProtocolVersion: FileTransferProtocol.ProtocolVersionV6,
-            TargetTransport: FileTransferTransportKind.RegularNkn);
-        var publicationToken = IssueRoutePublicationToken(
-            routeState,
-            publicationRequest,
-            Math.Max(1, routeState.LastRoutePublicationGeneration + 1))!.Value;
-        var committedState = ApplyIssuedRoutePublicationAuthority(
-            routeState,
-            CreateRoutePublicationDecision(
-                routeState,
-                FileTransferCoordinatorActionKind.RoutePublication,
-                accepted: true,
-                rejectionReason: "accepted",
-                publicationToken)) with
-        {
-            LastRuntimeUnlockUncommittedTunaFallbackHandoff = transition,
-        };
-        var supersededDisposition =
-            new RegularV4ToTunaRouteTransitionDispositionCommand(
-                transitionAuthority,
-                RegularV4ToTunaRouteTransitionDispositionKind.Superseded,
-                RouteCommitToken: null,
-                RoutePublicationToken: publicationToken,
-                "regular_v4_to_tuna_transition_superseded_by_fallback");
-        if (!IsRegularV4ToTunaRouteTransitionDispositionCommandValid(
-                supersededDisposition))
-        {
-            rejectionReason =
-                "uncommitted_tuna_fallback_route_transition_disposition_invalid";
-            return false;
-        }
-
-        var supersededOperation = currentOperation with
-        {
-            State = RegularV4ToTunaRouteTransitionState.Invalidated,
-            DrainReceipt = SnapshotRegularV4ToTunaDrainReceipt(drainReceipt),
-            DispositionCommand = supersededDisposition,
-        };
-        committedState = committedState with
-        {
-            PersistentState = committedState.PersistentState with
-            {
-                RegularV4ToTunaRouteTransition = routeTransitionState with
-                {
-                    CurrentOperation = null,
-                    LastTerminalOperation = supersededOperation,
-                },
-            },
-        };
-        routeDecision = routeDecision with { State = committedState };
-        rejectionReason = "accepted";
-        return true;
-    }
-
-    private static bool IsRuntimeUnlockUncommittedTunaFallbackAdoptionStageReceiptValid(
-        RuntimeUnlockUncommittedTunaFallbackHandoff handoff,
-        RuntimeUnlockUncommittedTunaFallbackAdoptionStageReceipt receipt)
-    {
-        var stage = receipt.Stage;
-        return receipt.Status is (
-                   RuntimeUnlockUncommittedTunaFallbackAdoptionStageStatus.Staged or
-                   RuntimeUnlockUncommittedTunaFallbackAdoptionStageStatus.Idempotent) &&
-               receipt.StageGeneration > 0 &&
-               !string.IsNullOrWhiteSpace(receipt.Reason) &&
-               string.Equals(receipt.Reason, NormalizeReason(receipt.Reason), StringComparison.Ordinal) &&
-               stage.DataSession is not null &&
-               stage.DataSessionGeneration == handoff.SourceDataSessionGeneration &&
-               stage.SourceRuntimeOwner == handoff.SourceRuntimeOwner &&
-               stage.SourceRoutePublication == handoff.SourceRoutePublication &&
-               stage.RuntimeUnlockAdmission == handoff.RuntimeUnlockAdmission &&
-               stage.PendingPreCommitProbe == handoff.PendingPreCommitProbe &&
-               stage.PreCommitSnapshot == handoff.PreCommitSnapshot &&
-               stage.SourceLegGeneration == handoff.SourceLegGeneration &&
-               stage.SourceTransportEpoch == handoff.SourceTransportEpoch &&
-               stage.SourceBridgeRecoveryGeneration == handoff.SourceBridgeRecoveryGeneration &&
-               stage.HandoffGeneration == handoff.HandoffGeneration &&
-               stage.DrainGeneration == handoff.DrainGeneration &&
-               stage.CompletedDrainGeneration == handoff.CompletedDrainGeneration &&
-               stage.TargetTransportEpoch == handoff.ProofTransportEpoch &&
-               stage.TargetBridgeRecoveryGeneration > handoff.SourceBridgeRecoveryGeneration &&
-               stage.PeerProofEvidence == handoff.PeerProofEvidence;
-    }
-
-    private static bool IsRuntimeUnlockUncommittedTunaFallbackAdoptionPreparationReceiptValid(
-        RuntimeUnlockUncommittedTunaFallbackHandoffTransition transition,
-        RuntimeUnlockUncommittedTunaFallbackAdoptionStageReceipt stageReceipt,
-        RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationReceipt receipt)
-    {
-        var stage = stageReceipt.Stage;
-        var command = receipt.Command;
-        return receipt.Status is (
-                   RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationStatus.Prepared or
-                   RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationStatus.Idempotent) &&
-               !string.IsNullOrWhiteSpace(receipt.Reason) &&
-               string.Equals(receipt.Reason, NormalizeReason(receipt.Reason), StringComparison.Ordinal) &&
-               command.DataSession is not null &&
-               ReferenceEquals(command.DataSession, stage.DataSession) &&
-               command.DataSessionGeneration == stage.DataSessionGeneration &&
-               command.StageGeneration == stageReceipt.StageGeneration &&
-               command.RuntimeOwner == stage.TargetRuntimeOwner &&
-               command.RoutePublication == stage.TargetRoutePublication &&
-               command.TransportEpoch == stage.TargetTransportEpoch &&
-               command.BridgeRecoveryGeneration == stage.TargetBridgeRecoveryGeneration &&
-               command.HandoffGeneration == stage.HandoffGeneration &&
-               command.DrainGeneration == stage.DrainGeneration &&
-               command.PeerProofEvidence == stage.PeerProofEvidence &&
-               command.PressureSettlementCommand == transition.PressureSettlementCommand &&
-               command.PressureSettlementCommand == stage.PressureSettlementCommand &&
-               command.SourceAvailabilityGeneration == stageReceipt.AvailabilityGeneration &&
-               command.SourceActivationPaused == stageReceipt.ActivationPaused &&
-               string.Equals(
-                   command.SourceAvailabilityReason,
-                   stageReceipt.AvailabilityReason,
-                   StringComparison.Ordinal);
-    }
-
-    private static bool IsRuntimeUnlockUncommittedTunaFallbackProjectedTargetValid(
-        FileTransferCoordinatorDecision routeDecision,
-        RuntimeUnlockUncommittedTunaFallbackAdoptionStage stage)
-        => routeDecision.State.CurrentRuntimeOwner == stage.TargetRuntimeOwner &&
-           routeDecision.State.CurrentRoutePublicationToken == stage.TargetRoutePublication &&
-           routeDecision.State.CurrentLeg is { } leg &&
-           leg.Generation == stage.TargetRoutePublication.LegGeneration &&
-           leg.TransportEpochId == stage.TargetTransportEpoch &&
-           leg.BridgeRecoveryGeneration == stage.TargetBridgeRecoveryGeneration &&
-           leg.State == FileTransferLegState.CheckpointPending &&
-           !leg.CanSendData &&
-           routeDecision.State.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6 &&
-           routeDecision.State.RouteSelection.ProtocolVersion == FileTransferProtocol.ProtocolVersionV6;
-
-    private static bool TryCreateRuntimeUnlockUncommittedTunaFallbackHandoffTransition(
-        FileTransferCoordinatorState state,
-        FileTransferCoordinatorEvent coordinatorEvent,
-        out RuntimeUnlockUncommittedTunaFallbackHandoffTransition transition,
-        out string rejectionReason)
-    {
-        transition = default;
-        rejectionReason = "accepted";
-        var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
-        if (coordinatorEvent.RuntimeUnlockUncommittedTunaFallbackHandoff is not { } handoff ||
-            !IsRuntimeUnlockUncommittedTunaFallbackHandoffCurrent(
-                state,
-                coordinatorEvent,
-                handoff,
-                out rejectionReason))
-        {
-            if (string.Equals(rejectionReason, "accepted", StringComparison.Ordinal))
-            {
-                rejectionReason = "uncommitted_tuna_fallback_handoff_missing";
-            }
-
-            return false;
-        }
-
-        if (pressureState.PendingBinding is not null)
-        {
-            rejectionReason = "uncommitted_tuna_fallback_pressure_binding_pending";
-            return false;
-        }
-
-        if (pressureState.RetainedPredecessorBinding is not null)
-        {
-            rejectionReason = "uncommitted_tuna_fallback_pressure_predecessor_pending";
-            return false;
-        }
-
-        RegularV4FrontierRepairPressureBinding? pressureBinding = null;
-        FileTransferRegularV4FrontierRepairSettlement? pressureSettlement = null;
-        FileTransferRegularV4FrontierRepairPressureSettlementCommand? pressureCommand = null;
-        if (pressureState.InstalledBinding is { } installed)
-        {
-            if (installed.IsDefault ||
-                installed.State != RegularV4FrontierRepairPressureBindingState.Installed)
-            {
-                rejectionReason = "uncommitted_tuna_fallback_pressure_binding_invalid";
-                return false;
-            }
-
-            pressureSettlement = CreateRuntimeUnlockUncommittedTunaFallbackPressureSettlement(
-                installed.Authority);
-            var preparedPressure = PrepareRegularV4FrontierRepairPressureSettlement(
-                state,
-                pressureSettlement);
-            if (preparedPressure.Status !=
-                    RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted ||
-                preparedPressure.SettlementCommand is not { } settlementCommand)
-            {
-                rejectionReason = preparedPressure.Reason;
-                return false;
-            }
-
-            pressureBinding = installed;
-            pressureCommand = settlementCommand;
-        }
-
-        transition = new RuntimeUnlockUncommittedTunaFallbackHandoffTransition(
-            coordinatorEvent,
-            handoff,
-            pressureBinding,
-            pressureSettlement,
-            pressureCommand);
-        return true;
-    }
-
-    private static FileTransferRegularV4FrontierRepairSettlement
-        CreateRuntimeUnlockUncommittedTunaFallbackPressureSettlement(
-            FileTransferRegularV4FrontierRepairAuthority authority)
-        => new(
-            authority.SessionId,
-            authority.TransferId,
-            authority.Direction,
-            authority.RouteToken,
-            authority.ProtocolVersion,
-            authority.LiveRouteEpoch,
-            authority.RuntimeGeneration,
-            authority.TerminalGeneration,
-            authority.LegGeneration,
-            authority.TransportEpoch,
-            authority.BridgeRecoveryGeneration,
-            authority.BridgeDecisionGeneration,
-            authority.RoutePublicationGeneration,
-            authority.RouteCommitGeneration,
-            authority.RepairKey,
-            authority.FrontierChunkIndex,
-            authority.DurableReceivedHighestChunkIndex,
-            authority.PendingRepairCount,
-            authority.DecisionGeneration,
-            "uncommitted_tuna_fallback_pressure_handoff",
-            FileTransferRegularV4FrontierRepairSettlementOutcome.StaleRejected,
-            authority.TargetTransport)
-        {
-            AuthorityId = authority.AuthorityId,
-        };
-
-    private static bool IsRuntimeUnlockUncommittedTunaFallbackHandoffCommitted(
-        FileTransferCoordinatorState state,
-        RuntimeUnlockUncommittedTunaFallbackHandoffTransition transition,
-        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt? pressureReceipt)
-    {
-        var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
-        var routeTransitionState =
-            state.PersistentState.RegularV4ToTunaRouteTransition;
-        if (state.IsTerminal ||
-            state.RouteSelection.Route != FileTransferRoute.PostTunaFallbackV6 ||
-            state.RouteSelection.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
-            state.CurrentRuntimeOwner is not { Route: FileTransferRoute.PostTunaFallbackV6 } ||
-            state.CurrentRouteCommit is not null ||
-            state.CurrentRuntimeUnlockAdmission is not null ||
-            state.CurrentRuntimeUnlockPendingPreCommitProbe is not null ||
-            state.CurrentRoutePublicationToken is not { } publication ||
-            !IsRoutePublicationTokenCurrent(state, publication, out _) ||
-            pressureState.PendingBinding is not null ||
-            pressureState.InstalledBinding is not null ||
-            pressureState.RetainedPredecessorBinding is not null ||
-            transition.Handoff.RouteTransitionAuthority is not { } transitionAuthority ||
-            transition.Handoff.PhysicalDrainReceipt is not { } drainReceipt ||
-            routeTransitionState.CurrentOperation is not null ||
-            routeTransitionState.LastTerminalOperation is not
-            {
-                State: RegularV4ToTunaRouteTransitionState.Invalidated,
-                DispositionCommand:
-                {
-                    Kind: RegularV4ToTunaRouteTransitionDispositionKind.Superseded,
-                },
-            } terminalTransition ||
-            terminalTransition.Authority != transitionAuthority ||
-            terminalTransition.DrainReceipt is not { } committedDrainReceipt ||
-            !IsExactOrCanonicalIdempotentRegularV4ToTunaDrainReceipt(
-                committedDrainReceipt,
-                drainReceipt))
-        {
-            return false;
-        }
-
-        if (transition.PressureSettlementCommand is null)
-        {
-            return pressureReceipt is null;
-        }
-
-        return pressureReceipt is not null &&
-               pressureState.LastSettlement == transition.PressureSettlement &&
-               pressureState.LastSettlementApplyReceipt is { } committedReceipt &&
-               committedReceipt.Command == transition.PressureSettlementCommand &&
-               committedReceipt.CurrentAuthorityCleared &&
-               !committedReceipt.RetainedPredecessorCleared &&
-               IsExactOrCanonicalIdempotentRegularV4PressureSettlementReceipt(
-                   committedReceipt,
-                   pressureReceipt);
-    }
-
-    private static RuntimeUnlockUncommittedTunaFallbackHandoffTransitionDecision
-        RuntimeUnlockUncommittedTunaFallbackDecision(
-            FileTransferCoordinatorState state,
-            RuntimeUnlockUncommittedTunaFallbackHandoffTransitionStatus status,
-            string reason,
-            RuntimeUnlockUncommittedTunaFallbackHandoffTransition? transition = null,
-            FileTransferCoordinatorDecision? routeDecision = null)
-        => new(status, NormalizeReason(reason), transition, routeDecision) { State = state };
-
     private static FileTransferCoordinatorDecision TransitionToRoute(
         FileTransferCoordinatorEvent coordinatorEvent,
         FileTransferCoordinatorState state,
         string reason,
         bool recoverEpoch)
     {
-        if (state.PersistentState.RegularV4ToTunaRouteTransition.CurrentOperation
-                is not null &&
-            coordinatorEvent.RuntimeUnlockUncommittedTunaFallbackHandoff is null)
+        if (state.PersistentState.FileTransferRouteTransition.CurrentOperation
+                is not null)
         {
             return MutationRejected(
                 state,
                 reason,
-                "regular_v4_to_tuna_transition_commit_required");
-        }
-
-        if (coordinatorEvent.RuntimeUnlockUncommittedTunaFallbackHandoff is { } fallbackHandoff &&
-            !IsRuntimeUnlockUncommittedTunaFallbackHandoffCurrent(
-                state,
-                coordinatorEvent,
-                fallbackHandoff,
-                out var fallbackHandoffRejectionReason))
-        {
-            return MutationRejected(state, reason, fallbackHandoffRejectionReason);
+                "filetransfer_route_transition_commit_required");
         }
 
         if (HasRegularV4FrontierRepairPressureBinding(state))
@@ -11076,129 +9922,6 @@ internal static class FileTransferCoordinator
             FallbackCheckpointRequired: !coordinatorEvent.CanSendData &&
                                         coordinatorEvent.RouteSelection.RuntimeDescriptor.UsesPostTunaFallbackV6Runtime,
             reason);
-    }
-
-    private static bool IsRuntimeUnlockUncommittedTunaFallbackHandoffCurrent(
-        FileTransferCoordinatorState state,
-        FileTransferCoordinatorEvent coordinatorEvent,
-        RuntimeUnlockUncommittedTunaFallbackHandoff handoff,
-        out string rejectionReason)
-    {
-        rejectionReason = "accepted";
-        if (coordinatorEvent.Kind != FileTransferCoordinatorEventKind.TunaLost ||
-            coordinatorEvent.RouteSelection.Route != FileTransferRoute.PostTunaFallbackV6 ||
-            coordinatorEvent.RouteSelection.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
-            coordinatorEvent.HandoffKind != FileTransferTransportHandoffKind.TunaToNormalFallback ||
-            coordinatorEvent.TargetTransport != FileTransferTransportKind.RegularNkn ||
-            coordinatorEvent.LegState != FileTransferLegState.CheckpointPending ||
-            coordinatorEvent.CanSendData)
-        {
-            rejectionReason = "uncommitted_tuna_fallback_target_invalid";
-            return false;
-        }
-
-        if (state.IsTerminal ||
-            state.RouteSelection.Route != FileTransferRoute.RegularNknV4Fast ||
-            state.RouteSelection.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
-            state.CurrentRuntimeOwner != handoff.SourceRuntimeOwner ||
-            state.CurrentRoutePublicationToken != handoff.SourceRoutePublication ||
-            state.CurrentRuntimeUnlockAdmission != handoff.RuntimeUnlockAdmission ||
-            state.CurrentRuntimeUnlockPendingPreCommitProbe != handoff.PendingPreCommitProbe ||
-            state.CurrentRouteCommit is not null ||
-            !IsRuntimeOwnerCurrent(state, handoff.SourceRuntimeOwner, out _) ||
-            !IsRoutePublicationTokenCurrent(state, handoff.SourceRoutePublication, out _) ||
-            !IsRuntimeUnlockAdmissionTokenCurrent(state, handoff.RuntimeUnlockAdmission, out _) ||
-            !IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(
-                state,
-                handoff.PendingPreCommitProbe,
-                out _) ||
-            state.TerminalGeneration != handoff.SourceTerminalGeneration ||
-            state.CurrentLeg is not { } leg ||
-            leg.Generation != handoff.SourceLegGeneration ||
-            leg.TransportEpochId != handoff.SourceTransportEpoch ||
-            leg.BridgeRecoveryGeneration != handoff.SourceBridgeRecoveryGeneration)
-        {
-            rejectionReason = "uncommitted_tuna_fallback_source_scope_stale";
-            return false;
-        }
-
-        var snapshot = handoff.PreCommitSnapshot;
-        var admission = handoff.RuntimeUnlockAdmission;
-        var pendingPreCommit = handoff.PendingPreCommitProbe;
-        var peerProof = handoff.PeerProofEvidence;
-        if (handoff.RouteTransitionAuthority is not { } transitionAuthority ||
-            handoff.PhysicalDrainReceipt is not { } physicalDrainReceipt ||
-            transitionAuthority.SourceRuntimeOwner != handoff.SourceRuntimeOwner ||
-            transitionAuthority.SourceRoutePublication != handoff.SourceRoutePublication ||
-            transitionAuthority.RuntimeUnlockAdmission != admission ||
-            transitionAuthority.PendingPreCommitProbe != pendingPreCommit ||
-            transitionAuthority.DataSessionGeneration !=
-                handoff.SourceDataSessionGeneration ||
-            transitionAuthority.SourceTerminalGeneration !=
-                handoff.SourceTerminalGeneration ||
-            transitionAuthority.SourceLegGeneration != handoff.SourceLegGeneration ||
-            transitionAuthority.SourceTransportEpoch != handoff.SourceTransportEpoch ||
-            transitionAuthority.SourceBridgeRecoveryGeneration !=
-                handoff.SourceBridgeRecoveryGeneration ||
-            transitionAuthority.LaunchGeneration != snapshot.LaunchGeneration ||
-            !TryValidateRegularV4ToTunaDrainReceipt(
-                state,
-                transitionAuthority,
-                physicalDrainReceipt,
-                out rejectionReason))
-        {
-            if (string.Equals(rejectionReason, "accepted", StringComparison.Ordinal))
-            {
-                rejectionReason =
-                    "uncommitted_tuna_fallback_route_transition_authority_missing";
-            }
-
-            return false;
-        }
-
-        if (handoff.HandoffGeneration <= 0 ||
-            handoff.SourceDataSessionGeneration <= 0 ||
-            handoff.ProofTransportEpoch <= 0 ||
-            !peerProof.IsComplete ||
-            !peerProof.IsExactFrameBound ||
-            peerProof.Direction != FileTransferDirection.Outbound ||
-            !string.Equals(peerProof.ProofKind, NormalizeReason(peerProof.ProofKind), StringComparison.Ordinal) ||
-            !string.Equals(peerProof.Reason, NormalizeReason(peerProof.Reason), StringComparison.Ordinal) ||
-            snapshot.LaunchGeneration <= 0 ||
-            !snapshot.PeerVisibleProof ||
-            !snapshot.PeerReceived ||
-            !snapshot.AnswerReceived ||
-            !snapshot.TunaPathLeaseRequired ||
-            !snapshot.TunaPathLeaseCurrent ||
-            !string.Equals(peerProof.SessionId, state.SessionId, StringComparison.Ordinal) ||
-            !string.Equals(peerProof.TransferId, state.TransferId, StringComparison.Ordinal) ||
-            peerProof.TransportEpoch != handoff.ProofTransportEpoch ||
-            peerProof.TransportEpoch != coordinatorEvent.TransportEpochId ||
-            coordinatorEvent.BridgeRecoveryGeneration <= handoff.SourceBridgeRecoveryGeneration ||
-            !string.Equals(snapshot.SessionId, state.SessionId, StringComparison.Ordinal) ||
-            !string.Equals(snapshot.TransferId, state.TransferId, StringComparison.Ordinal) ||
-            admission != pendingPreCommit.AdmissionToken ||
-            pendingPreCommit.RuntimeOwner != handoff.SourceRuntimeOwner ||
-            snapshot.TransactionGeneration != pendingPreCommit.TransactionGeneration ||
-            snapshot.OfferGeneration != pendingPreCommit.OfferGeneration ||
-            snapshot.TunaPathLeaseGeneration != pendingPreCommit.TunaPathLeaseGeneration ||
-            !string.Equals(
-                snapshot.TunaPathLeaseListenerRunId,
-                pendingPreCommit.TunaPathLeaseListenerRunId,
-                StringComparison.Ordinal) ||
-            !string.Equals(snapshot.PathProbeState, "Acked", StringComparison.OrdinalIgnoreCase) ||
-            string.IsNullOrWhiteSpace(snapshot.PathProbeId) ||
-            snapshot.PathProbeTransport != FileTransferTransportKind.Tuna ||
-            snapshot.TargetRoute != FileTransferRoute.FileTunaV4 ||
-            snapshot.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
-            snapshot.TargetTransport != FileTransferTransportKind.Tuna ||
-            snapshot.HandoffKind != FileTransferTransportHandoffKind.NormalToTunaActivation)
-        {
-            rejectionReason = "uncommitted_tuna_fallback_precommit_or_drain_mismatch";
-            return false;
-        }
-
-        return true;
     }
 
     private static FileTransferCoordinatorDecision MarkFallbackCheckpointRequested(
@@ -11682,13 +10405,13 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         string reason)
     {
-        if (state.PersistentState.RegularV4ToTunaRouteTransition.CurrentOperation
+        if (state.PersistentState.FileTransferRouteTransition.CurrentOperation
             is not null)
         {
             return MutationRejected(
                 state,
                 reason,
-                "regular_v4_to_tuna_transition_invalidation_required");
+                "filetransfer_route_transition_invalidation_required");
         }
 
         var request = coordinatorEvent.RuntimeUnlockAdmissionRequest ??
@@ -11712,13 +10435,13 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         string reason)
     {
-        if (state.PersistentState.RegularV4ToTunaRouteTransition.CurrentOperation
+        if (state.PersistentState.FileTransferRouteTransition.CurrentOperation
             is not null)
         {
             return MutationRejected(
                 state,
                 reason,
-                "regular_v4_to_tuna_transition_invalidation_required");
+                "filetransfer_route_transition_invalidation_required");
         }
 
         if (coordinatorEvent.RuntimeUnlockPendingPreCommitProbeRequest is not { } pendingRequest)
@@ -11807,13 +10530,13 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         string reason)
     {
-        if (state.PersistentState.RegularV4ToTunaRouteTransition.CurrentOperation
+        if (state.PersistentState.FileTransferRouteTransition.CurrentOperation
             is not null)
         {
             return MutationRejected(
                 state,
                 reason,
-                "regular_v4_to_tuna_transition_invalidation_required");
+                "filetransfer_route_transition_invalidation_required");
         }
 
         if (coordinatorEvent.RuntimeUnlockPendingPreCommitProbeRequest is { } pendingRequest &&
@@ -11846,13 +10569,13 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         string reason)
     {
-        if (state.PersistentState.RegularV4ToTunaRouteTransition.CurrentOperation
+        if (state.PersistentState.FileTransferRouteTransition.CurrentOperation
             is not null)
         {
             return MutationRejected(
                 state,
                 reason,
-                "regular_v4_to_tuna_transition_invalidation_required");
+                "filetransfer_route_transition_invalidation_required");
         }
 
         if (HasRegularV4FrontierRepairPressureBinding(state))
@@ -11977,7 +10700,10 @@ internal static class FileTransferCoordinator
         }
 
         var expectedRoute = FileTransferRouteResolver.Resolve(proof.TargetRoute);
-        if (!string.Equals(coordinatorEvent.RouteSelection.TelemetryToken, expectedRoute.TelemetryToken, StringComparison.Ordinal))
+        if (!string.Equals(
+                coordinatorEvent.RouteSelection.TelemetryToken,
+                expectedRoute.TelemetryToken,
+                StringComparison.Ordinal))
         {
             rejectionReason = "route_commit_event_target_mismatch";
             return false;
@@ -11990,13 +10716,13 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         string reason)
     {
-        if (state.PersistentState.RegularV4ToTunaRouteTransition.CurrentOperation
+        if (state.PersistentState.FileTransferRouteTransition.CurrentOperation
             is not null)
         {
             return MutationRejected(
                 state,
                 reason,
-                "regular_v4_to_tuna_transition_invalidation_required");
+                "filetransfer_route_transition_invalidation_required");
         }
 
         if (HasRegularV4FrontierRepairPressureBinding(state))
@@ -13237,249 +11963,6 @@ internal static class FileTransferCoordinator
                publication.PublicationGeneration == authority.RoutePublicationGeneration;
     }
 
-    private static bool TryValidateRegularV4ToTunaPrepareRequest(
-        FileTransferCoordinatorState state,
-        RegularV4ToTunaRouteTransitionPrepareRequest request,
-        out string rejectionReason)
-    {
-        rejectionReason = "accepted";
-        if (state.IsTerminal)
-        {
-            rejectionReason = "transfer_terminal";
-            return false;
-        }
-
-        if (state.RouteSelection.Route != FileTransferRoute.RegularNknV4Fast ||
-            state.RouteSelection.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
-            state.CurrentRouteCommit is not null ||
-            state.CurrentRuntimeOwner is not { } owner ||
-            state.CurrentLeg is not { } leg)
-        {
-            rejectionReason = "regular_v4_to_tuna_transition_source_route_invalid";
-            return false;
-        }
-
-        if (request.SourceRuntimeOwner != owner ||
-            !IsRuntimeOwnerCurrent(state, request.SourceRuntimeOwner, out rejectionReason) ||
-            state.CurrentRoutePublicationToken != request.SourceRoutePublication ||
-            !IsRoutePublicationTokenCurrent(
-                state,
-                request.SourceRoutePublication,
-                out rejectionReason) ||
-            state.CurrentRuntimeUnlockAdmission != request.RuntimeUnlockAdmission ||
-            !IsRuntimeUnlockAdmissionTokenCurrent(
-                state,
-                request.RuntimeUnlockAdmission,
-                out rejectionReason) ||
-            state.CurrentRuntimeUnlockPendingPreCommitProbe !=
-                request.PendingPreCommitProbe ||
-            !IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(
-                state,
-                request.PendingPreCommitProbe,
-                out rejectionReason))
-        {
-            if (string.Equals(rejectionReason, "accepted", StringComparison.Ordinal))
-            {
-                rejectionReason = "regular_v4_to_tuna_transition_source_authority_mismatch";
-            }
-
-            return false;
-        }
-
-        if (request.LaunchGeneration <= 0 ||
-            !string.Equals(
-                request.AcceptedLaunchBoundary.SessionId,
-                state.SessionId,
-                StringComparison.Ordinal) ||
-            (!string.IsNullOrWhiteSpace(request.AcceptedLaunchBoundary.TransferId) &&
-             !string.Equals(
-                 request.AcceptedLaunchBoundary.TransferId,
-                 state.TransferId,
-                 StringComparison.Ordinal)) ||
-            request.PendingPreCommitProbe.RuntimeOwner != owner ||
-            request.PendingPreCommitProbe.AdmissionToken != request.RuntimeUnlockAdmission ||
-            request.PendingPreCommitProbe.TransactionGeneration !=
-                request.AcceptedLaunchBoundary.TransactionGeneration ||
-            request.PendingPreCommitProbe.OfferGeneration !=
-                request.AcceptedLaunchBoundary.OfferGeneration ||
-            request.PendingPreCommitProbe.TunaPathLeaseGeneration !=
-                request.AcceptedLaunchBoundary.TunaPathLeaseGeneration ||
-            !string.Equals(
-                request.PendingPreCommitProbe.TunaPathLeaseListenerRunId,
-                request.AcceptedLaunchBoundary.TunaPathLeaseListenerRunId,
-                StringComparison.Ordinal) ||
-            !RegularV4ToTunaProofMatchesTarget(request.AcceptedLaunchBoundary) ||
-            request.AcceptedLaunchBoundary.AdmissionToken != request.RuntimeUnlockAdmission)
-        {
-            rejectionReason = "regular_v4_to_tuna_transition_launch_boundary_mismatch";
-            return false;
-        }
-
-        var checkpoint = request.DurableCheckpoint;
-        if (checkpoint.IsDefault ||
-            checkpoint.SourceRuntimeOwner != owner ||
-            checkpoint.SourceRoutePublication != request.SourceRoutePublication ||
-            checkpoint.SourceTerminalGeneration != state.TerminalGeneration ||
-            checkpoint.SourceLegGeneration != leg.Generation ||
-            checkpoint.SourceTransportEpoch != leg.TransportEpochId ||
-            checkpoint.SourceBridgeRecoveryGeneration != leg.BridgeRecoveryGeneration)
-        {
-            rejectionReason = "regular_v4_to_tuna_transition_checkpoint_scope_mismatch";
-            return false;
-        }
-
-        return true;
-    }
-
-    private static bool IsRegularV4ToTunaRouteTransitionSourceScopeCurrent(
-        FileTransferCoordinatorState state,
-        RegularV4ToTunaRouteTransitionAuthority authority,
-        out string rejectionReason)
-    {
-        rejectionReason = "accepted";
-        if (authority.IsDefault ||
-            !string.Equals(state.SessionId, authority.SessionId, StringComparison.Ordinal) ||
-            !string.Equals(state.TransferId, authority.TransferId, StringComparison.Ordinal) ||
-            state.Direction != authority.Direction)
-        {
-            rejectionReason = "regular_v4_to_tuna_transition_identity_mismatch";
-            return false;
-        }
-
-        if (state.IsTerminal)
-        {
-            rejectionReason = "transfer_terminal";
-            return false;
-        }
-
-        if (state.RouteSelection.Route != FileTransferRoute.RegularNknV4Fast ||
-            state.RouteSelection.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
-            state.CurrentRouteCommit is not null ||
-            state.CurrentRuntimeOwner != authority.SourceRuntimeOwner ||
-            state.CurrentRoutePublicationToken != authority.SourceRoutePublication ||
-            state.CurrentRuntimeUnlockAdmission != authority.RuntimeUnlockAdmission ||
-            state.CurrentRuntimeUnlockPendingPreCommitProbe != authority.PendingPreCommitProbe ||
-            state.TerminalGeneration != authority.SourceTerminalGeneration ||
-            (state.CurrentLiveRouteEpoch?.EpochId ?? 0) != authority.SourceLiveRouteEpoch ||
-            state.CurrentLeg is not { } leg ||
-            leg.Generation != authority.SourceLegGeneration ||
-            leg.TransportEpochId != authority.SourceTransportEpoch ||
-            leg.BridgeRecoveryGeneration != authority.SourceBridgeRecoveryGeneration)
-        {
-            rejectionReason = "regular_v4_to_tuna_transition_source_scope_stale";
-            return false;
-        }
-
-        if (!IsRuntimeOwnerCurrent(state, authority.SourceRuntimeOwner, out rejectionReason) ||
-            !IsRoutePublicationTokenCurrent(
-                state,
-                authority.SourceRoutePublication,
-                out rejectionReason) ||
-            !IsRuntimeUnlockAdmissionTokenCurrent(
-                state,
-                authority.RuntimeUnlockAdmission,
-                out rejectionReason) ||
-            !IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(
-                state,
-                authority.PendingPreCommitProbe,
-                out rejectionReason))
-        {
-            return false;
-        }
-
-        return authority.DurableCheckpoint.SourceRuntimeOwner ==
-                   authority.SourceRuntimeOwner &&
-               authority.DurableCheckpoint.SourceRoutePublication ==
-                   authority.SourceRoutePublication &&
-               authority.DurableCheckpoint.SourceTerminalGeneration ==
-                   authority.SourceTerminalGeneration &&
-               authority.DurableCheckpoint.SourceLegGeneration ==
-                   authority.SourceLegGeneration &&
-               authority.DurableCheckpoint.SourceTransportEpoch ==
-                   authority.SourceTransportEpoch &&
-               authority.DurableCheckpoint.SourceBridgeRecoveryGeneration ==
-                   authority.SourceBridgeRecoveryGeneration &&
-               authority.DurableCheckpoint.DataSessionGeneration ==
-                   authority.DataSessionGeneration;
-    }
-
-    private static bool TryValidateRegularV4ToTunaFinalProof(
-        FileTransferCoordinatorState state,
-        RegularV4ToTunaRouteTransitionAuthority authority,
-        RuntimeUnlockRouteCommitProof proof,
-        out string rejectionReason)
-    {
-        if (!RuntimeUnlockTransaction.CanCommitRoute(proof, state, out rejectionReason))
-        {
-            return false;
-        }
-
-        var prepared = authority.AcceptedLaunchBoundary;
-        if (!RegularV4ToTunaProofMatchesTarget(proof) ||
-            proof.AdmissionToken != authority.RuntimeUnlockAdmission ||
-            proof.TransactionGeneration != prepared.TransactionGeneration ||
-            proof.OfferGeneration != prepared.OfferGeneration ||
-            proof.TunaPathLeaseGeneration != prepared.TunaPathLeaseGeneration ||
-            !string.Equals(
-                proof.TunaPathLeaseListenerRunId,
-                prepared.TunaPathLeaseListenerRunId,
-                StringComparison.Ordinal) ||
-            authority.PendingPreCommitProbe.TransactionGeneration !=
-                proof.TransactionGeneration ||
-            authority.PendingPreCommitProbe.OfferGeneration != proof.OfferGeneration ||
-            authority.PendingPreCommitProbe.TunaPathLeaseGeneration !=
-                proof.TunaPathLeaseGeneration ||
-            !string.Equals(
-                authority.PendingPreCommitProbe.TunaPathLeaseListenerRunId,
-                proof.TunaPathLeaseListenerRunId,
-                StringComparison.Ordinal))
-        {
-            rejectionReason = "regular_v4_to_tuna_transition_final_proof_mismatch";
-            return false;
-        }
-
-        if (!string.IsNullOrWhiteSpace(prepared.PathProbeId) &&
-            !string.Equals(prepared.PathProbeId, proof.PathProbeId, StringComparison.Ordinal))
-        {
-            rejectionReason = "regular_v4_to_tuna_transition_probe_identity_mismatch";
-            return false;
-        }
-
-        rejectionReason = "accepted";
-        return true;
-    }
-
-    private static bool RegularV4ToTunaProofMatchesTarget(
-        RuntimeUnlockRouteCommitProof proof)
-        => proof.TargetRoute == FileTransferRoute.FileTunaV4 &&
-           proof.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
-           proof.TargetTransport == FileTransferTransportKind.Tuna &&
-           proof.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
-           proof.TransactionGeneration > 0 &&
-           proof.OfferGeneration > 0 &&
-           proof.PeerVisibleProof &&
-           (proof.PeerReceived || proof.AnswerReceived) &&
-           proof.TransactionState is not (
-               RuntimeUnlockTransactionState.Failed or
-               RuntimeUnlockTransactionState.Retired or
-               RuntimeUnlockTransactionState.Committed) &&
-           proof.PathProbeState != RuntimeUnlockPathProbeState.Failed &&
-           proof.TunaPathLeaseGeneration > 0 &&
-           proof.TunaPathLeaseState == RuntimeUnlockTunaPathLeaseState.ListenerReady &&
-           proof.TunaPathLeaseCurrent;
-
-    private static bool RegularV4ToTunaPrepareRequestMatchesAuthority(
-        RegularV4ToTunaRouteTransitionPrepareRequest request,
-        RegularV4ToTunaRouteTransitionAuthority authority)
-        => request.SourceRuntimeOwner == authority.SourceRuntimeOwner &&
-           request.SourceRoutePublication == authority.SourceRoutePublication &&
-           request.RuntimeUnlockAdmission == authority.RuntimeUnlockAdmission &&
-           request.PendingPreCommitProbe == authority.PendingPreCommitProbe &&
-           request.AcceptedLaunchBoundary == authority.AcceptedLaunchBoundary &&
-           request.LaunchGeneration == authority.LaunchGeneration &&
-           request.DurableCheckpoint == authority.DurableCheckpoint &&
-           string.Equals(request.Reason, authority.Reason, StringComparison.Ordinal);
-
     private static bool TryValidateCapturedPhysicalSendLeaseSet(
         long capturedThroughPhysicalSendGeneration,
         IReadOnlyList<long> capturedPhysicalSendLeaseIds,
@@ -13492,11 +11975,11 @@ internal static class FileTransferCoordinator
             string.IsNullOrWhiteSpace(capturedPhysicalSendFingerprint) ||
             !string.Equals(
                 capturedPhysicalSendFingerprint,
-                CreateRegularV4ToTunaPhysicalDrainFingerprint(
+                CreateFileTransferRouteTransitionPhysicalDrainFingerprint(
                     capturedPhysicalSendLeaseIds),
                 StringComparison.Ordinal))
         {
-            rejectionReason = "regular_v4_to_tuna_transition_drain_boundary_invalid";
+            rejectionReason = "filetransfer_route_transition_drain_boundary_invalid";
             return false;
         }
 
@@ -13506,7 +11989,7 @@ internal static class FileTransferCoordinator
             if (leaseId <= previous ||
                 leaseId > capturedThroughPhysicalSendGeneration)
             {
-                rejectionReason = "regular_v4_to_tuna_transition_drain_lease_set_invalid";
+                rejectionReason = "filetransfer_route_transition_drain_lease_set_invalid";
                 return false;
             }
 
@@ -13516,87 +11999,7 @@ internal static class FileTransferCoordinator
         return true;
     }
 
-    private static bool TryValidateRegularV4ToTunaDrainReceipt(
-        FileTransferCoordinatorState state,
-        RegularV4ToTunaRouteTransitionAuthority authority,
-        RegularV4ToTunaPhysicalDrainReceipt receipt,
-        out string rejectionReason)
-    {
-        rejectionReason = "accepted";
-        var operation =
-            state.PersistentState.RegularV4ToTunaRouteTransition.CurrentOperation;
-        if (operation is not
-            {
-                State: RegularV4ToTunaRouteTransitionState.Draining,
-                DrainCommand: { } command,
-            } ||
-            operation.Value.Authority != authority ||
-            !IsRegularV4ToTunaRouteTransitionSourceScopeCurrent(
-                state,
-                authority,
-                out rejectionReason))
-        {
-            if (string.Equals(rejectionReason, "accepted", StringComparison.Ordinal))
-            {
-                rejectionReason = "regular_v4_to_tuna_transition_not_draining";
-            }
-
-            return false;
-        }
-
-        if (receipt.Command != command ||
-            receipt.Outcome != RegularV4ToTunaPhysicalDrainOutcome.Completed ||
-            receipt.CompletedPhysicalSendCount != command.CapturedPhysicalSendCount ||
-            receipt.CompletedPhysicalSendLeaseIds is null ||
-            !CapturedLeaseSetsEqual(
-                receipt.CompletedPhysicalSendLeaseIds,
-                command.CapturedPhysicalSendLeaseIds) ||
-            !string.Equals(
-                receipt.CompletedPhysicalSendFingerprint,
-                command.CapturedPhysicalSendFingerprint,
-                StringComparison.Ordinal) ||
-            string.IsNullOrWhiteSpace(receipt.Reason) ||
-            !string.Equals(
-                receipt.Reason,
-                NormalizeReason(receipt.Reason),
-                StringComparison.Ordinal))
-        {
-            rejectionReason = "regular_v4_to_tuna_transition_drain_receipt_mismatch";
-            return false;
-        }
-
-        return true;
-    }
-
-    private static bool IsExactOrCanonicalIdempotentRegularV4ToTunaDrainReceipt(
-        RegularV4ToTunaPhysicalDrainReceipt committed,
-        RegularV4ToTunaPhysicalDrainReceipt candidate)
-        => committed.Command == candidate.Command &&
-           candidate.Outcome == RegularV4ToTunaPhysicalDrainOutcome.Completed &&
-           committed.CompletedPhysicalSendCount == candidate.CompletedPhysicalSendCount &&
-           CapturedLeaseSetsEqual(
-               committed.CompletedPhysicalSendLeaseIds,
-               candidate.CompletedPhysicalSendLeaseIds) &&
-           string.Equals(
-               committed.CompletedPhysicalSendFingerprint,
-               candidate.CompletedPhysicalSendFingerprint,
-               StringComparison.Ordinal) &&
-           string.Equals(
-               committed.Reason,
-               candidate.Reason,
-               StringComparison.Ordinal);
-
-    private static RegularV4ToTunaPhysicalDrainReceipt
-        SnapshotRegularV4ToTunaDrainReceipt(
-            RegularV4ToTunaPhysicalDrainReceipt receipt)
-        => receipt with
-        {
-            CompletedPhysicalSendLeaseIds = Array.AsReadOnly(
-                receipt.CompletedPhysicalSendLeaseIds.ToArray()),
-            Reason = NormalizeReason(receipt.Reason),
-        };
-
-    private static bool IsExactRegularV4ToTunaPressureReceiptDuplicate(
+    private static bool IsExactFileTransferRouteTransitionPressureReceiptDuplicate(
         FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt? committed,
         FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt? candidate)
         => committed is null
@@ -13615,7 +12018,7 @@ internal static class FileTransferCoordinator
                     "regular_v4_frontier_repair_pressure_settlement_apply_idempotent",
                     StringComparison.Ordinal)));
 
-    private static bool IsCanonicalRegularV4ToTunaPressureSettlementReceipt(
+    private static bool IsCanonicalFileTransferRouteTransitionPressureSettlementReceipt(
         FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt receipt)
         => receipt.Status switch
         {
@@ -13631,73 +12034,6 @@ internal static class FileTransferCoordinator
                     StringComparison.Ordinal),
             _ => false,
         };
-
-    private static bool IsExactOrCanonicalIdempotentRegularV4ToTunaPauseBindReceipt(
-        RegularV4ToTunaActivationPauseBindReceipt committed,
-        RegularV4ToTunaActivationPauseBindReceipt candidate)
-        => committed == candidate ||
-           (committed.Command == candidate.Command &&
-            candidate.Status == RegularV4ToTunaActivationPauseBindStatus.Idempotent &&
-            string.Equals(
-                candidate.Reason,
-                "regular_v4_to_tuna_activation_pause_bind_idempotent",
-                StringComparison.Ordinal));
-
-    private static bool IsCanonicalRegularV4ToTunaPauseBindReceipt(
-        RegularV4ToTunaActivationPauseBindReceipt receipt)
-        => receipt.Status switch
-        {
-            RegularV4ToTunaActivationPauseBindStatus.Installed =>
-                string.Equals(
-                    receipt.Reason,
-                    "regular_v4_to_tuna_activation_pause_bound",
-                    StringComparison.Ordinal),
-            RegularV4ToTunaActivationPauseBindStatus.Idempotent =>
-                string.Equals(
-                    receipt.Reason,
-                    "regular_v4_to_tuna_activation_pause_bind_idempotent",
-                    StringComparison.Ordinal),
-            _ => false,
-        };
-
-    private static bool IsCanonicalAppliedRegularV4ToTunaDispositionReceipt(
-        RegularV4ToTunaRouteTransitionDispositionReceipt receipt)
-        => receipt.Status ==
-               RegularV4ToTunaRouteTransitionDispositionApplyStatus.Applied &&
-           string.Equals(
-               receipt.Reason,
-               receipt.Command.Kind switch
-               {
-                   RegularV4ToTunaRouteTransitionDispositionKind.Committed =>
-                       "regular_v4_to_tuna_route_transition_committed",
-                   RegularV4ToTunaRouteTransitionDispositionKind.RolledBack =>
-                       "regular_v4_to_tuna_route_transition_rolled_back",
-                   RegularV4ToTunaRouteTransitionDispositionKind.Superseded =>
-                       "regular_v4_to_tuna_route_transition_superseded",
-                   _ => "regular_v4_to_tuna_route_transition_terminal_invalidated",
-               },
-               StringComparison.Ordinal);
-
-    private static bool IsCanonicalAcceptedRegularV4ToTunaDispositionReceipt(
-        RegularV4ToTunaRouteTransitionDispositionReceipt receipt)
-        => IsCanonicalAppliedRegularV4ToTunaDispositionReceipt(receipt) ||
-           (receipt.Status ==
-                RegularV4ToTunaRouteTransitionDispositionApplyStatus.Idempotent &&
-            string.Equals(
-                receipt.Reason,
-                "regular_v4_to_tuna_route_transition_disposition_idempotent",
-                StringComparison.Ordinal));
-
-    private static bool IsCanonicalIdempotentRegularV4ToTunaDispositionReceipt(
-        RegularV4ToTunaRouteTransitionDispositionReceipt applied,
-        RegularV4ToTunaRouteTransitionDispositionReceipt candidate)
-        => candidate.Command == applied.Command &&
-           candidate.Status ==
-               RegularV4ToTunaRouteTransitionDispositionApplyStatus.Idempotent &&
-           string.Equals(
-               candidate.Reason,
-               "regular_v4_to_tuna_route_transition_disposition_idempotent",
-               StringComparison.Ordinal);
 
     private static bool CapturedLeaseSetsEqual(
         IReadOnlyList<long> left,
@@ -13725,7 +12061,7 @@ internal static class FileTransferCoordinator
     }
 
     private static FileTransferRegularV4FrontierRepairSettlement
-        CreateRegularV4ToTunaTransitionPressureSettlement(
+        CreateFileTransferRouteTransitionPressureSettlement(
             FileTransferRegularV4FrontierRepairAuthority authority)
         => new(
             authority.SessionId,
@@ -13747,111 +12083,11 @@ internal static class FileTransferCoordinator
             authority.DurableReceivedHighestChunkIndex,
             authority.PendingRepairCount,
             authority.DecisionGeneration,
-            "regular_v4_to_tuna_route_transition_pressure_handoff",
+            "filetransfer_route_transition_pressure_handoff",
             FileTransferRegularV4FrontierRepairSettlementOutcome.StaleRejected,
             authority.TargetTransport)
         {
             AuthorityId = authority.AuthorityId,
-        };
-
-    private static RegularV4ToTunaRouteTransitionDecision RegularV4ToTunaDecision(
-        FileTransferCoordinatorState state,
-        RegularV4ToTunaRouteTransitionDecisionStatus status,
-        string reason,
-        RegularV4ToTunaRouteTransitionAuthority? authority = null,
-        RegularV4ToTunaActivationPauseBindCommand? pauseBindCommand = null,
-        RegularV4ToTunaPhysicalDrainCommand? drainCommand = null,
-        RegularV4ToTunaRouteTransitionDispositionCommand? dispositionCommand = null,
-        FileTransferCoordinatorDecision? routeDecision = null)
-        => new(
-            status,
-            NormalizeReason(reason),
-            authority,
-            pauseBindCommand,
-            drainCommand,
-            dispositionCommand,
-            routeDecision)
-        {
-            State = state,
-        };
-
-    private static bool TryConvertRegularV4ToTunaPrepareRequest(
-        FileTransferRouteTransitionPrepareRequest source,
-        out RegularV4ToTunaRouteTransitionPrepareRequest request,
-        out string rejectionReason)
-    {
-        request = default;
-        rejectionReason = "accepted";
-        if (source.Kind != FileTransferRouteTransitionKind.RegularV4ToTunaV4 ||
-            source.SourceRoute != FileTransferRoute.RegularNknV4Fast ||
-            source.SourceProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
-            source.SourceTransport != FileTransferTransportKind.RegularNkn ||
-            source.SourceRouteCommit is not null ||
-            source.TargetRoute != FileTransferRoute.FileTunaV4 ||
-            source.TargetProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
-            source.TargetTransport != FileTransferTransportKind.Tuna ||
-            source.HandoffKind !=
-                FileTransferTransportHandoffKind.NormalToTunaActivation ||
-            source.PredecessorTransitionAuthorityId is not null ||
-            source.ProofBoundary is not
-                FileTransferTunaActivationTransitionProofBoundary proof ||
-            proof.EffectiveRetryInstallReceipt is not null ||
-            proof.FallbackTailYieldDecision is not null)
-        {
-            rejectionReason = "filetransfer_route_transition_regular_v4_boundary_invalid";
-            return false;
-        }
-
-        request = new RegularV4ToTunaRouteTransitionPrepareRequest(
-            source.SourceRuntimeOwner,
-            source.SourceRoutePublication,
-            proof.RuntimeUnlockAdmission,
-            proof.PendingPreCommitProbe,
-            proof.AcceptedLaunchBoundary,
-            proof.LaunchGeneration,
-            FileTransferRouteTransitionCompatibility.ToRegularV4ToTuna(
-                source.DurableCheckpoint),
-            source.Reason);
-        return true;
-    }
-
-    private static FileTransferRouteTransitionDecision FromRegularV4ToTunaDecision(
-        RegularV4ToTunaRouteTransitionDecision source)
-        => new(
-            (FileTransferRouteTransitionDecisionStatus)(int)source.Status,
-            source.Reason,
-            source.Authority is { } authority
-                ? FileTransferRouteTransitionCompatibility.FromRegularV4ToTuna(authority)
-                : null,
-            source.PauseBindCommand is { } pause
-                ? new FileTransferRouteTransitionPauseBindCommand(
-                    FileTransferRouteTransitionCompatibility.FromRegularV4ToTuna(
-                        pause.Authority))
-                : null,
-            source.DrainCommand is { } drain
-                ? new FileTransferRouteTransitionPhysicalDrainCommand(
-                    FileTransferRouteTransitionCompatibility.FromRegularV4ToTuna(
-                        drain.Authority),
-                    drain.CapturedThroughPhysicalSendGeneration,
-                    drain.CapturedPhysicalSendLeaseIds,
-                    drain.CapturedPhysicalSendCount,
-                    drain.CapturedPhysicalSendFingerprint)
-                : null,
-            source.DispositionCommand is { } disposition
-                ? new FileTransferRouteTransitionDispositionCommand(
-                    FileTransferRouteTransitionCompatibility.FromRegularV4ToTuna(
-                        disposition.Authority),
-                    (FileTransferRouteTransitionDispositionKind)(int)disposition.Kind,
-                    disposition.RouteCommitToken,
-                    disposition.RoutePublicationToken,
-                    disposition.Reason)
-                {
-                    FinalProof = disposition.FinalProof,
-                }
-                : null,
-            source.RouteDecision)
-        {
-            State = source.State,
         };
 
     private static bool TryValidateFileTransferRouteTransitionPrepareRequest(
@@ -13914,8 +12150,7 @@ internal static class FileTransferCoordinator
             }
         }
         else if (request.Kind ==
-                     FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6 &&
-                 state.CurrentRouteCommit is not null)
+                 FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6)
         {
             rejectionReason = "filetransfer_route_transition_source_commit_missing";
             return false;
@@ -13957,10 +12192,24 @@ internal static class FileTransferCoordinator
                 !string.Equals(
                     receipt.Authority.ReleaseOutcome,
                     FallbackTailYieldKind.Quiescent.ToString(),
-                    StringComparison.Ordinal))
+                    StringComparison.Ordinal) ||
+                !TryValidateFileTransferFallbackTunaActivationBoundaryCurrent(
+                    state,
+                    receipt,
+                    yield,
+                    request.ProofBoundary as
+                        FileTransferTunaActivationTransitionProofBoundary,
+                    out rejectionReason))
             {
-                rejectionReason =
-                    "filetransfer_route_transition_fallback_release_boundary_invalid";
+                if (string.Equals(
+                        rejectionReason,
+                        "accepted",
+                        StringComparison.Ordinal))
+                {
+                    rejectionReason =
+                        "filetransfer_route_transition_fallback_release_boundary_invalid";
+                }
+
                 return false;
             }
         }
@@ -13968,9 +12217,18 @@ internal static class FileTransferCoordinator
         if (request.Kind is
                 FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6 or
                 FileTransferRouteTransitionKind.UncommittedTunaToPostTunaFallbackV6 &&
-            request.ProofBoundary is not FileTransferFallbackTransitionProofBoundary)
+            (request.ProofBoundary is not FileTransferFallbackTransitionProofBoundary fallback ||
+             !TryValidateFileTransferFallbackProofBoundary(
+                 state,
+                 request,
+                 fallback,
+                 out rejectionReason)))
         {
-            rejectionReason = "filetransfer_route_transition_peer_proof_missing";
+            if (string.Equals(rejectionReason, "accepted", StringComparison.Ordinal))
+            {
+                rejectionReason = "filetransfer_route_transition_peer_proof_missing";
+            }
+
             return false;
         }
 
@@ -13994,6 +12252,7 @@ internal static class FileTransferCoordinator
                 request.SourceRoute == FileTransferRoute.FileTunaV4 &&
                 request.SourceProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
                 request.SourceTransport == FileTransferTransportKind.Tuna &&
+                request.SourceRouteCommit is not null &&
                 request.TargetRoute == FileTransferRoute.PostTunaFallbackV6 &&
                 request.TargetProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
                 request.TargetTransport == FileTransferTransportKind.RegularNkn &&
@@ -14004,6 +12263,7 @@ internal static class FileTransferCoordinator
                 request.SourceRoute == FileTransferRoute.PostTunaFallbackV6 &&
                 request.SourceProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
                 request.SourceTransport == FileTransferTransportKind.RegularNkn &&
+                request.SourceRouteCommit is null &&
                 request.TargetRoute == FileTransferRoute.FileTunaV4 &&
                 request.TargetProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
                 request.TargetTransport == FileTransferTransportKind.Tuna &&
@@ -14023,6 +12283,247 @@ internal static class FileTransferCoordinator
                 request.PredecessorTransitionAuthorityId is { IsDefault: false },
             _ => false,
         };
+
+    private static bool TryValidateFileTransferFallbackProofBoundary(
+        FileTransferCoordinatorState state,
+        FileTransferRouteTransitionPrepareRequest request,
+        FileTransferFallbackTransitionProofBoundary fallback,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        var evidence = fallback.PeerProofEvidence;
+        if (fallback.IsDefault ||
+            !evidence.IsComplete ||
+            !evidence.IsExactFrameBound ||
+            !string.Equals(evidence.SessionId, state.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(evidence.TransferId, state.TransferId, StringComparison.Ordinal) ||
+            evidence.Direction != state.Direction ||
+            evidence.FrameIdentity != fallback.RetainedFrameIdentity ||
+            evidence.TransportEpoch != fallback.TargetTransportEpoch ||
+            fallback.TargetTransportEpoch <=
+                request.DurableCheckpoint.SourceTransportEpoch ||
+            fallback.TargetBridgeRecoveryGeneration <= 0 ||
+            fallback.SourceRouteCommit != request.SourceRouteCommit)
+        {
+            rejectionReason = "filetransfer_route_transition_peer_proof_mismatch";
+            return false;
+        }
+
+        if (request.Kind ==
+            FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6)
+        {
+            if (fallback.SourceRouteCommit is not { } sourceCommit ||
+                state.CurrentRouteCommit != sourceCommit ||
+                fallback.PredecessorTransitionAuthorityId is not null ||
+                request.PredecessorTransitionAuthorityId is not null)
+            {
+                rejectionReason =
+                    "filetransfer_route_transition_tuna_fallback_lineage_invalid";
+                return false;
+            }
+
+            return true;
+        }
+
+        if (request.Kind !=
+                FileTransferRouteTransitionKind
+                    .UncommittedTunaToPostTunaFallbackV6 ||
+            fallback.SourceRouteCommit is not null ||
+            request.PredecessorTransitionAuthorityId is not
+                { IsDefault: false } predecessor ||
+            fallback.PredecessorTransitionAuthorityId != predecessor ||
+            state.PersistentState.FileTransferRouteTransition.CurrentOperation is not
+                { } current ||
+            current.Authority.AuthorityId != predecessor ||
+            current.Authority.Kind !=
+                FileTransferRouteTransitionKind.RegularV4ToTunaV4)
+        {
+            rejectionReason =
+                "filetransfer_route_transition_uncommitted_fallback_lineage_invalid";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool
+        TryValidateFileTransferFallbackTunaActivationBoundaryCurrent(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockRetryDispatchInstallReceipt installReceipt,
+            FallbackTailYieldDecision tailYield,
+            FileTransferTunaActivationTransitionProofBoundary? activation,
+            out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (activation is null ||
+            activation.EffectiveRetryInstallReceipt != installReceipt ||
+            activation.FallbackTailYieldDecision != tailYield ||
+            !IsEffectiveRuntimeUnlockRetryDispatchInstallReceipt(
+                installReceipt) ||
+            state.CurrentRuntimeUnlockRetryDispatchAuthority !=
+                installReceipt.Authority ||
+            state.LastRuntimeUnlockRetryDispatchAuthorityGeneration !=
+                installReceipt.Authority.AuthorityGeneration ||
+            installReceipt.Request.IsDefault ||
+            !TryValidateRuntimeUnlockRetryDispatchBinding(
+                installReceipt.Authority,
+                installReceipt.Request,
+                out _) ||
+            installReceipt.Authority.RuntimeOwner != state.CurrentRuntimeOwner ||
+            installReceipt.Authority.SourcePublicationAuthority !=
+                state.CurrentRoutePublicationToken ||
+            installReceipt.Authority.Route != state.RouteSelection.Route ||
+            !string.Equals(
+                installReceipt.Authority.RouteToken,
+                state.RouteSelection.TelemetryToken,
+                StringComparison.Ordinal) ||
+            installReceipt.Authority.ProtocolVersion !=
+                state.RouteSelection.ProtocolVersion ||
+            installReceipt.Authority.LiveRouteEpoch !=
+                (state.CurrentLiveRouteEpoch?.EpochId ?? 0) ||
+            installReceipt.Authority.TerminalGeneration !=
+                state.TerminalGeneration ||
+            state.CurrentLeg is not { } currentLeg ||
+            installReceipt.Authority.LegGeneration != currentLeg.Generation ||
+            installReceipt.Authority.TransportEpoch !=
+                currentLeg.TransportEpochId ||
+            installReceipt.Authority.BridgeRecoveryGeneration !=
+                currentLeg.BridgeRecoveryGeneration ||
+            installReceipt.Authority.ReleaseKind !=
+                RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield ||
+            installReceipt.Authority.ReleaseAuthorityId != tailYield.AuthorityId ||
+            installReceipt.Authority.ReleaseGeneration !=
+                tailYield.YieldGeneration ||
+            !string.Equals(
+                installReceipt.Authority.ReleaseOutcome,
+                FallbackTailYieldKind.Quiescent.ToString(),
+                StringComparison.Ordinal) ||
+            !IsFallbackTailYieldDecisionCurrent(state, tailYield, out _) ||
+            state.CurrentRuntimeUnlockAdmission !=
+                activation.RuntimeUnlockAdmission ||
+            state.CurrentRuntimeUnlockPendingPreCommitProbe !=
+                activation.PendingPreCommitProbe ||
+            !IsRuntimeUnlockAdmissionTokenCurrent(
+                state,
+                activation.RuntimeUnlockAdmission,
+                out _) ||
+            !IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(
+                state,
+                activation.PendingPreCommitProbe,
+                out _) ||
+            activation.PendingPreCommitProbe.AdmissionToken !=
+                activation.RuntimeUnlockAdmission ||
+            activation.PendingPreCommitProbe.TransactionGeneration !=
+                activation.AcceptedLaunchBoundary.TransactionGeneration ||
+            activation.PendingPreCommitProbe.OfferGeneration !=
+                activation.AcceptedLaunchBoundary.OfferGeneration ||
+            activation.PendingPreCommitProbe.TunaPathLeaseGeneration !=
+                activation.AcceptedLaunchBoundary.TunaPathLeaseGeneration ||
+            !string.Equals(
+                activation.PendingPreCommitProbe.TunaPathLeaseListenerRunId,
+                activation.AcceptedLaunchBoundary.TunaPathLeaseListenerRunId,
+                StringComparison.Ordinal) ||
+            activation.LaunchGeneration <= 0 ||
+            !RuntimeUnlockTransaction.CanCommitRoute(
+                activation.AcceptedLaunchBoundary,
+                state,
+                out _))
+        {
+            rejectionReason =
+                "filetransfer_route_transition_fallback_activation_authority_not_current";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsEffectiveRuntimeUnlockRetryDispatchInstallReceipt(
+        RuntimeUnlockRetryDispatchInstallReceipt receipt)
+        => !receipt.IsDefault &&
+           !receipt.Request.IsDefault &&
+           !receipt.StageCleared &&
+           receipt.StageStatus is
+               RuntimeUnlockRetryDispatchDecisionStageStatus.Staged or
+               RuntimeUnlockRetryDispatchDecisionStageStatus.Idempotent &&
+           (
+               receipt.StageDisposition ==
+                   RuntimeUnlockRetryDispatchStageDisposition.Retained &&
+               receipt.StagedUtcMs > 0 &&
+               receipt.StageExpiresUtcMs > receipt.StagedUtcMs ||
+               receipt.StageStatus ==
+                   RuntimeUnlockRetryDispatchDecisionStageStatus.Idempotent &&
+               receipt.StageDisposition ==
+                   RuntimeUnlockRetryDispatchStageDisposition.AlreadyInstalled &&
+               receipt.StagedUtcMs == 0 &&
+               receipt.StageExpiresUtcMs == 0
+           );
+
+    private static bool IsCommittedFileTransferRouteTransitionTerminalEvidenceValid(
+        FileTransferRouteTransitionOperation terminal)
+    {
+        if (terminal.State != FileTransferRouteTransitionState.Committed ||
+            terminal.DrainCommand is null ||
+            terminal.DrainReceipt is null ||
+            terminal.RoutePublicationToken is not { } publication ||
+            terminal.DispositionCommand is not { } disposition ||
+            disposition.Authority != terminal.Authority ||
+            disposition.RouteCommitToken != terminal.RouteCommitToken ||
+            disposition.RoutePublicationToken != publication ||
+            disposition.FinalProof != terminal.FinalProof ||
+            !IsFileTransferRouteTransitionDispositionCommandValid(disposition))
+        {
+            return false;
+        }
+
+        if (terminal.DispositionReceipt is { } dispositionReceipt &&
+            (dispositionReceipt.Command != disposition ||
+             dispositionReceipt.Status is not (
+                 FileTransferRouteTransitionDispositionApplyStatus.Applied or
+                 FileTransferRouteTransitionDispositionApplyStatus.Idempotent) ||
+             !string.Equals(
+                 dispositionReceipt.Reason,
+                 dispositionReceipt.Status ==
+                     FileTransferRouteTransitionDispositionApplyStatus.Idempotent
+                     ? "filetransfer_route_transition_disposition_idempotent"
+                     : "filetransfer_route_transition_committed",
+                 StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
+        if (terminal.Authority.TargetRoute == FileTransferRoute.FileTunaV4)
+        {
+            return terminal.RetainedFrameApplyCommand is null &&
+                   terminal.RetainedFrameApplyReceipt is null;
+        }
+
+        if (terminal.Authority.ProofBoundary is not
+                FileTransferFallbackTransitionProofBoundary fallback ||
+            terminal.RetainedFrameApplyCommand is not { } frameCommand ||
+            frameCommand != new FileTransferRouteTransitionRetainedFrameApplyCommand(
+                terminal.Authority,
+                publication.RuntimeOwner,
+                publication,
+                fallback.RetainedFrameIdentity) ||
+            !IsFileTransferRouteTransitionRetainedFrameApplyCommandValid(
+                frameCommand))
+        {
+            return false;
+        }
+
+        return terminal.RetainedFrameApplyReceipt is not { } frameReceipt ||
+               frameReceipt.Command == frameCommand &&
+               frameReceipt.Status is (
+                   FileTransferRouteTransitionRetainedFrameApplyStatus.Applied or
+                   FileTransferRouteTransitionRetainedFrameApplyStatus.Idempotent) &&
+               string.Equals(
+                   frameReceipt.Reason,
+                   frameReceipt.Status ==
+                       FileTransferRouteTransitionRetainedFrameApplyStatus.Applied
+                       ? "filetransfer_route_transition_retained_frame_applied"
+                       : "filetransfer_route_transition_retained_frame_apply_idempotent",
+                   StringComparison.Ordinal);
+    }
 
     private static FileTransferRouteTransitionAuthority
         CreateFileTransferRouteTransitionAuthority(
@@ -14108,6 +12609,13 @@ internal static class FileTransferCoordinator
             rejectionReason = "filetransfer_route_transition_source_commit_stale";
             return false;
         }
+        else if (authority.SourceRouteCommit is null &&
+                 state.CurrentRouteCommit is not null)
+        {
+            rejectionReason =
+                "filetransfer_route_transition_unexpected_source_commit";
+            return false;
+        }
 
         if (!IsRuntimeOwnerCurrent(state, authority.SourceRuntimeOwner, out rejectionReason) ||
             !IsRoutePublicationTokenCurrent(
@@ -14154,6 +12662,244 @@ internal static class FileTransferCoordinator
                authority.PredecessorTransitionAuthorityId &&
            string.Equals(request.Reason, authority.Reason, StringComparison.Ordinal);
 
+    private static bool TryValidateFileTransferRouteTransitionDrainReceipt(
+        FileTransferCoordinatorState state,
+        FileTransferRouteTransitionAuthority authority,
+        FileTransferRouteTransitionPhysicalDrainReceipt receipt,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        var operation =
+            state.PersistentState.FileTransferRouteTransition.CurrentOperation;
+        if (operation is not
+            {
+                State: FileTransferRouteTransitionState.Draining,
+                DrainCommand: { } command,
+            } ||
+            operation.Value.Authority != authority ||
+            !IsFileTransferRouteTransitionSourceScopeCurrent(
+                state,
+                authority,
+                out rejectionReason))
+        {
+            if (string.Equals(rejectionReason, "accepted", StringComparison.Ordinal))
+            {
+                rejectionReason = "filetransfer_route_transition_not_draining";
+            }
+
+            return false;
+        }
+
+        if (receipt.Command != command ||
+            receipt.Outcome != FileTransferRouteTransitionPhysicalDrainOutcome.Completed ||
+            receipt.CompletedPhysicalSendCount != command.CapturedPhysicalSendCount ||
+            receipt.CompletedPhysicalSendLeaseIds is null ||
+            !CapturedLeaseSetsEqual(
+                receipt.CompletedPhysicalSendLeaseIds,
+                command.CapturedPhysicalSendLeaseIds) ||
+            !string.Equals(
+                receipt.CompletedPhysicalSendFingerprint,
+                command.CapturedPhysicalSendFingerprint,
+                StringComparison.Ordinal) ||
+            string.IsNullOrWhiteSpace(receipt.Reason) ||
+            !string.Equals(
+                receipt.Reason,
+                NormalizeReason(receipt.Reason),
+                StringComparison.Ordinal))
+        {
+            rejectionReason = "filetransfer_route_transition_drain_receipt_mismatch";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool TryValidateFileTransferRouteTransitionCommitProof(
+        FileTransferCoordinatorState state,
+        FileTransferRouteTransitionAuthority authority,
+        RuntimeUnlockRouteCommitProof? finalProof,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (authority.TargetRoute == FileTransferRoute.PostTunaFallbackV6)
+        {
+            if (finalProof is not null ||
+                authority.ProofBoundary is not
+                    FileTransferFallbackTransitionProofBoundary fallback ||
+                fallback.IsDefault ||
+                fallback.PeerProofEvidence.FrameIdentity !=
+                    fallback.RetainedFrameIdentity ||
+                fallback.PeerProofEvidence.TransportEpoch !=
+                    fallback.TargetTransportEpoch)
+            {
+                rejectionReason =
+                    "filetransfer_route_transition_fallback_proof_mismatch";
+                return false;
+            }
+
+            if (authority.Kind ==
+                FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6)
+            {
+                if (fallback.SourceRouteCommit is not { } sourceCommit ||
+                    authority.SourceRouteCommit != sourceCommit ||
+                    state.CurrentRouteCommit != sourceCommit ||
+                    !IsRouteCommitTokenCurrent(state, sourceCommit, out rejectionReason))
+                {
+                    if (string.Equals(
+                            rejectionReason,
+                            "accepted",
+                            StringComparison.Ordinal))
+                    {
+                        rejectionReason =
+                            "filetransfer_route_transition_tuna_commit_not_current";
+                    }
+
+                    return false;
+                }
+            }
+            else if (authority.Kind ==
+                     FileTransferRouteTransitionKind
+                         .UncommittedTunaToPostTunaFallbackV6)
+            {
+                if (fallback.SourceRouteCommit is not null ||
+                    state.CurrentRouteCommit is not null ||
+                    authority.PredecessorTransitionAuthorityId is not
+                        { IsDefault: false } predecessor ||
+                    fallback.PredecessorTransitionAuthorityId != predecessor ||
+                    state.PersistentState.FileTransferRouteTransition
+                            .LastTerminalOperation is not
+                        {
+                            State: FileTransferRouteTransitionState.Invalidated,
+                            Authority.AuthorityId: var retiredAuthority,
+                            DispositionCommand.Kind:
+                                FileTransferRouteTransitionDispositionKind.Superseded,
+                        } ||
+                    retiredAuthority != predecessor)
+                {
+                    rejectionReason =
+                        "filetransfer_route_transition_predecessor_not_superseded";
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        if (authority.TargetRoute != FileTransferRoute.FileTunaV4 ||
+            finalProof is not { } proof ||
+            proof.PathProbeState != RuntimeUnlockPathProbeState.Acked ||
+            authority.ProofBoundary is not
+                FileTransferTunaActivationTransitionProofBoundary activation ||
+            activation.IsDefault ||
+            proof.AdmissionToken != activation.RuntimeUnlockAdmission ||
+            proof.TransactionGeneration !=
+                activation.AcceptedLaunchBoundary.TransactionGeneration ||
+            proof.OfferGeneration !=
+                activation.AcceptedLaunchBoundary.OfferGeneration ||
+            proof.TunaPathLeaseGeneration !=
+                activation.AcceptedLaunchBoundary.TunaPathLeaseGeneration ||
+            !string.Equals(
+                proof.TunaPathLeaseListenerRunId,
+                activation.AcceptedLaunchBoundary.TunaPathLeaseListenerRunId,
+                StringComparison.Ordinal) ||
+            !FileTransferTunaActivationProofMatchesTarget(proof) ||
+            state.CurrentRuntimeUnlockAdmission != activation.RuntimeUnlockAdmission ||
+            state.CurrentRuntimeUnlockPendingPreCommitProbe !=
+                activation.PendingPreCommitProbe ||
+            !IsRuntimeUnlockAdmissionTokenCurrent(
+                state,
+                activation.RuntimeUnlockAdmission,
+                out rejectionReason) ||
+            !IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(
+                state,
+                activation.PendingPreCommitProbe,
+                out rejectionReason))
+        {
+            if (string.Equals(rejectionReason, "accepted", StringComparison.Ordinal))
+            {
+                rejectionReason =
+                    "filetransfer_route_transition_activation_proof_mismatch";
+            }
+
+            return false;
+        }
+
+        if (authority.Kind ==
+            FileTransferRouteTransitionKind.PostTunaFallbackV6ToTunaV4)
+        {
+            if (activation.EffectiveRetryInstallReceipt is not
+                    { IsDefault: false } installReceipt ||
+                activation.FallbackTailYieldDecision is not
+                    { IsDefault: false, Accepted: true } tailYield ||
+                proof != activation.AcceptedLaunchBoundary ||
+                !TryValidateFileTransferFallbackTunaActivationBoundaryCurrent(
+                    state,
+                    installReceipt,
+                    tailYield,
+                    activation,
+                    out _))
+            {
+                rejectionReason =
+                    "filetransfer_route_transition_fallback_release_not_current";
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool FileTransferTunaActivationProofMatchesTarget(
+        RuntimeUnlockRouteCommitProof proof)
+        => proof.TargetRoute == FileTransferRoute.FileTunaV4 &&
+           proof.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+           proof.TargetTransport == FileTransferTransportKind.Tuna &&
+           proof.HandoffKind ==
+               FileTransferTransportHandoffKind.NormalToTunaActivation &&
+           proof.TransactionGeneration > 0 &&
+           proof.OfferGeneration > 0 &&
+           proof.PeerVisibleProof &&
+           (proof.PeerReceived || proof.AnswerReceived) &&
+           proof.TransactionState is not (
+               RuntimeUnlockTransactionState.Failed or
+               RuntimeUnlockTransactionState.Retired or
+               RuntimeUnlockTransactionState.Committed) &&
+           proof.PathProbeState != RuntimeUnlockPathProbeState.Failed &&
+           proof.TunaPathLeaseGeneration > 0 &&
+           proof.TunaPathLeaseState ==
+               RuntimeUnlockTunaPathLeaseState.ListenerReady &&
+           proof.TunaPathLeaseCurrent;
+
+    private static bool
+        IsExactOrCanonicalIdempotentFileTransferRouteTransitionDrainReceipt(
+            FileTransferRouteTransitionPhysicalDrainReceipt committed,
+            FileTransferRouteTransitionPhysicalDrainReceipt candidate)
+        => committed.Command == candidate.Command &&
+           candidate.Outcome ==
+               FileTransferRouteTransitionPhysicalDrainOutcome.Completed &&
+           committed.CompletedPhysicalSendCount ==
+               candidate.CompletedPhysicalSendCount &&
+           CapturedLeaseSetsEqual(
+               committed.CompletedPhysicalSendLeaseIds,
+               candidate.CompletedPhysicalSendLeaseIds) &&
+           string.Equals(
+               committed.CompletedPhysicalSendFingerprint,
+               candidate.CompletedPhysicalSendFingerprint,
+               StringComparison.Ordinal) &&
+           string.Equals(
+               committed.Reason,
+               candidate.Reason,
+               StringComparison.Ordinal);
+
+    private static FileTransferRouteTransitionPhysicalDrainReceipt
+        SnapshotFileTransferRouteTransitionDrainReceipt(
+            FileTransferRouteTransitionPhysicalDrainReceipt receipt)
+        => receipt with
+        {
+            CompletedPhysicalSendLeaseIds = Array.AsReadOnly(
+                receipt.CompletedPhysicalSendLeaseIds.ToArray()),
+            Reason = NormalizeReason(receipt.Reason),
+        };
+
     private static bool IsExactOrCanonicalIdempotentFileTransferRouteTransitionPauseBindReceipt(
         FileTransferRouteTransitionPauseBindReceipt committed,
         FileTransferRouteTransitionPauseBindReceipt candidate)
@@ -14172,8 +12918,12 @@ internal static class FileTransferCoordinator
             FileTransferRouteTransitionPauseBindStatus.Installed =>
                 string.Equals(
                     receipt.Reason,
-                    "filetransfer_route_transition_pause_bound",
-                    StringComparison.Ordinal),
+                    receipt.Command.PredecessorAuthority is null
+                        ? "filetransfer_route_transition_pause_bound"
+                        : "filetransfer_route_transition_pause_rebound",
+                    StringComparison.Ordinal) &&
+                (receipt.Command.PredecessorAuthority is null ||
+                 receipt.Command.PredecessorAuthority.Value.IsDefault is false),
             FileTransferRouteTransitionPauseBindStatus.Idempotent =>
                 string.Equals(
                     receipt.Reason,
@@ -14191,6 +12941,8 @@ internal static class FileTransferCoordinator
             FileTransferRouteTransitionPauseBindCommand? pauseBindCommand = null,
             FileTransferRouteTransitionPhysicalDrainCommand? drainCommand = null,
             FileTransferRouteTransitionDispositionCommand? dispositionCommand = null,
+            FileTransferRouteTransitionRetainedFrameApplyCommand?
+                retainedFrameApplyCommand = null,
             FileTransferCoordinatorDecision? routeDecision = null)
         => new(
             status,
@@ -14199,6 +12951,7 @@ internal static class FileTransferCoordinator
             pauseBindCommand,
             drainCommand,
             dispositionCommand,
+            retainedFrameApplyCommand,
             routeDecision)
         {
             State = state,

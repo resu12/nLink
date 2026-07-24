@@ -4581,6 +4581,14 @@ public sealed partial class SessionFileTransferService
                 sendTask = Task.FromException(ex);
                 physicalCompletionTask = sendTask;
             }
+
+            if (physicalSendLease is not null)
+            {
+                physicalSendLease = BindOutboundPhysicalSendLeaseCompletionLocked(
+                    context,
+                    physicalSendLease,
+                    physicalCompletionTask);
+            }
         }
 
         if (physicalSendLease is not null)

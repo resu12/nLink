@@ -96,28 +96,16 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
-            if (context.CoordinatorPersistentState.RegularV4ToTunaRouteTransition
+            if (context.CoordinatorPersistentState.FileTransferRouteTransition
                     .CurrentOperation is { } activeRouteTransition)
             {
-                if (context.PendingRuntimeUnlockRegularV4RouteCommitDrain is { } drain &&
-                    drain.Authority == activeRouteTransition.Authority)
-                {
-                    InvalidateRuntimeUnlockRegularV4RouteCommitDrainLocked(
-                        context,
-                        drain,
-                        "outbound_transfer_terminal",
-                        terminalInvalidation: true);
-                }
-                else
-                {
-                    InvalidateRegularV4ToTunaRouteTransitionLocked(
-                        context,
-                        activeRouteTransition.Authority,
-                        terminalInvalidation: true,
-                        "outbound_transfer_terminal");
-                }
+                InvalidateOutboundFileTransferRouteTransitionLocked(
+                    context,
+                    activeRouteTransition.Authority,
+                    terminalInvalidation: true,
+                    "outbound_transfer_terminal");
 
-                if (context.CoordinatorPersistentState.RegularV4ToTunaRouteTransition
+                if (context.CoordinatorPersistentState.FileTransferRouteTransition
                         .CurrentOperation is not null)
                 {
                     LocalOperationalLog.Info(
@@ -412,15 +400,15 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
-            if (context.CoordinatorPersistentState.RegularV4ToTunaRouteTransition
+            if (context.CoordinatorPersistentState.FileTransferRouteTransition
                     .CurrentOperation is { } activeRouteTransition)
             {
-                InvalidateRegularV4ToTunaRouteTransitionLocked(
+                InvalidateInboundFileTransferRouteTransitionLocked(
                     context,
                     activeRouteTransition.Authority,
                     terminalInvalidation: true,
                     "inbound_transfer_terminal");
-                if (context.CoordinatorPersistentState.RegularV4ToTunaRouteTransition
+                if (context.CoordinatorPersistentState.FileTransferRouteTransition
                         .CurrentOperation is not null)
                 {
                     LocalOperationalLog.Info(

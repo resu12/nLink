@@ -456,14 +456,14 @@ internal interface IFileTransferRegularV4FrontierRepairPressureInstallBridge
             FileTransferRegularV4FrontierRepairPressureSettlementCommand command);
 }
 
-internal interface IRegularV4ToTunaRouteTransitionBridge
+internal interface IFileTransferRouteTransitionBridge
 {
-    RegularV4ToTunaActivationPauseBindReceipt BindRegularV4ToTunaActivationPause(
-        RegularV4ToTunaActivationPauseBindCommand command);
+    FileTransferRouteTransitionPauseBindReceipt BindFileTransferRouteTransitionPause(
+        FileTransferRouteTransitionPauseBindCommand command);
 
-    RegularV4ToTunaRouteTransitionDispositionReceipt
-        ApplyRegularV4ToTunaRouteTransitionDisposition(
-            RegularV4ToTunaRouteTransitionDispositionCommand command);
+    FileTransferRouteTransitionDispositionReceipt
+        ApplyFileTransferRouteTransitionDisposition(
+            FileTransferRouteTransitionDispositionCommand command);
 }
 
 public interface IFileTransferRegularV4FrontierRepairSettlementObserver
@@ -670,7 +670,8 @@ internal sealed record PostTunaFallbackHandoffEvidence(
     public bool IsComplete =>
         !string.IsNullOrWhiteSpace(SessionId) &&
         !string.IsNullOrWhiteSpace(TransferId) &&
-        Direction == FileTransferDirection.Outbound &&
+        (Direction is FileTransferDirection.Outbound or
+            FileTransferDirection.Inbound) &&
         ProofGeneration > 0 &&
         string.Equals(
             SourceRouteToken,
@@ -732,7 +733,8 @@ internal sealed record PostTunaFallbackPeerProofEvidence(
     public bool IsComplete =>
         !string.IsNullOrWhiteSpace(SessionId) &&
         !string.IsNullOrWhiteSpace(TransferId) &&
-        Direction == FileTransferDirection.Outbound &&
+        (Direction is FileTransferDirection.Outbound or
+            FileTransferDirection.Inbound) &&
         ProofGeneration > 0 &&
         TransportEpoch > 0 &&
         !string.IsNullOrWhiteSpace(ProofKind) &&
@@ -752,7 +754,7 @@ internal sealed record PostTunaFallbackPeerProofEvidence(
            string.Equals(candidate.ProofKind, ProofKind, StringComparison.Ordinal);
 }
 
-internal sealed record RuntimeUnlockUncommittedTunaFallbackProofBoundary(
+internal sealed record PostTunaFallbackAvailabilityProofEvidence(
     PostTunaFallbackPeerProofEvidence PeerProofEvidence,
     RuntimeUnlockRouteCommitSnapshot PreCommitSnapshot)
 {
@@ -832,108 +834,6 @@ internal sealed record PostTunaFallbackPeerProofFrameIdentity(
             return false;
         }
     }
-}
-
-internal enum RuntimeUnlockUncommittedTunaFallbackAdoptionStageStatus
-{
-    Staged,
-    Idempotent,
-    Rejected,
-}
-
-internal sealed record RuntimeUnlockUncommittedTunaFallbackAdoptionStage(
-    IFileTransferDataSession DataSession,
-    long DataSessionGeneration,
-    RuntimeOwnerToken SourceRuntimeOwner,
-    RoutePublicationToken SourceRoutePublication,
-    RuntimeUnlockAdmissionToken RuntimeUnlockAdmission,
-    RuntimeUnlockPendingPreCommitProbeRequest PendingPreCommitProbe,
-    RuntimeUnlockRouteCommitSnapshot PreCommitSnapshot,
-    long SourceLegGeneration,
-    long SourceTransportEpoch,
-    int SourceBridgeRecoveryGeneration,
-    int HandoffGeneration,
-    long DrainGeneration,
-    long CompletedDrainGeneration,
-    long TargetTransportEpoch,
-    int TargetBridgeRecoveryGeneration,
-    PostTunaFallbackPeerProofEvidence PeerProofEvidence,
-    FileTransferRegularV4FrontierRepairPressureSettlementCommand?
-        PressureSettlementCommand = null,
-    RuntimeOwnerToken TargetRuntimeOwner = default,
-    RoutePublicationToken TargetRoutePublication = default);
-
-internal sealed record RuntimeUnlockUncommittedTunaFallbackAdoptionStageReceipt(
-    RuntimeUnlockUncommittedTunaFallbackAdoptionStage Stage,
-    RuntimeUnlockUncommittedTunaFallbackAdoptionStageStatus Status,
-    string Reason,
-    long StageGeneration,
-    long AvailabilityGeneration = 0,
-    bool ActivationPaused = false,
-    string AvailabilityReason = "");
-
-internal enum RuntimeUnlockUncommittedTunaFallbackAdoptionStatus
-{
-    Applied,
-    Idempotent,
-    Rejected,
-}
-
-internal enum RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationStatus
-{
-    Prepared,
-    Idempotent,
-    Rejected,
-}
-
-internal sealed record RuntimeUnlockUncommittedTunaFallbackAdoptionCommand(
-    IFileTransferDataSession DataSession,
-    long DataSessionGeneration,
-    long StageGeneration,
-    RuntimeOwnerToken RuntimeOwner,
-    RoutePublicationToken RoutePublication,
-    long TransportEpoch,
-    int BridgeRecoveryGeneration,
-    int HandoffGeneration,
-    long DrainGeneration,
-    PostTunaFallbackPeerProofEvidence PeerProofEvidence,
-    FileTransferRegularV4FrontierRepairPressureSettlementCommand?
-        PressureSettlementCommand = null,
-    long SourceAvailabilityGeneration = 0,
-    bool SourceActivationPaused = false,
-    string SourceAvailabilityReason = "");
-
-internal sealed record RuntimeUnlockUncommittedTunaFallbackAdoptionReceipt(
-    RuntimeUnlockUncommittedTunaFallbackAdoptionCommand Command,
-    RuntimeUnlockUncommittedTunaFallbackAdoptionStatus Status,
-    string Reason,
-    FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
-        PressureSettlementReceipt = null);
-
-internal sealed record RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationReceipt(
-    RuntimeUnlockUncommittedTunaFallbackAdoptionCommand Command,
-    RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationStatus Status,
-    string Reason,
-    FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
-        PressureSettlementReceipt = null);
-
-internal interface IRuntimeUnlockUncommittedTunaFallbackAdoptionBridge
-{
-    RuntimeUnlockUncommittedTunaFallbackAdoptionStageReceipt
-        StageRuntimeUnlockUncommittedTunaFallbackAdoption(
-            RuntimeUnlockUncommittedTunaFallbackAdoptionStage stage);
-
-    RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationReceipt
-        PrepareRuntimeUnlockUncommittedTunaFallbackAdoption(
-            RuntimeUnlockUncommittedTunaFallbackAdoptionCommand command);
-
-    RuntimeUnlockUncommittedTunaFallbackAdoptionReceipt
-        CommitRuntimeUnlockUncommittedTunaFallbackAdoption(
-            RuntimeUnlockUncommittedTunaFallbackAdoptionCommand command);
-
-    bool DiscardRuntimeUnlockUncommittedTunaFallbackAdoption(
-        RuntimeUnlockUncommittedTunaFallbackAdoptionStage stage,
-        string reason);
 }
 
 internal interface IRuntimeUnlockRouteCommitProofProvider
@@ -1068,6 +968,33 @@ internal readonly record struct RuntimeUnlockRetryDispatchAttempt(
     long OfferGeneration,
     string OfferNonce);
 
+internal readonly record struct FallbackPairedTailYieldReleaseEvidence(
+    FallbackTailYieldDecision LocalDecision,
+    FileTransferAuthorityId PeerAuthorityId,
+    FileTransferAuthorityId? PeerPredecessorAuthorityId,
+    long PeerYieldGeneration,
+    string PeerDirection,
+    string PeerOwnerKey,
+    string PeerPairKey,
+    int PeerLiveRouteEpoch,
+    int PeerLegGeneration,
+    int PeerBridgeRecoveryGeneration,
+    long PeerTransportEpoch,
+    string PeerCheckpointRequestIdSnapshot)
+{
+    public bool IsDefault => LocalDecision.IsDefault ||
+                             PeerAuthorityId.IsDefault ||
+                             PeerYieldGeneration <= 0 ||
+                             string.IsNullOrWhiteSpace(PeerDirection) ||
+                             string.IsNullOrWhiteSpace(PeerOwnerKey) ||
+                             string.IsNullOrWhiteSpace(PeerPairKey) ||
+                             PeerLiveRouteEpoch <= 0 ||
+                             PeerLegGeneration <= 0 ||
+                             PeerBridgeRecoveryGeneration < 0 ||
+                             PeerTransportEpoch <= 0 ||
+                             string.IsNullOrWhiteSpace(PeerCheckpointRequestIdSnapshot);
+}
+
 internal readonly record struct RuntimeUnlockRetryDispatchAuthorityRequest(
     string SessionId,
     string TransferId,
@@ -1084,6 +1011,8 @@ internal readonly record struct RuntimeUnlockRetryDispatchAuthorityRequest(
     bool RequestActivePredecessorSupersession = false,
     int MissingDispatchSuccessorGeneration = 0)
 {
+    public FallbackPairedTailYieldReleaseEvidence? FallbackPairedTailYieldEvidence { get; init; }
+
     public bool IsDefault => string.IsNullOrWhiteSpace(SessionId) ||
                              string.IsNullOrWhiteSpace(TransferId) ||
                              SourcePublicationAuthority is null ||
@@ -1623,6 +1552,10 @@ internal interface IRuntimeUnlockRetryDispatchAuthorityBridge
         FileTransferDirection direction,
         out RuntimeUnlockRetryDispatchAuthorityRequest request);
 
+    bool QueueRuntimeUnlockRetryDispatchAuthorityRequest(
+        RuntimeUnlockRetryDispatchAuthorityRequest request)
+        => false;
+
     bool ObserveRuntimeUnlockRetryDispatchNonGrantDecision(
         RuntimeUnlockRetryDispatchDecision decision);
 
@@ -1857,7 +1790,7 @@ public sealed class FileTransferDataSessionAvailabilityChangedEventArgs : EventA
         FileTransferTransportKind targetTransport,
         RuntimeUnlockRouteCommitSnapshot? runtimeUnlockPreCommitProbeSnapshot,
         PostTunaFallbackHandoffEvidence? postTunaFallbackHandoffEvidence = null,
-        RuntimeUnlockUncommittedTunaFallbackProofBoundary? postTunaFallbackProofBoundary = null)
+        PostTunaFallbackAvailabilityProofEvidence? postTunaFallbackProofBoundary = null)
     {
         IsAvailable = isAvailable;
         Reason = string.IsNullOrWhiteSpace(reason) ? "transport_state_changed" : reason.Trim();
@@ -1883,7 +1816,7 @@ public sealed class FileTransferDataSessionAvailabilityChangedEventArgs : EventA
 
     internal PostTunaFallbackHandoffEvidence? PostTunaFallbackHandoffEvidence { get; }
 
-    internal RuntimeUnlockUncommittedTunaFallbackProofBoundary? PostTunaFallbackProofBoundary { get; }
+    internal PostTunaFallbackAvailabilityProofEvidence? PostTunaFallbackProofBoundary { get; }
 }
 
 public sealed class FileTransferOfferReceivedEventArgs : EventArgs

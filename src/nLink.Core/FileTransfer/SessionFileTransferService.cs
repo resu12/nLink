@@ -3249,13 +3249,22 @@ public sealed partial class SessionFileTransferService : IDisposable
                 if (ReferenceEquals(outboundTransfer?.DataSession, dataSession) &&
                     outboundTransfer is { IsTerminal: false } outbound)
                 {
-                    fallbackHandled = TryRetainRuntimeUnlockUncommittedTunaFallbackHandoffLocked(
+                    fallbackHandled = TryRetainOutboundFileTransferRouteTransitionPeerProofLocked(
                         outbound,
                         dataSession,
                         fallbackBoundary.PeerProofEvidence,
                         availability.Reason,
-                        out fallbackSnapshot,
-                        fallbackBoundary.PreCommitSnapshot);
+                        out fallbackSnapshot);
+                }
+                else if (ReferenceEquals(inboundTransfer?.DataSession, dataSession) &&
+                         inboundTransfer is { IsTerminal: false } inbound)
+                {
+                    fallbackHandled = TryRetainInboundFileTransferRouteTransitionPeerProofLocked(
+                        inbound,
+                        dataSession,
+                        fallbackBoundary.PeerProofEvidence,
+                        availability.Reason,
+                        out fallbackSnapshot);
                 }
             }
 
@@ -3269,7 +3278,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 var proof = fallbackBoundary.PeerProofEvidence;
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=runtime_unlock_uncommitted_tuna_fallback_handoff_decided; direction=outbound; session_id={FormatProtocolLogValue(proof.SessionId)}; transfer_id={FormatProtocolLogValue(proof.TransferId)}; proof_generation={proof.ProofGeneration}; proof_transport_epoch={proof.TransportEpoch}; transaction_generation={fallbackBoundary.PreCommitSnapshot.TransactionGeneration}; offer_generation={fallbackBoundary.PreCommitSnapshot.OfferGeneration}; tuna_path_lease_generation={fallbackBoundary.PreCommitSnapshot.TunaPathLeaseGeneration}; launch_generation={fallbackBoundary.PreCommitSnapshot.LaunchGeneration}; decision_status=Rejected; decision_reason=proof_boundary_not_current");
+                    $"event=filetransfer_route_transition_peer_proof_observed; direction={proof.Direction.ToString().ToLowerInvariant()}; session_id={FormatProtocolLogValue(proof.SessionId)}; transfer_id={FormatProtocolLogValue(proof.TransferId)}; proof_generation={proof.ProofGeneration}; proof_transport_epoch={proof.TransportEpoch}; transaction_generation={fallbackBoundary.PreCommitSnapshot.TransactionGeneration}; offer_generation={fallbackBoundary.PreCommitSnapshot.OfferGeneration}; tuna_path_lease_generation={fallbackBoundary.PreCommitSnapshot.TunaPathLeaseGeneration}; launch_generation={fallbackBoundary.PreCommitSnapshot.LaunchGeneration}; status=Rejected; decision_reason=proof_boundary_not_current");
             }
 
             return;
@@ -3284,8 +3293,18 @@ public sealed partial class SessionFileTransferService : IDisposable
                 if (ReferenceEquals(outboundTransfer?.DataSession, dataSession) &&
                     outboundTransfer is { IsTerminal: false } outbound)
                 {
-                    fallbackHandled = TryRetainRuntimeUnlockUncommittedTunaFallbackHandoffLocked(
+                    fallbackHandled = TryRetainOutboundFileTransferRouteTransitionPeerProofLocked(
                         outbound,
+                        dataSession,
+                        fallbackEvidence.ToPeerProofEvidence(),
+                        availability.Reason,
+                        out fallbackSnapshot);
+                }
+                else if (ReferenceEquals(inboundTransfer?.DataSession, dataSession) &&
+                         inboundTransfer is { IsTerminal: false } inbound)
+                {
+                    fallbackHandled = TryRetainInboundFileTransferRouteTransitionPeerProofLocked(
+                        inbound,
                         dataSession,
                         fallbackEvidence.ToPeerProofEvidence(),
                         availability.Reason,
@@ -3302,7 +3321,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             {
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=runtime_unlock_uncommitted_tuna_fallback_handoff_decided; direction=outbound; session_id={FormatProtocolLogValue(fallbackEvidence.SessionId)}; transfer_id={FormatProtocolLogValue(fallbackEvidence.TransferId)}; route={FormatProtocolLogValue(fallbackEvidence.SourceRouteToken)}; protocol_version={fallbackEvidence.SourceProtocolVersion}; live_route_epoch={fallbackEvidence.SourceLiveRouteEpoch}; leg_generation={fallbackEvidence.SourceLegGeneration}; transport_epoch={fallbackEvidence.SourceTransportEpoch}; bridge_recovery_generation={fallbackEvidence.SourceBridgeRecoveryGeneration}; checkpoint_request_id={FormatProtocolLogValue(fallbackEvidence.CheckpointRequestId)}; decision_status=Rejected; decision_reason=proof_scoped_availability_not_current");
+                    $"event=filetransfer_route_transition_peer_proof_observed; direction={fallbackEvidence.Direction.ToString().ToLowerInvariant()}; session_id={FormatProtocolLogValue(fallbackEvidence.SessionId)}; transfer_id={FormatProtocolLogValue(fallbackEvidence.TransferId)}; source_route={FormatProtocolLogValue(fallbackEvidence.SourceRouteToken)}; source_protocol_version={fallbackEvidence.SourceProtocolVersion}; source_live_route_epoch={fallbackEvidence.SourceLiveRouteEpoch}; source_leg_generation={fallbackEvidence.SourceLegGeneration}; source_transport_epoch={fallbackEvidence.SourceTransportEpoch}; source_bridge_recovery_generation={fallbackEvidence.SourceBridgeRecoveryGeneration}; checkpoint_request_id={FormatProtocolLogValue(fallbackEvidence.CheckpointRequestId)}; status=Rejected; decision_reason=proof_scoped_availability_not_current");
             }
 
             return;
@@ -3364,7 +3383,8 @@ public sealed partial class SessionFileTransferService : IDisposable
                             staleLaunchSnapshot,
                             "Invalidated",
                             "data_session_availability_stale",
-                            invalidatedOutbound.PendingRuntimeUnlockRegularV4RouteCommitDrain?.DrainGeneration ?? 0);
+                            invalidatedOutbound.FileTransferRouteTransitionExecution
+                                ?.Authority?.TransitionGeneration ?? 0);
                     }
                     else
                     {
@@ -3448,7 +3468,8 @@ public sealed partial class SessionFileTransferService : IDisposable
                         invalidatedOutbound.IsTerminal
                             ? "terminal_context"
                             : "data_session_replaced",
-                        invalidatedOutbound.PendingRuntimeUnlockRegularV4RouteCommitDrain?.DrainGeneration ?? 0);
+                        invalidatedOutbound.FileTransferRouteTransitionExecution
+                            ?.Authority?.TransitionGeneration ?? 0);
                 }
                 else
                 {
@@ -5972,7 +5993,6 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.PendingFallbackTailYieldTransportEpochReauthorization,
             context.LastFallbackTailYieldTransportEpochReauthorizationGeneration,
             context.CoordinatorPersistentState,
-            context.LastRuntimeUnlockUncommittedTunaFallbackHandoff,
             context.CurrentBridgeRecoveryExecutionCommand,
             context.CurrentBridgeRecoveryExecutionState,
             context.LastBridgeRecoveryExecutionReceipt);
@@ -6044,8 +6064,6 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.CurrentRepairReplayDecision = decision.State.CurrentRepairReplayDecision;
         context.LastRepairReplayGeneration = decision.State.LastRepairReplayGeneration;
         context.CoordinatorPersistentState = decision.State.PersistentState;
-        context.LastRuntimeUnlockUncommittedTunaFallbackHandoff =
-            decision.State.LastRuntimeUnlockUncommittedTunaFallbackHandoff;
         context.CurrentTransportEpochDecision = decision.State.CurrentTransportEpochDecision;
         context.LastTransportEpochDecisionGeneration = decision.State.LastTransportEpochDecisionGeneration;
         context.CurrentBridgeRecoveryDecision = decision.State.CurrentBridgeRecoveryDecision;
@@ -6078,46 +6096,6 @@ public sealed partial class SessionFileTransferService : IDisposable
             decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable;
         context.TransferLegHistory.Clear();
         context.TransferLegHistory.AddRange(runtimeGraph.LegHistory);
-        if (context.PendingRuntimeUnlockRegularV4RouteCommitDrain is { } pendingDrain)
-        {
-            var sourceScopeStillCurrent =
-                !context.IsTerminal &&
-                context.RouteRuntime.UsesRegularNknV4FastRuntime &&
-                context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
-                context.CurrentRuntimeOwner == pendingDrain.SourceRuntimeOwner &&
-                context.CurrentRoutePublicationToken == pendingDrain.SourceRoutePublication &&
-                context.TerminalGeneration == pendingDrain.SourceTerminalGeneration &&
-                context.CurrentTransferLeg is { } currentLeg &&
-                currentLeg.Generation == pendingDrain.SourceLegGeneration &&
-                currentLeg.TransportEpochId == pendingDrain.SourceTransportEpoch &&
-                currentLeg.BridgeRecoveryGeneration == pendingDrain.SourceBridgeRecoveryGeneration &&
-                ReferenceEquals(context.DataSession, pendingDrain.SourceDataSession) &&
-                context.DataSessionGeneration == pendingDrain.SourceDataSessionGeneration;
-            var completedTunaTransition =
-                decision.State.PersistentState.RegularV4ToTunaRouteTransition
-                    .LastTerminalOperation is
-                    {
-                        State: RegularV4ToTunaRouteTransitionState.Committed,
-                    } completedOperation &&
-                completedOperation.Authority == pendingDrain.Authority &&
-                context.RouteRuntime.UsesFileTunaV4Runtime;
-            if (!sourceScopeStillCurrent && !completedTunaTransition)
-            {
-                context.PendingRuntimeUnlockRegularV4RouteCommitDrain = null;
-                context.RuntimeUnlockRegularV4RouteCommitDrainRecheckQueued = false;
-                LogRuntimeUnlockRegularV4RouteCommitSendDrain(
-                    "runtime_unlock_regular_v4_route_commit_send_drain_invalidated",
-                    context,
-                    pendingDrain,
-                    activeSendCount:
-                        CountActiveOutboundRegularV4PhysicalSendLeasesForDrainLocked(
-                            context,
-                            pendingDrain),
-                    context.IsTerminal
-                        ? "terminal_context"
-                        : "coordinator_source_scope_replaced");
-            }
-        }
 
         if (forwardRoutePublication &&
             context.CurrentRoutePublicationToken is { IsDefault: false } currentToken &&
@@ -7759,7 +7737,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             rejectionReason,
             previousRouteSelection.Route == FileTransferRoute.RegularNknV4Fast &&
             context.RouteSelection.Route == FileTransferRoute.FileTunaV4
-                ? context.CoordinatorPersistentState.RegularV4ToTunaRouteTransition
+                ? context.CoordinatorPersistentState.FileTransferRouteTransition
                     .LastTerminalOperation?.Authority.TransitionGeneration ?? 0
                 : 0);
         return true;
@@ -14984,6 +14962,16 @@ public sealed partial class SessionFileTransferService : IDisposable
         var peerPairKey = NormalizeFallbackTailYieldPairKey(
             context.PeerFallbackTailYieldPairKey,
             context.PeerFallbackTailYieldOwnerKey);
+        if (context.PairedFallbackTailYieldGranted &&
+            context.LastFallbackTailYieldDecision is { } retainedYield)
+        {
+            TryQueueFallbackPairedTailYieldRuntimeUnlockRetryDispatchLocked(
+                context,
+                retainedYield,
+                reason);
+            return;
+        }
+
         if (context.PairedFallbackTailYieldGranted ||
             context.LastFallbackTailYieldDecision is not { } currentYieldDecision ||
             !FileTransferCoordinator.IsFallbackTailYieldDecisionCurrent(
@@ -15059,16 +15047,10 @@ public sealed partial class SessionFileTransferService : IDisposable
             localPairKey,
             context.FallbackTailYieldGeneration,
             reason);
-        TryPublishRouteHintIfAuthorizedLocked(
+        TryQueueFallbackPairedTailYieldRuntimeUnlockRetryDispatchLocked(
             context,
-            "fallback_tail_paired_yield_route_hint",
-            "fallback_tail_paired_yield",
-            "fallback_tail_paired_yield",
-            runtimeUnlockAdmissionFactory: () => RequestRuntimeUnlockAdmissionLocked(context, "route_hint", "fallback_tail_paired_yield"),
-            routePublicationToken: context.CurrentRoutePublicationToken);
-        TryResumeOutboundRuntimeUnlockAfterFallbackSurvivalProofLocked(
-            context,
-            "fallback_tail_quiescent");
+            currentYieldDecision,
+            reason);
     }
 
     private void TryGrantPairedInboundFallbackTailYieldLocked(InboundTransferContext context, string reason)
@@ -15083,6 +15065,16 @@ public sealed partial class SessionFileTransferService : IDisposable
         var peerPairKey = NormalizeFallbackTailYieldPairKey(
             context.PeerFallbackTailYieldPairKey,
             context.PeerFallbackTailYieldOwnerKey);
+        if (context.PairedFallbackTailYieldGranted &&
+            context.LastFallbackTailYieldDecision is { } retainedYield)
+        {
+            TryQueueFallbackPairedTailYieldRuntimeUnlockRetryDispatchLocked(
+                context,
+                retainedYield,
+                reason);
+            return;
+        }
+
         if (context.PairedFallbackTailYieldGranted ||
             context.LastFallbackTailYieldDecision is not { } currentYieldDecision ||
             !FileTransferCoordinator.IsFallbackTailYieldDecisionCurrent(
@@ -15159,16 +15151,176 @@ public sealed partial class SessionFileTransferService : IDisposable
             localPairKey,
             context.FallbackTailYieldGeneration,
             reason);
-        TryPublishRouteHintIfAuthorizedLocked(
+        TryQueueFallbackPairedTailYieldRuntimeUnlockRetryDispatchLocked(
             context,
-            "fallback_tail_paired_yield_route_hint",
-            "fallback_tail_paired_yield",
-            "fallback_tail_paired_yield",
-            runtimeUnlockAdmissionFactory: () => RequestRuntimeUnlockAdmissionLocked(context, "route_hint", "fallback_tail_paired_yield"),
-            routePublicationToken: context.CurrentRoutePublicationToken);
-        TryResumeInboundRuntimeUnlockAfterFallbackSurvivalProofLocked(
-            context,
-            "fallback_tail_quiescent");
+            currentYieldDecision,
+            reason);
+    }
+
+    private void TryQueueFallbackPairedTailYieldRuntimeUnlockRetryDispatchLocked(
+        OutboundTransferContext context,
+        FallbackTailYieldDecision tailYield,
+        string reason)
+    {
+        var state = CreateCoordinatorStateLocked(context);
+        var request = default(RuntimeUnlockRetryDispatchAuthorityRequest);
+        var rejectionReason =
+            "fallback_paired_tail_yield_release_evidence_invalid";
+        if (!TryCreateFallbackPairedTailYieldReleaseEvidence(
+                FileTransferDirection.Outbound,
+                tailYield,
+                context.PeerFallbackTailYieldProof,
+                out var pairedYieldEvidence) ||
+            !FileTransferCoordinator
+                .TryCreateFallbackPairedTailYieldRuntimeUnlockRetryDispatchRequest(
+                    state,
+                    tailYield,
+                    pairedYieldEvidence,
+                    "fallback_paired_tail_yield",
+                    reason,
+                    out request,
+                    out rejectionReason))
+        {
+            LogFallbackPairedTailYieldRuntimeUnlockRetryRequest(
+                context.SessionId,
+                context.TransferId,
+                FileTransferDirection.Outbound,
+                tailYield,
+                request: null,
+                "Held",
+                rejectionReason);
+            return;
+        }
+
+        var queued =
+            transport is IRuntimeUnlockRetryDispatchAuthorityBridge bridge &&
+            bridge.QueueRuntimeUnlockRetryDispatchAuthorityRequest(request);
+        LogFallbackPairedTailYieldRuntimeUnlockRetryRequest(
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            tailYield,
+            request,
+            queued ? "Queued" : "Rejected",
+            queued
+                ? "fallback_paired_tail_yield_request_queued"
+                : "fallback_paired_tail_yield_request_queue_rejected");
+    }
+
+    private void TryQueueFallbackPairedTailYieldRuntimeUnlockRetryDispatchLocked(
+        InboundTransferContext context,
+        FallbackTailYieldDecision tailYield,
+        string reason)
+    {
+        var state = CreateCoordinatorStateLocked(context);
+        var request = default(RuntimeUnlockRetryDispatchAuthorityRequest);
+        var rejectionReason =
+            "fallback_paired_tail_yield_release_evidence_invalid";
+        if (!TryCreateFallbackPairedTailYieldReleaseEvidence(
+                FileTransferDirection.Inbound,
+                tailYield,
+                context.PeerFallbackTailYieldProof,
+                out var pairedYieldEvidence) ||
+            !FileTransferCoordinator
+                .TryCreateFallbackPairedTailYieldRuntimeUnlockRetryDispatchRequest(
+                    state,
+                    tailYield,
+                    pairedYieldEvidence,
+                    "fallback_paired_tail_yield",
+                    reason,
+                    out request,
+                    out rejectionReason))
+        {
+            LogFallbackPairedTailYieldRuntimeUnlockRetryRequest(
+                context.SessionId,
+                context.TransferId,
+                FileTransferDirection.Inbound,
+                tailYield,
+                request: null,
+                "Held",
+                rejectionReason);
+            return;
+        }
+
+        var queued =
+            transport is IRuntimeUnlockRetryDispatchAuthorityBridge bridge &&
+            bridge.QueueRuntimeUnlockRetryDispatchAuthorityRequest(request);
+        LogFallbackPairedTailYieldRuntimeUnlockRetryRequest(
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            tailYield,
+            request,
+            queued ? "Queued" : "Rejected",
+            queued
+                ? "fallback_paired_tail_yield_request_queued"
+                : "fallback_paired_tail_yield_request_queue_rejected");
+    }
+
+    private static bool TryCreateFallbackPairedTailYieldReleaseEvidence(
+        FileTransferDirection direction,
+        FallbackTailYieldDecision tailYield,
+        FallbackTailYieldPeerProofSnapshot? peerProof,
+        out FallbackPairedTailYieldReleaseEvidence evidence)
+    {
+        evidence = default;
+        if (peerProof is not { } proof ||
+            !FileTransferAuthorityIdParser.TryNormalizeFallbackTailYield(
+                proof.AuthorityId,
+                out var peerAuthorityId))
+        {
+            return false;
+        }
+
+        FileTransferAuthorityId? peerPredecessorAuthorityId = null;
+        if (!string.IsNullOrWhiteSpace(proof.PredecessorAuthorityId))
+        {
+            if (!FileTransferAuthorityIdParser.TryNormalizeFallbackTailYield(
+                    proof.PredecessorAuthorityId,
+                    out var normalizedPredecessorAuthorityId))
+            {
+                return false;
+            }
+
+            peerPredecessorAuthorityId =
+                new FileTransferAuthorityId(normalizedPredecessorAuthorityId);
+        }
+
+        evidence = new FallbackPairedTailYieldReleaseEvidence(
+            tailYield,
+            new FileTransferAuthorityId(peerAuthorityId),
+            peerPredecessorAuthorityId,
+            proof.YieldGeneration,
+            proof.Direction,
+            proof.OwnerKey,
+            proof.PairKey,
+            proof.LiveRouteEpoch,
+            proof.FallbackLegGeneration,
+            proof.BridgeRecoveryGeneration,
+            proof.TransportEpoch,
+            proof.CheckpointRequestIdSnapshot);
+        return !evidence.IsDefault &&
+               string.Equals(
+                   proof.Direction,
+                   direction == FileTransferDirection.Outbound
+                       ? FileTransferDirection.Inbound.ToString().ToLowerInvariant()
+                       : FileTransferDirection.Outbound.ToString().ToLowerInvariant(),
+                   StringComparison.Ordinal);
+    }
+
+    private static void LogFallbackPairedTailYieldRuntimeUnlockRetryRequest(
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction,
+        FallbackTailYieldDecision tailYield,
+        RuntimeUnlockRetryDispatchAuthorityRequest? request,
+        string status,
+        string reason)
+    {
+        var publication = request?.SourcePublicationAuthority;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(tailYield.AuthorityId.ToString())}; direction={direction.ToString().ToLowerInvariant()}; session_id={FormatProtocolLogValue(sessionId)}; transfer_id={FormatProtocolLogValue(transferId)}; yield_generation={tailYield.YieldGeneration}; yield_kind={FormatProtocolLogValue(tailYield.YieldKind.ToString())}; source_route={FormatProtocolLogValue(publication?.RouteToken ?? "(none)")}; source_protocol_version={publication?.ProtocolVersion ?? 0}; source_live_route_epoch={publication?.LiveRouteEpoch ?? 0}; source_runtime_generation={publication?.RuntimeGeneration ?? 0}; source_terminal_generation={publication?.TerminalGeneration ?? 0}; source_leg_generation={publication?.LegGeneration ?? 0}; source_route_publication_generation={publication?.RoutePublicationGeneration ?? 0}; source_route_commit_generation={publication?.RouteCommitGeneration ?? 0}; recovery_contract_generation={request?.RecoveryContractGeneration ?? 0}; retired_offer_generation={request?.RetiredOfferGeneration ?? 0}; dispatch_attempt_generation={request?.DispatchAttemptGeneration ?? 0}; missing_dispatch_successor_generation={request?.MissingDispatchSuccessorGeneration ?? 0}; predecessor_authority_id={FormatProtocolLogValue(request?.PredecessorAuthorityId?.ToString() ?? "(none)")}; request_active_predecessor_supersession={(request?.RequestActivePredecessorSupersession == true ? 1 : 0)}; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(reason)}");
     }
 
     private static void ClearOutboundFallbackTailQuiescenceDiagnosticLocked(OutboundTransferContext context)
@@ -21454,84 +21606,6 @@ public sealed partial class SessionFileTransferService : IDisposable
         string RepairRequestKey,
         Task? PhysicalCompletionTask = null);
 
-    private sealed record RuntimeUnlockRegularV4RouteCommitDrain(
-        RegularV4ToTunaPhysicalDrainCommand DrainCommand,
-        IFileTransferDataSession SourceDataSession,
-        RuntimeUnlockRouteCommitSnapshot RouteCommitSnapshot,
-        string Reason)
-    {
-        public RegularV4ToTunaRouteTransitionAuthority Authority => DrainCommand.Authority;
-
-        public long DrainGeneration => Authority.TransitionGeneration;
-
-        public RuntimeOwnerToken SourceRuntimeOwner => Authority.SourceRuntimeOwner;
-
-        public RoutePublicationToken SourceRoutePublication => Authority.SourceRoutePublication;
-
-        public int SourceTerminalGeneration => Authority.SourceTerminalGeneration;
-
-        public int SourceLegGeneration => Authority.SourceLegGeneration;
-
-        public long SourceTransportEpoch => Authority.SourceTransportEpoch;
-
-        public int SourceBridgeRecoveryGeneration => Authority.SourceBridgeRecoveryGeneration;
-
-        public long SourceDataSessionGeneration => Authority.DataSessionGeneration;
-
-        public RuntimeUnlockAdmissionToken RuntimeUnlockAdmission => Authority.RuntimeUnlockAdmission;
-
-        public RuntimeUnlockPendingPreCommitProbeRequest PendingPreCommitProbe =>
-            Authority.PendingPreCommitProbe;
-
-        public long CapturedThroughSendLeaseGeneration =>
-            DrainCommand.CapturedThroughPhysicalSendGeneration;
-
-        public int CapturedSendCount => DrainCommand.CapturedPhysicalSendCount;
-    }
-
-    private sealed record RuntimeUnlockUncommittedTunaFallbackHandoffIntent(
-        int HandoffGeneration,
-        RuntimeOwnerToken SourceRuntimeOwner,
-        RoutePublicationToken SourceRoutePublication,
-        RuntimeUnlockAdmissionToken RuntimeUnlockAdmission,
-        RuntimeUnlockPendingPreCommitProbeRequest PendingPreCommitProbe,
-        RuntimeUnlockRegularV4RouteCommitDrain RouteCommitDrain,
-        IFileTransferDataSession SourceDataSession,
-        long SourceDataSessionGeneration,
-        PostTunaFallbackPeerProofEvidence? PeerProofEvidence,
-        FileTransferDataFrame? PeerProofFrame,
-        long ProofTransportEpoch,
-        string Reason);
-
-    private sealed record RuntimeUnlockUncommittedTunaFallbackRetainedPeerProof(
-        int HandoffGeneration,
-        FileTransferDataFrame Frame,
-        PostTunaFallbackPeerProofFrameIdentity FrameIdentity,
-        long ProofTransportEpoch,
-        IFileTransferDataSession DataSession,
-        long DataSessionGeneration,
-        RuntimeOwnerToken RuntimeOwner,
-        RoutePublicationToken RoutePublication);
-
-    private sealed record RuntimeUnlockUncommittedTunaFallbackAdoptionContinuation(
-        RuntimeUnlockUncommittedTunaFallbackHandoffIntent Intent,
-        RuntimeUnlockUncommittedTunaFallbackHandoffTransition Transition,
-        FileTransferCoordinatorDecision CoordinatorDecision,
-        FileTransferRouteSelection PreviousRouteSelection,
-        FileTransferRouteSelection RouteSelection,
-        FileTransferRouteResolverInput RouteInput,
-        RuntimeOwnerToken RuntimeOwner,
-        RoutePublicationToken RoutePublication,
-        FileTransferLeg Leg,
-        RuntimeUnlockUncommittedTunaFallbackAdoptionStageReceipt StageReceipt,
-        RuntimeUnlockUncommittedTunaFallbackAdoptionCommand AdoptionCommand,
-        RegularV4FrontierRepairContract? PressureContract,
-        IRuntimeUnlockUncommittedTunaFallbackAdoptionBridge AdoptionBridge)
-    {
-        public RegularV4ToTunaRouteTransitionDispositionCommand?
-            PendingTransitionDispositionCommand { get; init; }
-    }
-
     private sealed record RuntimeUnlockPreCommitProbeLaunchDisposition(
         long LaunchGeneration,
         RuntimeUnlockRouteCommitSnapshot Snapshot,
@@ -21698,62 +21772,6 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public Dictionary<long, OutboundPhysicalSendLease>
             ActiveOutboundPhysicalSendLeases { get; } = [];
-
-        // Compatibility projections retained for focused Slice-3 reflection tests.
-        public long LastOutboundRegularV4PhysicalSendLeaseGeneration
-        {
-            get => LastOutboundPhysicalSendLeaseGeneration;
-            set => LastOutboundPhysicalSendLeaseGeneration = value;
-        }
-
-        public long OutboundRegularV4PhysicalSendRegisteredCount
-        {
-            get => OutboundPhysicalSendRegisteredCount;
-            set => OutboundPhysicalSendRegisteredCount = value;
-        }
-
-        public long OutboundRegularV4PhysicalSendRetiredCount
-        {
-            get => OutboundPhysicalSendRetiredCount;
-            set => OutboundPhysicalSendRetiredCount = value;
-        }
-
-        public Dictionary<long, OutboundPhysicalSendLease>
-            ActiveOutboundRegularV4PhysicalSendLeases => ActiveOutboundPhysicalSendLeases;
-
-        public RuntimeUnlockRegularV4RouteCommitDrain?
-            PendingRuntimeUnlockRegularV4RouteCommitDrain { get; set; }
-
-        public bool RuntimeUnlockRegularV4RouteCommitDrainRecheckQueued { get; set; }
-
-        public int LastRuntimeUnlockUncommittedTunaFallbackHandoffGeneration { get; set; }
-
-        public RuntimeUnlockUncommittedTunaFallbackHandoffIntent?
-            PendingRuntimeUnlockUncommittedTunaFallbackHandoff { get; set; }
-
-        public RuntimeUnlockUncommittedTunaFallbackHandoffTransition?
-            LastRuntimeUnlockUncommittedTunaFallbackHandoff { get; set; }
-
-        public RuntimeUnlockUncommittedTunaFallbackRetainedPeerProof?
-            PendingRuntimeUnlockUncommittedTunaFallbackRetainedPeerProof { get; set; }
-
-        public RuntimeUnlockUncommittedTunaFallbackRetainedPeerProof?
-            LastRuntimeUnlockUncommittedTunaFallbackRetainedPeerProof { get; set; }
-
-        public RuntimeUnlockUncommittedTunaFallbackAdoptionContinuation?
-            PendingRuntimeUnlockUncommittedTunaFallbackAdoptionContinuation { get; set; }
-
-        public int LastRuntimeUnlockUncommittedTunaFallbackAdoptionRestageHandoffGeneration
-        {
-            get;
-            set;
-        }
-
-        public int LastRuntimeUnlockUncommittedTunaFallbackRetainedPeerProofDispatchGeneration { get; set; }
-
-        public int RuntimeUnlockUncommittedTunaFallbackRetainedPeerProofApplyInFlightGeneration { get; set; }
-
-        public int LastRuntimeUnlockUncommittedTunaFallbackRetainedPeerProofAppliedGeneration { get; set; }
 
         public RuntimeUnlockPreCommitProbeLaunchDisposition?
             LastRuntimeUnlockPreCommitProbeLaunchDisposition { get; set; }
@@ -21977,6 +21995,9 @@ public sealed partial class SessionFileTransferService : IDisposable
         public RegularV4FrontierRepairContract? CurrentRegularV4FrontierRepairContract { get; set; }
 
         public FileTransferCoordinatorPersistentState CoordinatorPersistentState { get; set; }
+
+        public FileTransferRouteTransitionExecutionShadow?
+            FileTransferRouteTransitionExecution { get; set; }
 
         public RegularV4FrontierRepairPressureInstallExecutionIdentity?
             PendingRegularV4FrontierRepairPressureInstallRetry { get; set; }
@@ -23205,6 +23226,9 @@ public sealed partial class SessionFileTransferService : IDisposable
         public RegularV4FrontierRepairContract? CurrentRegularV4FrontierRepairContract { get; set; }
 
         public FileTransferCoordinatorPersistentState CoordinatorPersistentState { get; set; }
+
+        public FileTransferRouteTransitionExecutionShadow?
+            FileTransferRouteTransitionExecution { get; set; }
 
         public FallbackFrontierRepairContract? CurrentFallbackFrontierRepairContract { get; set; }
 
