@@ -1,3 +1,8 @@
+using System.Collections.Immutable;
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
+
 namespace NLink.Core.FileTransfer;
 
 internal enum FileTransferCoordinatorEventKind
@@ -832,10 +837,197 @@ internal readonly record struct FileTransferRouteTransitionDecision(
     public FileTransferCoordinatorState State { get; init; } = null!;
 }
 
+internal enum RuntimeUnlockRetryLifecycleAttemptState
+{
+    None = 0,
+    Authorized = 1,
+    Staged = 2,
+    Installed = 3,
+    AliasBound = 4,
+    SendInFlight = 5,
+    Settled = 6,
+    Closed = 7,
+    Invalidated = 8,
+}
+
+internal readonly record struct RuntimeUnlockRetryLifecycleAttemptSnapshot(
+    RuntimeUnlockRetryDispatchAuthorityRequest Request,
+    RuntimeUnlockRetryDispatchAuthority Authority,
+    RuntimeUnlockRetryLifecycleAttemptState State,
+    RuntimeUnlockRetryDispatchDecisionStageStatus? StageStatus = null,
+    RuntimeUnlockRetryDispatchStageDisposition StageDisposition =
+        RuntimeUnlockRetryDispatchStageDisposition.Unknown,
+    long StagedUtcMs = 0,
+    long StageExpiresUtcMs = 0,
+    RuntimeUnlockRetryDispatchInstallReceipt? InstallReceipt = null,
+    long DispatchDeadlineUtcMs = 0,
+    long OfferGeneration = 0,
+    string? OfferNonce = null,
+    RuntimeUnlockRetryDispatchSettlementReport? Settlement = null,
+    FileTransferAuthorityId? SuccessorAuthorityId = null,
+    bool DispatchObserved = false)
+{
+    public bool IsDefault => Request.IsDefault || Authority.IsDefault;
+
+    public bool IsInstalled =>
+        InstallReceipt is { IsDefault: false } &&
+        State is
+            RuntimeUnlockRetryLifecycleAttemptState.Installed or
+            RuntimeUnlockRetryLifecycleAttemptState.AliasBound or
+            RuntimeUnlockRetryLifecycleAttemptState.SendInFlight or
+            RuntimeUnlockRetryLifecycleAttemptState.Settled;
+
+    public bool IsTerminal =>
+        State is
+            RuntimeUnlockRetryLifecycleAttemptState.Settled or
+            RuntimeUnlockRetryLifecycleAttemptState.Closed or
+            RuntimeUnlockRetryLifecycleAttemptState.Invalidated;
+}
+
+internal readonly record struct RuntimeUnlockRetryLifecycleBoundedClosure(
+    RuntimeUnlockRetryLifecycleAttemptSnapshot FinalAttempt,
+    RuntimeUnlockRetryDispatchAuthorityRequest RejectedSuccessorRequest,
+    long ClosureGeneration,
+    string Reason)
+{
+    public bool IsDefault =>
+        FinalAttempt.IsDefault ||
+        RejectedSuccessorRequest.IsDefault ||
+        ClosureGeneration <= 0 ||
+        string.IsNullOrWhiteSpace(Reason);
+}
+
+internal sealed record RuntimeUnlockRetryLifecycleSubstate(
+    RuntimeUnlockRetryLifecycleAttemptSnapshot? PendingAttempt = null,
+    RuntimeUnlockRetryLifecycleAttemptSnapshot? InstalledAttempt = null,
+    RuntimeUnlockRetryLifecycleAttemptSnapshot? RetainedPredecessor = null,
+    RuntimeUnlockRetryLifecycleAttemptSnapshot? LastTerminalAttempt = null,
+    RuntimeUnlockRetryLifecycleBoundedClosure? BoundedClosure = null,
+    RuntimeUnlockRetryDispatchSettlementReport? LastSettlement = null,
+    int LastAuthorityGeneration = 0,
+    long LastInstallGeneration = 0,
+    long LastClosureGeneration = 0,
+    RuntimeUnlockRetryDispatchScopeInvalidationCommand?
+        PendingScopeInvalidationCommand = null,
+    RuntimeUnlockRetryDispatchScopeInvalidationReceipt?
+        LastScopeInvalidationReceipt = null,
+    long LastScopeInvalidationGeneration = 0,
+    ImmutableArray<RuntimeUnlockRetryLifecycleAttemptSnapshot> AttemptHistory = default)
+{
+    internal static RuntimeUnlockRetryLifecycleSubstate Empty { get; } = new();
+
+    public RuntimeUnlockRetryDispatchAuthority? CurrentAuthorizedAuthority =>
+        PendingAttempt?.Authority ?? InstalledAttempt?.Authority;
+
+    public RuntimeUnlockRetryDispatchAuthority? CurrentInstalledAuthority =>
+        InstalledAttempt is { IsInstalled: true } attempt
+            ? attempt.Authority
+            : null;
+}
+
+internal enum RuntimeUnlockRetryLifecycleTransitionStatus
+{
+    Accepted = 0,
+    Idempotent = 1,
+    Expired = 2,
+    Rejected = 3,
+}
+
+internal readonly record struct RuntimeUnlockRetryLifecycleTransitionDecision(
+    RuntimeUnlockRetryLifecycleTransitionStatus Status,
+    string Reason)
+{
+    public FileTransferCoordinatorState State { get; init; } = null!;
+
+    public RuntimeUnlockRetryDispatchSettlementDecision?
+        PredecessorSettlementDecision { get; init; }
+
+    public bool Accepted =>
+        Status is
+            RuntimeUnlockRetryLifecycleTransitionStatus.Accepted or
+            RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent;
+}
+
+internal readonly record struct RuntimeUnlockRetryLifecycleInstallReceiptDecision(
+    RuntimeUnlockRetryLifecycleTransitionStatus Status,
+    string Reason,
+    RuntimeUnlockRetryDispatchInstallReceipt? Receipt = null)
+{
+    public FileTransferCoordinatorState State { get; init; } = null!;
+
+    public bool Accepted =>
+        Status is
+            RuntimeUnlockRetryLifecycleTransitionStatus.Accepted or
+            RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent &&
+        Receipt is { IsDefault: false };
+}
+
+internal readonly record struct RuntimeUnlockRetryLifecycleDeadlineDecision(
+    RuntimeUnlockRetryLifecycleTransitionStatus Status,
+    string Reason,
+    RuntimeUnlockRetryDispatchSettlementReport? Settlement = null)
+{
+    public FileTransferCoordinatorState State { get; init; } = null!;
+
+    public bool SettlementIssued =>
+        Status == RuntimeUnlockRetryLifecycleTransitionStatus.Accepted &&
+        Settlement is { IsDefault: false };
+}
+
+internal readonly record struct RuntimeUnlockRetryLifecycleScopeInvalidationDecision(
+    RuntimeUnlockRetryLifecycleTransitionStatus Status,
+    string Reason,
+    RuntimeUnlockRetryDispatchScopeInvalidationCommand? Command = null)
+{
+    public FileTransferCoordinatorState State { get; init; } = null!;
+
+    public bool Accepted =>
+        Status is
+            RuntimeUnlockRetryLifecycleTransitionStatus.Accepted or
+            RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent;
+}
+
+internal enum RuntimeUnlockRetryDispatchSuccessorDecisionStatus
+{
+    Requested = 0,
+    Idempotent = 1,
+    ChainClosed = 2,
+    Held = 3,
+    Rejected = 4,
+}
+
+internal readonly record struct RuntimeUnlockRetryDispatchSuccessorDecision(
+    RuntimeUnlockRetryDispatchSuccessorDecisionStatus Status,
+    string Reason,
+    RuntimeUnlockRetryDispatchSuccessorEvaluation Evaluation,
+    RuntimeUnlockRetryDispatchAuthorityRequest? Request = null,
+    RuntimeUnlockRetryDispatchDecision? AuthorizationDecision = null)
+{
+    public FileTransferCoordinatorState State { get; init; } = null!;
+
+    public bool Requested =>
+        (Status is
+             RuntimeUnlockRetryDispatchSuccessorDecisionStatus.Requested or
+             RuntimeUnlockRetryDispatchSuccessorDecisionStatus.Idempotent) &&
+        Request is not null &&
+        AuthorizationDecision is { Granted: true };
+}
+
 internal readonly record struct FileTransferCoordinatorPersistentState(
     RegularV4FrontierRepairPressureSubstate RegularV4FrontierRepairPressure = default,
     FileTransferRouteTransitionSubstate FileTransferRouteTransition = default)
 {
+    private readonly RuntimeUnlockRetryLifecycleSubstate?
+        runtimeUnlockRetryLifecycle;
+
+    internal RuntimeUnlockRetryLifecycleSubstate RuntimeUnlockRetryLifecycle
+    {
+        get =>
+            runtimeUnlockRetryLifecycle ??
+            RuntimeUnlockRetryLifecycleSubstate.Empty;
+        init => runtimeUnlockRetryLifecycle = value;
+    }
+
     internal static FileTransferCoordinatorPersistentState Empty => default;
 }
 
@@ -1033,10 +1225,7 @@ internal sealed record FileTransferCoordinatorState(
     int LastRoutePublicationGeneration = 0,
     RuntimeUnlockPendingPreCommitProbeRequest? CurrentRuntimeUnlockPendingPreCommitProbe = null,
     int LastRuntimeUnlockPendingPreCommitProbeGeneration = 0,
-    RuntimeUnlockRetryDispatchAuthority? CurrentRuntimeUnlockRetryDispatchAuthority = null,
-    int LastRuntimeUnlockRetryDispatchAuthorityGeneration = 0,
     RecoveryLivenessLease? LastRetiredRecoveryLivenessLease = null,
-    RuntimeUnlockRetryDispatchSettlementReport? LastRuntimeUnlockRetryDispatchSettlement = null,
     RuntimeUnlockRegularV4RecoverySettlementReport? LastRuntimeUnlockRegularV4RecoverySettlement = null,
     FileTransferRegularV4FrontierRepairSettlement? LastCoordinatorIssuedRegularV4RecoverySettlement = null,
     bool RuntimeUnlockRegularV4RecoverySettlementAvailable = false,
@@ -1053,6 +1242,17 @@ internal sealed record FileTransferCoordinatorState(
         LastBridgeRecoveryExecutionReceipt = null)
 {
     public FileTransferRouteRuntimeDescriptor RouteRuntime => RouteSelection.RuntimeDescriptor;
+
+    internal RuntimeUnlockRetryDispatchAuthority?
+        CurrentRuntimeUnlockRetryDispatchAuthority =>
+        PersistentState.RuntimeUnlockRetryLifecycle.CurrentAuthorizedAuthority;
+
+    internal int LastRuntimeUnlockRetryDispatchAuthorityGeneration =>
+        PersistentState.RuntimeUnlockRetryLifecycle.LastAuthorityGeneration;
+
+    internal RuntimeUnlockRetryDispatchSettlementReport?
+        LastRuntimeUnlockRetryDispatchSettlement =>
+        PersistentState.RuntimeUnlockRetryLifecycle.LastSettlement;
 }
 
 internal readonly record struct FileTransferCoordinatorEvent(
@@ -1309,6 +1509,8 @@ internal sealed class FileTransferLeg
 internal static class FileTransferCoordinator
 {
     internal const int RuntimeUnlockRetryMissingDispatchSuccessorLimit = 1;
+    internal const long RuntimeUnlockRetryDispatchDeadlineMilliseconds = 15_000;
+    internal static TimeSpan? RuntimeUnlockRetryDispatchDeadlineOverrideForTests;
 
     private static readonly TimeSpan InitialTunaReadinessEvidenceMaxAge = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan SessionReactivationInitialTunaReadinessEvidenceMaxAge = TimeSpan.FromMinutes(30);
@@ -1316,6 +1518,2019 @@ internal static class FileTransferCoordinator
     internal static FileTransferRouteTransitionSubstate
         GetFileTransferRouteTransitionSubstate(FileTransferCoordinatorState state)
         => state.PersistentState.FileTransferRouteTransition;
+
+    internal static RuntimeUnlockRetryLifecycleSubstate
+        GetRuntimeUnlockRetryLifecycle(FileTransferCoordinatorState state)
+        => state.PersistentState.RuntimeUnlockRetryLifecycle;
+
+    internal static bool TryPrepareRuntimeUnlockRetryDispatchInitialRequest(
+        FileTransferCoordinatorState state,
+        RuntimeUnlockRetryDispatchInitialEvaluation evaluation,
+        out RuntimeUnlockRetryDispatchAuthorityRequest request,
+        out string reason)
+    {
+        request = default;
+        reason = "accepted";
+        if (evaluation.IsDefault)
+        {
+            reason = "retry_dispatch_initial_evaluation_missing";
+            return false;
+        }
+
+        var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
+        if (lifecycle.PendingScopeInvalidationCommand is not null)
+        {
+            reason = "retry_dispatch_scope_invalidation_pending";
+            return false;
+        }
+
+        var currentAttempt =
+            lifecycle.PendingAttempt ??
+            lifecycle.InstalledAttempt ??
+            lifecycle.RetainedPredecessor;
+        if (currentAttempt is { } existing)
+        {
+            if (existing.Request.DispatchAttemptGeneration != 1 ||
+                existing.Request.MissingDispatchSuccessorGeneration != 0 ||
+                existing.Request.PredecessorAuthorityId is not null ||
+                existing.Request.RequestActivePredecessorSupersession ||
+                !RuntimeUnlockRetryDispatchInitialEvaluationMatchesRequest(
+                    evaluation,
+                    existing.Request))
+            {
+                reason = "retry_dispatch_initial_attempt_already_current";
+                return false;
+            }
+
+            request = existing.Request;
+            reason = "idempotent";
+            return true;
+        }
+
+        request = new RuntimeUnlockRetryDispatchAuthorityRequest(
+            evaluation.SessionId,
+            evaluation.TransferId,
+            evaluation.Direction,
+            evaluation.SourcePublicationAuthority,
+            evaluation.RecoveryContractGeneration,
+            evaluation.RetiredOfferGeneration,
+            DispatchAttemptGeneration: 1,
+            evaluation.RetryReason,
+            evaluation.RecoveryReason,
+            evaluation.RegularV4LivenessGeneration,
+            evaluation.BridgeDecisionGeneration,
+            PredecessorAuthorityId: null,
+            RequestActivePredecessorSupersession: false,
+            MissingDispatchSuccessorGeneration: 0)
+        {
+            FallbackPairedTailYieldEvidence =
+                evaluation.FallbackPairedTailYieldEvidence,
+            ListenerRearmRequirement = evaluation.ListenerRearmRequirement,
+        };
+        return true;
+    }
+
+    private static bool RuntimeUnlockRetryDispatchInitialEvaluationMatchesRequest(
+        RuntimeUnlockRetryDispatchInitialEvaluation evaluation,
+        RuntimeUnlockRetryDispatchAuthorityRequest request)
+        => string.Equals(
+               evaluation.SessionId,
+               request.SessionId,
+               StringComparison.Ordinal) &&
+           string.Equals(
+               evaluation.TransferId,
+               request.TransferId,
+               StringComparison.Ordinal) &&
+           evaluation.Direction == request.Direction &&
+           evaluation.SourcePublicationAuthority ==
+               request.SourcePublicationAuthority &&
+           evaluation.RecoveryContractGeneration ==
+               request.RecoveryContractGeneration &&
+           evaluation.RetiredOfferGeneration ==
+               request.RetiredOfferGeneration &&
+           string.Equals(
+               NormalizeReason(evaluation.RetryReason),
+               NormalizeReason(request.RetryReason),
+               StringComparison.Ordinal) &&
+           string.Equals(
+               NormalizeReason(evaluation.RecoveryReason),
+               NormalizeReason(request.RecoveryReason),
+               StringComparison.Ordinal) &&
+           evaluation.RegularV4LivenessGeneration ==
+               request.RegularV4LivenessGeneration &&
+           evaluation.BridgeDecisionGeneration ==
+               request.BridgeDecisionGeneration &&
+           evaluation.FallbackPairedTailYieldEvidence ==
+               request.FallbackPairedTailYieldEvidence &&
+           evaluation.ListenerRearmRequirement ==
+               request.ListenerRearmRequirement;
+
+    internal static bool TryGetPendingRuntimeUnlockRetryDispatchAttempt(
+        FileTransferCoordinatorState state,
+        out RuntimeUnlockRetryLifecycleAttemptSnapshot attempt)
+    {
+        if (GetRuntimeUnlockRetryLifecycle(state).PendingAttempt is { } pending)
+        {
+            attempt = pending;
+            return true;
+        }
+
+        attempt = default;
+        return false;
+    }
+
+    internal static bool TryGetInstalledRuntimeUnlockRetryDispatchAttempt(
+        FileTransferCoordinatorState state,
+        out RuntimeUnlockRetryLifecycleAttemptSnapshot attempt)
+    {
+        if (GetRuntimeUnlockRetryLifecycle(state).InstalledAttempt is
+            { IsInstalled: true } installed)
+        {
+            attempt = installed;
+            return true;
+        }
+
+        attempt = default;
+        return false;
+    }
+
+    internal static bool TryGetRetainedRuntimeUnlockRetryDispatchPredecessor(
+        FileTransferCoordinatorState state,
+        out RuntimeUnlockRetryLifecycleAttemptSnapshot attempt)
+    {
+        if (GetRuntimeUnlockRetryLifecycle(state).RetainedPredecessor is
+            { } predecessor)
+        {
+            attempt = predecessor;
+            return true;
+        }
+
+        attempt = default;
+        return false;
+    }
+
+    internal static bool TryGetCurrentRuntimeUnlockRetryDispatchInstallReceipt(
+        FileTransferCoordinatorState state,
+        out RuntimeUnlockRetryDispatchInstallReceipt receipt)
+    {
+        var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
+        if (state.IsTerminal ||
+            lifecycle.PendingScopeInvalidationCommand is not null)
+        {
+            receipt = default;
+            return false;
+        }
+
+        RuntimeUnlockRetryLifecycleAttemptSnapshot? effectiveAttempt =
+            lifecycle.InstalledAttempt is
+            {
+                State:
+                    RuntimeUnlockRetryLifecycleAttemptState.Installed or
+                    RuntimeUnlockRetryLifecycleAttemptState.AliasBound or
+                    RuntimeUnlockRetryLifecycleAttemptState.SendInFlight,
+                InstallReceipt: { IsDefault: false },
+            } installed
+                ? installed
+                : lifecycle.PendingAttempt is null &&
+                  lifecycle.InstalledAttempt is null &&
+                  lifecycle.RetainedPredecessor is null &&
+                  lifecycle.BoundedClosure is null &&
+                  lifecycle.LastTerminalAttempt is
+                  {
+                      State:
+                          RuntimeUnlockRetryLifecycleAttemptState.Settled,
+                      Settlement.Outcome:
+                          RuntimeUnlockRetryDispatchSettlementOutcome
+                              .DispatchObserved,
+                      InstallReceipt: { IsDefault: false },
+                  } dispatchObserved
+                    ? dispatchObserved
+                    : null;
+        var coveredByAcceptedScopeInvalidation =
+            effectiveAttempt is { } invalidatedAttempt &&
+            lifecycle.LastScopeInvalidationReceipt is
+            {
+                Accepted: true,
+                Command: { } invalidationCommand,
+            } &&
+            (
+                invalidationCommand.PendingAttempt == invalidatedAttempt ||
+                invalidationCommand.InstalledAttempt == invalidatedAttempt ||
+                invalidationCommand.RetainedPredecessor == invalidatedAttempt
+            );
+        if (effectiveAttempt is not { } attempt ||
+            attempt.InstallReceipt is not { IsDefault: false } exactReceipt ||
+            coveredByAcceptedScopeInvalidation ||
+            !RuntimeUnlockRetryDispatchAuthorityMatchesCurrentScope(
+                state,
+                attempt.Authority,
+                out _))
+        {
+            receipt = default;
+            return false;
+        }
+
+        receipt = exactReceipt;
+        return true;
+
+    }
+
+    internal static bool IsRuntimeUnlockRetryDispatchAuthorityCurrent(
+        FileTransferCoordinatorState state,
+        RuntimeUnlockRetryDispatchAuthority authority,
+        bool requireInstalled,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (authority.IsDefault || state.IsTerminal)
+        {
+            rejectionReason = state.IsTerminal
+                ? "terminal_state"
+                : "retry_dispatch_authority_missing";
+            return false;
+        }
+
+        var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
+        if (lifecycle.PendingScopeInvalidationCommand is not null)
+        {
+            rejectionReason =
+                "retry_dispatch_scope_invalidation_pending";
+            return false;
+        }
+
+        var current = requireInstalled
+            ? lifecycle.CurrentInstalledAuthority
+            : lifecycle.CurrentAuthorizedAuthority;
+        if (current is not { } currentAuthority || currentAuthority != authority)
+        {
+            rejectionReason = requireInstalled
+                ? "retry_dispatch_installed_authority_not_current"
+                : "retry_dispatch_authority_not_current";
+            return false;
+        }
+
+        return RuntimeUnlockRetryDispatchAuthorityMatchesCurrentScope(
+            state,
+            authority,
+            out rejectionReason);
+    }
+
+    private static bool IsRuntimeUnlockRetryLifecycleAttemptCurrent(
+        FileTransferCoordinatorState state,
+        RuntimeUnlockRetryLifecycleAttemptSnapshot attempt,
+        out string rejectionReason,
+        bool allowTerminalState = false)
+    {
+        if (state.IsTerminal && !allowTerminalState)
+        {
+            rejectionReason = "terminal_state";
+            return false;
+        }
+
+        return RuntimeUnlockRetryDispatchAuthorityMatchesCurrentScope(
+            state,
+            attempt.Authority,
+            out rejectionReason,
+            allowTerminalState);
+    }
+
+    internal static RuntimeUnlockRetryLifecycleTransitionDecision
+        ObserveRuntimeUnlockRetryDispatchStage(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockRetryDispatchDecisionStageResult stageResult,
+            long observedUtcMs)
+    {
+        RuntimeUnlockRetryLifecycleTransitionDecision Decision(
+            RuntimeUnlockRetryLifecycleTransitionStatus status,
+            string reason,
+            FileTransferCoordinatorState? nextState = null)
+            => new(status, reason)
+            {
+                State = nextState ?? state,
+            };
+
+        if (state.IsTerminal)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "terminal_state");
+        }
+
+        if (!stageResult.Accepted ||
+            stageResult.Decision.Contract is not { } contract ||
+            stageResult.Decision.Request.IsDefault)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_stage_rejected");
+        }
+
+        var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
+        if (lifecycle.PendingScopeInvalidationCommand is not null)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_scope_invalidation_pending");
+        }
+
+        if (lifecycle.InstalledAttempt is { } installed &&
+            installed.Authority == contract.Authority &&
+            installed.InstallReceipt is { IsDefault: false } &&
+            stageResult.Status == RuntimeUnlockRetryDispatchDecisionStageStatus.Idempotent &&
+            stageResult.StageDisposition ==
+                RuntimeUnlockRetryDispatchStageDisposition.AlreadyInstalled)
+        {
+            if (!IsRuntimeUnlockRetryLifecycleAttemptCurrent(
+                    state,
+                    installed,
+                    out var installedCurrentnessReason))
+            {
+                return Decision(
+                    RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                    installedCurrentnessReason);
+            }
+
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent,
+                "retry_dispatch_stage_already_installed");
+        }
+
+        if (lifecycle.PendingAttempt is not { } pending ||
+            pending.Authority != contract.Authority ||
+            pending.Request != stageResult.Decision.Request)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_stage_authority_not_pending");
+        }
+
+        if (!IsRuntimeUnlockRetryLifecycleAttemptCurrent(
+                state,
+                pending,
+                out var pendingCurrentnessReason))
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                pendingCurrentnessReason);
+        }
+
+        if (pending.State == RuntimeUnlockRetryLifecycleAttemptState.Staged)
+        {
+            if (pending.StageExpiresUtcMs > 0 &&
+                observedUtcMs >= pending.StageExpiresUtcMs)
+            {
+                return EvaluateRuntimeUnlockRetryDispatchStageExpiry(
+                    state,
+                    pending.Authority.AuthorityId,
+                    observedUtcMs);
+            }
+
+            var exactDuplicateStatus =
+                pending.StageStatus == stageResult.Status ||
+                pending.StageStatus ==
+                    RuntimeUnlockRetryDispatchDecisionStageStatus.Staged &&
+                stageResult.Status ==
+                    RuntimeUnlockRetryDispatchDecisionStageStatus.Idempotent;
+            if (exactDuplicateStatus &&
+                pending.StageDisposition == stageResult.StageDisposition &&
+                pending.StagedUtcMs == stageResult.StagedUtcMs)
+            {
+                return Decision(
+                    RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent,
+                    "retry_dispatch_stage_duplicate");
+            }
+
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_stage_tuple_mismatch");
+        }
+
+        var deadlineMilliseconds =
+            GetRuntimeUnlockRetryDispatchDeadlineMilliseconds();
+        if (observedUtcMs <= 0 ||
+            stageResult.StagedUtcMs <= 0 ||
+            stageResult.StagedUtcMs > long.MaxValue - deadlineMilliseconds ||
+            observedUtcMs < stageResult.StagedUtcMs ||
+            observedUtcMs >
+                stageResult.StagedUtcMs + deadlineMilliseconds)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_stage_deadline_invalid");
+        }
+
+        var staged = pending with
+        {
+            State = RuntimeUnlockRetryLifecycleAttemptState.Staged,
+            StageStatus = stageResult.Status,
+            StageDisposition = stageResult.StageDisposition,
+            StagedUtcMs = stageResult.StagedUtcMs,
+            StageExpiresUtcMs =
+                stageResult.StagedUtcMs + deadlineMilliseconds,
+        };
+        var nextLifecycle = lifecycle with
+        {
+            PendingAttempt = staged,
+        };
+        return Decision(
+            RuntimeUnlockRetryLifecycleTransitionStatus.Accepted,
+            "retry_dispatch_stage_recorded",
+            ApplyRuntimeUnlockRetryLifecycle(state, nextLifecycle));
+    }
+
+    internal static RuntimeUnlockRetryLifecycleInstallReceiptDecision
+        IssueRuntimeUnlockRetryDispatchInstallReceipt(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockRetryDispatchDecision stagedDecision,
+            RuntimeUnlockRetryDispatchAuthorityRequest expectedRequest,
+            long observedUtcMs)
+    {
+        RuntimeUnlockRetryLifecycleInstallReceiptDecision Decision(
+            RuntimeUnlockRetryLifecycleTransitionStatus status,
+            string reason,
+            RuntimeUnlockRetryDispatchInstallReceipt? receipt = null,
+            FileTransferCoordinatorState? nextState = null)
+            => new(status, reason, receipt)
+            {
+                State = nextState ?? state,
+            };
+
+        if (state.IsTerminal)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "terminal_state");
+        }
+
+        var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
+        if (lifecycle.PendingScopeInvalidationCommand is not null)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_scope_invalidation_pending");
+        }
+
+        if (lifecycle.InstalledAttempt is { } installed &&
+            installed.Authority == stagedDecision.Contract?.Authority &&
+            installed.InstallReceipt is { IsDefault: false } installedReceipt)
+        {
+            if (!IsRuntimeUnlockRetryLifecycleAttemptCurrent(
+                    state,
+                    installed,
+                    out var installedCurrentnessReason))
+            {
+                return Decision(
+                    RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                    installedCurrentnessReason);
+            }
+
+            return installed.Request == expectedRequest &&
+                   stagedDecision.Request == expectedRequest
+                ? Decision(
+                    RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent,
+                    "retry_dispatch_install_receipt_already_committed",
+                    installedReceipt)
+                : Decision(
+                    RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                    "retry_dispatch_install_receipt_current_mismatch");
+        }
+
+        if (lifecycle.PendingAttempt is not
+            {
+                State: RuntimeUnlockRetryLifecycleAttemptState.Staged,
+            } pending ||
+            pending.Authority != stagedDecision.Contract?.Authority)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_install_receipt_stage_not_current");
+        }
+
+        if (!IsRuntimeUnlockRetryLifecycleAttemptCurrent(
+                state,
+                pending,
+                out var pendingCurrentnessReason))
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                pendingCurrentnessReason);
+        }
+
+        if (pending.StageExpiresUtcMs <= 0 ||
+            observedUtcMs <= 0 ||
+            observedUtcMs < pending.StagedUtcMs ||
+            observedUtcMs >= pending.StageExpiresUtcMs)
+        {
+            if (observedUtcMs < pending.StagedUtcMs)
+            {
+                return Decision(
+                    RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                    "retry_dispatch_install_receipt_observation_invalid");
+            }
+
+            var expiry = EvaluateRuntimeUnlockRetryDispatchStageExpiry(
+                state,
+                pending.Authority.AuthorityId,
+                observedUtcMs);
+            return Decision(
+                expiry.Status,
+                expiry.Reason,
+                nextState: expiry.State);
+        }
+
+        if (pending.InstallReceipt is { IsDefault: false } issuedReceipt)
+        {
+            return issuedReceipt.Authority == pending.Authority &&
+                   issuedReceipt.Request == expectedRequest &&
+                   issuedReceipt.InstallGeneration ==
+                       lifecycle.LastInstallGeneration
+                ? Decision(
+                    RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent,
+                    "retry_dispatch_install_receipt_duplicate",
+                    issuedReceipt)
+                : Decision(
+                    RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                    "retry_dispatch_install_receipt_issued_mismatch");
+        }
+
+        if (!TryIssueRuntimeUnlockRetryDispatchInstallReceipt(
+                state,
+                stagedDecision,
+                expectedRequest,
+                out var receipt,
+                out var mismatchField))
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                $"retry_dispatch_install_receipt_{NormalizeReason(mismatchField)}");
+        }
+
+        var dispatchDeadlineMilliseconds =
+            GetRuntimeUnlockRetryDispatchDeadlineMilliseconds();
+        if (observedUtcMs > long.MaxValue - dispatchDeadlineMilliseconds)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_install_receipt_deadline_overflow");
+        }
+
+        receipt = receipt with
+        {
+            DispatchDeadlineUtcMs =
+                observedUtcMs + dispatchDeadlineMilliseconds,
+        };
+        var issued = pending with
+        {
+            InstallReceipt = receipt,
+            DispatchDeadlineUtcMs = receipt.DispatchDeadlineUtcMs,
+        };
+        var nextLifecycle = lifecycle with
+        {
+            PendingAttempt = issued,
+            LastInstallGeneration = receipt.InstallGeneration,
+        };
+        return Decision(
+            RuntimeUnlockRetryLifecycleTransitionStatus.Accepted,
+            "retry_dispatch_install_receipt_issued",
+            receipt,
+            ApplyRuntimeUnlockRetryLifecycle(state, nextLifecycle));
+    }
+
+    internal static RuntimeUnlockRetryLifecycleTransitionDecision
+        CommitRuntimeUnlockRetryDispatchInstall(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockRetryDispatchInstallResult installResult,
+            long observedUtcMs)
+    {
+        RuntimeUnlockRetryLifecycleTransitionDecision Decision(
+            RuntimeUnlockRetryLifecycleTransitionStatus status,
+            string reason,
+            FileTransferCoordinatorState? nextState = null,
+            RuntimeUnlockRetryDispatchSettlementDecision?
+                predecessorSettlementDecision = null)
+            => new(status, reason)
+            {
+                State = nextState ?? state,
+                PredecessorSettlementDecision =
+                    predecessorSettlementDecision,
+            };
+
+        if (state.IsTerminal)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "terminal_state");
+        }
+
+        if (!installResult.Accepted ||
+            installResult.Receipt.IsDefault ||
+            observedUtcMs <= 0 ||
+            installResult.Receipt.DispatchDeadlineUtcMs <= 0)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_install_receipt_rejected");
+        }
+
+        var receipt = installResult.Receipt;
+        var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
+        if (lifecycle.PendingScopeInvalidationCommand is not null)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_scope_invalidation_pending");
+        }
+
+        if (!RuntimeUnlockRetryDispatchAuthorityMatchesCurrentScope(
+                state,
+                receipt.Authority,
+                out var receiptCurrentnessReason))
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                receiptCurrentnessReason);
+        }
+
+        if (lifecycle.InstalledAttempt is { } installed &&
+            installed.Authority == receipt.Authority &&
+            installed.InstallReceipt == receipt)
+        {
+            RuntimeUnlockRetryDispatchSettlementDecision?
+                duplicatePredecessorDecision = null;
+            if (lifecycle.RetainedPredecessor is
+                {
+                    Settlement:
+                    {
+                        Outcome:
+                            RuntimeUnlockRetryDispatchSettlementOutcome
+                                .Superseded,
+                    } retainedSettlement,
+                } pendingRetainedPredecessor &&
+                pendingRetainedPredecessor.SuccessorAuthorityId ==
+                    installed.Authority.AuthorityId)
+            {
+                duplicatePredecessorDecision =
+                    new RuntimeUnlockRetryDispatchSettlementDecision(
+                        RuntimeUnlockRetryDispatchSettlementDecisionStatus
+                            .Idempotent,
+                        "retry_dispatch_settlement_duplicate",
+                        retainedSettlement)
+                    {
+                        State = state,
+                    };
+            }
+            else if (receipt.Authority.PredecessorAuthorityId is
+                     { IsDefault: false } duplicatePredecessorAuthorityId &&
+                receipt.Request.RequestActivePredecessorSupersession &&
+                lifecycle.LastSettlement is
+                {
+                    Outcome:
+                        RuntimeUnlockRetryDispatchSettlementOutcome.Superseded,
+                } duplicatePredecessorSettlement &&
+                duplicatePredecessorSettlement.Authority.AuthorityId ==
+                    duplicatePredecessorAuthorityId &&
+                lifecycle.LastTerminalAttempt is { } terminalPredecessor &&
+                terminalPredecessor.Authority ==
+                    duplicatePredecessorSettlement.Authority &&
+                terminalPredecessor.SuccessorAuthorityId ==
+                    receipt.Authority.AuthorityId)
+            {
+                duplicatePredecessorDecision =
+                    new RuntimeUnlockRetryDispatchSettlementDecision(
+                        RuntimeUnlockRetryDispatchSettlementDecisionStatus.Idempotent,
+                        "retry_dispatch_settlement_duplicate",
+                        duplicatePredecessorSettlement)
+                    {
+                        State = state,
+                    };
+            }
+
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent,
+                "retry_dispatch_install_duplicate",
+                predecessorSettlementDecision:
+                    duplicatePredecessorDecision);
+        }
+
+        var receiptWasIssued =
+            lifecycle.PendingAttempt is { } issuedPending &&
+            issuedPending.InstallReceipt == receipt &&
+            lifecycle.LastInstallGeneration == receipt.InstallGeneration;
+        if (lifecycle.PendingAttempt is
+            {
+                State: RuntimeUnlockRetryLifecycleAttemptState.Staged,
+            } expirablePending &&
+            expirablePending.Authority == receipt.Authority &&
+            expirablePending.StageExpiresUtcMs > 0 &&
+            observedUtcMs >= expirablePending.StageExpiresUtcMs)
+        {
+            var expiry = EvaluateRuntimeUnlockRetryDispatchStageExpiry(
+                state,
+                receipt.Authority.AuthorityId,
+                observedUtcMs);
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Expired,
+                expiry.Reason,
+                expiry.State);
+        }
+
+        if (lifecycle.PendingAttempt is not { } pending ||
+            pending.Authority != receipt.Authority ||
+            pending.Request != receipt.Request ||
+            pending.State != RuntimeUnlockRetryLifecycleAttemptState.Staged ||
+            pending.StageStatus != receipt.StageStatus ||
+            pending.StageDisposition != receipt.StageDisposition ||
+            pending.StagedUtcMs != receipt.StagedUtcMs ||
+            pending.StageExpiresUtcMs != receipt.StageExpiresUtcMs ||
+            pending.DispatchDeadlineUtcMs != receipt.DispatchDeadlineUtcMs ||
+            receipt.StageCleared ||
+            !receiptWasIssued ||
+            pending.InstallReceipt != receipt ||
+            receipt.InstallGeneration != lifecycle.LastInstallGeneration)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_install_receipt_mismatch");
+        }
+
+        RuntimeUnlockRetryLifecycleAttemptSnapshot? retainedPredecessor = null;
+        RuntimeUnlockRetryDispatchSettlementReport? predecessorSettlement = null;
+        if (receipt.Authority.PredecessorAuthorityId is
+            { IsDefault: false } predecessorAuthorityId)
+        {
+            if (lifecycle.InstalledAttempt is not { } predecessor ||
+                predecessor.Authority.AuthorityId != predecessorAuthorityId)
+            {
+                return Decision(
+                    RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                    "retry_dispatch_install_predecessor_not_current");
+            }
+
+            if (receipt.Request.RequestActivePredecessorSupersession)
+            {
+                if (predecessor.IsTerminal)
+                {
+                    return Decision(
+                        RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                        "retry_dispatch_install_active_predecessor_terminal");
+                }
+
+                predecessorSettlement =
+                    new RuntimeUnlockRetryDispatchSettlementReport(
+                        predecessor.Authority,
+                        RuntimeUnlockRetryDispatchSettlementOutcome.Superseded,
+                        "coordinator_successor_installed")
+                    {
+                        OfferGeneration = predecessor.OfferGeneration,
+                        OfferNonce = predecessor.OfferNonce,
+                        DispatchObserved = false,
+                        SuccessorAuthorityId =
+                            receipt.Authority.AuthorityId,
+                    };
+                retainedPredecessor = predecessor with
+                {
+                    State = RuntimeUnlockRetryLifecycleAttemptState.Settled,
+                    Settlement = predecessorSettlement,
+                    SuccessorAuthorityId = receipt.Authority.AuthorityId,
+                };
+            }
+            else if (predecessor.Settlement is not
+                     {
+                         Outcome:
+                             RuntimeUnlockRetryDispatchSettlementOutcome
+                                 .MissingDispatch,
+                     })
+            {
+                return Decision(
+                    RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                    "retry_dispatch_install_predecessor_settlement_missing");
+            }
+        }
+        else if (lifecycle.InstalledAttempt is not null)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_install_conflicting_authority");
+        }
+
+        var installedAttempt = pending with
+        {
+            State = RuntimeUnlockRetryLifecycleAttemptState.Installed,
+            InstallReceipt = receipt,
+            DispatchDeadlineUtcMs = receipt.DispatchDeadlineUtcMs,
+        };
+        var nextLifecycle = lifecycle with
+        {
+            PendingAttempt = null,
+            InstalledAttempt = installedAttempt,
+            RetainedPredecessor = retainedPredecessor,
+            LastTerminalAttempt =
+                retainedPredecessor is null &&
+                receipt.Authority.PredecessorAuthorityId is not null
+                     ? lifecycle.InstalledAttempt
+                     : lifecycle.LastTerminalAttempt,
+            LastSettlement = lifecycle.LastSettlement,
+            AttemptHistory = lifecycle.AttemptHistory,
+            LastInstallGeneration = receipt.InstallGeneration,
+            BoundedClosure = null,
+        };
+        var committedState = ApplyRuntimeUnlockRetryLifecycle(
+            state,
+            nextLifecycle);
+        if (receipt.Authority.PredecessorAuthorityId is null)
+        {
+            committedState = committedState with
+            {
+                RuntimeUnlockRegularV4RecoverySettlementAvailable =
+                    receipt.Authority.ReleaseKind ==
+                    RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement
+                        ? false
+                        : committedState
+                            .RuntimeUnlockRegularV4RecoverySettlementAvailable,
+                RuntimeUnlockRecoveryLeaseClosureAvailable =
+                    receipt.Authority.ReleaseKind ==
+                    RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure
+                        ? false
+                        : committedState
+                            .RuntimeUnlockRecoveryLeaseClosureAvailable,
+            };
+        }
+        RuntimeUnlockRetryDispatchSettlementDecision?
+            predecessorSettlementDecision = null;
+        if (predecessorSettlement is { } exactPredecessorSettlement)
+        {
+            predecessorSettlementDecision =
+                new RuntimeUnlockRetryDispatchSettlementDecision(
+                    RuntimeUnlockRetryDispatchSettlementDecisionStatus.Accepted,
+                    "retry_dispatch_settlement_superseded_predecessor",
+                    exactPredecessorSettlement)
+                {
+                    State = committedState,
+                };
+        }
+        return Decision(
+            RuntimeUnlockRetryLifecycleTransitionStatus.Accepted,
+            "retry_dispatch_install_committed",
+            committedState,
+            predecessorSettlementDecision);
+    }
+
+    internal static RuntimeUnlockRetryLifecycleTransitionDecision
+        EvaluateRuntimeUnlockRetryDispatchStageExpiry(
+            FileTransferCoordinatorState state,
+            FileTransferAuthorityId authorityId,
+            long observedUtcMs)
+    {
+        RuntimeUnlockRetryLifecycleTransitionDecision Decision(
+            RuntimeUnlockRetryLifecycleTransitionStatus status,
+            string reason,
+            FileTransferCoordinatorState? nextState = null)
+            => new(status, reason)
+            {
+                State = nextState ?? state,
+            };
+
+        var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
+        if (lifecycle.PendingScopeInvalidationCommand is not null)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_scope_invalidation_pending");
+        }
+
+        if (authorityId.IsDefault ||
+            lifecycle.PendingAttempt is not { } pending ||
+            pending.Authority.AuthorityId != authorityId)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_stage_not_current");
+        }
+
+        if (pending.State != RuntimeUnlockRetryLifecycleAttemptState.Staged ||
+            pending.StageExpiresUtcMs <= 0)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_stage_not_expirable");
+        }
+
+        if (!IsRuntimeUnlockRetryLifecycleAttemptCurrent(
+                state,
+                pending,
+                out var pendingCurrentnessReason))
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                pendingCurrentnessReason);
+        }
+
+        if (observedUtcMs < pending.StageExpiresUtcMs)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent,
+                "retry_dispatch_stage_deadline_pending");
+        }
+
+        var expired = pending with
+        {
+            State = RuntimeUnlockRetryLifecycleAttemptState.Invalidated,
+        };
+        var nextLifecycle = lifecycle with
+        {
+            PendingAttempt = null,
+            LastTerminalAttempt = expired,
+            AttemptHistory =
+                AppendRuntimeUnlockRetryLifecycleAttemptHistory(
+                    lifecycle.AttemptHistory,
+                    expired),
+        };
+        return Decision(
+            RuntimeUnlockRetryLifecycleTransitionStatus.Expired,
+            "retry_dispatch_stage_expired",
+            ApplyRuntimeUnlockRetryLifecycle(state, nextLifecycle));
+    }
+
+    internal static RuntimeUnlockRetryLifecycleScopeInvalidationDecision
+        PrepareRuntimeUnlockRetryDispatchStageExpiry(
+            FileTransferCoordinatorState state,
+            FileTransferAuthorityId authorityId,
+            long observedUtcMs)
+    {
+        RuntimeUnlockRetryLifecycleScopeInvalidationDecision Decision(
+            RuntimeUnlockRetryLifecycleTransitionStatus status,
+            string reason,
+            RuntimeUnlockRetryDispatchScopeInvalidationCommand? command = null,
+            FileTransferCoordinatorState? nextState = null)
+            => new(status, reason, command)
+            {
+                State = nextState ?? state,
+            };
+
+        var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
+        if (lifecycle.PendingScopeInvalidationCommand is
+            {
+                Kind:
+                    RuntimeUnlockRetryDispatchScopeInvalidationKind
+                        .PendingStageExpiry,
+            } pendingCommand)
+        {
+            return pendingCommand.PendingAttempt?.Authority.AuthorityId ==
+                   authorityId
+                ? Decision(
+                    RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent,
+                    "retry_dispatch_stage_expiry_already_prepared",
+                    pendingCommand)
+                : Decision(
+                    RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                    "retry_dispatch_scope_invalidation_pending_mismatch");
+        }
+
+        var expiry =
+            EvaluateRuntimeUnlockRetryDispatchStageExpiry(
+                state,
+                authorityId,
+                observedUtcMs);
+        if (expiry.Status != RuntimeUnlockRetryLifecycleTransitionStatus.Expired)
+        {
+            return Decision(expiry.Status, expiry.Reason);
+        }
+
+        if (lifecycle.PendingAttempt is not { } pendingAttempt ||
+            lifecycle.LastScopeInvalidationGeneration == long.MaxValue)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                lifecycle.PendingAttempt is null
+                    ? "retry_dispatch_stage_not_current"
+                    : "retry_dispatch_scope_invalidation_generation_exhausted");
+        }
+
+        const string reason = "retry_dispatch_stage_expired";
+        var generation = lifecycle.LastScopeInvalidationGeneration + 1;
+        var command =
+            new RuntimeUnlockRetryDispatchScopeInvalidationCommand(
+                pendingAttempt,
+                lifecycle.InstalledAttempt,
+                lifecycle.RetainedPredecessor,
+                lifecycle.BoundedClosure,
+                generation,
+                reason,
+                ComputeRuntimeUnlockRetryDispatchScopeInvalidationCommandId(
+                    pendingAttempt,
+                    lifecycle.InstalledAttempt,
+                    lifecycle.RetainedPredecessor,
+                    lifecycle.BoundedClosure,
+                    generation,
+                    reason,
+                    RuntimeUnlockRetryDispatchScopeInvalidationKind
+                        .PendingStageExpiry),
+                RuntimeUnlockRetryDispatchScopeInvalidationKind
+                    .PendingStageExpiry);
+        var preparedLifecycle = lifecycle with
+        {
+            PendingScopeInvalidationCommand = command,
+            LastScopeInvalidationGeneration = generation,
+        };
+        return Decision(
+            RuntimeUnlockRetryLifecycleTransitionStatus.Accepted,
+            "retry_dispatch_stage_expiry_prepared",
+            command,
+            ApplyRuntimeUnlockRetryLifecycle(state, preparedLifecycle));
+    }
+
+    internal static RuntimeUnlockRetryLifecycleTransitionDecision
+        InvalidateRuntimeUnlockRetryDispatchPendingAttempt(
+            FileTransferCoordinatorState state,
+            FileTransferAuthorityId authorityId,
+            string reason)
+    {
+        RuntimeUnlockRetryLifecycleTransitionDecision Decision(
+            RuntimeUnlockRetryLifecycleTransitionStatus status,
+            string decisionReason,
+            FileTransferCoordinatorState? nextState = null)
+            => new(status, decisionReason)
+            {
+                State = nextState ?? state,
+            };
+
+        var normalizedReason = NormalizeReason(reason);
+        var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
+        if (lifecycle.PendingScopeInvalidationCommand is not null)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_scope_invalidation_pending");
+        }
+
+        if (authorityId.IsDefault ||
+            string.IsNullOrWhiteSpace(normalizedReason))
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_pending_invalidation_invalid");
+        }
+
+        if (lifecycle.PendingAttempt is not { } pending)
+        {
+            if (lifecycle.LastTerminalAttempt is
+                {
+                    State: RuntimeUnlockRetryLifecycleAttemptState.Invalidated,
+                } terminal &&
+                terminal.Authority.AuthorityId == authorityId)
+            {
+                return Decision(
+                    RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent,
+                    "retry_dispatch_pending_already_invalidated");
+            }
+
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_pending_not_current");
+        }
+
+        if (pending.Authority.AuthorityId != authorityId)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_pending_authority_mismatch");
+        }
+
+        var invalidated = pending with
+        {
+            State = RuntimeUnlockRetryLifecycleAttemptState.Invalidated,
+        };
+        return Decision(
+            RuntimeUnlockRetryLifecycleTransitionStatus.Accepted,
+            normalizedReason,
+            ApplyRuntimeUnlockRetryLifecycle(
+                state,
+                lifecycle with
+                {
+                    PendingAttempt = null,
+                    LastTerminalAttempt = invalidated,
+                    AttemptHistory =
+                        AppendRuntimeUnlockRetryLifecycleAttemptHistory(
+                            lifecycle.AttemptHistory,
+                            invalidated),
+                }));
+    }
+
+    internal static RuntimeUnlockRetryLifecycleScopeInvalidationDecision
+        PrepareRuntimeUnlockRetryLifecycleScopeInvalidation(
+            FileTransferCoordinatorState state,
+            string reason)
+    {
+        RuntimeUnlockRetryLifecycleScopeInvalidationDecision Decision(
+            RuntimeUnlockRetryLifecycleTransitionStatus status,
+            string decisionReason,
+            RuntimeUnlockRetryDispatchScopeInvalidationCommand? command = null,
+            FileTransferCoordinatorState? nextState = null)
+            => new(status, decisionReason, command)
+            {
+                State = nextState ?? state,
+            };
+
+        var normalizedReason = NormalizeReason(reason);
+        if (string.IsNullOrWhiteSpace(normalizedReason))
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_scope_invalidation_reason_missing");
+        }
+
+        var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
+        var installedForScopeInvalidation =
+            GetRuntimeUnlockRetryLifecycleAttemptForScopeInvalidation(
+                lifecycle);
+        if (lifecycle.PendingAttempt is null &&
+            installedForScopeInvalidation is null &&
+            lifecycle.RetainedPredecessor is null &&
+            lifecycle.BoundedClosure is null)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent,
+                "retry_dispatch_scope_already_invalidated");
+        }
+
+        if (lifecycle.PendingScopeInvalidationCommand is { } pending)
+        {
+            var exact =
+                pending.Kind ==
+                    RuntimeUnlockRetryDispatchScopeInvalidationKind.FullScope &&
+                pending.PendingAttempt == lifecycle.PendingAttempt &&
+                pending.InstalledAttempt ==
+                    installedForScopeInvalidation &&
+                pending.RetainedPredecessor == lifecycle.RetainedPredecessor &&
+                pending.BoundedClosure == lifecycle.BoundedClosure;
+            return exact
+                ? Decision(
+                    RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent,
+                    "retry_dispatch_scope_invalidation_already_prepared",
+                    pending)
+                : Decision(
+                    RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                    "retry_dispatch_scope_invalidation_pending_mismatch");
+        }
+
+        if (lifecycle.LastScopeInvalidationGeneration == long.MaxValue)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_scope_invalidation_generation_exhausted");
+        }
+
+        var command =
+            new RuntimeUnlockRetryDispatchScopeInvalidationCommand(
+                lifecycle.PendingAttempt,
+                installedForScopeInvalidation,
+                lifecycle.RetainedPredecessor,
+                lifecycle.BoundedClosure,
+                lifecycle.LastScopeInvalidationGeneration + 1,
+                normalizedReason,
+                ComputeRuntimeUnlockRetryDispatchScopeInvalidationCommandId(
+                    lifecycle.PendingAttempt,
+                    installedForScopeInvalidation,
+                    lifecycle.RetainedPredecessor,
+                    lifecycle.BoundedClosure,
+                    lifecycle.LastScopeInvalidationGeneration + 1,
+                    normalizedReason,
+                    RuntimeUnlockRetryDispatchScopeInvalidationKind
+                        .FullScope));
+        var preparedLifecycle = lifecycle with
+        {
+            PendingScopeInvalidationCommand = command,
+            LastScopeInvalidationGeneration =
+                command.InvalidationGeneration,
+        };
+        return Decision(
+            RuntimeUnlockRetryLifecycleTransitionStatus.Accepted,
+            "retry_dispatch_scope_invalidation_prepared",
+            command,
+            ApplyRuntimeUnlockRetryLifecycle(state, preparedLifecycle));
+    }
+
+    internal static RuntimeUnlockRetryLifecycleScopeInvalidationDecision
+        CommitRuntimeUnlockRetryLifecycleScopeInvalidation(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockRetryDispatchScopeInvalidationReceipt receipt)
+    {
+        RuntimeUnlockRetryLifecycleScopeInvalidationDecision Decision(
+            RuntimeUnlockRetryLifecycleTransitionStatus status,
+            string reason,
+            RuntimeUnlockRetryDispatchScopeInvalidationCommand? command = null,
+            FileTransferCoordinatorState? nextState = null)
+            => new(status, reason, command)
+            {
+                State = nextState ?? state,
+            };
+
+        var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
+        var installedForScopeInvalidation =
+            GetRuntimeUnlockRetryLifecycleAttemptForScopeInvalidation(
+                lifecycle);
+        if (receipt.Command is null || receipt.Command.IsDefault)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_scope_invalidation_receipt_missing");
+        }
+
+        if (lifecycle.PendingScopeInvalidationCommand is null &&
+            receipt.Accepted &&
+            lifecycle.LastScopeInvalidationReceipt is { } lastReceipt &&
+            lastReceipt.Command == receipt.Command)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent,
+                "retry_dispatch_scope_invalidation_duplicate",
+                receipt.Command);
+        }
+
+        if (!receipt.Accepted ||
+            lifecycle.PendingScopeInvalidationCommand is not { } pending ||
+            pending != receipt.Command ||
+            pending.InvalidationGeneration !=
+                lifecycle.LastScopeInvalidationGeneration ||
+            pending.PendingAttempt != lifecycle.PendingAttempt ||
+            pending.InstalledAttempt !=
+                installedForScopeInvalidation ||
+            pending.RetainedPredecessor != lifecycle.RetainedPredecessor ||
+            pending.BoundedClosure != lifecycle.BoundedClosure)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_scope_invalidation_receipt_mismatch");
+        }
+
+        RuntimeUnlockRetryLifecycleSubstate invalidatedLifecycle;
+        if (pending.Kind ==
+            RuntimeUnlockRetryDispatchScopeInvalidationKind.PendingStageExpiry)
+        {
+            if (lifecycle.PendingAttempt is not { } stagedAttempt ||
+                stagedAttempt.State !=
+                    RuntimeUnlockRetryLifecycleAttemptState.Staged)
+            {
+                return Decision(
+                    RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                    "retry_dispatch_stage_expiry_receipt_mismatch");
+            }
+
+            var expiredAttempt = stagedAttempt with
+            {
+                State = RuntimeUnlockRetryLifecycleAttemptState.Invalidated,
+            };
+            invalidatedLifecycle = lifecycle with
+            {
+                PendingAttempt = null,
+                LastTerminalAttempt = expiredAttempt,
+                PendingScopeInvalidationCommand = null,
+                LastScopeInvalidationReceipt = receipt,
+                LastScopeInvalidationGeneration =
+                    pending.InvalidationGeneration,
+                AttemptHistory =
+                    AppendRuntimeUnlockRetryLifecycleAttemptHistory(
+                        lifecycle.AttemptHistory,
+                        expiredAttempt),
+            };
+        }
+        else
+        {
+            invalidatedLifecycle =
+                InvalidateRuntimeUnlockRetryLifecycle(lifecycle) with
+                {
+                    PendingScopeInvalidationCommand = null,
+                    LastScopeInvalidationReceipt = receipt,
+                    LastScopeInvalidationGeneration =
+                        pending.InvalidationGeneration,
+                };
+        }
+        return Decision(
+            RuntimeUnlockRetryLifecycleTransitionStatus.Accepted,
+            pending.Kind ==
+                RuntimeUnlockRetryDispatchScopeInvalidationKind
+                    .PendingStageExpiry
+                ? "retry_dispatch_stage_expired"
+                : "retry_dispatch_scope_invalidated",
+            pending,
+            ApplyRuntimeUnlockRetryLifecycle(
+                state,
+                invalidatedLifecycle));
+    }
+
+    internal static bool
+        IsRuntimeUnlockRetryDispatchScopeInvalidationCommandIdentityValid(
+            RuntimeUnlockRetryDispatchScopeInvalidationCommand command)
+        => !command.IsDefault &&
+           command.CommandId ==
+           ComputeRuntimeUnlockRetryDispatchScopeInvalidationCommandId(
+               command.PendingAttempt,
+               command.InstalledAttempt,
+               command.RetainedPredecessor,
+               command.BoundedClosure,
+               command.InvalidationGeneration,
+               command.Reason,
+               command.Kind);
+
+    private static FileTransferAuthorityId
+        ComputeRuntimeUnlockRetryDispatchScopeInvalidationCommandId(
+            RuntimeUnlockRetryLifecycleAttemptSnapshot? pendingAttempt,
+            RuntimeUnlockRetryLifecycleAttemptSnapshot? installedAttempt,
+            RuntimeUnlockRetryLifecycleAttemptSnapshot? retainedPredecessor,
+            RuntimeUnlockRetryLifecycleBoundedClosure? boundedClosure,
+            long invalidationGeneration,
+            string reason,
+            RuntimeUnlockRetryDispatchScopeInvalidationKind kind)
+    {
+        var builder = new StringBuilder();
+        AppendRuntimeUnlockRetryDispatchScopeInvalidationIdentityPart(
+            builder,
+            pendingAttempt?.ToString());
+        AppendRuntimeUnlockRetryDispatchScopeInvalidationIdentityPart(
+            builder,
+            installedAttempt?.ToString());
+        AppendRuntimeUnlockRetryDispatchScopeInvalidationIdentityPart(
+            builder,
+            retainedPredecessor?.ToString());
+        AppendRuntimeUnlockRetryDispatchScopeInvalidationIdentityPart(
+            builder,
+            boundedClosure?.ToString());
+        AppendRuntimeUnlockRetryDispatchScopeInvalidationIdentityPart(
+            builder,
+            invalidationGeneration.ToString(CultureInfo.InvariantCulture));
+        AppendRuntimeUnlockRetryDispatchScopeInvalidationIdentityPart(
+            builder,
+            reason);
+        AppendRuntimeUnlockRetryDispatchScopeInvalidationIdentityPart(
+            builder,
+            kind.ToString());
+        var digest = SHA256.HashData(
+            Encoding.UTF8.GetBytes(builder.ToString()));
+        return new FileTransferAuthorityId(
+            $"runtime-unlock-retry-scope-{Convert.ToHexString(digest).ToLowerInvariant()}");
+    }
+
+    private static void
+        AppendRuntimeUnlockRetryDispatchScopeInvalidationIdentityPart(
+            StringBuilder builder,
+            string? value)
+    {
+        value ??= string.Empty;
+        builder.Append(value.Length.ToString(CultureInfo.InvariantCulture));
+        builder.Append(':');
+        builder.Append(value);
+        builder.Append(';');
+    }
+
+    internal static RuntimeUnlockRetryLifecycleDeadlineDecision
+        EvaluateRuntimeUnlockRetryDispatchDeadline(
+            FileTransferCoordinatorState state,
+            FileTransferAuthorityId authorityId,
+            long observedUtcMs)
+    {
+        RuntimeUnlockRetryLifecycleDeadlineDecision Decision(
+            RuntimeUnlockRetryLifecycleTransitionStatus status,
+            string reason,
+            RuntimeUnlockRetryDispatchSettlementReport? settlement = null,
+            FileTransferCoordinatorState? nextState = null)
+            => new(status, reason, settlement)
+            {
+                State = nextState ?? state,
+            };
+
+        var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
+        if (lifecycle.PendingScopeInvalidationCommand is not null)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_scope_invalidation_pending");
+        }
+
+        if (authorityId.IsDefault ||
+            lifecycle.InstalledAttempt is not { } installed ||
+            installed.Authority.AuthorityId != authorityId ||
+            !installed.IsInstalled)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_deadline_authority_not_installed");
+        }
+
+        if (!IsRuntimeUnlockRetryLifecycleAttemptCurrent(
+                state,
+                installed,
+                out var installedCurrentnessReason))
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                installedCurrentnessReason);
+        }
+
+        if (installed.Settlement is { } existingSettlement)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent,
+                "retry_dispatch_deadline_already_settled",
+                existingSettlement);
+        }
+
+        if (installed.DispatchDeadlineUtcMs <= 0)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_deadline_missing");
+        }
+
+        if (observedUtcMs < installed.DispatchDeadlineUtcMs)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent,
+                "retry_dispatch_deadline_pending");
+        }
+
+        if (installed.DispatchObserved)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent,
+                "retry_dispatch_deadline_dispatch_observed");
+        }
+
+        var settlement = new RuntimeUnlockRetryDispatchSettlementReport(
+            installed.Authority,
+            RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch,
+            "retry_dispatch_deadline_elapsed")
+        {
+            OfferGeneration = installed.OfferGeneration,
+            OfferNonce = installed.OfferNonce,
+            DispatchObserved = false,
+        };
+        var settlementDecision =
+            ObserveRuntimeUnlockRetryDispatchSettlement(state, settlement);
+        if (settlementDecision.Status is not
+            (RuntimeUnlockRetryDispatchSettlementDecisionStatus.Accepted or
+             RuntimeUnlockRetryDispatchSettlementDecisionStatus.Idempotent))
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                settlementDecision.Reason);
+        }
+
+        return Decision(
+            settlementDecision.Status ==
+                RuntimeUnlockRetryDispatchSettlementDecisionStatus.Accepted
+                ? RuntimeUnlockRetryLifecycleTransitionStatus.Accepted
+                : RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent,
+            settlementDecision.Reason,
+            settlement,
+            settlementDecision.State);
+    }
+
+    internal static RuntimeUnlockRetryLifecycleTransitionDecision
+        ObserveRuntimeUnlockRetryDispatchExecutionState(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockRetryDispatchInstallReceipt installReceipt,
+            RuntimeUnlockRetryDispatchAttemptPhase attemptPhase,
+            long offerGeneration,
+            string? offerNonce,
+            bool dispatchObserved)
+    {
+        RuntimeUnlockRetryLifecycleTransitionDecision Decision(
+            RuntimeUnlockRetryLifecycleTransitionStatus status,
+            string reason,
+            FileTransferCoordinatorState? nextState = null)
+            => new(status, reason)
+            {
+                State = nextState ?? state,
+            };
+
+        var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
+        if (lifecycle.PendingScopeInvalidationCommand is not null)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_scope_invalidation_pending");
+        }
+
+        if (installReceipt.IsDefault ||
+            installReceipt.DispatchDeadlineUtcMs <= 0 ||
+            lifecycle.InstalledAttempt is not { } installed ||
+            !installed.IsInstalled ||
+            installed.Authority != installReceipt.Authority ||
+            installed.InstallReceipt != installReceipt)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_execution_receipt_not_installed");
+        }
+
+        if (!IsRuntimeUnlockRetryLifecycleAttemptCurrent(
+                state,
+                installed,
+                out var installedCurrentnessReason))
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                installedCurrentnessReason);
+        }
+
+        if (dispatchObserved ||
+            attemptPhase == RuntimeUnlockRetryDispatchAttemptPhase.Settled)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_execution_transition_invalid");
+        }
+
+        if (attemptPhase == RuntimeUnlockRetryDispatchAttemptPhase.Granted)
+        {
+            return installed.State ==
+                       RuntimeUnlockRetryLifecycleAttemptState.Installed &&
+                   offerGeneration == 0 &&
+                   string.IsNullOrWhiteSpace(offerNonce)
+                ? Decision(
+                    RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent,
+                    "retry_dispatch_execution_duplicate")
+                : Decision(
+                    RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                    "retry_dispatch_execution_transition_invalid");
+        }
+
+        if (offerGeneration <= 0 ||
+            string.IsNullOrWhiteSpace(offerNonce) ||
+            !string.Equals(offerNonce, offerNonce.Trim(), StringComparison.Ordinal))
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_execution_offer_tuple_invalid");
+        }
+
+        RuntimeUnlockRetryLifecycleAttemptState requestedState;
+        if (attemptPhase == RuntimeUnlockRetryDispatchAttemptPhase.AliasBound)
+        {
+            requestedState = RuntimeUnlockRetryLifecycleAttemptState.AliasBound;
+            if (installed.State ==
+                    RuntimeUnlockRetryLifecycleAttemptState.AliasBound &&
+                installed.OfferGeneration == offerGeneration &&
+                string.Equals(
+                    installed.OfferNonce,
+                    offerNonce,
+                    StringComparison.Ordinal))
+            {
+                return Decision(
+                    RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent,
+                    "retry_dispatch_execution_duplicate");
+            }
+
+            if (installed.State !=
+                    RuntimeUnlockRetryLifecycleAttemptState.Installed ||
+                installed.OfferGeneration != 0 ||
+                installed.OfferNonce is not null)
+            {
+                return Decision(
+                    RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                    "retry_dispatch_execution_transition_invalid");
+            }
+        }
+        else if (attemptPhase ==
+                 RuntimeUnlockRetryDispatchAttemptPhase.SendInFlight)
+        {
+            requestedState =
+                RuntimeUnlockRetryLifecycleAttemptState.SendInFlight;
+            if (installed.State ==
+                    RuntimeUnlockRetryLifecycleAttemptState.SendInFlight &&
+                installed.OfferGeneration == offerGeneration &&
+                string.Equals(
+                    installed.OfferNonce,
+                    offerNonce,
+                    StringComparison.Ordinal))
+            {
+                return Decision(
+                    RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent,
+                    "retry_dispatch_execution_duplicate");
+            }
+
+            if (installed.State !=
+                    RuntimeUnlockRetryLifecycleAttemptState.AliasBound ||
+                installed.OfferGeneration != offerGeneration ||
+                !string.Equals(
+                    installed.OfferNonce,
+                    offerNonce,
+                    StringComparison.Ordinal))
+            {
+                return Decision(
+                    RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                    "retry_dispatch_execution_transition_invalid");
+            }
+        }
+        else
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_execution_transition_invalid");
+        }
+
+        var updated = installed with
+        {
+            State = requestedState,
+            OfferGeneration = offerGeneration,
+            OfferNonce = offerNonce,
+        };
+        return Decision(
+            RuntimeUnlockRetryLifecycleTransitionStatus.Accepted,
+            "retry_dispatch_execution_recorded",
+            ApplyRuntimeUnlockRetryLifecycle(
+                state,
+                lifecycle with
+                {
+                    InstalledAttempt = updated,
+                }));
+    }
+
+    internal static RuntimeUnlockRetryDispatchSuccessorDecision
+        PrepareRuntimeUnlockRetryDispatchSuccessor(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockRetryDispatchAuthority predecessorAuthority,
+            long retiredOfferGeneration) =>
+        PrepareRuntimeUnlockRetryDispatchSuccessor(
+            state,
+            new RuntimeUnlockRetryDispatchSuccessorEvaluation(
+                predecessorAuthority,
+                retiredOfferGeneration));
+
+    internal static RuntimeUnlockRetryDispatchSuccessorDecision
+        PrepareRuntimeUnlockRetryDispatchSuccessor(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockRetryDispatchSuccessorEvaluation evaluation)
+    {
+        RuntimeUnlockRetryDispatchSuccessorDecision Decision(
+            RuntimeUnlockRetryDispatchSuccessorDecisionStatus status,
+            string reason,
+            RuntimeUnlockRetryDispatchAuthorityRequest? request = null,
+            RuntimeUnlockRetryDispatchDecision? authorizationDecision = null,
+            FileTransferCoordinatorState? nextState = null)
+            => new(
+                status,
+                reason,
+                evaluation,
+                request,
+                authorizationDecision)
+            {
+                State = nextState ?? state,
+            };
+
+        if (evaluation.IsDefault)
+        {
+            return Decision(
+                RuntimeUnlockRetryDispatchSuccessorDecisionStatus.Rejected,
+                "retry_dispatch_successor_evaluation_missing");
+        }
+
+        var predecessorAuthorityId =
+            evaluation.PredecessorAuthority.AuthorityId;
+        var retiredOfferGeneration = evaluation.RetiredOfferGeneration;
+        if (state.IsTerminal)
+        {
+            return Decision(
+                RuntimeUnlockRetryDispatchSuccessorDecisionStatus.Rejected,
+                "terminal_state");
+        }
+
+        var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
+        if (lifecycle.PendingScopeInvalidationCommand is not null)
+        {
+            return Decision(
+                RuntimeUnlockRetryDispatchSuccessorDecisionStatus.Rejected,
+                "retry_dispatch_scope_invalidation_pending");
+        }
+
+        if (predecessorAuthorityId.IsDefault ||
+            lifecycle.InstalledAttempt is not { } predecessor ||
+            predecessor.Authority.AuthorityId != predecessorAuthorityId ||
+            retiredOfferGeneration <= 0)
+        {
+            return Decision(
+                RuntimeUnlockRetryDispatchSuccessorDecisionStatus.Rejected,
+                "retry_dispatch_successor_predecessor_not_current");
+        }
+
+        var expectedRetiredOfferGeneration =
+            predecessor.OfferGeneration > 0
+                ? predecessor.OfferGeneration
+                : predecessor.Authority.RetiredOfferGeneration;
+        if (retiredOfferGeneration != expectedRetiredOfferGeneration)
+        {
+            return Decision(
+                RuntimeUnlockRetryDispatchSuccessorDecisionStatus.Rejected,
+                "retry_dispatch_successor_retired_offer_mismatch");
+        }
+
+        if (!IsRuntimeUnlockRetryLifecyclePredecessorCurrentForSuccessor(
+                state,
+                predecessor,
+                out var predecessorCurrentnessReason))
+        {
+            return Decision(
+                RuntimeUnlockRetryDispatchSuccessorDecisionStatus.Rejected,
+                predecessorCurrentnessReason);
+        }
+
+        var activePredecessorSupersession =
+            predecessor.Settlement is null;
+        if (activePredecessorSupersession)
+        {
+            if (predecessor.IsTerminal ||
+                predecessor.State !=
+                    RuntimeUnlockRetryLifecycleAttemptState.AliasBound ||
+                predecessor.DispatchObserved ||
+                predecessor.Request.ListenerRearmRequirement ==
+                    RuntimeUnlockRetryDispatchListenerRearmRequirement.None)
+            {
+                return Decision(
+                    RuntimeUnlockRetryDispatchSuccessorDecisionStatus.Held,
+                    "retry_dispatch_successor_predecessor_not_supersedable");
+            }
+        }
+        else if (predecessor.Settlement is not
+                 {
+                     Outcome:
+                         RuntimeUnlockRetryDispatchSettlementOutcome
+                             .MissingDispatch,
+                 })
+        {
+            return Decision(
+                RuntimeUnlockRetryDispatchSuccessorDecisionStatus.Held,
+                "retry_dispatch_successor_missing_dispatch_not_accepted");
+        }
+
+        var missingDispatchGeneration =
+            predecessor.Authority.MissingDispatchSuccessorGeneration +
+            (activePredecessorSupersession ? 0 : 1);
+        var request = new RuntimeUnlockRetryDispatchAuthorityRequest(
+            predecessor.Authority.SessionId,
+            predecessor.Authority.TransferId,
+            predecessor.Authority.Direction,
+            predecessor.Request.SourcePublicationAuthority,
+            predecessor.Authority.RecoveryContractGeneration,
+            retiredOfferGeneration,
+            predecessor.Authority.DispatchAttemptGeneration + 1,
+            predecessor.Authority.RetryReason,
+            predecessor.Authority.RecoveryReason,
+            predecessor.Request.RegularV4LivenessGeneration,
+            predecessor.Request.BridgeDecisionGeneration,
+            predecessor.Authority.AuthorityId,
+            activePredecessorSupersession,
+            missingDispatchGeneration)
+        {
+            FallbackPairedTailYieldEvidence =
+                predecessor.Request.FallbackPairedTailYieldEvidence,
+            ListenerRearmRequirement =
+                predecessor.Request.ListenerRearmRequirement,
+        };
+
+        if (!activePredecessorSupersession &&
+            missingDispatchGeneration >
+                RuntimeUnlockRetryMissingDispatchSuccessorLimit)
+        {
+            var closure = CloseRuntimeUnlockRetryDispatchChain(
+                state,
+                request,
+                "retry_dispatch_missing_successor_limit_exhausted");
+            return closure.Status is
+                RuntimeUnlockRetryLifecycleTransitionStatus.Accepted or
+                RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent
+                ? Decision(
+                    RuntimeUnlockRetryDispatchSuccessorDecisionStatus.ChainClosed,
+                    closure.Reason,
+                    request,
+                    nextState: closure.State)
+                : Decision(
+                    RuntimeUnlockRetryDispatchSuccessorDecisionStatus.Rejected,
+                    closure.Reason);
+        }
+
+        if (lifecycle.PendingAttempt is { } existingPending)
+        {
+            if (existingPending.Request == request)
+            {
+                var duplicate = AuthorizeRuntimeUnlockRetryDispatchCore(
+                    state,
+                    request,
+                    predecessor.Authority.ReleaseKind,
+                    predecessor.Authority.ReleaseAuthorityId,
+                    predecessor.Authority.ReleaseGeneration,
+                    predecessor.Authority.ReleaseOutcome,
+                    allowCoordinatorPreparedSuccessor: true);
+                return Decision(
+                    RuntimeUnlockRetryDispatchSuccessorDecisionStatus.Idempotent,
+                    duplicate.Reason,
+                    request,
+                    duplicate,
+                    duplicate.State);
+            }
+
+            return Decision(
+                RuntimeUnlockRetryDispatchSuccessorDecisionStatus.Rejected,
+                "retry_dispatch_successor_conflict");
+        }
+
+        var authorization = AuthorizeRuntimeUnlockRetryDispatchCore(
+            state,
+            request,
+            predecessor.Authority.ReleaseKind,
+            predecessor.Authority.ReleaseAuthorityId,
+            predecessor.Authority.ReleaseGeneration,
+            predecessor.Authority.ReleaseOutcome,
+            allowCoordinatorPreparedSuccessor: true);
+        var status = authorization.Status switch
+        {
+            RuntimeUnlockRetryDispatchDecisionStatus.Granted =>
+                RuntimeUnlockRetryDispatchSuccessorDecisionStatus.Requested,
+            RuntimeUnlockRetryDispatchDecisionStatus.Held =>
+                RuntimeUnlockRetryDispatchSuccessorDecisionStatus.Held,
+            _ => RuntimeUnlockRetryDispatchSuccessorDecisionStatus.Rejected,
+        };
+        return Decision(
+            status,
+            authorization.Reason,
+            request,
+            authorization,
+            authorization.State);
+    }
+
+    private static bool
+        IsRuntimeUnlockRetryLifecyclePredecessorCurrentForSuccessor(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockRetryLifecycleAttemptSnapshot predecessor,
+            out string rejectionReason)
+    {
+        if (IsRuntimeUnlockRetryLifecycleAttemptCurrent(
+                state,
+                predecessor,
+                out rejectionReason))
+        {
+            return true;
+        }
+
+        var authority = predecessor.Authority;
+        if (rejectionReason != "retry_dispatch_runtime_scope_mismatch" ||
+            predecessor.Settlement?.Outcome !=
+                RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch ||
+            authority.ReleaseKind !=
+                RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield ||
+            state.IsTerminal ||
+            state.RouteSelection.Route !=
+                FileTransferRoute.PostTunaFallbackV6 ||
+            state.RouteSelection.ProtocolVersion !=
+                FileTransferProtocol.ProtocolVersionV6 ||
+            state.CurrentRuntimeOwner is not { } owner ||
+            state.CurrentRoutePublicationToken is not { } publication ||
+            state.CurrentLeg is not { } leg ||
+            leg.TransportEpochId <= authority.TransportEpoch ||
+            !string.Equals(
+                authority.SessionId,
+                state.SessionId,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                authority.TransferId,
+                state.TransferId,
+                StringComparison.Ordinal) ||
+            authority.Direction != state.Direction ||
+            authority.RuntimeOwner != owner ||
+            authority.SourcePublicationAuthority != publication ||
+            authority.Route != state.RouteSelection.Route ||
+            !string.Equals(
+                authority.RouteToken,
+                state.RouteSelection.TelemetryToken,
+                StringComparison.Ordinal) ||
+            authority.ProtocolVersion != state.RouteSelection.ProtocolVersion ||
+            authority.LiveRouteEpoch !=
+                (state.CurrentLiveRouteEpoch?.EpochId ?? 0) ||
+            authority.RuntimeGeneration != owner.RuntimeGeneration ||
+            authority.TerminalGeneration != state.TerminalGeneration ||
+            authority.LegGeneration != leg.Generation ||
+            authority.BridgeRecoveryGeneration !=
+                leg.BridgeRecoveryGeneration ||
+            authority.RoutePublicationGeneration !=
+                publication.PublicationGeneration ||
+            authority.RouteCommitGeneration !=
+                publication.RouteCommitGeneration)
+        {
+            return false;
+        }
+
+        rejectionReason = "accepted_same_leg_transport_epoch_carry_forward";
+        return true;
+    }
+
+    internal static RuntimeUnlockRetryLifecycleTransitionDecision
+        CloseRuntimeUnlockRetryDispatchChain(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockRetryDispatchAuthorityRequest rejectedSuccessorRequest,
+            string reason)
+    {
+        RuntimeUnlockRetryLifecycleTransitionDecision Decision(
+            RuntimeUnlockRetryLifecycleTransitionStatus status,
+            string decisionReason,
+            FileTransferCoordinatorState? nextState = null)
+            => new(status, decisionReason)
+            {
+                State = nextState ?? state,
+            };
+
+        var normalizedReason = NormalizeReason(reason);
+        var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
+        if (lifecycle.PendingScopeInvalidationCommand is not null)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_scope_invalidation_pending");
+        }
+
+        var finalAttempt = lifecycle.InstalledAttempt ??
+                           lifecycle.LastTerminalAttempt;
+        if (finalAttempt is not { } attempt ||
+            attempt.Settlement is not
+            {
+                Outcome: RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch,
+            } settlement ||
+            rejectedSuccessorRequest.IsDefault ||
+            rejectedSuccessorRequest.PredecessorAuthorityId !=
+                attempt.Authority.AuthorityId ||
+            rejectedSuccessorRequest.DispatchAttemptGeneration !=
+                attempt.Authority.DispatchAttemptGeneration + 1 ||
+            rejectedSuccessorRequest.MissingDispatchSuccessorGeneration !=
+                attempt.Authority.MissingDispatchSuccessorGeneration + 1 ||
+            rejectedSuccessorRequest.MissingDispatchSuccessorGeneration <=
+                RuntimeUnlockRetryMissingDispatchSuccessorLimit ||
+            !string.Equals(
+                normalizedReason,
+                "retry_dispatch_missing_successor_limit_exhausted",
+                StringComparison.Ordinal))
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_chain_closure_mismatch");
+        }
+
+        if (!IsRuntimeUnlockRetryLifecyclePredecessorCurrentForSuccessor(
+                state,
+                attempt,
+                out var attemptCurrentnessReason))
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                attemptCurrentnessReason);
+        }
+
+        if (lifecycle.BoundedClosure is { } existingClosure)
+        {
+            if (existingClosure.FinalAttempt.Authority == attempt.Authority &&
+                existingClosure.RejectedSuccessorRequest ==
+                    rejectedSuccessorRequest)
+            {
+                return Decision(
+                    RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent,
+                    "retry_dispatch_chain_already_closed");
+            }
+
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_chain_closure_conflict");
+        }
+
+        var closedAttempt = attempt with
+        {
+            State = RuntimeUnlockRetryLifecycleAttemptState.Closed,
+            Settlement = settlement,
+        };
+        if (lifecycle.LastClosureGeneration == long.MaxValue)
+        {
+            return Decision(
+                RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_chain_closure_generation_exhausted");
+        }
+
+        var closureGeneration =
+            Math.Max(1, lifecycle.LastClosureGeneration + 1);
+        var closure = new RuntimeUnlockRetryLifecycleBoundedClosure(
+            closedAttempt,
+            rejectedSuccessorRequest,
+            closureGeneration,
+            normalizedReason);
+        var nextLifecycle = lifecycle with
+        {
+            PendingAttempt = null,
+            InstalledAttempt = null,
+            RetainedPredecessor = null,
+            LastTerminalAttempt = closedAttempt,
+            BoundedClosure = closure,
+            LastClosureGeneration = closureGeneration,
+        };
+        return Decision(
+            RuntimeUnlockRetryLifecycleTransitionStatus.Accepted,
+            "retry_dispatch_chain_closed",
+            ApplyRuntimeUnlockRetryLifecycle(state, nextLifecycle));
+    }
 
     internal static bool IsFileTransferRouteTransitionCurrent(
         FileTransferCoordinatorState state,
@@ -2095,6 +4310,14 @@ internal static class FileTransferCoordinator
                 retainedFrameApplyCommand: terminal.RetainedFrameApplyCommand);
         }
 
+        if (RequiresRuntimeUnlockRetryLifecycleScopeInvalidation(state))
+        {
+            return FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Rejected,
+                "runtime_unlock_retry_scope_invalidation_required");
+        }
+
         if (!TryValidateFileTransferRouteTransitionDrainReceipt(
                 state,
                 authority,
@@ -2263,7 +4486,6 @@ internal static class FileTransferCoordinator
                 LastRouteCommitGeneration = commitGeneration,
                 CurrentRuntimeUnlockAdmission = null,
                 CurrentRuntimeUnlockPendingPreCommitProbe = null,
-                CurrentRuntimeUnlockRetryDispatchAuthority = null,
             };
             var publicationRequest = new FileTransferCoordinatorActionRequest(
                 FileTransferCoordinatorActionKind.RouteCommitPublication,
@@ -2310,7 +4532,6 @@ internal static class FileTransferCoordinator
                 CurrentRouteCommit = null,
                 CurrentRuntimeUnlockAdmission = null,
                 CurrentRuntimeUnlockPendingPreCommitProbe = null,
-                CurrentRuntimeUnlockRetryDispatchAuthority = null,
             };
             var publicationRequest = new FileTransferCoordinatorActionRequest(
                 FileTransferCoordinatorActionKind.RoutePublication,
@@ -4905,8 +7126,10 @@ internal static class FileTransferCoordinator
             PendingFallbackTailYieldTransportEpochReauthorization = null,
         });
 
-    private static FileTransferCoordinatorState InvalidateRecoveryAuthority(FileTransferCoordinatorState state)
-        => state with
+    private static FileTransferCoordinatorState InvalidateRecoveryAuthority(
+        FileTransferCoordinatorState state)
+    {
+        var invalidated = state with
         {
             CurrentRepairReplayDecision = null,
             CurrentTransportEpochDecision = null,
@@ -4915,7 +7138,6 @@ internal static class FileTransferCoordinator
             CurrentBridgeRecoveryExecutionState = null,
             PendingFallbackTailYieldTransportEpochReauthorization = null,
             CurrentRecoveryLivenessLease = null,
-            CurrentRuntimeUnlockRetryDispatchAuthority = null,
             LastRetiredRecoveryLivenessLease = null,
             LastRuntimeUnlockRegularV4RecoverySettlement = null,
             LastCoordinatorIssuedRegularV4RecoverySettlement = null,
@@ -4923,6 +7145,59 @@ internal static class FileTransferCoordinator
             LastRuntimeUnlockRegularV4RecoveryLifecycle = null,
             RuntimeUnlockRecoveryLeaseClosureAvailable = false,
         };
+        return invalidated;
+    }
+
+    private static bool RequiresRuntimeUnlockRetryLifecycleScopeInvalidation(
+        FileTransferCoordinatorState state)
+    {
+        var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
+        return lifecycle.PendingAttempt is not null ||
+               GetRuntimeUnlockRetryLifecycleAttemptForScopeInvalidation(
+                   lifecycle) is not null ||
+               lifecycle.RetainedPredecessor is not null ||
+               lifecycle.BoundedClosure is not null ||
+               lifecycle.PendingScopeInvalidationCommand is not null;
+    }
+
+    private static RuntimeUnlockRetryLifecycleAttemptSnapshot?
+        GetRuntimeUnlockRetryLifecycleAttemptForScopeInvalidation(
+            RuntimeUnlockRetryLifecycleSubstate lifecycle)
+    {
+        if (lifecycle.InstalledAttempt is { } installed)
+        {
+            return installed;
+        }
+
+        if (lifecycle.PendingAttempt is null &&
+            lifecycle.RetainedPredecessor is null &&
+            lifecycle.LastTerminalAttempt is
+            {
+                State: RuntimeUnlockRetryLifecycleAttemptState.Settled,
+                Settlement:
+                {
+                    Outcome:
+                        RuntimeUnlockRetryDispatchSettlementOutcome
+                            .DispatchObserved,
+                },
+            } dispatchObserved)
+        {
+            if (lifecycle.PendingScopeInvalidationCommand is null &&
+                lifecycle.LastScopeInvalidationReceipt is
+                {
+                    Accepted: true,
+                    Command.InstalledAttempt: { } invalidatedAttempt,
+                } &&
+                invalidatedAttempt == dispatchObserved)
+            {
+                return null;
+            }
+
+            return dispatchObserved;
+        }
+
+        return null;
+    }
 
     private static FileTransferCoordinatorState InvalidateRoutePublicationAuthority(FileTransferCoordinatorState state)
         => state with
@@ -7112,11 +9387,28 @@ internal static class FileTransferCoordinator
     internal static RuntimeUnlockRetryDispatchDecision AuthorizeRuntimeUnlockRetryDispatch(
         FileTransferCoordinatorState state,
         RuntimeUnlockRetryDispatchAuthorityRequest request,
-        RuntimeUnlockRetryDispatchContract? currentContract,
         RuntimeUnlockRetryReleaseKind releaseKind,
         FileTransferAuthorityId? releaseAuthorityId,
         int releaseGeneration,
         string releaseOutcome)
+        => AuthorizeRuntimeUnlockRetryDispatchCore(
+            state,
+            request,
+            releaseKind,
+            releaseAuthorityId,
+            releaseGeneration,
+            releaseOutcome,
+            allowCoordinatorPreparedSuccessor: false);
+
+    private static RuntimeUnlockRetryDispatchDecision
+        AuthorizeRuntimeUnlockRetryDispatchCore(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockRetryDispatchAuthorityRequest request,
+            RuntimeUnlockRetryReleaseKind releaseKind,
+            FileTransferAuthorityId? releaseAuthorityId,
+            int releaseGeneration,
+            string releaseOutcome,
+            bool allowCoordinatorPreparedSuccessor)
     {
         RuntimeUnlockRetryDispatchDecision Decision(
             RuntimeUnlockRetryDispatchDecisionStatus status,
@@ -7128,6 +9420,18 @@ internal static class FileTransferCoordinator
                 Request = request,
                 State = nextState ?? state,
             };
+
+        var retryLifecycle = GetRuntimeUnlockRetryLifecycle(state);
+        if (retryLifecycle.PendingScopeInvalidationCommand is not null)
+        {
+            return Decision(
+                RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
+                "retry_dispatch_scope_invalidation_pending");
+        }
+
+        RuntimeUnlockRetryLifecycleAttemptSnapshot? currentAttempt =
+            retryLifecycle.PendingAttempt ??
+            retryLifecycle.InstalledAttempt;
 
         if (state.IsTerminal)
         {
@@ -7210,8 +9514,26 @@ internal static class FileTransferCoordinator
         var predecessorAuthorityId = request.PredecessorAuthorityId is { IsDefault: false }
             ? request.PredecessorAuthorityId
             : null;
-        if (currentContract is null &&
-            state.CurrentRuntimeUnlockRetryDispatchAuthority is null)
+        var normalizedReleaseAuthorityId =
+            releaseAuthorityId is { IsDefault: false }
+                ? releaseAuthorityId
+                : null;
+        var normalizedReleaseOutcome = NormalizeReason(releaseOutcome);
+        if (currentAttempt is null &&
+            RuntimeUnlockRetryLifecycleContainsTerminalBoundary(
+                retryLifecycle,
+                request,
+                releaseKind,
+                normalizedReleaseAuthorityId,
+                releaseGeneration,
+                normalizedReleaseOutcome))
+        {
+            return Decision(
+                RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
+                "retry_dispatch_attempt_already_settled");
+        }
+
+        if (currentAttempt is null)
         {
             if (predecessorAuthorityId is not null)
             {
@@ -7241,19 +9563,31 @@ internal static class FileTransferCoordinator
                     "retry_dispatch_initial_supersession_invalid");
             }
         }
+        else if (predecessorAuthorityId is not null &&
+                 !allowCoordinatorPreparedSuccessor)
+        {
+            return Decision(
+                RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
+                "retry_dispatch_successor_not_coordinator_prepared");
+        }
 
-        if (currentContract is { } existing &&
-            existing.Authority.RecoveryContractGeneration == request.RecoveryContractGeneration &&
-            existing.Authority.RetiredOfferGeneration == request.RetiredOfferGeneration &&
-            existing.Authority.DispatchAttemptGeneration == request.DispatchAttemptGeneration)
+        if (currentAttempt is { } existingAttempt &&
+            existingAttempt.Authority.RecoveryContractGeneration ==
+                request.RecoveryContractGeneration &&
+            existingAttempt.Authority.RetiredOfferGeneration ==
+                request.RetiredOfferGeneration &&
+            existingAttempt.Authority.DispatchAttemptGeneration ==
+                request.DispatchAttemptGeneration)
         {
             if (!RuntimeUnlockRetryDispatchAuthorityMatchesStableRequest(
-                    existing.Authority,
+                    existingAttempt.Authority,
                     request,
                     out _) ||
-                existing.RegularV4LivenessGeneration != request.RegularV4LivenessGeneration ||
-                existing.RequestBridgeDecisionGeneration != request.BridgeDecisionGeneration ||
-                existing.RequestActivePredecessorSupersession !=
+                existingAttempt.Request.RegularV4LivenessGeneration !=
+                    request.RegularV4LivenessGeneration ||
+                existingAttempt.Request.BridgeDecisionGeneration !=
+                    request.BridgeDecisionGeneration ||
+                existingAttempt.Request.RequestActivePredecessorSupersession !=
                     request.RequestActivePredecessorSupersession)
             {
                 return Decision(
@@ -7261,21 +9595,30 @@ internal static class FileTransferCoordinator
                     "retry_dispatch_attempt_identity_mismatch");
             }
 
-            return existing.Lifecycle.IsSettled
+            var existingContract =
+                new RuntimeUnlockRetryDispatchContract(
+                    existingAttempt.Authority,
+                    existingAttempt.Request.RequestActivePredecessorSupersession,
+                    existingAttempt.Request.RegularV4LivenessGeneration,
+                    existingAttempt.Request.BridgeDecisionGeneration);
+            return existingAttempt.IsTerminal
                 ? Decision(
                     RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
                     "retry_dispatch_attempt_already_settled")
-                : Decision(RuntimeUnlockRetryDispatchDecisionStatus.Granted, "idempotent", existing);
+                : Decision(
+                    RuntimeUnlockRetryDispatchDecisionStatus.Granted,
+                    "idempotent",
+                    existingContract);
         }
 
         var authorizedReleaseKind = releaseKind;
         var authorizedReleaseAuthorityId = releaseAuthorityId;
         var authorizedReleaseGeneration = releaseGeneration;
         var authorizedReleaseOutcome = releaseOutcome;
-        if (currentContract is { } predecessor)
+        if (currentAttempt is { } predecessor)
         {
             if (predecessorAuthorityId != predecessor.Authority.AuthorityId ||
-                state.CurrentRuntimeUnlockRetryDispatchAuthority is not { } coordinatorPredecessor ||
+                retryLifecycle.CurrentAuthorizedAuthority is not { } coordinatorPredecessor ||
                 coordinatorPredecessor != predecessor.Authority)
             {
                 return Decision(
@@ -7288,15 +9631,17 @@ internal static class FileTransferCoordinator
             authorizedReleaseGeneration = predecessor.Authority.ReleaseGeneration;
             authorizedReleaseOutcome = predecessor.Authority.ReleaseOutcome;
 
-            if (request.RegularV4LivenessGeneration != predecessor.RegularV4LivenessGeneration ||
-                request.BridgeDecisionGeneration != predecessor.RequestBridgeDecisionGeneration)
+            if (request.RegularV4LivenessGeneration !=
+                    predecessor.Request.RegularV4LivenessGeneration ||
+                request.BridgeDecisionGeneration !=
+                    predecessor.Request.BridgeDecisionGeneration)
             {
                 return Decision(
                     RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
                     "retry_dispatch_recovery_handoff_tuple_mismatch");
             }
 
-            if (!predecessor.Lifecycle.IsSettled)
+            if (!predecessor.IsTerminal)
             {
                 if (!request.RequestActivePredecessorSupersession)
                 {
@@ -7323,7 +9668,8 @@ internal static class FileTransferCoordinator
                         "retry_dispatch_active_successor_generation_mismatch");
                 }
 
-                if (predecessor.AttemptPhase == RuntimeUnlockRetryDispatchAttemptPhase.SendInFlight)
+                if (predecessor.State ==
+                    RuntimeUnlockRetryLifecycleAttemptState.SendInFlight)
                 {
                     return Decision(
                         RuntimeUnlockRetryDispatchDecisionStatus.Held,
@@ -7333,7 +9679,7 @@ internal static class FileTransferCoordinator
             }
             else
             {
-                if (predecessor.Lifecycle.SettlementOutcome !=
+                if (predecessor.Settlement?.Outcome !=
                     RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch)
                 {
                     return Decision(
@@ -7348,8 +9694,8 @@ internal static class FileTransferCoordinator
                         "retry_dispatch_missing_successor_supersession_invalid");
                 }
 
-                if (!predecessor.TryCreateSettlementReport(out var predecessorSettlement) ||
-                    state.LastRuntimeUnlockRetryDispatchSettlement is not { } acceptedPredecessorSettlement ||
+                if (predecessor.Settlement is not { } predecessorSettlement ||
+                    retryLifecycle.LastSettlement is not { } acceptedPredecessorSettlement ||
                     acceptedPredecessorSettlement != predecessorSettlement)
                 {
                     return Decision(
@@ -7391,25 +9737,25 @@ internal static class FileTransferCoordinator
                     return Decision(
                         RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
                         "retry_dispatch_missing_successor_limit_exhausted",
-                        nextState: state with
-                        {
-                            CurrentRuntimeUnlockRetryDispatchAuthority = null,
-                        });
+                        nextState: CloseRuntimeUnlockRetryDispatchChain(
+                            state,
+                            request,
+                            "retry_dispatch_missing_successor_limit_exhausted").State);
                 }
             }
         }
         else if (predecessorAuthorityId is not null ||
-                 state.CurrentRuntimeUnlockRetryDispatchAuthority is not null)
+                 retryLifecycle.CurrentAuthorizedAuthority is not null)
         {
             return Decision(
                 RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
                 "retry_dispatch_predecessor_missing");
         }
 
-        var releaseValid = currentContract is not null
+        var releaseValid = currentAttempt is not null
             ? TryValidateInheritedRuntimeUnlockRetryRelease(
                 state,
-                currentContract.Authority,
+                currentAttempt.Value.Authority,
                 authorizedReleaseKind,
                 authorizedReleaseAuthorityId,
                 authorizedReleaseGeneration,
@@ -7438,9 +9784,16 @@ internal static class FileTransferCoordinator
                 releaseRejectionReason);
         }
 
+        if (retryLifecycle.LastAuthorityGeneration == int.MaxValue)
+        {
+            return Decision(
+                RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
+                "retry_dispatch_authority_generation_exhausted");
+        }
+
         var authorityGeneration = Math.Max(
             1,
-            state.LastRuntimeUnlockRetryDispatchAuthorityGeneration + 1);
+            retryLifecycle.LastAuthorityGeneration + 1);
         var authority = new RuntimeUnlockRetryDispatchAuthority(
             state.SessionId,
             state.TransferId,
@@ -7474,30 +9827,27 @@ internal static class FileTransferCoordinator
             FileTransferTransportKind.Tuna,
             authorityGeneration,
             IssueAuthorityId("runtime_unlock_retry_dispatch", state, authorityGeneration),
-            predecessorAuthorityId);
+            predecessorAuthorityId)
+        {
+            ListenerRearmRequirement = request.ListenerRearmRequirement,
+        };
         var contract = new RuntimeUnlockRetryDispatchContract(
             authority,
             request.RequestActivePredecessorSupersession,
             request.RegularV4LivenessGeneration,
             request.BridgeDecisionGeneration);
 
-        var acceptedState = state with
+        var attempt = new RuntimeUnlockRetryLifecycleAttemptSnapshot(
+            request,
+            authority,
+            RuntimeUnlockRetryLifecycleAttemptState.Authorized);
+        var nextRetryLifecycle = retryLifecycle with
         {
-            CurrentRuntimeUnlockRetryDispatchAuthority = authority,
-            LastRuntimeUnlockRetryDispatchAuthorityGeneration = authorityGeneration,
-            LastRuntimeUnlockRetryDispatchSettlement =
-                state.LastRuntimeUnlockRetryDispatchSettlement,
-            RuntimeUnlockRegularV4RecoverySettlementAvailable =
-                currentContract is null &&
-                authorizedReleaseKind == RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement
-                    ? false
-                    : state.RuntimeUnlockRegularV4RecoverySettlementAvailable,
-            RuntimeUnlockRecoveryLeaseClosureAvailable =
-                currentContract is null &&
-                authorizedReleaseKind == RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure
-                    ? false
-                    : state.RuntimeUnlockRecoveryLeaseClosureAvailable,
+            PendingAttempt = attempt,
+            LastAuthorityGeneration = authorityGeneration,
         };
+        var acceptedState =
+            ApplyRuntimeUnlockRetryLifecycle(state, nextRetryLifecycle);
         return Decision(
             RuntimeUnlockRetryDispatchDecisionStatus.Granted,
             "accepted",
@@ -7505,11 +9855,10 @@ internal static class FileTransferCoordinator
             acceptedState);
     }
 
-    internal static RuntimeUnlockRetryDispatchSettlementDecision ObserveRuntimeUnlockRetryDispatchSettlement(
-        FileTransferCoordinatorState state,
-        RuntimeUnlockRetryDispatchContract? currentContract,
-        RuntimeUnlockRetryDispatchSettlementReport? lastSettlement,
-        RuntimeUnlockRetryDispatchSettlementReport report)
+    internal static RuntimeUnlockRetryDispatchSettlementDecision
+        ObserveRuntimeUnlockRetryDispatchSettlement(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockRetryDispatchSettlementReport report)
     {
         RuntimeUnlockRetryDispatchSettlementDecision Decision(
             RuntimeUnlockRetryDispatchSettlementDecisionStatus status,
@@ -7520,134 +9869,232 @@ internal static class FileTransferCoordinator
                 State = nextState ?? state,
             };
 
-        if (report.IsDefault)
+        if (report.IsDefault ||
+            !IsCompleteRuntimeUnlockRetryDispatchSettlementAuthority(
+                report.Authority))
         {
             return Decision(
                 RuntimeUnlockRetryDispatchSettlementDecisionStatus.Rejected,
-                "retry_dispatch_settlement_report_missing");
+                report.IsDefault
+                    ? "retry_dispatch_settlement_report_missing"
+                    : "retry_dispatch_settlement_authority_incomplete");
         }
 
-        var authority = report.Authority;
-        if (!IsCompleteRuntimeUnlockRetryDispatchSettlementAuthority(authority))
+        var retryLifecycle = GetRuntimeUnlockRetryLifecycle(state);
+        if (retryLifecycle.PendingScopeInvalidationCommand is not null)
         {
             return Decision(
                 RuntimeUnlockRetryDispatchSettlementDecisionStatus.Rejected,
-                "retry_dispatch_settlement_authority_incomplete");
+                "retry_dispatch_scope_invalidation_pending");
         }
 
-        if (!string.Equals(authority.SessionId, state.SessionId, StringComparison.Ordinal) ||
-            !string.Equals(authority.TransferId, state.TransferId, StringComparison.Ordinal) ||
-            authority.Direction != state.Direction)
+        if (!string.Equals(
+                report.Authority.SessionId,
+                state.SessionId,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                report.Authority.TransferId,
+                state.TransferId,
+                StringComparison.Ordinal) ||
+            report.Authority.Direction != state.Direction ||
+            !string.Equals(
+                report.Reason,
+                NormalizeReason(report.Reason),
+                StringComparison.Ordinal))
         {
             return Decision(
                 RuntimeUnlockRetryDispatchSettlementDecisionStatus.Rejected,
-                "retry_dispatch_settlement_identity_mismatch");
+                "retry_dispatch_settlement_tuple_invalid");
         }
 
-        var normalizedReason = NormalizeReason(report.Reason);
-        if (!string.Equals(report.Reason, normalizedReason, StringComparison.Ordinal))
+        var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
+        if (lifecycle.PendingAttempt is { } pendingSuccessor &&
+            lifecycle.InstalledAttempt is { } installedPredecessor &&
+            installedPredecessor.Authority == report.Authority &&
+            pendingSuccessor.Authority.PredecessorAuthorityId ==
+                installedPredecessor.Authority.AuthorityId)
         {
             return Decision(
                 RuntimeUnlockRetryDispatchSettlementDecisionStatus.Rejected,
-                "retry_dispatch_settlement_reason_not_normalized");
+                "retry_dispatch_successor_install_pending");
         }
 
-        if (report.Outcome != RuntimeUnlockRetryDispatchSettlementOutcome.Superseded &&
-            ((lastSettlement is { } contextSettlement && contextSettlement == report) ||
-             (state.LastRuntimeUnlockRetryDispatchSettlement is { } coordinatorSettlement &&
-              coordinatorSettlement == report)))
+        if ((lifecycle.LastSettlement is { } duplicate &&
+             duplicate == report) ||
+            RuntimeUnlockRetryLifecycleContainsSettlement(
+                lifecycle,
+                report))
         {
             return Decision(
                 RuntimeUnlockRetryDispatchSettlementDecisionStatus.Idempotent,
                 "retry_dispatch_settlement_duplicate");
         }
 
-        if (report.Outcome == RuntimeUnlockRetryDispatchSettlementOutcome.Superseded &&
-            currentContract is { } successorContract &&
-            state.CurrentRuntimeUnlockRetryDispatchAuthority is { } currentSuccessor &&
-            successorContract.Authority == currentSuccessor &&
-            currentSuccessor.PredecessorAuthorityId == authority.AuthorityId &&
-            IsRuntimeUnlockRetryDispatchSupersededReason(report.Reason))
+        var reportAttempt =
+            report.Outcome ==
+                    RuntimeUnlockRetryDispatchSettlementOutcome.Superseded
+                ? lifecycle.RetainedPredecessor
+                : lifecycle.InstalledAttempt;
+        if (reportAttempt is not { } exactAttempt ||
+            exactAttempt.Authority != report.Authority ||
+            report.OfferGeneration != exactAttempt.OfferGeneration ||
+            !string.Equals(
+                report.OfferNonce,
+                exactAttempt.OfferNonce,
+                StringComparison.Ordinal))
         {
             return Decision(
-                RuntimeUnlockRetryDispatchSettlementDecisionStatus.Idempotent,
+                RuntimeUnlockRetryDispatchSettlementDecisionStatus.Rejected,
+                "retry_dispatch_settlement_execution_proof_mismatch");
+        }
+
+        if (report.DispatchObserved !=
+            (report.Outcome ==
+             RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved))
+        {
+            return Decision(
+                RuntimeUnlockRetryDispatchSettlementDecisionStatus.Rejected,
+                "retry_dispatch_settlement_dispatch_proof_mismatch");
+        }
+
+        var currentScopeAttempt =
+            report.Outcome ==
+                    RuntimeUnlockRetryDispatchSettlementOutcome.Superseded
+                ? lifecycle.InstalledAttempt
+                : reportAttempt;
+        if (currentScopeAttempt is not { } currentScope)
+        {
+            return Decision(
+                RuntimeUnlockRetryDispatchSettlementDecisionStatus.Rejected,
+                "retry_dispatch_settlement_current_attempt_missing");
+        }
+
+        if (!IsRuntimeUnlockRetryLifecycleAttemptCurrent(
+                state,
+                currentScope,
+                out var currentnessReason,
+                allowTerminalState:
+                    report.Outcome ==
+                    RuntimeUnlockRetryDispatchSettlementOutcome.TransferTerminal))
+        {
+            return Decision(
+                RuntimeUnlockRetryDispatchSettlementDecisionStatus.Rejected,
+                currentnessReason);
+        }
+
+        if (report.Outcome == RuntimeUnlockRetryDispatchSettlementOutcome.Superseded)
+        {
+            if (lifecycle.RetainedPredecessor is not { } predecessor ||
+                lifecycle.InstalledAttempt is not { } successor ||
+                predecessor.Authority != report.Authority ||
+                successor.Authority.PredecessorAuthorityId !=
+                    predecessor.Authority.AuthorityId ||
+                report.SuccessorAuthorityId !=
+                    successor.Authority.AuthorityId ||
+                !IsRuntimeUnlockRetryDispatchSupersededReason(report.Reason))
+            {
+                return Decision(
+                    RuntimeUnlockRetryDispatchSettlementDecisionStatus.Rejected,
+                    "retry_dispatch_settlement_successor_missing");
+            }
+
+            var settledPredecessor = predecessor with
+            {
+                State = RuntimeUnlockRetryLifecycleAttemptState.Settled,
+                Settlement = report,
+                SuccessorAuthorityId = successor.Authority.AuthorityId,
+            };
+            var successorLifecycle = lifecycle with
+            {
+                RetainedPredecessor = null,
+                LastTerminalAttempt = settledPredecessor,
+                LastSettlement = report,
+                AttemptHistory =
+                    AppendRuntimeUnlockRetryLifecycleAttemptHistory(
+                        lifecycle.AttemptHistory,
+                        settledPredecessor),
+            };
+            return Decision(
+                RuntimeUnlockRetryDispatchSettlementDecisionStatus.Accepted,
                 "retry_dispatch_settlement_superseded_predecessor",
-                state with
-                {
-                    LastRuntimeUnlockRetryDispatchSettlement = report,
-                });
+                ApplyRuntimeUnlockRetryLifecycle(state, successorLifecycle));
         }
 
-        if (currentContract is null)
-        {
-            return Decision(
-                RuntimeUnlockRetryDispatchSettlementDecisionStatus.Rejected,
-                "retry_dispatch_settlement_contract_missing");
-        }
-
-        if (currentContract.Authority != authority)
-        {
-            return Decision(
-                RuntimeUnlockRetryDispatchSettlementDecisionStatus.Rejected,
-                "retry_dispatch_settlement_contract_mismatch");
-        }
-
-        var currentAuthorityMatches =
-            state.CurrentRuntimeUnlockRetryDispatchAuthority is { } currentAuthority &&
-            currentAuthority == authority;
-        var coordinatorAuthorityRetired =
-            state.CurrentRuntimeUnlockRetryDispatchAuthority is null &&
-            report.Outcome is RuntimeUnlockRetryDispatchSettlementOutcome.AuthorityRejected or
-                RuntimeUnlockRetryDispatchSettlementOutcome.StaleRejected or
-                RuntimeUnlockRetryDispatchSettlementOutcome.TerminalRejected or
-                RuntimeUnlockRetryDispatchSettlementOutcome.TransferTerminal;
-        if (!currentAuthorityMatches && !coordinatorAuthorityRetired)
+        if (lifecycle.InstalledAttempt is not { } current ||
+            !current.IsInstalled ||
+            current.Authority != report.Authority)
         {
             return Decision(
                 RuntimeUnlockRetryDispatchSettlementDecisionStatus.Rejected,
                 "retry_dispatch_settlement_authority_mismatch");
         }
 
-        if (!currentContract.TryCreateSettlementReport(out var lifecycleReport))
+        var exactBoundOffer =
+            report.OfferGeneration > 0 &&
+            report.OfferGeneration == current.OfferGeneration &&
+            !string.IsNullOrWhiteSpace(report.OfferNonce) &&
+            string.Equals(
+                report.OfferNonce,
+                current.OfferNonce,
+                StringComparison.Ordinal);
+        var exactPreOfferMissingDispatch =
+            report.Outcome ==
+                RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch &&
+            current.State == RuntimeUnlockRetryLifecycleAttemptState.Installed &&
+            current.IsInstalled &&
+            current.OfferGeneration == 0 &&
+            string.IsNullOrWhiteSpace(current.OfferNonce) &&
+            report.OfferGeneration == 0 &&
+            string.IsNullOrWhiteSpace(report.OfferNonce) &&
+            !report.DispatchObserved;
+        if (report.Outcome ==
+                RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved &&
+            (!exactBoundOffer ||
+             current.State !=
+                 RuntimeUnlockRetryLifecycleAttemptState.SendInFlight))
         {
             return Decision(
                 RuntimeUnlockRetryDispatchSettlementDecisionStatus.Rejected,
-                "retry_dispatch_settlement_lifecycle_unsettled");
+                "retry_dispatch_settlement_execution_proof_mismatch");
         }
 
-        if (lifecycleReport != report)
+        if (report.Outcome ==
+                RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch &&
+            !((exactBoundOffer &&
+               current.State is
+                   RuntimeUnlockRetryLifecycleAttemptState.AliasBound or
+                   RuntimeUnlockRetryLifecycleAttemptState.SendInFlight) ||
+              exactPreOfferMissingDispatch))
         {
             return Decision(
                 RuntimeUnlockRetryDispatchSettlementDecisionStatus.Rejected,
-                "retry_dispatch_settlement_lifecycle_mismatch");
+                "retry_dispatch_settlement_execution_proof_mismatch");
         }
 
-        if (report.Outcome == RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved &&
-            !currentContract.Lifecycle.DispatchObserved)
+        var settled = current with
         {
-            return Decision(
-                RuntimeUnlockRetryDispatchSettlementDecisionStatus.Rejected,
-                "retry_dispatch_settlement_dispatch_proof_missing");
-        }
-
-        if (report.Outcome == RuntimeUnlockRetryDispatchSettlementOutcome.Superseded)
+            State = RuntimeUnlockRetryLifecycleAttemptState.Settled,
+            Settlement = report,
+            DispatchObserved = report.DispatchObserved,
+        };
+        var retainForSuccessor =
+            report.Outcome ==
+            RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch;
+        var nextLifecycle = lifecycle with
         {
-            return Decision(
-                RuntimeUnlockRetryDispatchSettlementDecisionStatus.Rejected,
-                "retry_dispatch_settlement_successor_missing");
-        }
-
-        var retainAuthority =
-            report.Outcome == RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch;
-        var acceptedState = state with
-        {
-            CurrentRuntimeUnlockRetryDispatchAuthority = retainAuthority ? authority : null,
-            LastRuntimeUnlockRetryDispatchSettlement = report,
+            PendingAttempt = null,
+            InstalledAttempt = retainForSuccessor ? settled : null,
+            LastTerminalAttempt = settled,
+            LastSettlement = report,
+            AttemptHistory =
+                AppendRuntimeUnlockRetryLifecycleAttemptHistory(
+                    lifecycle.AttemptHistory,
+                    settled),
         };
         return Decision(
             RuntimeUnlockRetryDispatchSettlementDecisionStatus.Accepted,
             "retry_dispatch_settlement_accepted",
-            acceptedState);
+            ApplyRuntimeUnlockRetryLifecycle(state, nextLifecycle));
     }
 
     internal static RuntimeUnlockRegularV4RecoverySettlementDecision ObserveRuntimeUnlockRegularV4RecoverySettlement(
@@ -8329,7 +10776,8 @@ internal static class FileTransferCoordinator
             return RuntimeUnlockRetryDispatchMismatch("coordinator_runtime_tuple", out mismatchField);
         }
 
-        if (state.CurrentRuntimeUnlockRetryDispatchAuthority is not { } currentAuthority ||
+        if (GetRuntimeUnlockRetryLifecycle(state).CurrentAuthorizedAuthority is not
+                { } currentAuthority ||
             currentAuthority != authority)
         {
             return RuntimeUnlockRetryDispatchMismatch("coordinator_current_authority", out mismatchField);
@@ -8385,11 +10833,6 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         RuntimeUnlockRetryDispatchDecision stagedDecision,
         RuntimeUnlockRetryDispatchAuthorityRequest expectedRequest,
-        RuntimeUnlockRetryDispatchContract? currentContract,
-        RuntimeUnlockRetryDispatchContract? activePredecessorContract,
-        RuntimeUnlockRetryDispatchSettlementReport? lastSettlement,
-        RuntimeUnlockRetryDispatchInstallReceipt? currentReceipt,
-        long lastInstallGeneration,
         out RuntimeUnlockRetryDispatchInstallReceipt receipt,
         out string mismatchField)
     {
@@ -8397,27 +10840,70 @@ internal static class FileTransferCoordinator
         mismatchField = "none";
         if (state.IsTerminal)
         {
-            return RuntimeUnlockRetryDispatchMismatch("terminal_state", out mismatchField);
+            return RuntimeUnlockRetryDispatchMismatch(
+                "terminal_state",
+                out mismatchField);
         }
 
-        if (lastInstallGeneration < 0 || lastInstallGeneration == long.MaxValue)
+        var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
+        if (lifecycle.InstalledAttempt is { } installed &&
+            installed.Authority == stagedDecision.Contract?.Authority &&
+            installed.InstallReceipt is { IsDefault: false } installedReceipt)
         {
-            return RuntimeUnlockRetryDispatchMismatch("install_generation", out mismatchField);
+            if (installed.Request != expectedRequest ||
+                stagedDecision.Request != expectedRequest)
+            {
+                return RuntimeUnlockRetryDispatchMismatch(
+                    "current_install_receipt",
+                    out mismatchField);
+            }
+
+            receipt = installedReceipt;
+            return true;
+        }
+
+        if (lifecycle.PendingAttempt is
+            {
+                State: RuntimeUnlockRetryLifecycleAttemptState.Staged,
+                InstallReceipt: { IsDefault: false } issuedReceipt,
+            } issued &&
+            issued.Authority == stagedDecision.Contract?.Authority)
+        {
+            if (issued.Request != expectedRequest ||
+                stagedDecision.Request != expectedRequest ||
+                issuedReceipt.Authority != issued.Authority ||
+                issuedReceipt.Request != expectedRequest ||
+                issuedReceipt.InstallGeneration !=
+                    lifecycle.LastInstallGeneration)
+            {
+                return RuntimeUnlockRetryDispatchMismatch(
+                    "issued_install_receipt",
+                    out mismatchField);
+            }
+
+            receipt = issuedReceipt;
+            return true;
         }
 
         if (!stagedDecision.Granted ||
             stagedDecision.Contract is not { } stagedContract ||
-            currentContract is null ||
-            !ReferenceEquals(stagedContract, currentContract) ||
-            stagedContract.Authority != currentContract.Authority)
+            lifecycle.PendingAttempt is not
+            {
+                State: RuntimeUnlockRetryLifecycleAttemptState.Staged,
+            } pending ||
+            pending.Authority != stagedContract.Authority ||
+            pending.Request != expectedRequest ||
+            pending.StageStatus is not
+                (RuntimeUnlockRetryDispatchDecisionStageStatus.Staged or
+                 RuntimeUnlockRetryDispatchDecisionStageStatus.Idempotent) ||
+            pending.StageDisposition !=
+                RuntimeUnlockRetryDispatchStageDisposition.Retained ||
+            pending.StagedUtcMs <= 0 ||
+            pending.StageExpiresUtcMs <= pending.StagedUtcMs)
         {
-            return RuntimeUnlockRetryDispatchMismatch("current_contract", out mismatchField);
-        }
-
-        if (currentContract.Lifecycle.IsSettled ||
-            currentContract.AttemptPhase == RuntimeUnlockRetryDispatchAttemptPhase.Settled)
-        {
-            return RuntimeUnlockRetryDispatchMismatch("contract_lifecycle", out mismatchField);
+            return RuntimeUnlockRetryDispatchMismatch(
+                "coordinator_stage",
+                out mismatchField);
         }
 
         var currentDecision = stagedDecision with
@@ -8432,127 +10918,82 @@ internal static class FileTransferCoordinator
             return false;
         }
 
-        var authority = stagedContract.Authority;
-        if (state.LastRuntimeUnlockRetryDispatchAuthorityGeneration != authority.AuthorityGeneration)
+        var authority = pending.Authority;
+        if (lifecycle.LastAuthorityGeneration != authority.AuthorityGeneration)
         {
             return RuntimeUnlockRetryDispatchMismatch(
                 "authority_generation",
                 out mismatchField);
         }
 
-        if (stagedDecision.State is null ||
-            stagedDecision.State.CurrentRuntimeUnlockRetryDispatchAuthority != authority)
+        if (authority.PredecessorAuthorityId is
+            { IsDefault: false } predecessorAuthorityId)
         {
-            return RuntimeUnlockRetryDispatchMismatch(
-                "staged_coordinator_authority",
-                out mismatchField);
-        }
-
-        if (currentReceipt is { } installedReceipt)
-        {
-            if (installedReceipt.IsDefault ||
-                installedReceipt.Authority != authority ||
-                installedReceipt.InstallGeneration != lastInstallGeneration)
+            if (lifecycle.InstalledAttempt is not { } predecessor ||
+                predecessor.Authority.AuthorityId != predecessorAuthorityId)
             {
                 return RuntimeUnlockRetryDispatchMismatch(
-                    "current_install_receipt",
+                    "predecessor_lineage",
                     out mismatchField);
             }
-
-            receipt = installedReceipt;
-            return true;
-        }
-
-        if (authority.PredecessorAuthorityId is { IsDefault: false } predecessorAuthorityId)
-        {
-            if (stagedContract.RequestActivePredecessorSupersession)
+            if (pending.Request.RequestActivePredecessorSupersession)
             {
-                if (activePredecessorContract is not { } predecessor ||
-                    predecessor.Authority.AuthorityId != predecessorAuthorityId ||
-                    predecessor.Authority.SessionId != authority.SessionId ||
-                    predecessor.Authority.TransferId != authority.TransferId ||
-                    predecessor.Authority.Direction != authority.Direction ||
-                    predecessor.Authority.RecoveryContractGeneration !=
-                        authority.RecoveryContractGeneration ||
+                if (predecessor.IsTerminal ||
+                    predecessor.State ==
+                        RuntimeUnlockRetryLifecycleAttemptState.SendInFlight ||
                     predecessor.Authority.DispatchAttemptGeneration + 1 !=
                         authority.DispatchAttemptGeneration ||
                     predecessor.Authority.MissingDispatchSuccessorGeneration !=
-                        authority.MissingDispatchSuccessorGeneration ||
-                    predecessor.Lifecycle.IsSettled ||
-                    predecessor.AttemptPhase is
-                        RuntimeUnlockRetryDispatchAttemptPhase.SendInFlight or
-                        RuntimeUnlockRetryDispatchAttemptPhase.Settled)
+                        authority.MissingDispatchSuccessorGeneration)
                 {
                     return RuntimeUnlockRetryDispatchMismatch(
                         "active_predecessor_lineage",
                         out mismatchField);
                 }
             }
-            else if (activePredecessorContract is not null)
-            {
-                return RuntimeUnlockRetryDispatchMismatch(
-                    "missing_dispatch_predecessor_lineage",
-                    out mismatchField);
-            }
-            else if (lastSettlement is not { } predecessorSettlement ||
-                     predecessorSettlement.Authority.AuthorityId != predecessorAuthorityId)
-            {
-                return RuntimeUnlockRetryDispatchMismatch(
-                    "predecessor_settlement",
-                    out mismatchField);
-            }
-            else if (predecessorSettlement.Outcome !=
-                     RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch)
+            else if (predecessor.Settlement is not
+                     {
+                         Outcome:
+                             RuntimeUnlockRetryDispatchSettlementOutcome
+                                 .MissingDispatch,
+                     } predecessorSettlement ||
+                     predecessorSettlement.Authority.AuthorityId !=
+                         predecessorAuthorityId)
             {
                 return RuntimeUnlockRetryDispatchMismatch(
                     "missing_dispatch_predecessor_lineage",
                     out mismatchField);
             }
         }
-        else if (expectedRequest.PredecessorAuthorityId is not null ||
-                 stagedContract.RequestActivePredecessorSupersession)
+        else if (pending.Request.PredecessorAuthorityId is not null ||
+                 pending.Request.RequestActivePredecessorSupersession ||
+                 lifecycle.InstalledAttempt is not null)
         {
             return RuntimeUnlockRetryDispatchMismatch(
                 "initial_predecessor_lineage",
                 out mismatchField);
         }
 
-        if (currentReceipt is null)
+        if (lifecycle.LastInstallGeneration == long.MaxValue)
         {
-            var predecessorReleaseAuthority = stagedContract.RequestActivePredecessorSupersession
-                ? activePredecessorContract?.Authority
-                : lastSettlement?.Authority;
-            var releaseCurrent = authority.PredecessorAuthorityId is null
-                ? TryValidateRuntimeUnlockRetryRelease(
-                    state,
-                    expectedRequest,
-                    authority.ReleaseKind,
-                    authority.ReleaseAuthorityId,
-                    authority.ReleaseGeneration,
-                    authority.ReleaseOutcome,
-                    out _)
-                : TryValidateInheritedRuntimeUnlockRetryRelease(
-                    state,
-                    predecessorReleaseAuthority,
-                    authority.ReleaseKind,
-                    authority.ReleaseAuthorityId,
-                    authority.ReleaseGeneration,
-                    authority.ReleaseOutcome,
-                    out _);
-            if (!releaseCurrent)
-            {
-                return RuntimeUnlockRetryDispatchMismatch(
-                    "release_currentness",
-                    out mismatchField);
-            }
+            return RuntimeUnlockRetryDispatchMismatch(
+                "install_generation",
+                out mismatchField);
         }
 
-        var installGeneration = Math.Max(1, lastInstallGeneration + 1);
         receipt = new RuntimeUnlockRetryDispatchInstallReceipt(
             authority,
-            installGeneration)
+            Math.Max(1, lifecycle.LastInstallGeneration + 1))
         {
             Request = expectedRequest,
+            StageStatus = pending.StageStatus.Value,
+            StageDisposition = pending.StageDisposition,
+            StageCleared = false,
+            StagedUtcMs = pending.StagedUtcMs,
+            StageExpiresUtcMs = pending.StageExpiresUtcMs,
+            DispatchDeadlineUtcMs =
+                pending.StagedUtcMs +
+                GetRuntimeUnlockRetryDispatchDeadlineMilliseconds(),
         };
         return true;
     }
@@ -8639,7 +11080,226 @@ internal static class FileTransferCoordinator
             return RuntimeUnlockRetryDispatchMismatch("request_reason", out mismatchField);
         }
 
+        if (authority.ListenerRearmRequirement !=
+            request.ListenerRearmRequirement)
+        {
+            return RuntimeUnlockRetryDispatchMismatch(
+                "request_listener_rearm_requirement",
+                out mismatchField);
+        }
+
         return true;
+    }
+
+    private static bool RuntimeUnlockRetryDispatchAuthorityMatchesCurrentScope(
+        FileTransferCoordinatorState state,
+        RuntimeUnlockRetryDispatchAuthority authority,
+        out string rejectionReason,
+        bool allowTerminalState = false)
+    {
+        rejectionReason = "accepted";
+        if ((state.IsTerminal && !allowTerminalState) ||
+            state.CurrentRuntimeOwner is not { } owner ||
+            state.CurrentRoutePublicationToken is not { } publication ||
+            state.CurrentLeg is not { } leg)
+        {
+            rejectionReason = state.IsTerminal && !allowTerminalState
+                ? "terminal_state"
+                : "retry_dispatch_runtime_scope_missing";
+            return false;
+        }
+
+        if (!string.Equals(authority.SessionId, state.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(authority.TransferId, state.TransferId, StringComparison.Ordinal) ||
+            authority.Direction != state.Direction ||
+            authority.RuntimeOwner != owner ||
+            authority.SourcePublicationAuthority != publication ||
+            authority.Route != state.RouteSelection.Route ||
+            !string.Equals(
+                authority.RouteToken,
+                state.RouteSelection.TelemetryToken,
+                StringComparison.Ordinal) ||
+            authority.ProtocolVersion != state.RouteSelection.ProtocolVersion ||
+            authority.LiveRouteEpoch != (state.CurrentLiveRouteEpoch?.EpochId ?? 0) ||
+            authority.RuntimeGeneration != owner.RuntimeGeneration ||
+            authority.TerminalGeneration != state.TerminalGeneration ||
+            authority.LegGeneration != leg.Generation ||
+            authority.TransportEpoch != leg.TransportEpochId ||
+            authority.BridgeRecoveryGeneration != leg.BridgeRecoveryGeneration ||
+            authority.RoutePublicationGeneration != publication.PublicationGeneration ||
+            authority.RouteCommitGeneration != publication.RouteCommitGeneration)
+        {
+            rejectionReason = "retry_dispatch_runtime_scope_mismatch";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static FileTransferCoordinatorState ApplyRuntimeUnlockRetryLifecycle(
+        FileTransferCoordinatorState state,
+        RuntimeUnlockRetryLifecycleSubstate lifecycle)
+    {
+        var persistent = state.PersistentState with
+        {
+            RuntimeUnlockRetryLifecycle = lifecycle,
+        };
+        return state with
+        {
+            PersistentState = persistent,
+        };
+    }
+
+    private static ImmutableArray<RuntimeUnlockRetryLifecycleAttemptSnapshot>
+        AppendRuntimeUnlockRetryLifecycleAttemptHistory(
+            ImmutableArray<RuntimeUnlockRetryLifecycleAttemptSnapshot> history,
+            RuntimeUnlockRetryLifecycleAttemptSnapshot attempt)
+    {
+        var current = history.IsDefault
+            ? ImmutableArray<RuntimeUnlockRetryLifecycleAttemptSnapshot>.Empty
+            : history;
+        for (var index = 0; index < current.Length; index++)
+        {
+            if (current[index].Authority.AuthorityId !=
+                attempt.Authority.AuthorityId)
+            {
+                continue;
+            }
+
+            return current[index] == attempt
+                ? current
+                : current.SetItem(index, attempt);
+        }
+
+        return current.Add(attempt);
+    }
+
+    private static bool RuntimeUnlockRetryLifecycleContainsTerminalBoundary(
+        RuntimeUnlockRetryLifecycleSubstate lifecycle,
+        RuntimeUnlockRetryDispatchAuthorityRequest request,
+        RuntimeUnlockRetryReleaseKind releaseKind,
+        FileTransferAuthorityId? releaseAuthorityId,
+        int releaseGeneration,
+        string releaseOutcome)
+    {
+        static bool Matches(
+            RuntimeUnlockRetryLifecycleAttemptSnapshot attempt,
+            RuntimeUnlockRetryDispatchAuthorityRequest expectedRequest,
+            RuntimeUnlockRetryReleaseKind expectedReleaseKind,
+            FileTransferAuthorityId? expectedReleaseAuthorityId,
+            int expectedReleaseGeneration,
+            string expectedReleaseOutcome)
+            => attempt.IsTerminal &&
+               attempt.Request == expectedRequest &&
+               attempt.Authority.ReleaseKind == expectedReleaseKind &&
+               attempt.Authority.ReleaseAuthorityId ==
+                   expectedReleaseAuthorityId &&
+               attempt.Authority.ReleaseGeneration ==
+                   expectedReleaseGeneration &&
+               string.Equals(
+                   attempt.Authority.ReleaseOutcome,
+                   expectedReleaseOutcome,
+                   StringComparison.Ordinal);
+
+        var history = lifecycle.AttemptHistory.IsDefault
+            ? ImmutableArray<RuntimeUnlockRetryLifecycleAttemptSnapshot>.Empty
+            : lifecycle.AttemptHistory;
+        foreach (var attempt in history)
+        {
+            if (Matches(
+                    attempt,
+                    request,
+                    releaseKind,
+                    releaseAuthorityId,
+                    releaseGeneration,
+                    releaseOutcome))
+            {
+                return true;
+            }
+        }
+
+        return lifecycle.LastTerminalAttempt is { } terminal &&
+               Matches(
+                   terminal,
+                   request,
+                   releaseKind,
+                   releaseAuthorityId,
+                   releaseGeneration,
+                   releaseOutcome);
+    }
+
+    private static bool RuntimeUnlockRetryLifecycleContainsSettlement(
+        RuntimeUnlockRetryLifecycleSubstate lifecycle,
+        RuntimeUnlockRetryDispatchSettlementReport report)
+    {
+        var history = lifecycle.AttemptHistory.IsDefault
+            ? ImmutableArray<RuntimeUnlockRetryLifecycleAttemptSnapshot>.Empty
+            : lifecycle.AttemptHistory;
+        foreach (var attempt in history)
+        {
+            if (attempt.Settlement == report)
+            {
+                return true;
+            }
+        }
+
+        return lifecycle.LastTerminalAttempt?.Settlement == report;
+    }
+
+    private static long GetRuntimeUnlockRetryDispatchDeadlineMilliseconds()
+    {
+        var configured =
+            RuntimeUnlockRetryDispatchDeadlineOverrideForTests ??
+            TimeSpan.FromMilliseconds(
+                RuntimeUnlockRetryDispatchDeadlineMilliseconds);
+        var milliseconds = (long)configured.TotalMilliseconds;
+        return milliseconds > 0
+            ? milliseconds
+            : RuntimeUnlockRetryDispatchDeadlineMilliseconds;
+    }
+
+    private static RuntimeUnlockRetryLifecycleSubstate
+        InvalidateRuntimeUnlockRetryLifecycle(
+            RuntimeUnlockRetryLifecycleSubstate lifecycle)
+    {
+        var history = lifecycle.AttemptHistory;
+        RuntimeUnlockRetryLifecycleAttemptSnapshot? invalidated = null;
+        foreach (var attempt in new RuntimeUnlockRetryLifecycleAttemptSnapshot?[]
+                 {
+                     lifecycle.PendingAttempt,
+                     lifecycle.InstalledAttempt,
+                     lifecycle.RetainedPredecessor,
+                 })
+        {
+            if (attempt is not { } current)
+            {
+                continue;
+            }
+
+            var historical = current.IsTerminal
+                ? current
+                : current with
+                {
+                    State =
+                        RuntimeUnlockRetryLifecycleAttemptState.Invalidated,
+                };
+            history = AppendRuntimeUnlockRetryLifecycleAttemptHistory(
+                history,
+                historical);
+            invalidated ??= historical;
+        }
+
+        invalidated ??= lifecycle.LastTerminalAttempt;
+        return lifecycle with
+        {
+            PendingAttempt = null,
+            InstalledAttempt = null,
+            RetainedPredecessor = null,
+            LastTerminalAttempt = invalidated,
+            BoundedClosure = null,
+            PendingScopeInvalidationCommand = null,
+            AttemptHistory = history,
+        };
     }
 
     private static bool RuntimeUnlockRetryDispatchMismatch(
@@ -8759,7 +11419,8 @@ internal static class FileTransferCoordinator
             return false;
         }
 
-        if (state.CurrentRuntimeUnlockRetryDispatchAuthority is not null)
+        var retryLifecycle = GetRuntimeUnlockRetryLifecycle(state);
+        if (retryLifecycle.CurrentAuthorizedAuthority is not null)
         {
             rejectionReason = "retry_dispatch_predecessor_active";
             return false;
@@ -8817,7 +11478,7 @@ internal static class FileTransferCoordinator
             sourcePublication,
             RecoveryContractGeneration: Math.Max(
                 1,
-                state.LastRuntimeUnlockRetryDispatchAuthorityGeneration + 1L),
+                retryLifecycle.LastAuthorityGeneration + 1L),
             RetiredOfferGeneration: 0,
             DispatchAttemptGeneration: 1,
             RetryReason: NormalizeReason(retryReason),
@@ -9661,6 +12322,15 @@ internal static class FileTransferCoordinator
                 initialTunaRouteSelectionDecision: initialTunaDecision);
         }
 
+        if (RequiresRuntimeUnlockRetryLifecycleScopeInvalidation(state))
+        {
+            return MutationRejected(
+                state,
+                reason,
+                "runtime_unlock_retry_scope_invalidation_required",
+                initialTunaRouteSelectionDecision: initialTunaDecision);
+        }
+
         var frozenLeg = coordinatorEvent.FreezeCurrentLeg
             ? FreezeLeg(state.CurrentLeg, DateTimeOffset.UtcNow)
             : null;
@@ -9849,6 +12519,14 @@ internal static class FileTransferCoordinator
                 "regular_v4_frontier_repair_pressure_retirement_required");
         }
 
+        if (RequiresRuntimeUnlockRetryLifecycleScopeInvalidation(state))
+        {
+            return MutationRejected(
+                state,
+                reason,
+                "runtime_unlock_retry_scope_invalidation_required");
+        }
+
         var legHistory = state.LegHistory.Select(CloneLeg).ToList();
         var currentLeg = state.CurrentLeg;
         var clonedCurrentLeg = currentLeg is null
@@ -9957,6 +12635,16 @@ internal static class FileTransferCoordinator
                 "regular_v4_frontier_repair_pressure_retirement_required");
         }
 
+        if (coordinatorEvent.TransportEpochId > 0 &&
+            coordinatorEvent.TransportEpochId != leg.TransportEpochId &&
+            RequiresRuntimeUnlockRetryLifecycleScopeInvalidation(state))
+        {
+            return MutationRejected(
+                state,
+                reason,
+                "runtime_unlock_retry_scope_invalidation_required");
+        }
+
         var previousTransportEpoch = leg.TransportEpochId;
         MarkFallbackCheckpointRequested(
             leg,
@@ -10022,6 +12710,16 @@ internal static class FileTransferCoordinator
                 state,
                 reason,
                 "regular_v4_frontier_repair_pressure_retirement_required");
+        }
+
+        if (coordinatorEvent.TransportEpochId > 0 &&
+            coordinatorEvent.TransportEpochId != leg.TransportEpochId &&
+            RequiresRuntimeUnlockRetryLifecycleScopeInvalidation(state))
+        {
+            return MutationRejected(
+                state,
+                reason,
+                "runtime_unlock_retry_scope_invalidation_required");
         }
 
         if (!string.IsNullOrWhiteSpace(coordinatorEvent.CheckpointRequestId) &&
@@ -10130,6 +12828,16 @@ internal static class FileTransferCoordinator
                 state,
                 reason,
                 "regular_v4_frontier_repair_pressure_retirement_required");
+        }
+
+        if (coordinatorEvent.TransportEpochId > 0 &&
+            coordinatorEvent.TransportEpochId != leg.TransportEpochId &&
+            RequiresRuntimeUnlockRetryLifecycleScopeInvalidation(state))
+        {
+            return MutationRejected(
+                state,
+                reason,
+                "runtime_unlock_retry_scope_invalidation_required");
         }
 
         var reauthorization =
@@ -10731,6 +13439,14 @@ internal static class FileTransferCoordinator
                 state,
                 reason,
                 "regular_v4_frontier_repair_pressure_retirement_required");
+        }
+
+        if (RequiresRuntimeUnlockRetryLifecycleScopeInvalidation(state))
+        {
+            return MutationRejected(
+                state,
+                reason,
+                "runtime_unlock_retry_scope_invalidation_required");
         }
 
         var leg = state.CurrentLeg;
@@ -12352,17 +15068,54 @@ internal static class FileTransferCoordinator
             RuntimeUnlockRetryDispatchInstallReceipt installReceipt,
             FallbackTailYieldDecision tailYield,
             FileTransferTunaActivationTransitionProofBoundary? activation,
-            out string rejectionReason)
+        out string rejectionReason)
     {
         rejectionReason = "accepted";
+        var retryLifecycle = GetRuntimeUnlockRetryLifecycle(state);
+        if (retryLifecycle.PendingScopeInvalidationCommand is not null)
+        {
+            rejectionReason =
+                "retry_dispatch_scope_invalidation_pending";
+            return false;
+        }
+
+        RuntimeUnlockRetryLifecycleAttemptSnapshot? effectiveRetryAttempt =
+            retryLifecycle.InstalledAttempt is
+            {
+                State:
+                    RuntimeUnlockRetryLifecycleAttemptState.Installed or
+                    RuntimeUnlockRetryLifecycleAttemptState.AliasBound or
+                    RuntimeUnlockRetryLifecycleAttemptState.SendInFlight,
+            } activeAttempt
+                ? activeAttempt
+                : retryLifecycle.PendingAttempt is null &&
+                  retryLifecycle.InstalledAttempt is null &&
+                  retryLifecycle.RetainedPredecessor is null &&
+                  retryLifecycle.BoundedClosure is null &&
+                  retryLifecycle.LastTerminalAttempt is
+             {
+                 State:
+                     RuntimeUnlockRetryLifecycleAttemptState.Settled,
+                 Settlement.Outcome:
+                     RuntimeUnlockRetryDispatchSettlementOutcome
+                         .DispatchObserved,
+             } dispatchObserved
+                ? dispatchObserved
+                : TryGetExactlyInvalidatedRuntimeUnlockRetryAttempt(
+                    retryLifecycle,
+                    installReceipt);
         if (activation is null ||
             activation.EffectiveRetryInstallReceipt != installReceipt ||
             activation.FallbackTailYieldDecision != tailYield ||
             !IsEffectiveRuntimeUnlockRetryDispatchInstallReceipt(
                 installReceipt) ||
-            state.CurrentRuntimeUnlockRetryDispatchAuthority !=
-                installReceipt.Authority ||
-            state.LastRuntimeUnlockRetryDispatchAuthorityGeneration !=
+            effectiveRetryAttempt is not
+            {
+                InstallReceipt: { } currentInstallReceipt,
+            } installedRetry ||
+            installedRetry.Authority != installReceipt.Authority ||
+            currentInstallReceipt != installReceipt ||
+            retryLifecycle.LastAuthorityGeneration !=
                 installReceipt.Authority.AuthorityGeneration ||
             installReceipt.Request.IsDefault ||
             !TryValidateRuntimeUnlockRetryDispatchBinding(
@@ -12437,11 +15190,50 @@ internal static class FileTransferCoordinator
         return true;
     }
 
+    private static RuntimeUnlockRetryLifecycleAttemptSnapshot?
+        TryGetExactlyInvalidatedRuntimeUnlockRetryAttempt(
+            RuntimeUnlockRetryLifecycleSubstate lifecycle,
+            RuntimeUnlockRetryDispatchInstallReceipt installReceipt)
+    {
+        if (lifecycle.PendingAttempt is not null ||
+            lifecycle.InstalledAttempt is not null ||
+            lifecycle.RetainedPredecessor is not null ||
+            lifecycle.BoundedClosure is not null ||
+            lifecycle.PendingScopeInvalidationCommand is not null ||
+            lifecycle.LastScopeInvalidationReceipt is not
+            {
+                Accepted: true,
+                Command:
+                {
+                    Kind:
+                        RuntimeUnlockRetryDispatchScopeInvalidationKind
+                            .FullScope,
+                    InstalledAttempt: { } invalidatedSource,
+                },
+            } ||
+            invalidatedSource.InstallReceipt != installReceipt ||
+            lifecycle.LastTerminalAttempt is not { } terminal)
+        {
+            return null;
+        }
+
+        var expectedTerminal = invalidatedSource.IsTerminal
+            ? invalidatedSource
+            : invalidatedSource with
+            {
+                State = RuntimeUnlockRetryLifecycleAttemptState.Invalidated,
+            };
+        return terminal == expectedTerminal
+            ? terminal
+            : null;
+    }
+
     private static bool IsEffectiveRuntimeUnlockRetryDispatchInstallReceipt(
         RuntimeUnlockRetryDispatchInstallReceipt receipt)
         => !receipt.IsDefault &&
            !receipt.Request.IsDefault &&
            !receipt.StageCleared &&
+           receipt.DispatchDeadlineUtcMs > 0 &&
            receipt.StageStatus is
                RuntimeUnlockRetryDispatchDecisionStageStatus.Staged or
                RuntimeUnlockRetryDispatchDecisionStageStatus.Idempotent &&
@@ -12714,7 +15506,7 @@ internal static class FileTransferCoordinator
         return true;
     }
 
-    private static bool TryValidateFileTransferRouteTransitionCommitProof(
+    internal static bool TryValidateFileTransferRouteTransitionCommitProof(
         FileTransferCoordinatorState state,
         FileTransferRouteTransitionAuthority authority,
         RuntimeUnlockRouteCommitProof? finalProof,

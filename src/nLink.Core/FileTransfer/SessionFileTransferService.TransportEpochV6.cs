@@ -5941,7 +5941,7 @@ public sealed partial class SessionFileTransferService
         return true;
     }
 
-    private static void AcceptOutboundFallbackCheckpointAtTransportEpochCompletionLocked(
+    private void AcceptOutboundFallbackCheckpointAtTransportEpochCompletionLocked(
         OutboundTransferContext context,
         V6TransportEpoch epoch,
         int observedHighestChunkIndex,
@@ -5998,7 +5998,7 @@ public sealed partial class SessionFileTransferService
             acceptedReason);
     }
 
-    private static void AcceptInboundFallbackCheckpointAtTransportEpochCompletionLocked(
+    private void AcceptInboundFallbackCheckpointAtTransportEpochCompletionLocked(
         InboundTransferContext context,
         V6TransportEpoch epoch,
         string reason)

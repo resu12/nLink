@@ -1371,8 +1371,10 @@ public sealed partial class SessionFileTransferService
             context.CurrentRoutePublicationToken is not { IsDefault: false } publication ||
             context.CurrentTransferLeg is not { } leg ||
             context.DataSession is not { } dataSession ||
-            context.CurrentRuntimeUnlockRetryDispatchInstallReceipt is not
-                { IsDefault: false } retryReceipt ||
+            !FileTransferCoordinator
+                .TryGetCurrentRuntimeUnlockRetryDispatchInstallReceipt(
+                    CreateCoordinatorStateLocked(context),
+                    out var retryReceipt) ||
             context.LastFallbackTailYieldDecision is not
                 {
                     IsDefault: false,
@@ -1459,8 +1461,10 @@ public sealed partial class SessionFileTransferService
             context.CurrentRoutePublicationToken is not { IsDefault: false } publication ||
             context.CurrentTransferLeg is not { } leg ||
             context.DataSession is not { } dataSession ||
-            context.CurrentRuntimeUnlockRetryDispatchInstallReceipt is not
-                { IsDefault: false } retryReceipt ||
+            !FileTransferCoordinator
+                .TryGetCurrentRuntimeUnlockRetryDispatchInstallReceipt(
+                    CreateCoordinatorStateLocked(context),
+                    out var retryReceipt) ||
             context.LastFallbackTailYieldDecision is not
                 {
                     IsDefault: false,
@@ -2065,6 +2069,16 @@ public sealed partial class SessionFileTransferService
         }
 
         var state = CreateCoordinatorStateLocked(context);
+        if (!FileTransferCoordinator
+                .TryValidateFileTransferRouteTransitionCommitProof(
+                    state,
+                    authority,
+                    finalProof,
+                    out rejectionReason))
+        {
+            return false;
+        }
+
         if (!TryApplyFileTransferRouteTransitionPressureSettlement(
                 state,
                 authority,
@@ -2076,6 +2090,16 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (!TryInvalidateRuntimeUnlockRetryLifecycleForScopeReplacementLocked(
+                context,
+                "retry_dispatch_runtime_scope_replaced"))
+        {
+            rejectionReason =
+                "runtime_unlock_retry_scope_invalidation_failed";
+            return false;
+        }
+
+        state = CreateCoordinatorStateLocked(context);
         var committed = FileTransferCoordinator.CommitFileTransferRouteTransition(
             state,
             authority,
@@ -2192,6 +2216,16 @@ public sealed partial class SessionFileTransferService
         }
 
         var state = CreateCoordinatorStateLocked(context);
+        if (!FileTransferCoordinator
+                .TryValidateFileTransferRouteTransitionCommitProof(
+                    state,
+                    authority,
+                    finalProof,
+                    out rejectionReason))
+        {
+            return false;
+        }
+
         if (!TryApplyFileTransferRouteTransitionPressureSettlement(
                 state,
                 authority,
@@ -2203,6 +2237,16 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (!TryInvalidateRuntimeUnlockRetryLifecycleForScopeReplacementLocked(
+                context,
+                "retry_dispatch_runtime_scope_replaced"))
+        {
+            rejectionReason =
+                "runtime_unlock_retry_scope_invalidation_failed";
+            return false;
+        }
+
+        state = CreateCoordinatorStateLocked(context);
         var committed = FileTransferCoordinator.CommitFileTransferRouteTransition(
             state,
             authority,

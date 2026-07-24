@@ -130,6 +130,16 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
+            if (!TryInvalidateRuntimeUnlockRetryLifecycleForScopeReplacementLocked(
+                    context,
+                    "retry_dispatch_outbound_transfer_terminal"))
+            {
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_terminal_transition_rejected; direction=outbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; decision_reason=runtime_unlock_retry_scope_invalidation_failed");
+                return false;
+            }
+
             context.CancelLifetime();
             SettleAndClearFallbackFrontierRepairContractLocked(
                 context,
@@ -430,6 +440,16 @@ public sealed partial class SessionFileTransferService
                 LocalOperationalLog.Info(
                     "FileTransferService",
                     $"event=filetransfer_terminal_transition_rejected; direction=inbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; decision_reason=regular_v4_frontier_repair_pressure_retirement_failed");
+                return;
+            }
+
+            if (!TryInvalidateRuntimeUnlockRetryLifecycleForScopeReplacementLocked(
+                    context,
+                    "retry_dispatch_inbound_transfer_terminal"))
+            {
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_terminal_transition_rejected; direction=inbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; decision_reason=runtime_unlock_retry_scope_invalidation_failed");
                 return;
             }
 
@@ -1301,10 +1321,18 @@ public sealed partial class SessionFileTransferService
             previousTransport.FileTransferFallbackTailYieldProofReceived -= OnFileTransferFallbackTailYieldProofReceived;
             if (previousTransport is IRuntimeUnlockRetryDispatchAuthorityBridge retryDispatchBridge)
             {
+                retryDispatchBridge.RuntimeUnlockRetryDispatchInitialEvaluationRequested -=
+                    OnRuntimeUnlockRetryDispatchInitialEvaluationRequested;
                 retryDispatchBridge.RuntimeUnlockRetryDispatchAuthorityRequested -=
                     OnRuntimeUnlockRetryDispatchAuthorityRequested;
                 retryDispatchBridge.RuntimeUnlockRetryDispatchSettlementReported -=
                     OnRuntimeUnlockRetryDispatchSettlementReported;
+                retryDispatchBridge.RuntimeUnlockRetryDispatchDeadlineEvaluationRequested -=
+                    OnRuntimeUnlockRetryDispatchDeadlineEvaluationRequested;
+                retryDispatchBridge.RuntimeUnlockRetryDispatchExecutionObserved -=
+                    OnRuntimeUnlockRetryDispatchExecutionObserved;
+                retryDispatchBridge.RuntimeUnlockRetryDispatchSuccessorEvaluationRequested -=
+                    OnRuntimeUnlockRetryDispatchSuccessorEvaluationRequested;
                 retryDispatchBridge.RuntimeUnlockRegularV4RecoverySettlementReported -=
                     OnRuntimeUnlockRegularV4RecoverySettlementReported;
                 retryDispatchBridge.RuntimeUnlockRegularV4RecoveryLifecycleReported -=

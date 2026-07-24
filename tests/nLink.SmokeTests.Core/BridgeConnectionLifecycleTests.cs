@@ -6702,6 +6702,8 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
         var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
         var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        using var terminalCommitReached = new ManualResetEventSlim();
+        using var releaseTerminalCommit = new ManualResetEventSlim();
 
         try
         {
@@ -6731,19 +6733,21 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             var command = CreateBridgeRecoveryExecutionCommand(
                 transferId,
                 "sender_request_feedback_stalled");
+            adapter.FileTransferBridgeRecoveryBeforeTerminalCommitForTests =
+                observed =>
+                {
+                    adapter.FileTransferBridgeRecoveryBeforeTerminalCommitForTests =
+                        null;
+                    Assert.Equal(command, observed);
+                    terminalCommitReached.Set();
+                    Assert.True(releaseTerminalCommit.Wait(TimeSpan.FromSeconds(5)));
+                };
             var started = adapter.BeginFileTransferBridgeRecoveryExecution(command);
             Assert.Equal(
                 FileTransferBridgeRecoveryExecutionStartStatus.Started,
                 started.Status);
-            await WaitUntilAsync(
-                () => ReadOperationalLogTail(logBaseline).Contains(
-                    "event=nkn_bridge_receive_stall_recovery_hard_restart",
-                    StringComparison.Ordinal),
-                TimeSpan.FromSeconds(3));
-
+            Assert.True(terminalCommitReached.Wait(TimeSpan.FromSeconds(5)));
             Assert.False(started.Completion!.IsCompleted);
-            await Task.Delay(100, cts.Token);
-            Assert.False(started.Completion.IsCompleted);
             var duplicateInFlight =
                 adapter.BeginFileTransferBridgeRecoveryExecution(command);
             Assert.Equal(
@@ -6762,6 +6766,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 "bridge_recovery_execution_in_progress",
                 overlapping.Reason);
 
+            releaseTerminalCommit.Set();
             var receipt =
                 await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
                         started.Completion)
@@ -6843,6 +6848,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         }
         finally
         {
+            releaseTerminalCommit.Set();
             Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
             Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);

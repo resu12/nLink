@@ -214,6 +214,10 @@ function Invoke-TestLane {
                 -ResultSuffix "infra-bridge-recovery-execution"
             Invoke-DotnetTest `
                 -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
+                -Filter "FileTransferInfraSuite=RuntimeUnlockRetryLifecycle" `
+                -ResultSuffix "infra-runtime-unlock-retry-lifecycle"
+            Invoke-DotnetTest `
+                -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
                 -Filter "FullyQualifiedName~NknAccelerationTransportTests&(FullyQualifiedName~RuntimeUnlockRetry|FullyQualifiedName~RegularV4Recovery|FullyQualifiedName~RegularV4Closure|FullyQualifiedName~FileTransferReceiveRecovery|FullyQualifiedName~RuntimeUnlockProbeRecovery|FullyQualifiedName~RuntimeUnlockBridgeRecoveryWaitTimeoutArmsRetry|FullyQualifiedName~RuntimeUnlockSendTimeoutRequestsBridgeRecoveryBeforeReplay|FullyQualifiedName~RegularV4PressureSendTimeoutRequestsRecoveryAndDefersRetry)" `
                 -ResultSuffix "infra"
             Invoke-DotnetTest `
@@ -242,7 +246,7 @@ function Invoke-TestLane {
                 -ResultSuffix "core-runtime-session"
             Invoke-DotnetTest `
                 -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
-                -Filter "(FileTransferRuntimeSuite=SparseWorkerHandoff|FileTransferRuntimeSuite=FallbackTailChurn|FileTransferRuntimeSuite=RegularV4RecoveryAuthority|FileTransferRuntimeSuite=RegularV4FrontierRepairProjection)&FullyQualifiedName!~RegularNknV4Fast_LiveTunaActivationCanThenCycleOffOnOffSameTransfer&FullyQualifiedName!~FileTunaV4_LiveSwitchOffRecovery_DoesNotUseLiveV4RepairAndCompletesSameTransfer" `
+                -Filter "(FileTransferRuntimeSuite=SparseWorkerHandoff|FileTransferRuntimeSuite=FallbackTailChurn|FileTransferRuntimeSuite=RegularV4RecoveryAuthority|FileTransferRuntimeSuite=RegularV4FrontierRepairProjection|FileTransferRuntimeSuite=RuntimeUnlockRetryLifecycle)&FullyQualifiedName!~RegularNknV4Fast_LiveTunaActivationCanThenCycleOffOnOffSameTransfer&FullyQualifiedName!~FileTunaV4_LiveSwitchOffRecovery_DoesNotUseLiveV4RepairAndCompletesSameTransfer" `
                 -ResultSuffix "core-runtime-contracts"
         }
         "FileTransferAnalyzer" {

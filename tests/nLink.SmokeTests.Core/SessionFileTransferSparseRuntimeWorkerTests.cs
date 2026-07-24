@@ -3255,6 +3255,24 @@ public sealed partial class SessionFileTransferV4SenderTests
         var sessionId = $"session_{transferId}";
         var ackSendReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseAckSend = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRepairContinuation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var previousRepairContinuationBarrier =
+            SessionFileTransferService.OutboundSparseRepairContinuationBarrierForTests;
+        SessionFileTransferService.OutboundSparseRepairContinuationBarrierForTests =
+            async (observedTransferId, observedSessionId, stage) =>
+            {
+                if (string.Equals(observedTransferId, transferId, StringComparison.Ordinal) &&
+                    string.Equals(stage, "idle_delay", StringComparison.Ordinal))
+                {
+                    await releaseRepairContinuation.Task;
+                    return;
+                }
+
+                if (previousRepairContinuationBarrier is not null)
+                {
+                    await previousRepairContinuationBarrier(observedTransferId, observedSessionId, stage);
+                }
+            };
         using var transport = new LoopbackFileTransferTransport(sessionId)
         {
             OutboundDataFrameDeliveryOverrideAsync = async (_, frame, _) =>
@@ -3393,6 +3411,9 @@ public sealed partial class SessionFileTransferV4SenderTests
         finally
         {
             releaseAckSend.TrySetResult();
+            releaseRepairContinuation.TrySetResult();
+            SessionFileTransferService.OutboundSparseRepairContinuationBarrierForTests =
+                previousRepairContinuationBarrier;
             TryCancelContextLifetime(context);
             await supervisor.WaitAsync(TimeSpan.FromSeconds(5));
         }

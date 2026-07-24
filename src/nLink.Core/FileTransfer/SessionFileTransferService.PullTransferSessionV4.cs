@@ -1570,6 +1570,17 @@ public sealed partial class SessionFileTransferService
                             requestedToken: openingPublication,
                             out _,
                             out _);
+                    if (publicationCurrent &&
+                        !ReferenceEquals(
+                            context.DataSession,
+                            openedDataSession) &&
+                        !TryInvalidateRuntimeUnlockRetryLifecycleForScopeReplacementLocked(
+                            context,
+                            "retry_dispatch_data_session_replaced"))
+                    {
+                        publicationCurrent = false;
+                    }
+
                     if (publicationCurrent)
                     {
                         if (!ReferenceEquals(context.DataSession, openedDataSession))
@@ -5898,7 +5909,7 @@ public sealed partial class SessionFileTransferService
         }
     }
 
-    private static bool TryRetireOutboundPostTunaFallbackStaleStateRefreshSendLocked(
+    private bool TryRetireOutboundPostTunaFallbackStaleStateRefreshSendLocked(
         OutboundTransferContext context,
         FileTransferFrontierRequestFrameV6 request,
         DateTimeOffset now)
@@ -8311,24 +8322,11 @@ public sealed partial class SessionFileTransferService
             reason);
     }
 
-    private RuntimeUnlockRetryDispatchAuthorityRequest? GetPendingRuntimeUnlockRetryDispatchAuthorityRequest(
-        OutboundTransferContext context)
-    {
-        IRuntimeUnlockRetryDispatchAuthorityBridge? bridge;
-        lock (gate)
-        {
-            bridge = transport as IRuntimeUnlockRetryDispatchAuthorityBridge;
-        }
-
-        return bridge is not null &&
-               bridge.TryGetPendingRuntimeUnlockRetryDispatchAuthorityRequest(
-                   context.SessionId,
-                   context.TransferId,
-                   FileTransferDirection.Outbound,
-                   out var request)
-            ? request
-            : null;
-    }
+    private static RuntimeUnlockRetryDispatchAuthorityRequest?
+        GetPendingRuntimeUnlockRetryDispatchAuthorityRequest(
+            OutboundTransferContext context)
+        => context.CoordinatorPersistentState.RuntimeUnlockRetryLifecycle
+            .PendingAttempt?.Request;
 
     private static bool IsOutboundNormalToTunaActivationProofPendingLocked(OutboundTransferContext context)
     {
@@ -12139,7 +12137,7 @@ public sealed partial class SessionFileTransferService
         return true;
     }
 
-    private static void ActivateOutboundV4PostRebindFrontierOnlyRepairLocked(
+    private void ActivateOutboundV4PostRebindFrontierOnlyRepairLocked(
         OutboundTransferContext context,
         int frontierChunkIndex,
         string reason)

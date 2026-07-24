@@ -1018,8 +1018,20 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_install_receipt_issued') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_install_committed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_install_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_lifecycle_stage_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_authority_granted')
     )
+    [object[]]$runtimeUnlockRetryLifecycleEvents = @(
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_execution_observed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_lifecycle_execution_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_successor_evaluation_requested') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_lifecycle_successor_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_deadline_evaluation_requested') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_lifecycle_deadline_decided')
+    )
+    $runtimeUnlockRetryLifecycleProof =
+        Get-FileTransferRuntimeUnlockRetryLifecycleCorrelation `
+            -Events $runtimeUnlockRetryLifecycleEvents
     $runtimeUnlockRetryDispatchInstallProof =
         Get-FileTransferRuntimeUnlockRetryDispatchInstallProof `
             -Events $runtimeUnlockRetryDispatchInstallEvents
@@ -1033,6 +1045,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     )
     [object[]]$runtimeUnlockRetryDispatchPostGrantHoldEvents = @(
         $runtimeUnlockRetryDispatchInstallEvents +
+        $runtimeUnlockRetryLifecycleEvents +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_held_by_active_negotiation') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_held_by_regular_v4_receive_recovery') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_held_for_missing_dispatch_successor') +
@@ -1045,7 +1058,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'session_recovery_contract_retry_authority_offer_window_refreshed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_successor_intent_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_missing_dispatch_successor_limit_rejected') +
-        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_chain_closed')
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_chain_closed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_lifecycle_chain_closed')
     )
     $runtimeUnlockRetryDispatchPostGrantHoldProof =
         Get-FileTransferRuntimeUnlockRetryDispatchPostGrantHoldCorrelation `
@@ -1112,12 +1126,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_activation_offer_not_observed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_activation_offer_retry_not_scheduled') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_install_rejected') +
+        $runtimeUnlockRetryLifecycleEvents +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_contract_settled') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_settlement_reported') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_settlement_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_successor_intent_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_missing_dispatch_successor_limit_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_chain_closed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_lifecycle_chain_closed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_current_authority_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_recovery_authority_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_blocked_by_regular_v4_receive_recovery') +
@@ -1281,6 +1297,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_authority_granted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_authority_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_chain_closed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_lifecycle_chain_closed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'session_recovery_contract_started') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'session_recovery_contract_completed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'session_recovery_contract_failed') +
@@ -1308,6 +1325,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents `
             -Phase2ProtocolObserved $runtimeUnlockRetryDispatchInstallProof.ProtocolObserved
     [object[]]$runtimeUnlockRetryZeroOfferSuccessorEvents = @(
+        $runtimeUnlockRetryLifecycleEvents +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_authority_granted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_missing_after_authority_granted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_contract_settled') +
@@ -1315,7 +1333,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_settlement_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_successor_intent_requested') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_successor_intent_rejected') +
-        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_chain_closed')
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_chain_closed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_lifecycle_chain_closed')
     )
     $runtimeUnlockRetryZeroOfferSuccessorProof =
         Get-FileTransferRuntimeUnlockRetryZeroOfferSuccessorCorrelation `
@@ -2156,6 +2175,16 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRecoveredCount),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteUnresolvedCount),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_verdict={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceVerdict),
+        ("runtime_unlock_retry_lifecycle_execution_observation_count={0}" -f $runtimeUnlockRetryLifecycleProof.ExecutionObservationCount),
+        ("runtime_unlock_retry_lifecycle_execution_decision_count={0}" -f $runtimeUnlockRetryLifecycleProof.ExecutionDecisionCount),
+        ("runtime_unlock_retry_lifecycle_execution_unresolved_count={0}" -f @($runtimeUnlockRetryLifecycleProof.UnresolvedExecutionObservationEvents).Count),
+        ("runtime_unlock_retry_lifecycle_successor_evaluation_count={0}" -f $runtimeUnlockRetryLifecycleProof.SuccessorEvaluationCount),
+        ("runtime_unlock_retry_lifecycle_successor_decision_count={0}" -f $runtimeUnlockRetryLifecycleProof.SuccessorDecisionCount),
+        ("runtime_unlock_retry_lifecycle_successor_unresolved_count={0}" -f @($runtimeUnlockRetryLifecycleProof.UnresolvedSuccessorEvaluationEvents).Count),
+        ("runtime_unlock_retry_lifecycle_deadline_evaluation_count={0}" -f $runtimeUnlockRetryLifecycleProof.DeadlineEvaluationCount),
+        ("runtime_unlock_retry_lifecycle_deadline_decision_count={0}" -f $runtimeUnlockRetryLifecycleProof.DeadlineDecisionCount),
+        ("runtime_unlock_retry_lifecycle_deadline_unresolved_count={0}" -f @($runtimeUnlockRetryLifecycleProof.UnresolvedDeadlineEvaluationEvents).Count),
+        ("runtime_unlock_retry_lifecycle_verdict={0}" -f $runtimeUnlockRetryLifecycleProof.Verdict),
         ("runtime_unlock_retry_dispatch_proof_verdict={0}" -f $runtimeUnlockRetryDispatchProofVerdict),
         ("runtime_unlock_retry_dispatch_post_grant_hold_count={0}" -f $runtimeUnlockRetryDispatchPostGrantHoldProof.RawCount),
         ("runtime_unlock_retry_dispatch_post_grant_hold_raw_count={0}" -f $runtimeUnlockRetryDispatchPostGrantHoldProof.RawCount),
@@ -2375,6 +2404,16 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRecoveredCount),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteUnresolvedCount),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_verdict={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceVerdict),
+        ("runtime_unlock_retry_lifecycle_execution_observation_count={0}" -f $runtimeUnlockRetryLifecycleProof.ExecutionObservationCount),
+        ("runtime_unlock_retry_lifecycle_execution_decision_count={0}" -f $runtimeUnlockRetryLifecycleProof.ExecutionDecisionCount),
+        ("runtime_unlock_retry_lifecycle_execution_unresolved_count={0}" -f @($runtimeUnlockRetryLifecycleProof.UnresolvedExecutionObservationEvents).Count),
+        ("runtime_unlock_retry_lifecycle_successor_evaluation_count={0}" -f $runtimeUnlockRetryLifecycleProof.SuccessorEvaluationCount),
+        ("runtime_unlock_retry_lifecycle_successor_decision_count={0}" -f $runtimeUnlockRetryLifecycleProof.SuccessorDecisionCount),
+        ("runtime_unlock_retry_lifecycle_successor_unresolved_count={0}" -f @($runtimeUnlockRetryLifecycleProof.UnresolvedSuccessorEvaluationEvents).Count),
+        ("runtime_unlock_retry_lifecycle_deadline_evaluation_count={0}" -f $runtimeUnlockRetryLifecycleProof.DeadlineEvaluationCount),
+        ("runtime_unlock_retry_lifecycle_deadline_decision_count={0}" -f $runtimeUnlockRetryLifecycleProof.DeadlineDecisionCount),
+        ("runtime_unlock_retry_lifecycle_deadline_unresolved_count={0}" -f @($runtimeUnlockRetryLifecycleProof.UnresolvedDeadlineEvaluationEvents).Count),
+        ("runtime_unlock_retry_lifecycle_verdict={0}" -f $runtimeUnlockRetryLifecycleProof.Verdict),
         ("regular_v4_frontier_repair_missing_range_not_preserved_raw_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.RawCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_distinct_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.DistinctCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.RecoveredCount),
@@ -2573,6 +2612,16 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRecoveredCount),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteUnresolvedCount),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_verdict={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceVerdict),
+        ("runtime_unlock_retry_lifecycle_execution_observation_count={0}" -f $runtimeUnlockRetryLifecycleProof.ExecutionObservationCount),
+        ("runtime_unlock_retry_lifecycle_execution_decision_count={0}" -f $runtimeUnlockRetryLifecycleProof.ExecutionDecisionCount),
+        ("runtime_unlock_retry_lifecycle_execution_unresolved_count={0}" -f @($runtimeUnlockRetryLifecycleProof.UnresolvedExecutionObservationEvents).Count),
+        ("runtime_unlock_retry_lifecycle_successor_evaluation_count={0}" -f $runtimeUnlockRetryLifecycleProof.SuccessorEvaluationCount),
+        ("runtime_unlock_retry_lifecycle_successor_decision_count={0}" -f $runtimeUnlockRetryLifecycleProof.SuccessorDecisionCount),
+        ("runtime_unlock_retry_lifecycle_successor_unresolved_count={0}" -f @($runtimeUnlockRetryLifecycleProof.UnresolvedSuccessorEvaluationEvents).Count),
+        ("runtime_unlock_retry_lifecycle_deadline_evaluation_count={0}" -f $runtimeUnlockRetryLifecycleProof.DeadlineEvaluationCount),
+        ("runtime_unlock_retry_lifecycle_deadline_decision_count={0}" -f $runtimeUnlockRetryLifecycleProof.DeadlineDecisionCount),
+        ("runtime_unlock_retry_lifecycle_deadline_unresolved_count={0}" -f @($runtimeUnlockRetryLifecycleProof.UnresolvedDeadlineEvaluationEvents).Count),
+        ("runtime_unlock_retry_lifecycle_verdict={0}" -f $runtimeUnlockRetryLifecycleProof.Verdict),
         ("regular_v4_frontier_repair_missing_range_not_preserved_raw_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.RawCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_distinct_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.DistinctCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.RecoveredCount),
@@ -2756,6 +2805,16 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRecoveredCount),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteUnresolvedCount),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_verdict={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceVerdict),
+        ("runtime_unlock_retry_lifecycle_execution_observation_count={0}" -f $runtimeUnlockRetryLifecycleProof.ExecutionObservationCount),
+        ("runtime_unlock_retry_lifecycle_execution_decision_count={0}" -f $runtimeUnlockRetryLifecycleProof.ExecutionDecisionCount),
+        ("runtime_unlock_retry_lifecycle_execution_unresolved_count={0}" -f @($runtimeUnlockRetryLifecycleProof.UnresolvedExecutionObservationEvents).Count),
+        ("runtime_unlock_retry_lifecycle_successor_evaluation_count={0}" -f $runtimeUnlockRetryLifecycleProof.SuccessorEvaluationCount),
+        ("runtime_unlock_retry_lifecycle_successor_decision_count={0}" -f $runtimeUnlockRetryLifecycleProof.SuccessorDecisionCount),
+        ("runtime_unlock_retry_lifecycle_successor_unresolved_count={0}" -f @($runtimeUnlockRetryLifecycleProof.UnresolvedSuccessorEvaluationEvents).Count),
+        ("runtime_unlock_retry_lifecycle_deadline_evaluation_count={0}" -f $runtimeUnlockRetryLifecycleProof.DeadlineEvaluationCount),
+        ("runtime_unlock_retry_lifecycle_deadline_decision_count={0}" -f $runtimeUnlockRetryLifecycleProof.DeadlineDecisionCount),
+        ("runtime_unlock_retry_lifecycle_deadline_unresolved_count={0}" -f @($runtimeUnlockRetryLifecycleProof.UnresolvedDeadlineEvaluationEvents).Count),
+        ("runtime_unlock_retry_lifecycle_verdict={0}" -f $runtimeUnlockRetryLifecycleProof.Verdict),
         ("runtime_unlock_retry_dispatch_proof_verdict={0}" -f $runtimeUnlockRetryDispatchProofVerdict),
         ("runtime_unlock_retry_dispatch_post_grant_hold_count={0}" -f $runtimeUnlockRetryDispatchPostGrantHoldProof.RawCount),
         ("runtime_unlock_retry_dispatch_post_grant_hold_raw_count={0}" -f $runtimeUnlockRetryDispatchPostGrantHoldProof.RawCount),
@@ -2944,6 +3003,16 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count = $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRecoveredCount
         runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count = $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteUnresolvedCount
         runtime_unlock_retry_dispatch_install_grant_evidence_verdict = $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceVerdict
+        runtime_unlock_retry_lifecycle_execution_observation_count = $runtimeUnlockRetryLifecycleProof.ExecutionObservationCount
+        runtime_unlock_retry_lifecycle_execution_decision_count = $runtimeUnlockRetryLifecycleProof.ExecutionDecisionCount
+        runtime_unlock_retry_lifecycle_execution_unresolved_count = @($runtimeUnlockRetryLifecycleProof.UnresolvedExecutionObservationEvents).Count
+        runtime_unlock_retry_lifecycle_successor_evaluation_count = $runtimeUnlockRetryLifecycleProof.SuccessorEvaluationCount
+        runtime_unlock_retry_lifecycle_successor_decision_count = $runtimeUnlockRetryLifecycleProof.SuccessorDecisionCount
+        runtime_unlock_retry_lifecycle_successor_unresolved_count = @($runtimeUnlockRetryLifecycleProof.UnresolvedSuccessorEvaluationEvents).Count
+        runtime_unlock_retry_lifecycle_deadline_evaluation_count = $runtimeUnlockRetryLifecycleProof.DeadlineEvaluationCount
+        runtime_unlock_retry_lifecycle_deadline_decision_count = $runtimeUnlockRetryLifecycleProof.DeadlineDecisionCount
+        runtime_unlock_retry_lifecycle_deadline_unresolved_count = @($runtimeUnlockRetryLifecycleProof.UnresolvedDeadlineEvaluationEvents).Count
+        runtime_unlock_retry_lifecycle_verdict = $runtimeUnlockRetryLifecycleProof.Verdict
         runtime_unlock_retry_dispatch_proof_verdict = $runtimeUnlockRetryDispatchProofVerdict
         runtime_unlock_retry_dispatch_post_grant_hold_count = $runtimeUnlockRetryDispatchPostGrantHoldProof.RawCount
         runtime_unlock_retry_dispatch_post_grant_hold_raw_count = $runtimeUnlockRetryDispatchPostGrantHoldProof.RawCount

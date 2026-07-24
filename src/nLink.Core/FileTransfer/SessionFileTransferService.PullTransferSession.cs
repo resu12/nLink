@@ -4093,7 +4093,7 @@ public sealed partial class SessionFileTransferService
             $"event=filetransfer_post_tuna_recovery_started; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; recovery_generation={generation}; frontier_chunk_index={frontier}; remote_credit_until_chunk_index_exclusive={context.RemoteGrantedUntilExclusive}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}");
     }
 
-    private static bool TryRetireExpectedOutboundFallbackCheckpointBeforeReauthorizationRestartLocked(
+    private bool TryRetireExpectedOutboundFallbackCheckpointBeforeReauthorizationRestartLocked(
         OutboundTransferContext context,
         FallbackTailYieldTransportEpochReauthorization pendingReauthorization,
         long targetTransportEpoch,
@@ -4753,6 +4753,16 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (!TryInvalidateRuntimeUnlockRetryLifecycleForScopeReplacementLocked(
+                context,
+                "retry_dispatch_data_session_replaced"))
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_data_session_replacement_rejected; direction=outbound; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; decision_reason=runtime_unlock_retry_scope_invalidation_failed");
+            return false;
+        }
+
         if (context.DataSession is not null)
         {
             UnsubscribeDataSessionEvents(context.DataSession);
@@ -4802,6 +4812,16 @@ public sealed partial class SessionFileTransferService
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_data_session_replacement_rejected; direction=inbound; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; decision_reason=regular_v4_frontier_repair_pressure_retirement_failed");
+            return false;
+        }
+
+        if (!TryInvalidateRuntimeUnlockRetryLifecycleForScopeReplacementLocked(
+                context,
+                "retry_dispatch_data_session_replaced"))
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_data_session_replacement_rejected; direction=inbound; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; decision_reason=runtime_unlock_retry_scope_invalidation_failed");
             return false;
         }
 

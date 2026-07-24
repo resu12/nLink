@@ -4229,11 +4229,11 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             null
         ];
         var senderAuthorized = (bool)serviceType
-            .GetMethod("TryMarkOutboundFallbackTailQuiescentWithCoordinatorLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, senderAuthorizeArgs)!;
+            .GetMethod("TryMarkOutboundFallbackTailQuiescentWithCoordinatorLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(sender, senderAuthorizeArgs)!;
         var receiverAuthorized = (bool)serviceType
-            .GetMethod("TryMarkInboundFallbackTailQuiescentWithCoordinatorLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, receiverAuthorizeArgs)!;
+            .GetMethod("TryMarkInboundFallbackTailQuiescentWithCoordinatorLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(receiver, receiverAuthorizeArgs)!;
         Assert.True(senderAuthorized);
         Assert.True(receiverAuthorized);
 
@@ -14398,10 +14398,10 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var logStart = GetOperationalLogLength();
         var method = serviceType.GetMethod(
             "ActivateOutboundV4PostRebindFrontierOnlyRepairLocked",
-            BindingFlags.Static | BindingFlags.NonPublic)!;
-        method.Invoke(null, [context, 11540, "post_fallback_sender_wait"]);
-        method.Invoke(null, [context, 11540, "post_fallback_sender_wait"]);
-        method.Invoke(null, [context, 11540, "post_fallback_sender_wait"]);
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        method.Invoke(service, [context, 11540, "post_fallback_sender_wait"]);
+        method.Invoke(service, [context, 11540, "post_fallback_sender_wait"]);
+        method.Invoke(service, [context, 11540, "post_fallback_sender_wait"]);
 
         Assert.Equal(FileTransferLegState.RecoveryActive, GetPrivateProperty<FileTransferLegState>(leg, "State"));
         Assert.True(GetPrivateProperty<bool>(context, "FallbackTailQuiescenceTimedOut"));
@@ -14439,8 +14439,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
         var logStart = GetOperationalLogLength();
         serviceType
-            .GetMethod("ActivateOutboundV4PostRebindFrontierOnlyRepairLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, 11540, "post_yield_replay"]);
+            .GetMethod("ActivateOutboundV4PostRebindFrontierOnlyRepairLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, 11540, "post_yield_replay"]);
 
         Assert.False(GetPrivateProperty<bool>(context, "PullTransportFrontierOnlyRepairActive"));
         var log = ReadOperationalLogTail(logStart);
@@ -14784,8 +14784,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             null,
         ];
         Assert.True((bool)serviceType
-            .GetMethod("TryMarkOutboundFallbackTailQuiescentWithCoordinatorLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, authorizeArgs)!);
+            .GetMethod("TryMarkOutboundFallbackTailQuiescentWithCoordinatorLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, authorizeArgs)!);
         var predecessor = Assert.IsType<FallbackTailYieldDecision>(authorizeArgs[^1]);
         Assert.True((bool)serviceType
             .GetMethod("RecordOutboundFallbackTailLocalYieldLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -15073,8 +15073,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             null,
         ];
         Assert.True((bool)serviceType
-            .GetMethod("TryMarkOutboundFallbackTailQuiescentWithCoordinatorLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, authorizeArgs)!);
+            .GetMethod("TryMarkOutboundFallbackTailQuiescentWithCoordinatorLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, authorizeArgs)!);
         var predecessor = Assert.IsType<FallbackTailYieldDecision>(authorizeArgs[^1]);
         Assert.True((bool)serviceType
             .GetMethod("RecordOutboundFallbackTailLocalYieldLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -15176,8 +15176,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             null,
         ];
         Assert.True((bool)serviceType
-            .GetMethod("TryMarkInboundFallbackTailQuiescentWithCoordinatorLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, authorizeArgs)!);
+            .GetMethod("TryMarkInboundFallbackTailQuiescentWithCoordinatorLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, authorizeArgs)!);
         var predecessor = Assert.IsType<FallbackTailYieldDecision>(authorizeArgs[^1]);
         Assert.True((bool)serviceType
             .GetMethod("RecordInboundFallbackTailLocalYieldLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -15324,13 +15324,13 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             null,
         ];
         var authorizeMethod = serviceType
-            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
             .Single(candidate =>
                 candidate.Name == (inbound
                     ? "TryMarkInboundFallbackTailQuiescentWithCoordinatorLocked"
                     : "TryMarkOutboundFallbackTailQuiescentWithCoordinatorLocked") &&
                 candidate.GetParameters()[0].ParameterType == context.GetType());
-        Assert.True((bool)authorizeMethod.Invoke(null, authorizeArgs)!);
+        Assert.True((bool)authorizeMethod.Invoke(service, authorizeArgs)!);
         var predecessor = Assert.IsType<FallbackTailYieldDecision>(authorizeArgs[^1]);
         var recordMethod = serviceType.GetMethod(
             inbound
@@ -15811,8 +15811,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.True((bool)serviceType
             .GetMethod(
                 $"TryMark{directionName}FallbackTailQuiescentWithCoordinatorLocked",
-                BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, authorizeArgs)!);
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, authorizeArgs)!);
         var predecessor = Assert.IsType<FallbackTailYieldDecision>(authorizeArgs[^1]);
         Assert.True((bool)serviceType
             .GetMethod(
@@ -15954,8 +15954,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             Assert.True((bool)serviceType
                 .GetMethod(
                     $"TryMark{directionName}FallbackTailQuiescentWithCoordinatorLocked",
-                    BindingFlags.Static | BindingFlags.NonPublic)!
-                .Invoke(null, predecessorArgs)!);
+                    BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(service, predecessorArgs)!);
             var predecessor = Assert.IsType<FallbackTailYieldDecision>(predecessorArgs[^1]);
             Assert.True((bool)serviceType
                 .GetMethod(
@@ -16018,8 +16018,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             Assert.True((bool)serviceType
                 .GetMethod(
                     $"TryMark{directionName}FallbackTailQuiescentWithCoordinatorLocked",
-                    BindingFlags.Static | BindingFlags.NonPublic)!
-                .Invoke(null, successorArgs)!);
+                    BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(service, successorArgs)!);
             var successor = Assert.IsType<FallbackTailYieldDecision>(successorArgs[^1]);
             Assert.Equal(predecessor.AuthorityId, successor.PredecessorAuthorityId);
             Assert.Equal(predecessor.YieldGeneration + 1, successor.YieldGeneration);
@@ -16385,7 +16385,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
         object?[] authorizeArgs = [context, leg, leg.TransportEpochId, 1810, 1809, "fallback_tail_quiescent", null];
         var authorized = (bool)serviceType
-            .GetMethod("TryMarkOutboundFallbackTailQuiescentWithCoordinatorLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .GetMethod("TryMarkOutboundFallbackTailQuiescentWithCoordinatorLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, authorizeArgs)!;
         Assert.True(authorized);
         var yieldDecision = Assert.IsType<FallbackTailYieldDecision>(authorizeArgs[^1]);
@@ -16752,8 +16752,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             null,
         ];
         Assert.True((bool)serviceType
-            .GetMethod("TryMarkOutboundFallbackTailQuiescentWithCoordinatorLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, authorizeArgs)!);
+            .GetMethod("TryMarkOutboundFallbackTailQuiescentWithCoordinatorLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, authorizeArgs)!);
         var decision = Assert.IsType<FallbackTailYieldDecision>(authorizeArgs[^1]);
         SetPrivateProperty(context, "LocalFallbackTailYieldGranted", true);
         SetPrivateProperty(context, "LocalFallbackTailYieldOwnerKey", decision.OwnerKey);
@@ -16870,8 +16870,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 null,
             ];
             Assert.True((bool)serviceType
-                .GetMethod("TryMarkOutboundFallbackTailQuiescentWithCoordinatorLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-                .Invoke(null, args)!);
+                .GetMethod("TryMarkOutboundFallbackTailQuiescentWithCoordinatorLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(service, args)!);
             var decision = Assert.IsType<FallbackTailYieldDecision>(args[^1]);
             Assert.True((bool)serviceType
                 .GetMethod("RecordOutboundFallbackTailLocalYieldLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -18252,7 +18252,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             null
         ];
         var authorized = (bool)serviceType
-            .GetMethod("TryMarkInboundFallbackTailQuiescentWithCoordinatorLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .GetMethod("TryMarkInboundFallbackTailQuiescentWithCoordinatorLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, authorizeArgs)!;
         Assert.True(authorized);
         var yieldDecision = Assert.IsType<FallbackTailYieldDecision>(authorizeArgs[^1]);

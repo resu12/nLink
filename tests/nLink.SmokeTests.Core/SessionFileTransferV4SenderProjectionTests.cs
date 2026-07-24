@@ -431,8 +431,8 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.True(GetPrivateProperty<bool>(context, "RuntimeUnlockRecoveryLeaseClosureAvailable"));
         Assert.Null(GetPrivatePropertyValue(context, "CurrentRecoveryLivenessLease"));
         var retiredLease = GetPrivatePropertyValue(context, "LastRetiredRecoveryLivenessLease");
-        var retryContract = GetPrivatePropertyValue(context, "CurrentRuntimeUnlockRetryDispatchContract");
-        var retrySettlement = GetPrivatePropertyValue(context, "LastRuntimeUnlockRetryDispatchSettlement");
+        var retryLifecycle = FileTransferCoordinator.GetRuntimeUnlockRetryLifecycle(
+            CreateCoordinatorStateForTest(context));
 
         var rebound = CreateInboundState(service, context, "chunk_batch_committed");
 
@@ -466,8 +466,10 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Equal(lifecycleReport, GetPrivatePropertyValue(context, "LastRuntimeUnlockRegularV4RecoveryLifecycle"));
         Assert.Equal(retiredLease, GetPrivatePropertyValue(context, "LastRetiredRecoveryLivenessLease"));
         Assert.True(GetPrivateProperty<bool>(context, "RuntimeUnlockRecoveryLeaseClosureAvailable"));
-        Assert.Same(retryContract, GetPrivatePropertyValue(context, "CurrentRuntimeUnlockRetryDispatchContract"));
-        Assert.Equal(retrySettlement, GetPrivatePropertyValue(context, "LastRuntimeUnlockRetryDispatchSettlement"));
+        Assert.Equal(
+            retryLifecycle,
+            FileTransferCoordinator.GetRuntimeUnlockRetryLifecycle(
+                CreateCoordinatorStateForTest(context)));
     }
 
     [Fact]

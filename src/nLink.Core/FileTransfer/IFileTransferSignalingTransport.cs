@@ -995,6 +995,30 @@ internal readonly record struct FallbackPairedTailYieldReleaseEvidence(
                              string.IsNullOrWhiteSpace(PeerCheckpointRequestIdSnapshot);
 }
 
+internal readonly record struct RuntimeUnlockRetryDispatchInitialEvaluation(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    FileTransferRoutePublicationAuthority SourcePublicationAuthority,
+    long RecoveryContractGeneration,
+    long RetiredOfferGeneration,
+    string RetryReason,
+    string RecoveryReason,
+    int RegularV4LivenessGeneration,
+    int BridgeDecisionGeneration)
+{
+    public FallbackPairedTailYieldReleaseEvidence? FallbackPairedTailYieldEvidence { get; init; }
+
+    public RuntimeUnlockRetryDispatchListenerRearmRequirement
+        ListenerRearmRequirement { get; init; }
+
+    public bool IsDefault => string.IsNullOrWhiteSpace(SessionId) ||
+                             string.IsNullOrWhiteSpace(TransferId) ||
+                             SourcePublicationAuthority is null ||
+                             RecoveryContractGeneration <= 0 ||
+                             RetiredOfferGeneration < 0;
+}
+
 internal readonly record struct RuntimeUnlockRetryDispatchAuthorityRequest(
     string SessionId,
     string TransferId,
@@ -1013,11 +1037,21 @@ internal readonly record struct RuntimeUnlockRetryDispatchAuthorityRequest(
 {
     public FallbackPairedTailYieldReleaseEvidence? FallbackPairedTailYieldEvidence { get; init; }
 
+    public RuntimeUnlockRetryDispatchListenerRearmRequirement
+        ListenerRearmRequirement { get; init; }
+
     public bool IsDefault => string.IsNullOrWhiteSpace(SessionId) ||
                              string.IsNullOrWhiteSpace(TransferId) ||
                              SourcePublicationAuthority is null ||
                              RecoveryContractGeneration <= 0 ||
                              DispatchAttemptGeneration <= 0;
+}
+
+internal enum RuntimeUnlockRetryDispatchListenerRearmRequirement
+{
+    None = 0,
+    Required = 1,
+    RequiredBeforeDispatch = 2,
 }
 
 internal readonly record struct RuntimeUnlockRetryDispatchAuthority(
@@ -1055,6 +1089,9 @@ internal readonly record struct RuntimeUnlockRetryDispatchAuthority(
     FileTransferAuthorityId AuthorityId,
     FileTransferAuthorityId? PredecessorAuthorityId)
 {
+    public RuntimeUnlockRetryDispatchListenerRearmRequirement
+        ListenerRearmRequirement { get; init; }
+
     public bool IsDefault => AuthorityId.IsDefault ||
                              RuntimeOwner.IsDefault ||
                              SourcePublicationAuthority.IsDefault ||
@@ -1068,6 +1105,14 @@ internal readonly record struct RuntimeUnlockRetryDispatchSettlementReport(
     RuntimeUnlockRetryDispatchSettlementOutcome Outcome,
     string Reason)
 {
+    public long OfferGeneration { get; init; }
+
+    public string? OfferNonce { get; init; }
+
+    public bool DispatchObserved { get; init; }
+
+    public FileTransferAuthorityId? SuccessorAuthorityId { get; init; }
+
     public bool IsDefault => Authority.IsDefault || string.IsNullOrWhiteSpace(Reason);
 }
 
@@ -1087,7 +1132,23 @@ internal readonly record struct RuntimeUnlockRetryDispatchInstallReceipt(
 
     public long StageExpiresUtcMs { get; init; }
 
+    public long DispatchDeadlineUtcMs { get; init; }
+
     public bool IsDefault => Authority.IsDefault || InstallGeneration <= 0;
+}
+
+internal readonly record struct RuntimeUnlockRetryDispatchDeadlineEvaluation(
+    RuntimeUnlockRetryDispatchAuthority Authority,
+    RuntimeUnlockRetryDispatchInstallReceipt InstallReceipt,
+    long ObservedUtcMs,
+    string Reason)
+{
+    public bool IsDefault =>
+        Authority.IsDefault ||
+        InstallReceipt.IsDefault ||
+        InstallReceipt.Authority != Authority ||
+        ObservedUtcMs <= 0 ||
+        string.IsNullOrWhiteSpace(Reason);
 }
 
 internal readonly record struct RuntimeUnlockRegularV4RecoverySettlementReport(
@@ -1102,6 +1163,29 @@ internal readonly record struct RuntimeUnlockRegularV4RecoverySettlementReport(
                              RegularV4LivenessGeneration < 0 ||
                              BridgeDecisionGeneration < 0 ||
                              string.IsNullOrWhiteSpace(Reason);
+}
+
+internal readonly record struct RuntimeUnlockRetryDispatchExecutionObservation(
+    RuntimeUnlockRetryDispatchAuthority Authority,
+    RuntimeUnlockRetryDispatchAttemptPhase AttemptPhase,
+    long OfferGeneration,
+    string? OfferNonce,
+    bool DispatchObserved)
+{
+    public RuntimeUnlockRetryDispatchInstallReceipt InstallReceipt { get; init; }
+
+    public bool IsDefault =>
+        Authority.IsDefault ||
+        InstallReceipt.IsDefault ||
+        InstallReceipt.Authority != Authority;
+}
+
+internal readonly record struct RuntimeUnlockRetryDispatchSuccessorEvaluation(
+    RuntimeUnlockRetryDispatchAuthority PredecessorAuthority,
+    long RetiredOfferGeneration)
+{
+    public bool IsDefault => PredecessorAuthority.IsDefault ||
+                             RetiredOfferGeneration <= 0;
 }
 
 internal readonly record struct RuntimeUnlockRegularV4RecoveryLifecycleReport(
@@ -1294,71 +1378,123 @@ internal sealed class RuntimeUnlockRetryDispatchContract
         }
     }
 
-    public bool TryCompleteObserved(
+    public bool TryCreateObservedSettlementProposal(
         RuntimeUnlockRetryDispatchAttempt attempt,
-        string reason)
-        => TryCompleteAttempt(
+        string reason,
+        out RuntimeUnlockRetryDispatchSettlementReport report)
+        => TryCreateAttemptSettlementProposal(
             attempt,
             RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved,
             reason,
-            dispatched: true);
+            dispatched: true,
+            out report);
 
-    public bool TryCompleteMissingDispatch(
+    public bool TryCreateMissingDispatchSettlementProposal(
         RuntimeUnlockRetryDispatchAttempt attempt,
-        string reason)
-        => TryCompleteAttempt(
+        string reason,
+        out RuntimeUnlockRetryDispatchSettlementReport report)
+        => TryCreateAttemptSettlementProposal(
             attempt,
             RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch,
             reason,
-            dispatched: false);
+            dispatched: false,
+            out report);
 
-    public bool TrySettle(
-        RuntimeUnlockRetryDispatchSettlementOutcome outcome,
+    public bool TryCreatePreOfferMissingDispatchSettlementProposal(
         string reason,
-        FileTransferAuthorityId? successorAuthorityId = null)
+        out RuntimeUnlockRetryDispatchSettlementReport report)
     {
+        report = default;
         lock (aliasGate)
         {
-            if (!Lifecycle.TrySettle(outcome, reason, successorAuthorityId))
+            var unaliasedGrant =
+                attemptPhase == RuntimeUnlockRetryDispatchAttemptPhase.Granted &&
+                offerGeneration == 0 &&
+                offerNonce is null;
+            var aliasedBeforeSend =
+                attemptPhase == RuntimeUnlockRetryDispatchAttemptPhase.AliasBound &&
+                offerGeneration > 0 &&
+                !string.IsNullOrWhiteSpace(offerNonce);
+            if (Lifecycle.IsSettled || (!unaliasedGrant && !aliasedBeforeSend))
             {
                 return false;
             }
 
-            attemptPhase = RuntimeUnlockRetryDispatchAttemptPhase.Settled;
+            report = CreateSettlementReportUnsafe(
+                RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch,
+                reason,
+                dispatchObserved: false,
+                successorAuthorityId: null);
             return true;
         }
     }
 
-    public bool TrySupersedeBeforeSend(
+    public bool TryCreateTerminalSettlementProposal(
+        RuntimeUnlockRetryDispatchSettlementOutcome outcome,
         string reason,
-        FileTransferAuthorityId successorAuthorityId)
+        out RuntimeUnlockRetryDispatchSettlementReport report)
     {
+        report = default;
+        if (outcome is not (
+                RuntimeUnlockRetryDispatchSettlementOutcome.AuthorityRejected or
+                RuntimeUnlockRetryDispatchSettlementOutcome.StaleRejected or
+                RuntimeUnlockRetryDispatchSettlementOutcome.TerminalRejected or
+                RuntimeUnlockRetryDispatchSettlementOutcome.TransferTerminal))
+        {
+            return false;
+        }
+
+        lock (aliasGate)
+        {
+            if (Lifecycle.IsSettled)
+            {
+                return false;
+            }
+
+            report = CreateSettlementReportUnsafe(
+                outcome,
+                reason,
+                dispatchObserved: false,
+                successorAuthorityId: null);
+            return true;
+        }
+    }
+
+    public bool TryCreateSupersededSettlementProposal(
+        string reason,
+        FileTransferAuthorityId successorAuthorityId,
+        out RuntimeUnlockRetryDispatchSettlementReport report)
+    {
+        report = default;
         lock (aliasGate)
         {
             if (attemptPhase == RuntimeUnlockRetryDispatchAttemptPhase.SendInFlight ||
-                Lifecycle.IsSettled ||
-                !Lifecycle.TrySettle(
-                    RuntimeUnlockRetryDispatchSettlementOutcome.Superseded,
-                    reason,
-                    successorAuthorityId))
+                Lifecycle.IsSettled)
             {
                 return false;
             }
 
-            attemptPhase = RuntimeUnlockRetryDispatchAttemptPhase.Settled;
+            report = CreateSettlementReportUnsafe(
+                RuntimeUnlockRetryDispatchSettlementOutcome.Superseded,
+                reason,
+                dispatchObserved: false,
+                successorAuthorityId);
             return true;
         }
     }
 
-    private bool TryCompleteAttempt(
+    private bool TryCreateAttemptSettlementProposal(
         RuntimeUnlockRetryDispatchAttempt attempt,
         RuntimeUnlockRetryDispatchSettlementOutcome outcome,
         string reason,
-        bool dispatched)
+        bool dispatched,
+        out RuntimeUnlockRetryDispatchSettlementReport report)
     {
+        report = default;
         lock (aliasGate)
         {
             if (attemptPhase != RuntimeUnlockRetryDispatchAttemptPhase.SendInFlight ||
+                Lifecycle.IsSettled ||
                 attempt.AuthorityId != Authority.AuthorityId ||
                 offerGeneration != attempt.OfferGeneration ||
                 !string.Equals(offerNonce, attempt.OfferNonce, StringComparison.Ordinal))
@@ -1366,15 +1502,12 @@ internal sealed class RuntimeUnlockRetryDispatchContract
                 return false;
             }
 
-            var completed = dispatched
-                ? Lifecycle.TryMarkDispatchedAndSettle(outcome, reason)
-                : Lifecycle.TrySettle(outcome, reason);
-            if (completed)
-            {
-                attemptPhase = RuntimeUnlockRetryDispatchAttemptPhase.Settled;
-            }
-
-            return completed;
+            report = CreateSettlementReportUnsafe(
+                outcome,
+                reason,
+                dispatched,
+                successorAuthorityId: null);
+            return true;
         }
     }
 
@@ -1410,13 +1543,126 @@ internal sealed class RuntimeUnlockRetryDispatchContract
                 return false;
             }
 
-            report = new RuntimeUnlockRetryDispatchSettlementReport(
-                Authority,
+            report = CreateSettlementReportUnsafe(
                 outcome,
-                NormalizeSettlementReason(Lifecycle.SettlementReason));
+                Lifecycle.SettlementReason,
+                Lifecycle.DispatchObserved,
+                Lifecycle.SuccessorAuthorityId);
             return true;
         }
     }
+
+    public bool TryApplySettlementReport(
+        RuntimeUnlockRetryDispatchSettlementReport report)
+    {
+        lock (aliasGate)
+        {
+            if (report.IsDefault ||
+                report.Authority != Authority ||
+                report.OfferGeneration != offerGeneration ||
+                !string.Equals(
+                    report.OfferNonce,
+                    offerNonce,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    report.Reason,
+                    NormalizeSettlementReason(report.Reason),
+                    StringComparison.Ordinal) ||
+                report.DispatchObserved !=
+                    (report.Outcome ==
+                     RuntimeUnlockRetryDispatchSettlementOutcome
+                         .DispatchObserved) ||
+                (report.Outcome ==
+                     RuntimeUnlockRetryDispatchSettlementOutcome.Superseded
+                    ? report.SuccessorAuthorityId is not
+                        { IsDefault: false } ||
+                      attemptPhase ==
+                        RuntimeUnlockRetryDispatchAttemptPhase.SendInFlight
+                    : report.SuccessorAuthorityId is not null))
+            {
+                return false;
+            }
+
+            if (Lifecycle.IsSettled)
+            {
+                return Lifecycle.SettlementOutcome == report.Outcome &&
+                       string.Equals(
+                           NormalizeSettlementReason(
+                               Lifecycle.SettlementReason),
+                           report.Reason,
+                           StringComparison.Ordinal) &&
+                       Lifecycle.DispatchObserved ==
+                           report.DispatchObserved &&
+                       Lifecycle.SuccessorAuthorityId ==
+                           report.SuccessorAuthorityId;
+            }
+
+            if (report.Outcome ==
+                    RuntimeUnlockRetryDispatchSettlementOutcome
+                        .DispatchObserved &&
+                attemptPhase !=
+                    RuntimeUnlockRetryDispatchAttemptPhase.SendInFlight)
+            {
+                return false;
+            }
+
+            if (report.Outcome ==
+                    RuntimeUnlockRetryDispatchSettlementOutcome
+                        .MissingDispatch &&
+                !((attemptPhase ==
+                       RuntimeUnlockRetryDispatchAttemptPhase.SendInFlight &&
+                   offerGeneration > 0 &&
+                   !string.IsNullOrWhiteSpace(offerNonce)) ||
+                  (attemptPhase ==
+                       RuntimeUnlockRetryDispatchAttemptPhase.Granted &&
+                   offerGeneration == 0 &&
+                   offerNonce is null) ||
+                  (attemptPhase ==
+                       RuntimeUnlockRetryDispatchAttemptPhase.AliasBound &&
+                   offerGeneration > 0 &&
+                   !string.IsNullOrWhiteSpace(offerNonce))))
+            {
+                return false;
+            }
+
+            var applied = report.DispatchObserved
+                ? Lifecycle.TryMarkDispatchedAndSettle(
+                    report.Outcome,
+                    report.Reason,
+                    report.SuccessorAuthorityId)
+                : Lifecycle.TrySettle(
+                    report.Outcome,
+                    report.Reason,
+                    report.SuccessorAuthorityId);
+            if (!applied)
+            {
+                return false;
+            }
+
+            attemptPhase = RuntimeUnlockRetryDispatchAttemptPhase.Settled;
+            return true;
+        }
+    }
+
+    private RuntimeUnlockRetryDispatchSettlementReport
+        CreateSettlementReportUnsafe(
+            RuntimeUnlockRetryDispatchSettlementOutcome outcome,
+            string? reason,
+            bool dispatchObserved,
+            FileTransferAuthorityId? successorAuthorityId)
+        => new(
+            Authority,
+            outcome,
+            NormalizeSettlementReason(reason))
+        {
+            OfferGeneration = offerGeneration,
+            OfferNonce = offerNonce,
+            DispatchObserved = dispatchObserved,
+            SuccessorAuthorityId =
+                successorAuthorityId is { IsDefault: false }
+                    ? successorAuthorityId
+                    : null,
+        };
 
     private static string NormalizeSettlementReason(string? reason)
         => string.IsNullOrWhiteSpace(reason) ? "unknown" : reason.Trim();
@@ -1455,8 +1701,7 @@ internal readonly record struct RuntimeUnlockRetryDispatchDecisionStageResult(
             RuntimeUnlockRetryDispatchDecisionStageStatus.Idempotent &&
         (
             StageDisposition == RuntimeUnlockRetryDispatchStageDisposition.Retained &&
-            StagedUtcMs > 0 &&
-            StageExpiresUtcMs > StagedUtcMs ||
+            StagedUtcMs > 0 ||
             Status == RuntimeUnlockRetryDispatchDecisionStageStatus.Idempotent &&
             StageDisposition == RuntimeUnlockRetryDispatchStageDisposition.AlreadyInstalled &&
             StagedUtcMs == 0 &&
@@ -1474,6 +1719,73 @@ internal readonly record struct RuntimeUnlockRetryDispatchInstallResult(
         Status is
             RuntimeUnlockRetryDispatchInstallStatus.Installed or
             RuntimeUnlockRetryDispatchInstallStatus.Idempotent;
+}
+
+internal enum RuntimeUnlockRetryDispatchScopeInvalidationStatus
+{
+    Rejected = 0,
+    Applied = 1,
+    Idempotent = 2,
+}
+
+internal enum RuntimeUnlockRetryDispatchScopeInvalidationStageStatus
+{
+    Rejected = 0,
+    Staged = 1,
+    Idempotent = 2,
+}
+
+internal enum RuntimeUnlockRetryDispatchScopeInvalidationKind
+{
+    FullScope = 0,
+    PendingStageExpiry = 1,
+}
+
+internal sealed record RuntimeUnlockRetryDispatchScopeInvalidationCommand(
+    RuntimeUnlockRetryLifecycleAttemptSnapshot? PendingAttempt,
+    RuntimeUnlockRetryLifecycleAttemptSnapshot? InstalledAttempt,
+    RuntimeUnlockRetryLifecycleAttemptSnapshot? RetainedPredecessor,
+    RuntimeUnlockRetryLifecycleBoundedClosure? BoundedClosure,
+    long InvalidationGeneration,
+    string Reason,
+    FileTransferAuthorityId CommandId,
+    RuntimeUnlockRetryDispatchScopeInvalidationKind Kind =
+        RuntimeUnlockRetryDispatchScopeInvalidationKind.FullScope)
+{
+    public bool IsDefault =>
+        InvalidationGeneration <= 0 ||
+        string.IsNullOrWhiteSpace(Reason) ||
+        CommandId.IsDefault ||
+        PendingAttempt is null &&
+        InstalledAttempt is null &&
+        RetainedPredecessor is null &&
+        BoundedClosure is null;
+}
+
+internal readonly record struct RuntimeUnlockRetryDispatchScopeInvalidationStageResult(
+    RuntimeUnlockRetryDispatchScopeInvalidationCommand Command,
+    RuntimeUnlockRetryDispatchScopeInvalidationStageStatus Status,
+    string Reason)
+{
+    public bool Accepted =>
+        Command is not null &&
+        !Command.IsDefault &&
+        Status is
+            RuntimeUnlockRetryDispatchScopeInvalidationStageStatus.Staged or
+            RuntimeUnlockRetryDispatchScopeInvalidationStageStatus.Idempotent;
+}
+
+internal readonly record struct RuntimeUnlockRetryDispatchScopeInvalidationReceipt(
+    RuntimeUnlockRetryDispatchScopeInvalidationCommand Command,
+    RuntimeUnlockRetryDispatchScopeInvalidationStatus Status,
+    string Reason)
+{
+    public bool Accepted =>
+        Command is not null &&
+        !Command.IsDefault &&
+        Status is
+            RuntimeUnlockRetryDispatchScopeInvalidationStatus.Applied or
+            RuntimeUnlockRetryDispatchScopeInvalidationStatus.Idempotent;
 }
 
 internal readonly record struct RuntimeUnlockRetryDispatchSettlementDecision(
@@ -1514,10 +1826,44 @@ internal sealed class RuntimeUnlockRetryDispatchAuthorityRequestedEventArgs(
     public RuntimeUnlockRetryDispatchAuthorityRequest Request { get; } = request;
 }
 
+internal sealed class RuntimeUnlockRetryDispatchInitialEvaluationRequestedEventArgs(
+    RuntimeUnlockRetryDispatchInitialEvaluation evaluation) : EventArgs
+{
+    public RuntimeUnlockRetryDispatchInitialEvaluation Evaluation { get; } =
+        evaluation;
+}
+
 internal sealed class RuntimeUnlockRetryDispatchSettlementReportedEventArgs(
     RuntimeUnlockRetryDispatchSettlementReport report) : EventArgs
 {
     public RuntimeUnlockRetryDispatchSettlementReport Report { get; } = report;
+}
+
+internal sealed class RuntimeUnlockRetryDispatchDeadlineEvaluationEventArgs(
+    RuntimeUnlockRetryDispatchDeadlineEvaluation evaluation) : EventArgs
+{
+    public RuntimeUnlockRetryDispatchDeadlineEvaluation Evaluation { get; } =
+        evaluation;
+}
+
+internal sealed class RuntimeUnlockRetryDispatchExecutionObservedEventArgs(
+    RuntimeUnlockRetryDispatchExecutionObservation observation) : EventArgs
+{
+    public RuntimeUnlockRetryDispatchExecutionObservation Observation { get; } =
+        observation;
+
+    public RuntimeUnlockRetryLifecycleTransitionDecision? Decision
+    {
+        get;
+        set;
+    }
+}
+
+internal sealed class RuntimeUnlockRetryDispatchSuccessorEvaluationEventArgs(
+    RuntimeUnlockRetryDispatchSuccessorEvaluation evaluation) : EventArgs
+{
+    public RuntimeUnlockRetryDispatchSuccessorEvaluation Evaluation { get; } =
+        evaluation;
 }
 
 internal sealed class RuntimeUnlockRegularV4RecoverySettlementReportedEventArgs(
@@ -1534,23 +1880,29 @@ internal sealed class RuntimeUnlockRegularV4RecoveryLifecycleReportedEventArgs(
 
 internal interface IRuntimeUnlockRetryDispatchAuthorityBridge
 {
+    event EventHandler<RuntimeUnlockRetryDispatchInitialEvaluationRequestedEventArgs>?
+        RuntimeUnlockRetryDispatchInitialEvaluationRequested;
+
     event EventHandler<RuntimeUnlockRetryDispatchAuthorityRequestedEventArgs>?
         RuntimeUnlockRetryDispatchAuthorityRequested;
 
     event EventHandler<RuntimeUnlockRetryDispatchSettlementReportedEventArgs>?
         RuntimeUnlockRetryDispatchSettlementReported;
 
+    event EventHandler<RuntimeUnlockRetryDispatchDeadlineEvaluationEventArgs>?
+        RuntimeUnlockRetryDispatchDeadlineEvaluationRequested;
+
+    event EventHandler<RuntimeUnlockRetryDispatchExecutionObservedEventArgs>?
+        RuntimeUnlockRetryDispatchExecutionObserved;
+
+    event EventHandler<RuntimeUnlockRetryDispatchSuccessorEvaluationEventArgs>?
+        RuntimeUnlockRetryDispatchSuccessorEvaluationRequested;
+
     event EventHandler<RuntimeUnlockRegularV4RecoverySettlementReportedEventArgs>?
         RuntimeUnlockRegularV4RecoverySettlementReported;
 
     event EventHandler<RuntimeUnlockRegularV4RecoveryLifecycleReportedEventArgs>?
         RuntimeUnlockRegularV4RecoveryLifecycleReported;
-
-    bool TryGetPendingRuntimeUnlockRetryDispatchAuthorityRequest(
-        string sessionId,
-        string transferId,
-        FileTransferDirection direction,
-        out RuntimeUnlockRetryDispatchAuthorityRequest request);
 
     bool QueueRuntimeUnlockRetryDispatchAuthorityRequest(
         RuntimeUnlockRetryDispatchAuthorityRequest request)
@@ -1559,10 +1911,25 @@ internal interface IRuntimeUnlockRetryDispatchAuthorityBridge
     bool ObserveRuntimeUnlockRetryDispatchNonGrantDecision(
         RuntimeUnlockRetryDispatchDecision decision);
 
+    bool ObserveRuntimeUnlockRetryDispatchSuccessorDecision(
+        RuntimeUnlockRetryDispatchSuccessorDecision decision)
+        => false;
+
     RuntimeUnlockRetryDispatchDecisionStageResult StageRuntimeUnlockRetryDispatchDecision(
         RuntimeUnlockRetryDispatchDecision decision);
 
     RuntimeUnlockRetryDispatchInstallResult CommitRuntimeUnlockRetryDispatchInstall(
+        RuntimeUnlockRetryDispatchInstallReceipt receipt);
+
+    RuntimeUnlockRetryDispatchScopeInvalidationReceipt
+        ApplyRuntimeUnlockRetryDispatchScopeInvalidation(
+            RuntimeUnlockRetryDispatchScopeInvalidationCommand command);
+
+    RuntimeUnlockRetryDispatchScopeInvalidationStageResult
+        StageRuntimeUnlockRetryDispatchScopeInvalidation(
+            RuntimeUnlockRetryDispatchScopeInvalidationCommand command);
+
+    bool ConfirmRuntimeUnlockRetryDispatchInstall(
         RuntimeUnlockRetryDispatchInstallReceipt receipt);
 
     bool ObserveRuntimeUnlockRetryDispatchSettlementDecision(

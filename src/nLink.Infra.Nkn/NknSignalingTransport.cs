@@ -931,7 +931,6 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         }
 
         disposed = true;
-        SettleRuntimeUnlockRetryDispatchContractForTransportTerminal("transport_disposed");
         TryCancelHostReady();
 
         // Avoid treating normal cleanup as a disconnection.
