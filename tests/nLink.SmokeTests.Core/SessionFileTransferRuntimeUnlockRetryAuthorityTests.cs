@@ -1037,7 +1037,9 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         fixture.Bridge.RaiseAuthorityRequest(request);
 
         var granted = fixture.Bridge.DequeueAuthorityDecision();
-        Assert.True(granted.Granted);
+        Assert.True(
+            granted.Granted,
+            $"status={granted.Status} reason={granted.Reason}");
         Assert.Equal(request, granted.Request);
         Assert.Equal(priorTransportEpoch + 1, granted.Contract!.Authority.TransportEpoch);
         Assert.Equal(tailYield.AuthorityId, granted.Contract.Authority.ReleaseAuthorityId);
@@ -1217,42 +1219,39 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         FallbackTailYieldDecision TailYield) SeedPostTunaFallbackRetrySource(object context)
     {
         var regularState = CreateCoordinatorState(context);
-        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
         var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
-        var tunaActivated = FileTransferCoordinator.Apply(
+        var fallbackEpoch = FileTransferCoordinator.StartLiveRouteEpoch(
+            regularState.LastLiveRouteEpochId,
+            fallback,
+            FileTransferTransportHandoffKind.TunaToNormalFallback,
+            FileTransferTransportKind.RegularNkn,
+            "test_post_tuna_fallback_retry_source");
+        regularState = regularState with
+        {
+            CurrentLiveRouteEpoch = fallbackEpoch,
+            LastLiveRouteEpochId = fallbackEpoch.EpochId,
+        };
+        var fallbackStarted = FileTransferCoordinator.Apply(
             new FileTransferCoordinatorEvent(
-                FileTransferCoordinatorEventKind.TunaActivated,
-                tuna,
-                FileTransferTransportHandoffKind.NormalToTunaActivation,
-                FileTransferTransportKind.Tuna,
-                "test_tuna_activation",
-                FileTransferLegState.Active,
-                CanSendData: true,
-                CommittedChunkIndex: 0,
-                HighestObservedChunkIndex: 0,
-                TransportEpochId: 1,
-                BridgeRecoveryGeneration: 1),
-            regularState);
-        var fallbackApplied = FileTransferCoordinator.Apply(
-            new FileTransferCoordinatorEvent(
-                FileTransferCoordinatorEventKind.TunaLost,
+                FileTransferCoordinatorEventKind.StartTransfer,
                 fallback,
                 FileTransferTransportHandoffKind.TunaToNormalFallback,
                 FileTransferTransportKind.RegularNkn,
-                "test_post_tuna_fallback",
+                "test_post_tuna_fallback_retry_source",
                 FileTransferLegState.Active,
                 CanSendData: true,
                 CommittedChunkIndex: 0,
                 HighestObservedChunkIndex: 0,
                 TransportEpochId: 2,
                 BridgeRecoveryGeneration: 1),
-            tunaActivated.State);
-        ApplyCoordinatorDecision(context, fallbackApplied);
+            regularState);
+        Assert.Null(fallbackStarted.MutationRejectedReason);
+        ApplyCoordinatorDecision(context, fallbackStarted);
 
-        var owner = Assert.IsType<RuntimeOwnerToken>(fallbackApplied.State.CurrentRuntimeOwner);
-        var leg = Assert.IsType<FileTransferLeg>(fallbackApplied.State.CurrentLeg);
+        var owner = Assert.IsType<RuntimeOwnerToken>(fallbackStarted.State.CurrentRuntimeOwner);
+        var leg = Assert.IsType<FileTransferLeg>(fallbackStarted.State.CurrentLeg);
         var publication = FileTransferCoordinator.AuthorizeAction(
-            fallbackApplied.State,
+            fallbackStarted.State,
             new FileTransferCoordinatorActionRequest(
                 FileTransferCoordinatorActionKind.RoutePublication,
                 "test",
@@ -1263,7 +1262,7 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
                 LiveRouteEpoch: leg.LiveRouteEpochId,
                 LegGeneration: leg.Generation,
                 RuntimeGeneration: owner.RuntimeGeneration,
-                TerminalGeneration: fallbackApplied.State.TerminalGeneration,
+                TerminalGeneration: fallbackStarted.State.TerminalGeneration,
                 TargetRoute: fallback.Route,
                 TargetProtocolVersion: fallback.ProtocolVersion,
                 TargetTransport: FileTransferTransportKind.RegularNkn));
@@ -1292,6 +1291,31 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             FileTransferCoordinator.CreateRoutePublicationAuthority(
                 publication.State.CurrentRoutePublicationToken,
                 "fallback_retry_publication"));
+        var peerAuthorityId = new FileTransferAuthorityId(
+            "fta2-fallback_tail_yield-0123456789abcdef01234567");
+        var peerOwnerKey = FileTransferCoordinator.BuildFallbackTailYieldOwnerKey(
+            publication.State.SessionId,
+            publication.State.TransferId,
+            publication.State.RouteSelection.TelemetryToken,
+            publication.State.RouteSelection.ProtocolVersion,
+            tailYield.CurrentLiveRouteEpoch,
+            publication.State.CurrentLeg!.Generation,
+            publication.State.CurrentLeg.BridgeRecoveryGeneration,
+            publication.State.CurrentLeg.TransportEpochId,
+            tailYield.CheckpointRequestIdSnapshot);
+        var pairedYieldEvidence = new FallbackPairedTailYieldReleaseEvidence(
+            tailYield,
+            peerAuthorityId,
+            PeerPredecessorAuthorityId: null,
+            PeerYieldGeneration: 1,
+            PeerDirection: "inbound",
+            peerOwnerKey,
+            tailYield.PairKey,
+            tailYield.CurrentLiveRouteEpoch,
+            publication.State.CurrentLeg.Generation,
+            publication.State.CurrentLeg.BridgeRecoveryGeneration,
+            publication.State.CurrentLeg.TransportEpochId,
+            tailYield.CheckpointRequestIdSnapshot);
         return (
             new RuntimeUnlockRetryDispatchAuthorityRequest(
                 regularState.SessionId,
@@ -1304,7 +1328,10 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
                 RetryReason: "runtime_unlock_offer_send_not_observed",
                 RecoveryReason: "post_tuna_fallback_tail_unblocked",
                 RegularV4LivenessGeneration: 0,
-                BridgeDecisionGeneration: 0),
+                BridgeDecisionGeneration: 0)
+            {
+                FallbackPairedTailYieldEvidence = pairedYieldEvidence,
+            },
             tailYield);
     }
 
@@ -1316,8 +1343,11 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         SetProperty(context, "LocalFallbackTailYieldGranted", true);
         SetProperty(context, "PeerFallbackTailYieldGranted", true);
         SetProperty(context, "LocalFallbackTailYieldAuthorityId", tailYield.AuthorityId.ToString());
-        SetProperty(context, "PeerFallbackTailYieldAuthorityId", tailYield.AuthorityId.ToString());
-        SetProperty(context, "PeerFallbackTailYieldGeneration", (long)tailYield.YieldGeneration);
+        SetProperty(
+            context,
+            "PeerFallbackTailYieldAuthorityId",
+            "fta2-fallback_tail_yield-0123456789abcdef01234567");
+        SetProperty(context, "PeerFallbackTailYieldGeneration", 1L);
         SetProperty(context, "LocalFallbackTailYieldOwnerKey", tailYield.OwnerKey);
         SetProperty(context, "PeerFallbackTailYieldOwnerKey", tailYield.OwnerKey);
         SetProperty(context, "LocalFallbackTailYieldPairKey", tailYield.PairKey);

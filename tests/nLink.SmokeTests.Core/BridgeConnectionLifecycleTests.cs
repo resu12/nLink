@@ -3352,52 +3352,16 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 installed.InstallGeneration,
                 authority.AuthorityId,
                 RetainedPredecessorAuthorityId: null);
-            var adoptionCommand = new RuntimeUnlockUncommittedTunaFallbackAdoptionCommand(
-                DataSession: null!,
-                DataSessionGeneration: 1,
-                StageGeneration: 1,
-                RuntimeOwner: default,
-                RoutePublication: default,
-                TransportEpoch: 1,
-                BridgeRecoveryGeneration: 1,
-                HandoffGeneration: 1,
-                DrainGeneration: 1,
-                PeerProofEvidence: null!,
-                settlementCommand);
-            var preparedPressureReceipt =
-                adapter.PrepareRuntimeUnlockUncommittedTunaFallbackPressureSettlement(
-                    settlementCommand);
-            Assert.Equal(
-                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
-                preparedPressureReceipt.Status);
-            var mismatchedPreparation =
-                new RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationReceipt(
-                    adoptionCommand,
-                    RuntimeUnlockUncommittedTunaFallbackAdoptionPreparationStatus.Prepared,
-                    "uncommitted_tuna_fallback_adoption_prepared",
-                    preparedPressureReceipt with
+            var rejectedSettlement =
+                adapter.ApplyRegularV4FrontierRepairPressureSettlement(
+                    settlementCommand with
                     {
-                        Reason = "synthetic_preparation_receipt_mismatch",
-                    });
-            var adoptionCallbackInvoked = false;
-            var rejectedAdoption =
-                adapter.CommitRuntimeUnlockUncommittedTunaFallbackAdoptionAtomically(
-                    adoptionCommand,
-                    mismatchedPreparation,
-                    () =>
-                    {
-                        adoptionCallbackInvoked = true;
-                        return new RuntimeUnlockUncommittedTunaFallbackAdoptionReceipt(
-                            adoptionCommand,
-                            RuntimeUnlockUncommittedTunaFallbackAdoptionStatus.Applied,
-                            "unexpected_adoption");
+                        InstallGeneration = installed.InstallGeneration + 1,
                     });
             Assert.Equal(
-                RuntimeUnlockUncommittedTunaFallbackAdoptionStatus.Rejected,
-                rejectedAdoption.Status);
-            Assert.False(adoptionCallbackInvoked);
-            Assert.NotNull(rejectedAdoption.PressureSettlementReceipt);
-            Assert.False(rejectedAdoption.PressureSettlementReceipt!.CurrentAuthorityCleared);
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+                rejectedSettlement.Status);
+            Assert.False(rejectedSettlement.CurrentAuthorityCleared);
             Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out _));
             Assert.Equal("regular_v4_control_feedback_pressure", blockerReason);
             Assert.False(adapter.IsRegularV4FrontierRepairSettlementApplied(settlement));
@@ -3430,11 +3394,6 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 wrongRetainedPredecessorDuplicate.Status);
             Assert.False(wrongRetainedPredecessorDuplicate.CurrentAuthorityCleared);
             Assert.False(wrongRetainedPredecessorDuplicate.RetainedPredecessorCleared);
-            var mismatchedSettlement = adapter.ApplyRegularV4FrontierRepairPressureSettlement(settlementCommand with
-            {
-                InstallGeneration = installed.InstallGeneration + 1,
-            });
-            Assert.Equal(FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected, mismatchedSettlement.Status);
             Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
 
             adapter.UnregisterActiveFileTransferRuntime(transferId);

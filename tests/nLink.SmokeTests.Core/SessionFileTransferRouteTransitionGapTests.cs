@@ -10,7 +10,7 @@ public sealed partial class SessionFileTransferV4SenderTests
     [InlineData(FileTransferDirection.Outbound)]
     [InlineData(FileTransferDirection.Inbound)]
     [Trait("FileTransferRuntimeSuite", "SparseWorkerHandoff")]
-    public void RegularV4ToTunaRouteTransition_InvalidationDoesNotResurrectPrecommitAuthority(
+    public void RegularV4ToTunaRouteTransition_InvalidationPreservesUnconsumedPrecommitAuthority(
         FileTransferDirection direction)
     {
         var transferId =
@@ -21,7 +21,7 @@ public sealed partial class SessionFileTransferV4SenderTests
             $"session_{transferId}");
         service.AttachTransport(transport);
         object context;
-        RegularV4ToTunaRouteTransitionAuthority authority;
+        FileTransferRouteTransitionAuthority authority;
         transport.SeedRuntimeUnlockRouteCommitProofForTests(
             transferId,
             reason,
@@ -52,9 +52,9 @@ public sealed partial class SessionFileTransferV4SenderTests
                 context,
                 reason);
             Assert.True(staged.Accepted);
-            authority = AssertRegularV4ToTunaTransitionOperation(
+            authority = AssertFileTransferRouteTransitionOperation(
                     context,
-                    RegularV4ToTunaRouteTransitionState.Draining)
+                    FileTransferRouteTransitionState.Draining)
                 .Authority;
         }
         else
@@ -86,7 +86,7 @@ public sealed partial class SessionFileTransferV4SenderTests
                     "inboundTransfer",
                     BindingFlags.Instance | BindingFlags.NonPublic)!
                 .SetValue(service, context);
-            var staged = StageInboundRegularV4ToTunaTransitionForGapTest(
+            var staged = StageInboundFileTransferRouteTransitionForGapTest(
                 service,
                 context,
                 Assert.IsType<RuntimeUnlockRouteCommitSnapshot>(
@@ -104,21 +104,27 @@ public sealed partial class SessionFileTransferV4SenderTests
                 "RuntimeUnlockPendingPreCommitProbe"));
 
         Assert.True(
-            InvalidateRegularV4ToTunaRouteTransitionForGapTest(
+            InvalidateFileTransferRouteTransitionForGapTest(
                 service,
                 context,
                 authority,
                 reason));
 
-        Assert.Null(
-            GetPrivatePropertyValue(context, "RuntimeUnlockAdmissionToken"));
-        Assert.Null(
-            GetPrivatePropertyValue(
+        var retainedAdmission =
+            GetPrivateProperty<RuntimeUnlockAdmissionToken>(
                 context,
-                "RuntimeUnlockPendingPreCommitProbe"));
+                "RuntimeUnlockAdmissionToken");
+        var retainedPrecommit =
+            GetPrivateProperty<RuntimeUnlockPendingPreCommitProbeRequest>(
+                context,
+                "RuntimeUnlockPendingPreCommitProbe");
         var reconstructed = CreateCoordinatorStateForTest(context);
-        Assert.Null(reconstructed.CurrentRuntimeUnlockAdmission);
-        Assert.Null(reconstructed.CurrentRuntimeUnlockPendingPreCommitProbe);
+        Assert.Equal(
+            retainedAdmission,
+            reconstructed.CurrentRuntimeUnlockAdmission);
+        Assert.Equal(
+            retainedPrecommit,
+            reconstructed.CurrentRuntimeUnlockPendingPreCommitProbe);
     }
 
     [Fact]
@@ -141,6 +147,7 @@ public sealed partial class SessionFileTransferV4SenderTests
             context,
             "V4LastStateDurableHighestChunkIndex",
             63);
+        SetPrivateProperty(context, "V4LastStateEpoch", -1);
         typeof(SessionFileTransferService)
             .GetField(
                 "outboundTransfer",
@@ -166,7 +173,7 @@ public sealed partial class SessionFileTransferV4SenderTests
             GetPrivateProperty<FileTransferCoordinatorPersistentState>(
                     context,
                     "CoordinatorPersistentState")
-                .RegularV4ToTunaRouteTransition.CurrentOperation);
+                .FileTransferRouteTransition.CurrentOperation);
 
         SetPrivateProperty(context, "V4LastStateEpoch", 1);
 
@@ -180,10 +187,10 @@ public sealed partial class SessionFileTransferV4SenderTests
             GetPrivateProperty<FileTransferCoordinatorPersistentState>(
                     context,
                     "CoordinatorPersistentState")
-                .RegularV4ToTunaRouteTransition.CurrentOperation;
+                .FileTransferRouteTransition.CurrentOperation;
         Assert.True(operation.HasValue);
         Assert.Equal(
-            RegularV4ToTunaRouteTransitionState.Draining,
+            FileTransferRouteTransitionState.Draining,
             operation.Value.State);
         Assert.Equal(1, operation.Value.Authority.DurableCheckpoint.StateEpoch);
         Assert.Equal(
@@ -197,7 +204,7 @@ public sealed partial class SessionFileTransferV4SenderTests
 
         var currentnessMethod = typeof(SessionFileTransferService)
             .GetMethod(
-                "IsOutboundRegularV4ToTunaDurableCheckpointCurrent",
+                "IsOutboundFileTransferRouteTransitionDurableCheckpointCurrentLocked",
                 BindingFlags.Static | BindingFlags.NonPublic)!;
         Assert.True(Assert.IsType<bool>(
             currentnessMethod.Invoke(
@@ -251,6 +258,7 @@ public sealed partial class SessionFileTransferV4SenderTests
             "ReceiverSparseChunksPendingWrite");
         pendingWrites.Add(20);
         pendingWrites.Add(21);
+        var excludedPendingWrites = pendingWrites.ToArray();
         var dataSession = new RecordingDataSession(
             $"session_{transferId}",
             transferId);
@@ -269,7 +277,22 @@ public sealed partial class SessionFileTransferV4SenderTests
             leaseGeneration: 13,
             launchGeneration: 17);
 
-        var staged = StageInboundRegularV4ToTunaTransitionForGapTest(
+        var staged = StageInboundFileTransferRouteTransitionForGapTest(
+            service,
+            context,
+            Assert.IsType<RuntimeUnlockRouteCommitSnapshot>(
+                transport.RuntimeUnlockRouteCommitSnapshot),
+            "test_inbound_durable_checkpoint");
+
+        Assert.False(staged.Accepted);
+        Assert.Null(
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                    context,
+                    "CoordinatorPersistentState")
+                .FileTransferRouteTransition.CurrentOperation);
+
+        pendingWrites.Clear();
+        staged = StageInboundFileTransferRouteTransitionForGapTest(
             service,
             context,
             Assert.IsType<RuntimeUnlockRouteCommitSnapshot>(
@@ -281,11 +304,11 @@ public sealed partial class SessionFileTransferV4SenderTests
             FileTransferDirection.Inbound,
             staged.Command.Authority.Direction);
         Assert.Equal(
-            RegularV4ToTunaRouteTransitionState.Draining,
+            FileTransferRouteTransitionState.Draining,
             GetPrivateProperty<FileTransferCoordinatorPersistentState>(
                     context,
                     "CoordinatorPersistentState")
-                .RegularV4ToTunaRouteTransition.CurrentOperation!.Value.State);
+                .FileTransferRouteTransition.CurrentOperation!.Value.State);
         Assert.Equal(
             8,
             staged.Command.Authority.DurableCheckpoint
@@ -299,7 +322,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.DoesNotContain(
             staged.Command.Authority.DurableCheckpoint
                 .DurableHighestChunkIndex,
-            pendingWrites);
+            excludedPendingWrites);
     }
 
     [Fact]
@@ -345,7 +368,7 @@ public sealed partial class SessionFileTransferV4SenderTests
             leaseGeneration: 7,
             launchGeneration: 9);
 
-        var staged = StageInboundRegularV4ToTunaTransitionForGapTest(
+        var staged = StageInboundFileTransferRouteTransitionForGapTest(
             service,
             context,
             Assert.IsType<RuntimeUnlockRouteCommitSnapshot>(
@@ -357,15 +380,15 @@ public sealed partial class SessionFileTransferV4SenderTests
             GetPrivateProperty<FileTransferCoordinatorPersistentState>(
                     context,
                     "CoordinatorPersistentState")
-                .RegularV4ToTunaRouteTransition;
+                .FileTransferRouteTransition;
         Assert.Equal(
-            RegularV4ToTunaRouteTransitionState.Draining,
+            FileTransferRouteTransitionState.Draining,
             transition.CurrentOperation!.Value.State);
         Assert.True(GetPrivateProperty<bool>(
             context,
             "PullTransportPaused"));
         Assert.Equal(
-            "tuna_activation_negotiating",
+            "filetransfer_route_transition_draining",
             GetPrivateProperty<string>(
                 context,
                 "PullTransportPauseReason"));
@@ -376,9 +399,9 @@ public sealed partial class SessionFileTransferV4SenderTests
 
     private static (
         bool Accepted,
-        RegularV4ToTunaPhysicalDrainCommand Command,
+        FileTransferRouteTransitionPhysicalDrainCommand Command,
         string Reason)
-        StageInboundRegularV4ToTunaTransitionForGapTest(
+        StageInboundFileTransferRouteTransitionForGapTest(
             SessionFileTransferService service,
             object context,
             RuntimeUnlockRouteCommitSnapshot snapshot,
@@ -390,28 +413,42 @@ public sealed partial class SessionFileTransferV4SenderTests
             snapshot,
             reason,
             null,
-            null,
         ];
-        var accepted = Assert.IsType<bool>(
-            typeof(SessionFileTransferService)
-                .GetMethod(
-                    "TryStageInboundRegularV4ToTunaRouteTransitionLocked",
-                    BindingFlags.Instance | BindingFlags.NonPublic)!
-                .Invoke(service, arguments));
+        bool accepted;
+        var serviceGate = typeof(SessionFileTransferService)
+            .GetField("gate", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(service)!;
+        lock (serviceGate)
+        {
+            accepted = Assert.IsType<bool>(
+                typeof(SessionFileTransferService)
+                    .GetMethod(
+                        "TryPrepareInboundRegularV4ToTunaRouteTransitionLocked",
+                        BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .Invoke(service, arguments));
+            if (accepted)
+            {
+                StabilizeFileTransferRouteTransitionDrainForTest(context);
+            }
+        }
+
         return (
             accepted,
             accepted
-                ? Assert.IsType<RegularV4ToTunaPhysicalDrainCommand>(
-                    arguments[3])
+                ? GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                        context,
+                        "CoordinatorPersistentState")
+                    .FileTransferRouteTransition.CurrentOperation!.Value
+                    .DrainCommand!.Value
                 : default,
-            arguments[4] as string ?? "(none)");
+            accepted ? "accepted" : "rejected");
     }
 
     private static bool
-        InvalidateRegularV4ToTunaRouteTransitionForGapTest(
+        InvalidateFileTransferRouteTransitionForGapTest(
             SessionFileTransferService service,
             object context,
-            RegularV4ToTunaRouteTransitionAuthority authority,
+            FileTransferRouteTransitionAuthority authority,
             string reason)
     {
         var method = typeof(SessionFileTransferService)
@@ -420,7 +457,11 @@ public sealed partial class SessionFileTransferV4SenderTests
             {
                 if (!string.Equals(
                         candidate.Name,
-                        "InvalidateRegularV4ToTunaRouteTransitionLocked",
+                        context.GetType().Name.Contains(
+                            "Outbound",
+                            StringComparison.Ordinal)
+                            ? "InvalidateOutboundFileTransferRouteTransitionLocked"
+                            : "InvalidateInboundFileTransferRouteTransitionLocked",
                         StringComparison.Ordinal))
                 {
                     return false;

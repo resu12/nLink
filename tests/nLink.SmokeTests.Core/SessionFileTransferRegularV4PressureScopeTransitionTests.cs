@@ -395,18 +395,19 @@ public sealed partial class SessionFileTransferV4SenderTests
                 RetainedPredecessorCleared: false);
         };
 
-        var promoted = Assert.IsType<bool>(typeof(SessionFileTransferService)
-            .GetMethod("TryPromoteInboundRegularNknV4ToFileTunaV4Locked", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(
-                service,
-                [
-                    context,
-                    "pressure_route_commit_rejected",
-                    FileTransferTransportHandoffKind.NormalToTunaActivation,
-                    FileTransferTransportKind.Tuna,
-                ]));
+        var promoted = PrepareInboundRegularV4ToTunaRouteTransitionForPressureTest(
+            service,
+            context,
+            "pressure_route_commit_rejected");
+        var committed = CommitInboundFileTransferRouteTransitionForPressureTest(
+            service,
+            context);
 
         Assert.True(promoted);
+        Assert.False(committed.Accepted);
+        Assert.Equal(
+            "unit_test_route_commit_retirement_rejected",
+            committed.Reason);
         Assert.Equal(
             FileTransferRoute.RegularNknV4Fast,
             GetPrivateProperty<FileTransferRouteSelection>(context, "RouteSelection").Route);
@@ -419,10 +420,10 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Equal(1, Volatile.Read(ref applyCount));
         var transition = GetPrivateProperty<FileTransferCoordinatorPersistentState>(
             context,
-            "CoordinatorPersistentState").RegularV4ToTunaRouteTransition;
+            "CoordinatorPersistentState").FileTransferRouteTransition;
         Assert.True(transition.CurrentOperation.HasValue);
         Assert.Equal(
-            RegularV4ToTunaRouteTransitionState.Draining,
+            FileTransferRouteTransitionState.Draining,
             transition.CurrentOperation.Value.State);
     }
 
@@ -433,8 +434,13 @@ public sealed partial class SessionFileTransferV4SenderTests
         const string transferId = "transfer_regular_v4_pressure_route_commit_proof_rejected";
         using var service = new SessionFileTransferService();
         using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        transport.SeedRuntimeUnlockRouteCommitProofForTests(
+            transferId,
+            "pressure_route_commit_proof_rejected");
         service.AttachTransport(transport);
         var context = CreateProjectionInboundContext(transferId);
+        SetPrivateProperty(context, "HighestBufferedChunkIndex", 8);
+        SetPrivateProperty(context, "DataSessionGeneration", 1L);
         typeof(SessionFileTransferService)
             .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
@@ -445,25 +451,20 @@ public sealed partial class SessionFileTransferV4SenderTests
             context,
             "InstalledRegularV4FrontierRepairPressureBinding");
         Assert.NotNull(installedBinding);
-        var method = typeof(SessionFileTransferService)
-            .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
-            .Single(candidate =>
-                string.Equals(candidate.Name, "TryAcceptRuntimeUnlockRouteCommitLocked", StringComparison.Ordinal) &&
-                candidate.GetParameters() is { Length: 5 } parameters &&
-                string.Equals(parameters[0].ParameterType.Name, "InboundTransferContext", StringComparison.Ordinal));
-        object?[] arguments =
-        [
+        var prepared = PrepareInboundRegularV4ToTunaRouteTransitionForPressureTest(
+            service,
             context,
-            FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4),
-            "unit_test_pressure_route_commit_proof_rejected",
-            null,
-            null,
-        ];
+            "unit_test_pressure_route_commit_proof_rejected");
+        transport.RuntimeUnlockRouteCommitSnapshot = null;
+        var committed = CommitInboundFileTransferRouteTransitionForPressureTest(
+            service,
+            context);
 
-        var accepted = Assert.IsType<bool>(method.Invoke(service, arguments));
-
-        Assert.False(accepted);
-        Assert.Equal("transaction_proof_missing", Assert.IsType<string>(arguments[3]));
+        Assert.True(prepared);
+        Assert.False(committed.Accepted);
+        Assert.Equal(
+            "filetransfer_route_transition_final_proof_missing",
+            committed.Reason);
         Assert.Equal(
             installedBinding,
             GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
@@ -495,18 +496,16 @@ public sealed partial class SessionFileTransferV4SenderTests
         _ = CreateInboundState(service, context, "frontier_stall_repair_due", forceMissingRange: true);
         Assert.NotNull(GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
 
-        var promoted = Assert.IsType<bool>(typeof(SessionFileTransferService)
-            .GetMethod("TryPromoteInboundRegularNknV4ToFileTunaV4Locked", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(
-                service,
-                [
-                    context,
-                    "pressure_route_commit",
-                    FileTransferTransportHandoffKind.NormalToTunaActivation,
-                    FileTransferTransportKind.Tuna,
-                ]));
+        var promoted = PrepareInboundRegularV4ToTunaRouteTransitionForPressureTest(
+            service,
+            context,
+            "pressure_route_commit");
+        var committed = CommitInboundFileTransferRouteTransitionForPressureTest(
+            service,
+            context);
 
         Assert.True(promoted);
+        Assert.True(committed.Accepted, committed.Reason);
         Assert.Equal(
             FileTransferRoute.FileTunaV4,
             GetPrivateProperty<FileTransferRouteSelection>(context, "RouteSelection").Route);
@@ -911,6 +910,80 @@ public sealed partial class SessionFileTransferV4SenderTests
         var log = ReadOperationalLogTail(logStart);
         Assert.Contains("lifecycle_outcome=Discarded", log, StringComparison.Ordinal);
         Assert.Contains("decision_status=Accepted", log, StringComparison.Ordinal);
+    }
+
+    private static bool PrepareInboundRegularV4ToTunaRouteTransitionForPressureTest(
+        SessionFileTransferService service,
+        object context,
+        string reason)
+    {
+        var serviceGate = typeof(SessionFileTransferService)
+            .GetField("gate", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(service)!;
+        lock (serviceGate)
+        {
+            var prepared = Assert.IsType<bool>(
+                typeof(SessionFileTransferService)
+                    .GetMethod(
+                        "TryPromoteInboundRegularNknV4ToFileTunaV4Locked",
+                        BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .Invoke(
+                        service,
+                        [
+                            context,
+                            reason,
+                            FileTransferTransportHandoffKind.NormalToTunaActivation,
+                            FileTransferTransportKind.Tuna,
+                        ]));
+            if (prepared &&
+                GetFileTransferRouteTransitionSubstate(context)
+                    .CurrentOperation is not null)
+            {
+                StabilizeFileTransferRouteTransitionDrainForTest(context);
+            }
+
+            return prepared;
+        }
+    }
+
+    private static (bool Accepted, string Reason)
+        CommitInboundFileTransferRouteTransitionForPressureTest(
+            SessionFileTransferService service,
+            object context)
+    {
+        var execution = Assert.IsAssignableFrom<object>(
+            GetCurrentFileTransferRouteTransitionExecution(context));
+        object?[] arguments = [context, execution, null, null];
+        var serviceGate = typeof(SessionFileTransferService)
+            .GetField("gate", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(service)!;
+        bool accepted;
+        lock (serviceGate)
+        {
+            accepted = Assert.IsType<bool>(
+                typeof(SessionFileTransferService)
+                    .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+                    .Single(candidate =>
+                    {
+                        if (!string.Equals(
+                                candidate.Name,
+                                "TryCommitInboundFileTransferRouteTransitionLocked",
+                                StringComparison.Ordinal))
+                        {
+                            return false;
+                        }
+
+                        var parameters = candidate.GetParameters();
+                        return parameters.Length == 4 &&
+                               parameters[0].ParameterType == context.GetType();
+                    })
+                    .Invoke(service, arguments));
+        }
+
+        return (
+            accepted,
+            arguments[3] as string ??
+            (accepted ? "none" : "filetransfer_route_transition_rejected"));
     }
 
     private static bool InvokeReceiveRecovery(

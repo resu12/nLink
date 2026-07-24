@@ -2324,6 +2324,322 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedAuthorityProofSuite", "FileTransferRouteTransition")]
+    public async Task AnalyzeRetained_FallbackRouteTransitions_ExactChainsPass(bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_generic_fallback_route_transition_valid";
+        var lines = BuildFileTunaV4DataPathProofFixture(
+            transferId,
+            FileTransferRouteTransitionProofMessage(
+                transferId,
+                operationGeneration: 11,
+                authorityId: "transition-tuna-fallback-11"),
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_prepared",
+                transferId,
+                operationGeneration: 11,
+                authorityId: "transition-tuna-fallback-11"),
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_pause_bound",
+                transferId,
+                operationGeneration: 11,
+                authorityId: "transition-tuna-fallback-11",
+                status: "Installed"),
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_draining",
+                transferId,
+                operationGeneration: 11,
+                authorityId: "transition-tuna-fallback-11",
+                status: "Draining"),
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_drain_receipt_decided",
+                transferId,
+                operationGeneration: 11,
+                authorityId: "transition-tuna-fallback-11",
+                status: "Accepted"),
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_committed",
+                transferId,
+                operationGeneration: 11,
+                authorityId: "transition-tuna-fallback-11",
+                status: "Committed"),
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_retained_frame_applied",
+                transferId,
+                operationGeneration: 11,
+                authorityId: "transition-tuna-fallback-11",
+                status: "Applied"),
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_disposition_applied",
+                transferId,
+                operationGeneration: 11,
+                authorityId: "transition-tuna-fallback-11",
+                status: "Committed"),
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_prepared",
+                transferId,
+                operationGeneration: 12,
+                authorityId: "transition-fallback-tuna-12",
+                sourceRoute: "post_tuna_fallback_v6",
+                sourceProtocol: 6,
+                targetRoute: "file_tuna_v4",
+                targetProtocol: 4,
+                targetTransport: "Tuna"),
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_pause_bound",
+                transferId,
+                operationGeneration: 12,
+                authorityId: "transition-fallback-tuna-12",
+                status: "Installed",
+                sourceRoute: "post_tuna_fallback_v6",
+                sourceProtocol: 6,
+                targetRoute: "file_tuna_v4",
+                targetProtocol: 4,
+                targetTransport: "Tuna"),
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_draining",
+                transferId,
+                operationGeneration: 12,
+                authorityId: "transition-fallback-tuna-12",
+                status: "Draining",
+                sourceRoute: "post_tuna_fallback_v6",
+                sourceProtocol: 6,
+                targetRoute: "file_tuna_v4",
+                targetProtocol: 4,
+                targetTransport: "Tuna"),
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_drain_receipt_decided",
+                transferId,
+                operationGeneration: 12,
+                authorityId: "transition-fallback-tuna-12",
+                status: "Accepted",
+                sourceRoute: "post_tuna_fallback_v6",
+                sourceProtocol: 6,
+                targetRoute: "file_tuna_v4",
+                targetProtocol: 4,
+                targetTransport: "Tuna"),
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_committed",
+                transferId,
+                operationGeneration: 12,
+                authorityId: "transition-fallback-tuna-12",
+                status: "Committed",
+                sourceRoute: "post_tuna_fallback_v6",
+                sourceProtocol: 6,
+                targetRoute: "file_tuna_v4",
+                targetProtocol: 4,
+                targetTransport: "Tuna"),
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_disposition_applied",
+                transferId,
+                operationGeneration: 12,
+                authorityId: "transition-fallback-tuna-12",
+                status: "Committed",
+                sourceRoute: "post_tuna_fallback_v6",
+                sourceProtocol: 6,
+                targetRoute: "file_tuna_v4",
+                targetProtocol: 4,
+                targetTransport: "Tuna"));
+
+        var result = compact
+            ? await RunAnalyzeFixtureAsync(
+                lines,
+                environment: new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                })
+            : await RunAnalyzeFixtureAsync(lines);
+        Assert.Equal(0, result.Script.ExitCode);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("0", verdict["filetransfer_route_transition_incomplete_unresolved_count"]);
+        Assert.Equal("pass", verdict["filetransfer_route_transition_verdict"]);
+        Assert.NotEqual("filetransfer_route_transition_incomplete", verdict["first_proof_chain_failure_class"]);
+    }
+
+    [Theory]
+    [InlineData(false, "missing_frame")]
+    [InlineData(true, "missing_frame")]
+    [InlineData(false, "local_proof_consumed")]
+    [InlineData(true, "local_proof_consumed")]
+    [InlineData(false, "payload_after_draining")]
+    [InlineData(true, "payload_after_draining")]
+    [InlineData(false, "owner_before_drain")]
+    [InlineData(true, "owner_before_drain")]
+    [InlineData(false, "old_scope_completion")]
+    [InlineData(true, "old_scope_completion")]
+    [InlineData(false, "frame_rejected")]
+    [InlineData(true, "frame_rejected")]
+    [InlineData(false, "duplicate_frame")]
+    [InlineData(true, "duplicate_frame")]
+    [Trait("RetainedAuthorityProofSuite", "FileTransferRouteTransition")]
+    public async Task AnalyzeRetained_FallbackRouteTransition_ViolationsHaveFullCompactParity(
+        bool compact,
+        string violation)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var transferId = $"transfer_generic_fallback_route_transition_{violation}_{compact}";
+        var messages = new List<string>
+        {
+            FileTransferRouteTransitionProofMessage(transferId, 21, "transition-fallback-21"),
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_prepared",
+                transferId,
+                21,
+                "transition-fallback-21"),
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_pause_bound",
+                transferId,
+                21,
+                "transition-fallback-21",
+                status: "Installed"),
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_draining",
+                transferId,
+                21,
+                "transition-fallback-21",
+                status: "Draining")
+        };
+        if (violation == "payload_after_draining")
+        {
+            messages.Add(
+                FileTransferRouteTransitionMessage(
+                    "filetransfer_route_transition_physical_send_lease_registered",
+                    transferId,
+                    21,
+                    "transition-fallback-21",
+                    status: "Registered",
+                    writerSequence: 71));
+        }
+        if (violation == "local_proof_consumed")
+        {
+            messages.Add(
+                FileTransferRouteTransitionMessage(
+                    "filetransfer_post_tuna_fallback_v6_route_consumed",
+                    transferId,
+                    21,
+                    "transition-fallback-21",
+                    status: "Consumed",
+                    writerSequence: 72));
+        }
+        if (violation == "owner_before_drain")
+        {
+            messages.Add(
+                $"event=filetransfer_route_transitioned; direction=outbound; transfer_id={transferId}; " +
+                "session_id=sess_a; route=post_tuna_fallback_v6; new_route=post_tuna_fallback_v6; " +
+                "protocol_version=6; runtime_generation=7; terminal_generation=0; leg_generation=6; " +
+                "route_publication_generation=9; log_writer_id=writer_route_transition; " +
+                "log_writer_sequence=72");
+        }
+        messages.Add(
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_drain_receipt_decided",
+                transferId,
+                21,
+                "transition-fallback-21",
+                status: "Accepted"));
+        messages.Add(
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_committed",
+                transferId,
+                21,
+                "transition-fallback-21",
+                status: "Committed"));
+        if (violation == "old_scope_completion")
+        {
+            messages.Add(
+                FileTransferRouteTransitionMessage(
+                    "filetransfer_route_transition_physical_send_lease_retired",
+                    transferId,
+                    21,
+                    "transition-fallback-21",
+                    status: "Completed",
+                    writerSequence: 72));
+        }
+        if (violation == "frame_rejected")
+        {
+            messages.Add(
+                FileTransferRouteTransitionMessage(
+                    "filetransfer_route_transition_retained_frame_rejected",
+                    transferId,
+                    21,
+                    "transition-fallback-21",
+                    status: "Rejected",
+                    writerSequence: 72));
+        }
+        if (violation != "missing_frame")
+        {
+            messages.Add(
+                FileTransferRouteTransitionMessage(
+                    "filetransfer_route_transition_retained_frame_applied",
+                    transferId,
+                    21,
+                    "transition-fallback-21",
+                    status: "Applied"));
+        }
+        if (violation == "duplicate_frame")
+        {
+            messages.Add(
+                FileTransferRouteTransitionMessage(
+                    "filetransfer_route_transition_retained_frame_applied",
+                    transferId,
+                    21,
+                    "transition-fallback-21",
+                    status: "Applied",
+                    writerSequence: 72));
+        }
+        messages.Add(
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_disposition_applied",
+                transferId,
+                21,
+                "transition-fallback-21",
+                status: "Committed",
+                writerSequence: 73));
+
+        var lines = BuildFileTunaV4DataPathProofFixture(transferId, messages.ToArray());
+        var result = compact
+            ? await RunAnalyzeFixtureAsync(
+                lines,
+                environment: new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                })
+            : await RunAnalyzeFixtureAsync(lines);
+        Assert.Equal(0, result.Script.ExitCode);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["filetransfer_route_transition_incomplete_raw_count"]);
+        Assert.Equal("1", verdict["filetransfer_route_transition_incomplete_distinct_count"]);
+        Assert.Equal("1", verdict["filetransfer_route_transition_incomplete_unresolved_count"]);
+        Assert.Equal("fail", verdict["filetransfer_route_transition_verdict"]);
+        Assert.Equal("filetransfer_route_transition_incomplete", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal(
+            violation switch
+            {
+                "missing_frame" => "fallback_route_transition_retained_frame_not_applied",
+                "local_proof_consumed" => "fallback_peer_proof_consumed_without_coordinator_transition_commit",
+                "owner_before_drain" => "successor_owner_or_publication_installed_before_route_transition_drain",
+                "old_scope_completion" => "old_scope_physical_send_completed_after_successor_owner_install",
+                "frame_rejected" => "fallback_route_transition_retained_frame_rejected",
+                "duplicate_frame" => "fallback_route_transition_retained_frame_applied_more_than_once",
+                _ => "source_payload_lease_registered_after_route_transition_draining"
+            },
+            verdict["first_proof_chain_failure_reason"]);
+    }
+
+    [Theory]
     [InlineData("runtime_generation")]
     [InlineData("range")]
     [Trait("RetainedAuthorityProofSuite", "FileTunaV4DataPathProof")]
@@ -3162,6 +3478,70 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
            "route_commit_generation=1; target_route=file_tuna_v4; target_protocol_version=4; " +
            "target_transport=tuna; route_publication_action_kind=RouteCommitPublication; " +
            "coordinator_decision_reason=regular_v4_to_tuna_transition_committed; completed_send_drain_generation=3";
+
+    private static string FileTransferRouteTransitionProofMessage(
+        string transferId,
+        int operationGeneration,
+        string authorityId)
+        => FileTransferRouteTransitionMessage(
+            "filetransfer_route_transition_peer_proof_observed",
+            transferId,
+            operationGeneration,
+            authorityId,
+            status: "Observed");
+
+    private static string FileTransferRouteTransitionMessage(
+        string eventName,
+        string transferId,
+        int operationGeneration,
+        string authorityId,
+        string? status = null,
+        string sourceRoute = "file_tuna_v4",
+        int sourceProtocol = 4,
+        string targetRoute = "post_tuna_fallback_v6",
+        int targetProtocol = 6,
+        string targetTransport = "RegularNkn",
+        int? writerSequence = null)
+    {
+        status ??= eventName switch
+        {
+            "filetransfer_route_transition_prepared" => "Prepared",
+            "filetransfer_route_transition_pause_bound" => "Installed",
+            "filetransfer_route_transition_draining" => "Draining",
+            "filetransfer_route_transition_drain_receipt_decided" => "Accepted",
+            "filetransfer_route_transition_committed" => "Committed",
+            "filetransfer_route_transition_invalidated" => "Invalidated",
+            "filetransfer_route_transition_retained_frame_applied" => "Applied",
+            _ => "Accepted"
+        };
+        var transitionKind = sourceRoute switch
+        {
+            "post_tuna_fallback_v6" => "PostTunaFallbackToTuna",
+            "regular_nkn_v4_fast" when targetRoute == "post_tuna_fallback_v6" => "UncommittedTunaToPostTunaFallback",
+            "regular_nkn_v4_fast" => "RegularV4ToTuna",
+            _ => "TunaToPostTunaFallback"
+        };
+        return $"event={eventName}; direction=outbound; transfer_id={transferId}; session_id=sess_a; " +
+               $"operation_generation={operationGeneration}; transition_generation={operationGeneration}; " +
+               $"authority_id={authorityId}; predecessor_authority_id=(none); transition_kind={transitionKind}; " +
+               $"source_route={sourceRoute}; source_protocol_version={sourceProtocol}; " +
+               $"source_transport={(sourceRoute == "file_tuna_v4" ? "tuna" : "regular_nkn")}; " +
+               "source_live_route_epoch=4; " +
+               "source_runtime_generation=6; source_route_publication_generation=8; source_terminal_generation=0; " +
+               "source_leg_generation=5; source_transport_epoch=2; source_bridge_recovery_generation=1; " +
+               "source_data_session_generation=3; peer_proof_generation=4; peer_proof_transport_epoch=3; " +
+               "peer_proof_kind=post_tuna_fallback_nkn; retained_frame_type=filetransfer.state.v6; " +
+               "retained_frame_transport_epoch=3; retained_frame_fingerprint=frame-hash-1; " +
+               "proof_generation=4; proof_transport_epoch=3; proof_kind=post_tuna_fallback_nkn; " +
+               "frame_type=filetransfer.state.v6; frame_transport_epoch=3; frame_fingerprint=frame-hash-1; " +
+               $"target_route={targetRoute}; target_protocol_version={targetProtocol}; target_transport={targetTransport}; " +
+               "captured_send_count=0; completed_send_count=0; captured_lease_fingerprint=empty-set; " +
+               "completed_lease_fingerprint=empty-set; outcome=Completed; " +
+               $"status={status}; decision_reason=fixture" +
+               (writerSequence.HasValue
+                   ? $"; log_writer_id=writer_route_transition; log_writer_sequence={writerSequence.Value}"
+                   : string.Empty);
+    }
 
     private static string FileTunaV4DataPathAuthoritySuffix(string transferId)
         => $"direction=outbound; transfer_id={transferId}; session_id=sess_a; route=file_tuna_v4; protocol_version=4; live_route_epoch=3; runtime_generation=7; terminal_generation=0; leg_generation=4; route_publication_generation=9; route_commit_generation=0; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; intended_target_transport=tuna; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted";

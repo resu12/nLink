@@ -5,13 +5,13 @@ using NLink.Infra.DevLocal;
 
 namespace NLink.SmokeTests;
 
-public sealed class RegularV4ToTunaRouteTransitionDevLocalAvailabilityTests
+public sealed class FileTransferRouteTransitionDevLocalAvailabilityTests
 {
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
     [Trait("Category", "LegacySmoke")]
-    [Trait("FileTransferInfraSuite", "RegularV4ToTunaRouteTransition")]
+    [Trait("FileTransferInfraSuite", "FileTransferRouteTransition")]
     public async Task PauseBindingRejectsMissingOrStaleExactDataSession(
         bool openStaleSession)
     {
@@ -26,25 +26,29 @@ public sealed class RegularV4ToTunaRouteTransitionDevLocalAvailabilityTests
             ? 1
             : GetGeneration(dataSession) + 1;
         var bridge =
-            Assert.IsAssignableFrom<IRegularV4ToTunaRouteTransitionBridge>(
+            Assert.IsAssignableFrom<IFileTransferRouteTransitionBridge>(
                 transport);
 
-        var receipt = bridge.BindRegularV4ToTunaActivationPause(
-            new RegularV4ToTunaActivationPauseBindCommand(
+        var receipt = bridge.BindFileTransferRouteTransitionPause(
+            new FileTransferRouteTransitionPauseBindCommand(
                 CreateAuthority(dataSessionGeneration)));
 
         Assert.Equal(
-            RegularV4ToTunaActivationPauseBindStatus.Rejected,
+            FileTransferRouteTransitionPauseBindStatus.Rejected,
             receipt.Status);
         Assert.Equal(
-            "regular_v4_to_tuna_data_session_not_current",
+            "filetransfer_route_transition_data_session_not_current",
             receipt.Reason);
+        var transitionShadow = typeof(DevLocalTransport)
+            .GetField(
+                "fileTransferRouteTransitionExecutionShadow",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(transport);
+        Assert.NotNull(transitionShadow);
         Assert.Null(
-            typeof(DevLocalTransport)
-                .GetField(
-                    "regularV4ToTunaActivationPauseShadow",
-                    BindingFlags.Instance | BindingFlags.NonPublic)!
-                .GetValue(transport));
+            transitionShadow!.GetType()
+                .GetProperty("Current")!
+                .GetValue(transitionShadow));
         if (dataSession is not null)
         {
             Assert.True(dataSession.IsAvailable);
@@ -56,7 +60,7 @@ public sealed class RegularV4ToTunaRouteTransitionDevLocalAvailabilityTests
     [InlineData("RolledBack", true, FileTransferTransportKind.RegularNkn)]
     [InlineData("TerminalInvalidated", false, FileTransferTransportKind.Unknown)]
     [Trait("Category", "LegacySmoke")]
-    [Trait("FileTransferInfraSuite", "RegularV4ToTunaRouteTransition")]
+    [Trait("FileTransferInfraSuite", "FileTransferRouteTransition")]
     public async Task ExactDispositionControlsDevLocalDataSessionAvailability(
         string dispositionKind,
         bool releasesAvailability,
@@ -69,34 +73,34 @@ public sealed class RegularV4ToTunaRouteTransitionDevLocalAvailabilityTests
             CancellationToken.None);
         var authority = CreateAuthority(GetGeneration(dataSession));
         var bridge =
-            Assert.IsAssignableFrom<IRegularV4ToTunaRouteTransitionBridge>(
+            Assert.IsAssignableFrom<IFileTransferRouteTransitionBridge>(
                 transport);
         var availability = new ConcurrentQueue<
             FileTransferDataSessionAvailabilityChangedEventArgs>();
         dataSession.AvailabilityChanged += (_, args) => availability.Enqueue(args);
 
         Assert.Equal(
-            RegularV4ToTunaActivationPauseBindStatus.Installed,
-            bridge.BindRegularV4ToTunaActivationPause(
-                new RegularV4ToTunaActivationPauseBindCommand(authority)).Status);
+            FileTransferRouteTransitionPauseBindStatus.Installed,
+            bridge.BindFileTransferRouteTransitionPause(
+                new FileTransferRouteTransitionPauseBindCommand(authority)).Status);
         Assert.False(dataSession.IsAvailable);
         Assert.Empty(availability);
 
         var kind =
-            Enum.Parse<RegularV4ToTunaRouteTransitionDispositionKind>(
+            Enum.Parse<FileTransferRouteTransitionDispositionKind>(
                 dispositionKind);
         var disposition = kind ==
-                          RegularV4ToTunaRouteTransitionDispositionKind.Committed
+                          FileTransferRouteTransitionDispositionKind.Committed
             ? CreateCommittedDisposition(authority)
-            : new RegularV4ToTunaRouteTransitionDispositionCommand(
+            : new FileTransferRouteTransitionDispositionCommand(
                 authority,
                 kind,
                 RouteCommitToken: null,
                 RoutePublicationToken: null,
                 Reason: "test_devlocal_disposition");
         Assert.Equal(
-            RegularV4ToTunaRouteTransitionDispositionApplyStatus.Applied,
-            bridge.ApplyRegularV4ToTunaRouteTransitionDisposition(disposition)
+            FileTransferRouteTransitionDispositionApplyStatus.Applied,
+            bridge.ApplyFileTransferRouteTransitionDisposition(disposition)
                 .Status);
 
         if (!releasesAvailability)
@@ -118,7 +122,7 @@ public sealed class RegularV4ToTunaRouteTransitionDevLocalAvailabilityTests
     [InlineData("RolledBack", true)]
     [InlineData("TerminalInvalidated", false)]
     [Trait("Category", "LegacySmoke")]
-    [Trait("FileTransferInfraSuite", "RegularV4ToTunaRouteTransition")]
+    [Trait("FileTransferInfraSuite", "FileTransferRouteTransition")]
     public async Task SupersededDevLocalHandoffWaitsForFinalDisposition(
         string finalDispositionKind,
         bool releasesAvailability)
@@ -130,31 +134,31 @@ public sealed class RegularV4ToTunaRouteTransitionDevLocalAvailabilityTests
             CancellationToken.None);
         var authority = CreateAuthority(GetGeneration(dataSession));
         var bridge =
-            Assert.IsAssignableFrom<IRegularV4ToTunaRouteTransitionBridge>(
+            Assert.IsAssignableFrom<IFileTransferRouteTransitionBridge>(
                 transport);
         var availability = new ConcurrentQueue<
             FileTransferDataSessionAvailabilityChangedEventArgs>();
         dataSession.AvailabilityChanged += (_, args) => availability.Enqueue(args);
 
         Assert.Equal(
-            RegularV4ToTunaActivationPauseBindStatus.Installed,
-            bridge.BindRegularV4ToTunaActivationPause(
-                new RegularV4ToTunaActivationPauseBindCommand(authority)).Status);
+            FileTransferRouteTransitionPauseBindStatus.Installed,
+            bridge.BindFileTransferRouteTransitionPause(
+                new FileTransferRouteTransitionPauseBindCommand(authority)).Status);
         Assert.Equal(
-            RegularV4ToTunaRouteTransitionDispositionApplyStatus.Applied,
-            bridge.ApplyRegularV4ToTunaRouteTransitionDisposition(
+            FileTransferRouteTransitionDispositionApplyStatus.Applied,
+            bridge.ApplyFileTransferRouteTransitionDisposition(
                 CreateSupersededDisposition(authority)).Status);
         await Task.Delay(25);
         Assert.False(dataSession.IsAvailable);
         Assert.Empty(availability);
 
         var finalKind =
-            Enum.Parse<RegularV4ToTunaRouteTransitionDispositionKind>(
+            Enum.Parse<FileTransferRouteTransitionDispositionKind>(
                 finalDispositionKind);
         Assert.Equal(
-            RegularV4ToTunaRouteTransitionDispositionApplyStatus.Applied,
-            bridge.ApplyRegularV4ToTunaRouteTransitionDisposition(
-                new RegularV4ToTunaRouteTransitionDispositionCommand(
+            FileTransferRouteTransitionDispositionApplyStatus.Applied,
+            bridge.ApplyFileTransferRouteTransitionDisposition(
+                new FileTransferRouteTransitionDispositionCommand(
                     authority,
                     finalKind,
                     RouteCommitToken: null,
@@ -177,35 +181,146 @@ public sealed class RegularV4ToTunaRouteTransitionDevLocalAvailabilityTests
         }
     }
 
+    [Fact]
+    [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "FileTransferRouteTransition")]
+    public async Task ExactSuccessorRebindRetainsPredecessorUntilSuperseded()
+    {
+        using var transport = new DevLocalTransport();
+        using var dataSession = await transport.OpenFileTransferDataSessionAsync(
+            "route-transition-session",
+            "route-transition-transfer",
+            CancellationToken.None);
+        var predecessor = CreateAuthority(GetGeneration(dataSession));
+        var successor = CreateFallbackSuccessor(predecessor);
+        var bridge =
+            Assert.IsAssignableFrom<IFileTransferRouteTransitionBridge>(
+                transport);
+
+        Assert.Equal(
+            FileTransferRouteTransitionPauseBindStatus.Installed,
+            bridge.BindFileTransferRouteTransitionPause(
+                new FileTransferRouteTransitionPauseBindCommand(predecessor))
+                .Status);
+        Assert.Equal(
+            FileTransferRouteTransitionPauseBindStatus.Installed,
+            bridge.BindFileTransferRouteTransitionPause(
+                new FileTransferRouteTransitionPauseBindCommand(successor)
+                {
+                    PredecessorAuthority = predecessor,
+                }).Status);
+        Assert.False(dataSession.IsAvailable);
+
+        var predecessorSuperseded =
+            new FileTransferRouteTransitionDispositionCommand(
+                predecessor,
+                FileTransferRouteTransitionDispositionKind.Superseded,
+                RouteCommitToken: null,
+                RoutePublicationToken: null,
+                Reason: "test_predecessor_superseded");
+        Assert.Equal(
+            FileTransferRouteTransitionDispositionApplyStatus.Applied,
+            bridge.ApplyFileTransferRouteTransitionDisposition(
+                predecessorSuperseded).Status);
+        Assert.Equal(
+            FileTransferRouteTransitionDispositionApplyStatus.Idempotent,
+            bridge.ApplyFileTransferRouteTransitionDisposition(
+                predecessorSuperseded).Status);
+        Assert.False(dataSession.IsAvailable);
+
+        Assert.Equal(
+            FileTransferRouteTransitionDispositionApplyStatus.Rejected,
+            bridge.ApplyFileTransferRouteTransitionDisposition(
+                new FileTransferRouteTransitionDispositionCommand(
+                    predecessor,
+                    FileTransferRouteTransitionDispositionKind.RolledBack,
+                    RouteCommitToken: null,
+                    RoutePublicationToken: null,
+                    Reason: "test_stale_predecessor_rollback")).Status);
+        Assert.False(dataSession.IsAvailable);
+
+        Assert.Equal(
+            FileTransferRouteTransitionDispositionApplyStatus.Applied,
+            bridge.ApplyFileTransferRouteTransitionDisposition(
+                new FileTransferRouteTransitionDispositionCommand(
+                    successor,
+                    FileTransferRouteTransitionDispositionKind.RolledBack,
+                    RouteCommitToken: null,
+                    RoutePublicationToken: null,
+                    Reason: "test_successor_rollback")).Status);
+        await WaitUntilAsync(() => dataSession.IsAvailable);
+    }
+
     private static long GetGeneration(IFileTransferDataSession dataSession)
         => Assert.IsType<long>(
             dataSession.GetType().GetProperty("Generation")!.GetValue(dataSession));
 
-    private static RegularV4ToTunaRouteTransitionAuthority CreateAuthority(
+    private static FileTransferRouteTransitionAuthority CreateAuthority(
         long dataSessionGeneration)
-        => InvokeFactory<RegularV4ToTunaRouteTransitionAuthority>(
+        => InvokeFactory<FileTransferRouteTransitionAuthority>(
             "CreateAuthority",
             "devlocal-availability",
             dataSessionGeneration);
 
-    private static RegularV4ToTunaRouteTransitionDispositionCommand
+    private static FileTransferRouteTransitionDispositionCommand
         CreateCommittedDisposition(
-            RegularV4ToTunaRouteTransitionAuthority authority)
-        => InvokeFactory<RegularV4ToTunaRouteTransitionDispositionCommand>(
+            FileTransferRouteTransitionAuthority authority)
+        => InvokeFactory<FileTransferRouteTransitionDispositionCommand>(
             "CreateCommittedDisposition",
             authority);
 
-    private static RegularV4ToTunaRouteTransitionDispositionCommand
+    private static FileTransferRouteTransitionDispositionCommand
         CreateSupersededDisposition(
-            RegularV4ToTunaRouteTransitionAuthority authority)
-        => InvokeFactory<RegularV4ToTunaRouteTransitionDispositionCommand>(
+            FileTransferRouteTransitionAuthority authority)
+        => InvokeFactory<FileTransferRouteTransitionDispositionCommand>(
             "CreateSupersededDisposition",
             authority);
+
+    private static FileTransferRouteTransitionAuthority CreateFallbackSuccessor(
+        FileTransferRouteTransitionAuthority predecessor)
+    {
+        var frameIdentity = new PostTunaFallbackPeerProofFrameIdentity(
+            FileTransferProtocol.ReceiverStateFrameTypeV6,
+            TransportEpoch: 7,
+            Sha256: new string('a', 64));
+        var peerProof = new PostTunaFallbackPeerProofEvidence(
+            predecessor.SessionId,
+            predecessor.TransferId,
+            predecessor.Direction,
+            ProofGeneration: 1,
+            TransportEpoch: frameIdentity.TransportEpoch,
+            ProofKind: "filetransfer_v6_peer_receiver_state_received",
+            Reason: "test_peer_fallback_proof",
+            FrameIdentity: frameIdentity);
+        return predecessor with
+        {
+            Kind =
+                FileTransferRouteTransitionKind
+                    .UncommittedTunaToPostTunaFallbackV6,
+            ProofBoundary = new FileTransferFallbackTransitionProofBoundary(
+                SourceRouteCommit: null,
+                peerProof,
+                frameIdentity,
+                TargetTransportEpoch: frameIdentity.TransportEpoch,
+                TargetBridgeRecoveryGeneration: 1,
+                PredecessorTransitionAuthorityId: predecessor.AuthorityId),
+            TargetRoute = FileTransferRoute.PostTunaFallbackV6,
+            TargetProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+            TargetTransport = FileTransferTransportKind.RegularNkn,
+            HandoffKind =
+                FileTransferTransportHandoffKind.TunaToNormalFallback,
+            TransitionGeneration = predecessor.TransitionGeneration + 1,
+            AuthorityId = new FileTransferAuthorityId(
+                "fta4-devlocal-fallback-successor"),
+            PredecessorTransitionAuthorityId = predecessor.AuthorityId,
+            Reason = "test_uncommitted_tuna_fallback_successor",
+        };
+    }
 
     private static T InvokeFactory<T>(string methodName, params object[] args)
     {
         var method =
-            typeof(RegularV4ToTunaRouteTransitionInfraTests).GetMethod(
+            typeof(FileTransferRouteTransitionInfraTests).GetMethod(
                 methodName,
                 BindingFlags.NonPublic | BindingFlags.Static);
         Assert.NotNull(method);
@@ -230,5 +345,16 @@ public sealed class RegularV4ToTunaRouteTransitionDevLocalAvailabilityTests
 
         Assert.Fail("Expected an exact DevLocal transition availability event.");
         return null!;
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> predicate)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(3);
+        while (!predicate() && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(10);
+        }
+
+        Assert.True(predicate());
     }
 }

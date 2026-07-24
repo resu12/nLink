@@ -1520,6 +1520,27 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_to_tuna_route_transition_disposition_applied') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_physical_send_lease_registered') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_physical_send_lease_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_peer_proof_observed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_prepared') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_pause_bound') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_draining') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_supersession_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_drain_receipt_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_committed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_invalidated') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_disposition_applied') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_retained_frame_applied') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_retained_frame_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_physical_send_lease_registered') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_physical_send_lease_retired') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_physical_send_lease_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_post_tuna_fallback_v6_route_consumed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_selected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_hint_authorized_publication_accepted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_data_session_availability_changed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_transport_availability_changed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_availability_changed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_acked') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transitioned') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_outbound_terminal') +
@@ -1528,6 +1549,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_terminalized') |
             Sort-Object Sequence, LineNumber
     )
+    $fileTransferRouteTransitionProof =
+        Get-FileTransferRouteTransitionCorrelation -Events $fileTunaV4DataPathEvents
     $runtimeUnlockRegularV4RouteCommitSendDrainProof =
         Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation -Events $fileTunaV4DataPathEvents
     $fileTunaV4DataPathMismatchProof =
@@ -1675,6 +1698,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     foreach ($candidateRecord in @($runtimeUnlockRegularV4RouteCommitSendDrainProof.UnresolvedCandidateRecords)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'runtime_unlock_regular_v4_route_commit_send_drain_missing'
+            Event = $candidateRecord.Event
+            Reason = $candidateRecord.Reason
+        }) | Out-Null
+    }
+    foreach ($candidateRecord in @($fileTransferRouteTransitionProof.UnresolvedCandidateRecords)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'filetransfer_route_transition_incomplete'
             Event = $candidateRecord.Event
             Reason = $candidateRecord.Reason
         }) | Out-Null
@@ -1927,6 +1957,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $fallbackTailTransportEpochReauthorizationProof.UnresolvedCount -gt 0 -or
         $regularV4FrontierTailRepairStatePublicationProof.UnresolvedCount -gt 0 -or
         $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.UnresolvedCount -gt 0 -or
+        $fileTransferRouteTransitionProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RouteCommitSendDrainProof.UnresolvedCount -gt 0) {
         $verdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
         $gateStatus = 'fail'
@@ -1977,6 +2008,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch',
                 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing',
                 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound',
+                'filetransfer_route_transition_incomplete',
                 'runtime_unlock_regular_v4_route_commit_send_drain_missing')) {
             $verdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
             $gateStatus = 'fail'
@@ -2032,6 +2064,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         0L
     }
     $semanticFailureDomain = if ($firstProofChainFailureClass -in @(
+            'filetransfer_route_transition_incomplete',
             'runtime_unlock_regular_v4_route_commit_send_drain_missing',
             'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved',
             'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing',
@@ -2099,6 +2132,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
         ("first_proof_chain_failure_writer_sequence={0}" -f $firstProofChainFailureWriterSequence),
         ("semantic_failure_domain={0}" -f $semanticFailureDomain),
+        ("filetransfer_route_transition_incomplete_raw_count={0}" -f $fileTransferRouteTransitionProof.RawCount),
+        ("filetransfer_route_transition_incomplete_distinct_count={0}" -f $fileTransferRouteTransitionProof.DistinctCount),
+        ("filetransfer_route_transition_incomplete_recovered_count={0}" -f $fileTransferRouteTransitionProof.RecoveredCount),
+        ("filetransfer_route_transition_incomplete_unresolved_count={0}" -f $fileTransferRouteTransitionProof.UnresolvedCount),
+        ("filetransfer_route_transition_verdict={0}" -f $fileTransferRouteTransitionProof.Verdict),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RawCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.DistinctCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RecoveredCount),
@@ -2319,6 +2357,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
         ("first_proof_chain_failure_writer_sequence={0}" -f $firstProofChainFailureWriterSequence),
         ("semantic_failure_domain={0}" -f $semanticFailureDomain),
+        ("filetransfer_route_transition_incomplete_raw_count={0}" -f $fileTransferRouteTransitionProof.RawCount),
+        ("filetransfer_route_transition_incomplete_distinct_count={0}" -f $fileTransferRouteTransitionProof.DistinctCount),
+        ("filetransfer_route_transition_incomplete_recovered_count={0}" -f $fileTransferRouteTransitionProof.RecoveredCount),
+        ("filetransfer_route_transition_incomplete_unresolved_count={0}" -f $fileTransferRouteTransitionProof.UnresolvedCount),
+        ("filetransfer_route_transition_verdict={0}" -f $fileTransferRouteTransitionProof.Verdict),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RawCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.DistinctCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RecoveredCount),
@@ -2512,6 +2555,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
         ("first_proof_chain_failure_writer_sequence={0}" -f $firstProofChainFailureWriterSequence),
         ("semantic_failure_domain={0}" -f $semanticFailureDomain),
+        ("filetransfer_route_transition_incomplete_raw_count={0}" -f $fileTransferRouteTransitionProof.RawCount),
+        ("filetransfer_route_transition_incomplete_distinct_count={0}" -f $fileTransferRouteTransitionProof.DistinctCount),
+        ("filetransfer_route_transition_incomplete_recovered_count={0}" -f $fileTransferRouteTransitionProof.RecoveredCount),
+        ("filetransfer_route_transition_incomplete_unresolved_count={0}" -f $fileTransferRouteTransitionProof.UnresolvedCount),
+        ("filetransfer_route_transition_verdict={0}" -f $fileTransferRouteTransitionProof.Verdict),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RawCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.DistinctCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RecoveredCount),
@@ -2684,6 +2732,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
         ("first_proof_chain_failure_writer_sequence={0}" -f $firstProofChainFailureWriterSequence),
         ("semantic_failure_domain={0}" -f $semanticFailureDomain),
+        ("filetransfer_route_transition_incomplete_raw_count={0}" -f $fileTransferRouteTransitionProof.RawCount),
+        ("filetransfer_route_transition_incomplete_distinct_count={0}" -f $fileTransferRouteTransitionProof.DistinctCount),
+        ("filetransfer_route_transition_incomplete_recovered_count={0}" -f $fileTransferRouteTransitionProof.RecoveredCount),
+        ("filetransfer_route_transition_incomplete_unresolved_count={0}" -f $fileTransferRouteTransitionProof.UnresolvedCount),
+        ("filetransfer_route_transition_verdict={0}" -f $fileTransferRouteTransitionProof.Verdict),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RawCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.DistinctCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RecoveredCount),
@@ -2867,6 +2920,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         first_proof_chain_failure_line_number = $firstProofChainFailureLineNumber
         first_proof_chain_failure_writer_sequence = $firstProofChainFailureWriterSequence
         semantic_failure_domain = $semanticFailureDomain
+        filetransfer_route_transition_incomplete_raw_count = $fileTransferRouteTransitionProof.RawCount
+        filetransfer_route_transition_incomplete_distinct_count = $fileTransferRouteTransitionProof.DistinctCount
+        filetransfer_route_transition_incomplete_recovered_count = $fileTransferRouteTransitionProof.RecoveredCount
+        filetransfer_route_transition_incomplete_unresolved_count = $fileTransferRouteTransitionProof.UnresolvedCount
+        filetransfer_route_transition_verdict = $fileTransferRouteTransitionProof.Verdict
         runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count = $runtimeUnlockRegularV4RouteCommitSendDrainProof.RawCount
         runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count = $runtimeUnlockRegularV4RouteCommitSendDrainProof.DistinctCount
         runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count = $runtimeUnlockRegularV4RouteCommitSendDrainProof.RecoveredCount
