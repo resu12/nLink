@@ -16,6 +16,35 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptancePhase5TestBase
 {
     [Fact]
+    public async Task RunFileTransferRouteAcceptance_ReceiveRecoveryOperationCountersReachScenarioAndRootSummaries()
+    {
+        var repoRoot = FindRepoRoot();
+        var script = await File.ReadAllTextAsync(
+            Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"));
+
+        Assert.Contains(
+            "$Result.fileTransferReceiveRecoveryOperationRawCount = ConvertTo-RouteAcceptanceInt",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "fileTransferReceiveRecoveryOperationRawCount = [int]$Result.fileTransferReceiveRecoveryOperationRawCount",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$fileTransferReceiveRecoveryOperationRawCount += [int]$runDto.fileTransferReceiveRecoveryOperationRawCount",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "filetransfer_receive_recovery_operation_unresolved_count={0}",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "fileTransferReceiveRecoveryOperationVerdict = if ($fileTransferReceiveRecoveryOperationUnresolvedCount -gt 0)",
+            script,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     [Trait("Category", "Smoke")]
     public async Task RunFileTransferRouteAcceptance_Phase5SingleScenarioSummaryUsesFilteredRunCount()
     {

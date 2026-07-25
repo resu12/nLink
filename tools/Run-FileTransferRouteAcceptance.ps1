@@ -1234,6 +1234,11 @@ function New-RouteAcceptanceRunResult {
         runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount = 0
         runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount = 0
         runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount = 0
+        fileTransferReceiveRecoveryOperationVerdict = 'none'
+        fileTransferReceiveRecoveryOperationRawCount = 0
+        fileTransferReceiveRecoveryOperationDistinctCount = 0
+        fileTransferReceiveRecoveryOperationRecoveredCount = 0
+        fileTransferReceiveRecoveryOperationUnresolvedCount = 0
         sessionLivenessTimeoutCount = 0
         bridgeLivenessStaleDeferralCount = 0
         bridgeLivenessTimeoutDuringValidRecoveryCount = 0
@@ -2413,6 +2418,11 @@ function Assert-Phase4RouteSummary {
     $Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count' -DefaultValue '0')
     $Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count' -DefaultValue '0')
     $Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryOperationVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'filetransfer_receive_recovery_operation_verdict' -DefaultValue 'none'
+    $Result.fileTransferReceiveRecoveryOperationRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'filetransfer_receive_recovery_operation_raw_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryOperationDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'filetransfer_receive_recovery_operation_distinct_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryOperationRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'filetransfer_receive_recovery_operation_recovered_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryOperationUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'filetransfer_receive_recovery_operation_unresolved_count' -DefaultValue '0')
     $Result.bridgeLivenessStaleDeferralCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'bridge_liveness_stale_deferral_count' -DefaultValue '0')
     $Result.bridgeLivenessTimeoutDuringValidRecoveryCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'session_liveness_timeout_during_valid_recovery_count' -DefaultValue '0')
 
@@ -2621,6 +2631,11 @@ function Assert-Phase4OperatorVerdict {
     $Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count' -DefaultValue ([string]$Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount))
     $Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count' -DefaultValue ([string]$Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount))
     $Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count' -DefaultValue ([string]$Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount))
+    $Result.fileTransferReceiveRecoveryOperationVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_operation_verdict' -DefaultValue ([string]$Result.fileTransferReceiveRecoveryOperationVerdict)
+    $Result.fileTransferReceiveRecoveryOperationRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_operation_raw_count' -DefaultValue ([string]$Result.fileTransferReceiveRecoveryOperationRawCount))
+    $Result.fileTransferReceiveRecoveryOperationDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_operation_distinct_count' -DefaultValue ([string]$Result.fileTransferReceiveRecoveryOperationDistinctCount))
+    $Result.fileTransferReceiveRecoveryOperationRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_operation_recovered_count' -DefaultValue ([string]$Result.fileTransferReceiveRecoveryOperationRecoveredCount))
+    $Result.fileTransferReceiveRecoveryOperationUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_operation_unresolved_count' -DefaultValue ([string]$Result.fileTransferReceiveRecoveryOperationUnresolvedCount))
     $Result.fallbackReceiverStateDeferredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'fallback_v6_receiver_state_deferred_count' -DefaultValue '0')
     $Result.fallbackReceiverStateCoalescedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'fallback_v6_receiver_state_coalesced_count' -DefaultValue '0')
     $firstProofClass = Get-RouteAcceptanceReportValue -Report $operator -Name 'first_proof_chain_failure_class' -DefaultValue '(none)'
@@ -6648,6 +6663,11 @@ function Write-Phase5PreflightFailureSummaryFiles {
         runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount = 0
         runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount = 0
         runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount = 0
+        fileTransferReceiveRecoveryOperationVerdict = 'none'
+        fileTransferReceiveRecoveryOperationRawCount = 0
+        fileTransferReceiveRecoveryOperationDistinctCount = 0
+        fileTransferReceiveRecoveryOperationRecoveredCount = 0
+        fileTransferReceiveRecoveryOperationUnresolvedCount = 0
         baselineManifest = $BaselinePath
         generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
         preflightVerdict = 'FAIL'
@@ -8180,6 +8200,11 @@ function New-RouteAcceptanceSummaryRunDto {
         runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount = [int]$Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount
         runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount = [int]$Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount
         runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount = [int]$Result.runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount
+        fileTransferReceiveRecoveryOperationVerdict = [string]$Result.fileTransferReceiveRecoveryOperationVerdict
+        fileTransferReceiveRecoveryOperationRawCount = [int]$Result.fileTransferReceiveRecoveryOperationRawCount
+        fileTransferReceiveRecoveryOperationDistinctCount = [int]$Result.fileTransferReceiveRecoveryOperationDistinctCount
+        fileTransferReceiveRecoveryOperationRecoveredCount = [int]$Result.fileTransferReceiveRecoveryOperationRecoveredCount
+        fileTransferReceiveRecoveryOperationUnresolvedCount = [int]$Result.fileTransferReceiveRecoveryOperationUnresolvedCount
         operatorVerdict = [string]$Result.operatorVerdict
         hardFailureCount = [int]$Result.hardFailureCount
         warningCount = [int]$Result.warningCount
@@ -8487,6 +8512,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount = 0
     $runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount = 0
     $runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount = 0
+    $fileTransferReceiveRecoveryOperationRawCount = 0
+    $fileTransferReceiveRecoveryOperationDistinctCount = 0
+    $fileTransferReceiveRecoveryOperationRecoveredCount = 0
+    $fileTransferReceiveRecoveryOperationUnresolvedCount = 0
     $regularV4FrontierRepairMissingRangeNotPreservedRawCount = 0
     $regularV4FrontierRepairMissingRangeNotPreservedDistinctCount = 0
     $regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount = 0
@@ -8617,6 +8646,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount += [int]$runDto.runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount
         $runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount += [int]$runDto.runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount
         $runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount += [int]$runDto.runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount
+        $fileTransferReceiveRecoveryOperationRawCount += [int]$runDto.fileTransferReceiveRecoveryOperationRawCount
+        $fileTransferReceiveRecoveryOperationDistinctCount += [int]$runDto.fileTransferReceiveRecoveryOperationDistinctCount
+        $fileTransferReceiveRecoveryOperationRecoveredCount += [int]$runDto.fileTransferReceiveRecoveryOperationRecoveredCount
+        $fileTransferReceiveRecoveryOperationUnresolvedCount += [int]$runDto.fileTransferReceiveRecoveryOperationUnresolvedCount
         $regularV4FrontierRepairMissingRangeNotPreservedRawCount += [int]$runDto.regularV4FrontierRepairMissingRangeNotPreservedRawCount
         $regularV4FrontierRepairMissingRangeNotPreservedDistinctCount += [int]$runDto.regularV4FrontierRepairMissingRangeNotPreservedDistinctCount
         $regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount += [int]$runDto.regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount
@@ -9169,6 +9202,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount),
+        ("filetransfer_receive_recovery_operation_raw_count={0}" -f $fileTransferReceiveRecoveryOperationRawCount),
+        ("filetransfer_receive_recovery_operation_distinct_count={0}" -f $fileTransferReceiveRecoveryOperationDistinctCount),
+        ("filetransfer_receive_recovery_operation_recovered_count={0}" -f $fileTransferReceiveRecoveryOperationRecoveredCount),
+        ("filetransfer_receive_recovery_operation_unresolved_count={0}" -f $fileTransferReceiveRecoveryOperationUnresolvedCount),
+        ("filetransfer_receive_recovery_operation_verdict={0}" -f $(if ($fileTransferReceiveRecoveryOperationUnresolvedCount -gt 0) { 'fail' } elseif ($fileTransferReceiveRecoveryOperationDistinctCount -gt 0) { 'pass' } else { 'none' })),
         ("baseline_manifest={0}" -f $BaselinePath),
         ("goodput_regression_tolerance_percent={0:F1}" -f [double]$GoodputRegressionTolerancePercent),
         'correctness_gate_policy=strict_no_exceptions',
@@ -9216,6 +9254,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount)
         $textLines += ("{0}.runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount)
         $textLines += ("{0}.runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_operation_raw_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryOperationRawCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_operation_distinct_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryOperationDistinctCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_operation_recovered_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryOperationRecoveredCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_operation_unresolved_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryOperationUnresolvedCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_operation_verdict={1}" -f $prefix, $result.fileTransferReceiveRecoveryOperationVerdict)
         $textLines += ("{0}.operator_verdict={1}" -f $prefix, $result.operatorVerdict)
         $textLines += ("{0}.hard_failure_count={1}" -f $prefix, $result.hardFailureCount)
         $textLines += ("{0}.warning_count={1}" -f $prefix, $result.warningCount)
@@ -9648,6 +9691,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount = $runtimeUnlockRegularV4RouteCommitSendDrainMissingDistinctCount
         runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount = $runtimeUnlockRegularV4RouteCommitSendDrainMissingRecoveredCount
         runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount = $runtimeUnlockRegularV4RouteCommitSendDrainMissingUnresolvedCount
+        fileTransferReceiveRecoveryOperationRawCount = $fileTransferReceiveRecoveryOperationRawCount
+        fileTransferReceiveRecoveryOperationDistinctCount = $fileTransferReceiveRecoveryOperationDistinctCount
+        fileTransferReceiveRecoveryOperationRecoveredCount = $fileTransferReceiveRecoveryOperationRecoveredCount
+        fileTransferReceiveRecoveryOperationUnresolvedCount = $fileTransferReceiveRecoveryOperationUnresolvedCount
+        fileTransferReceiveRecoveryOperationVerdict = if ($fileTransferReceiveRecoveryOperationUnresolvedCount -gt 0) { 'fail' } elseif ($fileTransferReceiveRecoveryOperationDistinctCount -gt 0) { 'pass' } else { 'none' }
         baselineManifest = $BaselinePath
         generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
         goodputRegressionTolerancePercent = $GoodputRegressionTolerancePercent

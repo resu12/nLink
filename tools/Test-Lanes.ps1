@@ -210,6 +210,10 @@ function Invoke-TestLane {
         "FileTransferInfraContract" {
             Invoke-DotnetTest `
                 -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
+                -Filter "FileTransferInfraSuite=ReceiveRecoveryOperation" `
+                -ResultSuffix "infra-receive-recovery-operation"
+            Invoke-DotnetTest `
+                -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
                 -Filter "FileTransferInfraSuite=BridgeRecoveryExecution" `
                 -ResultSuffix "infra-bridge-recovery-execution"
             Invoke-DotnetTest `
