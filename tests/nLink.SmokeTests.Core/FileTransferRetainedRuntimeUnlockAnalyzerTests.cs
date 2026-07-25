@@ -14,6 +14,640 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransferOpsScriptsTestBase
 {
     [Theory]
+    [InlineData(false, false, "valid")]
+    [InlineData(false, true, "valid")]
+    [InlineData(true, false, "valid")]
+    [InlineData(true, true, "valid")]
+    [InlineData(false, false, "stage_only")]
+    [InlineData(true, false, "stage_only")]
+    [InlineData(false, false, "stale_receipt")]
+    [InlineData(true, false, "stale_receipt")]
+    [InlineData(false, false, "rejected_commit")]
+    [InlineData(true, false, "rejected_commit")]
+    [InlineData(false, false, "mutated_receipt_scope")]
+    [InlineData(true, false, "mutated_receipt_scope")]
+    [InlineData(false, false, "mutated_phase2_scope")]
+    [InlineData(true, false, "mutated_phase2_scope")]
+    [InlineData(false, false, "retained_only")]
+    [InlineData(true, false, "retained_only")]
+    [InlineData(false, false, "adopted_only")]
+    [InlineData(true, false, "adopted_only")]
+    public async Task AnalyzeRetained_ReceiveRecoveryOperation_HasFullCompactAndArrivalOrderParity(
+        bool compact,
+        bool proofFirst,
+        string phase2Mode)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_receive_recovery_operation";
+        const string sessionId = "sess_runtime_unlock_dispatch_proof";
+        const string scope =
+            $"session_id={sessionId}; transfer_id={transferId}; direction=outbound; " +
+            "route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; " +
+            "route_publication_generation=6; runtime_generation=4; terminal_generation=0; " +
+            "leg_generation=9; transport_epoch=2; bridge_recovery_generation=3; " +
+            "data_session_generation=11";
+        static string OperationLine(string eventName, int generation, string scope, string suffix)
+        {
+            var bridgeDecisionGeneration = generation + 4;
+            var leaseGeneration = generation == 1 ? 3 : 0;
+            var leaseAuthorityId = generation == 1
+                ? "fta2-recovery-lease-3"
+                : "(none)";
+            return
+                $"event={eventName}; receive_recovery_operation_generation={generation}; " +
+                $"receive_recovery_operation_authority_id=fta2-receive-recovery-operation-{generation}; " +
+                $"observation_identity=receive-recovery-observation-{generation}; " +
+                $"observation_generation={generation}; observation_source=test; " +
+                $"observation_reason=test_receive_recovery; observation_utc_ms={1000 + generation}; " +
+                $"{scope}; route_commit_generation=0; route_commit_transaction_generation=0; " +
+                "route_commit_offer_generation=0; route_commit_path_lease_generation=0; " +
+                "route_commit_probe_ack_id=(none); checkpoint_request_id=(none); " +
+                "data_session_identity=data-session-11; " +
+                $"bridge_decision_generation={bridgeDecisionGeneration}; " +
+                $"recovery_liveness_lease_authority_id={leaseAuthorityId}; " +
+                $"recovery_liveness_lease_generation={leaseGeneration}; {suffix}";
+        }
+
+        var completedReceipt = OperationLine(
+            "filetransfer_receive_recovery_operation_execution_receipt_applied",
+            1,
+            scope,
+            "execution_outcome=Completed; execution_mode=soft_then_hard; bridge_decision_generation=5; regular_v4_liveness_generation=3" +
+            (string.Equals(
+                phase2Mode,
+                "mutated_receipt_scope",
+                StringComparison.Ordinal)
+                ? "; data_session_identity=other-data-session"
+                : string.Empty));
+        var proofObserved = OperationLine(
+            "filetransfer_receive_recovery_operation_proof_observed",
+            1,
+            scope,
+            "proof_identity=receive-proof-1; proof_observed_utc_ms=1010; " +
+            "bridge_decision_generation=5; regular_v4_liveness_generation=3");
+        var retainedOnly = string.Equals(
+            phase2Mode,
+            "retained_only",
+            StringComparison.Ordinal);
+        var adoptedOnly = string.Equals(
+            phase2Mode,
+            "adopted_only",
+            StringComparison.Ordinal);
+        var messages = new List<string>
+        {
+            OperationLine(
+                "filetransfer_receive_recovery_operation_issued",
+                1,
+                scope,
+                "operation_state=Issued; bridge_decision_generation=5; regular_v4_liveness_generation=3"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_issued",
+                1,
+                scope,
+                "operation_state=Issued; bridge_decision_generation=5; regular_v4_liveness_generation=3; decision_status=Idempotent"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_execution_start_decided",
+                1,
+                scope,
+                "execution_start_status=Started; bridge_decision_generation=5; regular_v4_liveness_generation=3")
+        };
+        if (retainedOnly)
+        {
+            messages.Add(completedReceipt);
+            messages.Add(
+                OperationLine(
+                    "filetransfer_receive_recovery_operation_closure_retained",
+                    1,
+                    scope,
+                    "closure_generation=1; closure_state=Retained; bridge_decision_generation=5; regular_v4_liveness_generation=3"));
+        }
+        else if (proofFirst)
+        {
+            messages.Add(proofObserved);
+            messages.Add(completedReceipt);
+            messages.Add(
+                OperationLine(
+                    "filetransfer_receive_recovery_operation_closure_adopted",
+                    1,
+                    scope,
+                    "closure_generation=1; closure_state=Adopted; bridge_decision_generation=5; regular_v4_liveness_generation=3"));
+        }
+        else
+        {
+            messages.Add(completedReceipt);
+            messages.Add(
+                OperationLine(
+                    "filetransfer_receive_recovery_operation_closure_retained",
+                    1,
+                    scope,
+                    "closure_generation=1; closure_state=Retained; bridge_decision_generation=5; regular_v4_liveness_generation=3"));
+            messages.Add(proofObserved);
+            messages.Add(
+                OperationLine(
+                    "filetransfer_receive_recovery_operation_closure_adopted",
+                    1,
+                    scope,
+                    "closure_generation=1; closure_state=Adopted; bridge_decision_generation=5; regular_v4_liveness_generation=3"));
+            }
+
+        const string receiveRecoveryRelease =
+            "; release_kind=ReceiveRecoveryLeaseClosure" +
+            "; release_authority_id=fta2-recovery-lease-3" +
+            "; release_generation=3; release_outcome=Retired" +
+            "; receive_recovery_operation_generation=1" +
+            "; data_session_generation=11";
+        if (!retainedOnly && !adoptedOnly)
+        {
+            messages.Add(
+                OperationLine(
+                    "filetransfer_receive_recovery_operation_closure_reserved",
+                    1,
+                    scope,
+                    "closure_generation=1; closure_state=Reserved; " +
+                    "retry_authority_id=fta2-runtime-unlock-test-1; " +
+                    "retry_dispatch_attempt_generation=1; retry_missing_dispatch_generation=0; " +
+                    "retry_release_kind=ReceiveRecoveryLeaseClosure; " +
+                    "retry_release_authority_id=fta2-recovery-lease-3; " +
+                    "retry_release_generation=3; retry_release_outcome=Retired; " +
+                    "retry_install_generation=0"));
+            var phase2Lines = new List<string>
+            {
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_decision_staged",
+                    transferId,
+                    "; stage_status=Staged; decision_status=Granted" +
+                    receiveRecoveryRelease,
+                    "retry_dispatch_decision_staged")
+            };
+            if (!string.Equals(phase2Mode, "stage_only", StringComparison.Ordinal))
+            {
+                var evidenceInstallGeneration =
+                    string.Equals(
+                        phase2Mode,
+                        "stale_receipt",
+                        StringComparison.Ordinal)
+                        ? 2
+                        : 1;
+                var phase2ScopeMutation = string.Equals(
+                    phase2Mode,
+                    "mutated_phase2_scope",
+                    StringComparison.Ordinal)
+                    ? "; data_session_generation=12"
+                    : string.Empty;
+                phase2Lines.Add(
+                    RuntimeUnlockRetryInstallLine(
+                        "runtime_unlock_retry_dispatch_install_receipt_issued",
+                        transferId,
+                        "; stage_status=Staged; decision_status=Granted" +
+                        receiveRecoveryRelease +
+                        phase2ScopeMutation,
+                        "retry_dispatch_install_receipt_issued",
+                        installGeneration: evidenceInstallGeneration));
+                phase2Lines.Add(
+                    RuntimeUnlockRetryInstallLine(
+                        "runtime_unlock_retry_dispatch_install_committed",
+                        transferId,
+                        $"; install_status={(string.Equals(phase2Mode, "rejected_commit", StringComparison.Ordinal) ? "Rejected" : "Installed")}; decision_status=Granted" +
+                        receiveRecoveryRelease +
+                        phase2ScopeMutation,
+                        "retry_dispatch_install_committed",
+                        installGeneration: evidenceInstallGeneration));
+            }
+            phase2Lines.Add(
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_authority_granted",
+                    transferId,
+                    "; install_status=Installed; decision_status=Granted" +
+                    receiveRecoveryRelease,
+                    "runtime_unlock_retry_dispatch_authority_granted"));
+            foreach (var phase2Line in phase2Lines)
+            {
+                messages.Add(phase2Line);
+            }
+            messages.Add(
+                OperationLine(
+                    "filetransfer_receive_recovery_operation_closure_consumed",
+                    1,
+                    scope,
+                    "closure_generation=1; closure_state=Consumed; " +
+                    "retry_authority_id=fta2-runtime-unlock-test-1; " +
+                    "retry_dispatch_attempt_generation=1; retry_missing_dispatch_generation=0; " +
+                    "retry_release_kind=ReceiveRecoveryLeaseClosure; " +
+                    "retry_release_authority_id=fta2-recovery-lease-3; " +
+                    "retry_release_generation=3; retry_release_outcome=Retired; " +
+                    "retry_install_generation=1"));
+        }
+
+        // Compatibility telemetry for the same coordinator operation must not
+        // create a second legacy recovery-lease failure.
+        messages.Add(
+            $"event=runtime_unlock_regular_v4_recovery_lifecycle_decided; {scope}; " +
+            "regular_v4_liveness_generation=3; bridge_decision_generation=5; " +
+            "lifecycle_outcome=Completed; decision_status=Accepted");
+        messages.Add(
+            $"event=runtime_unlock_regular_v4_recovery_lease_closure_rejected; {scope}; " +
+            "regular_v4_liveness_generation=3; bridge_decision_generation=5; " +
+            "lifecycle_outcome=Completed; decision_status=Accepted; " +
+            "mismatch_kind=coordinator_recovery_liveness_lease_stale; " +
+            "decision_reason=coordinator_recovery_liveness_lease_stale");
+
+        messages.AddRange(
+        [
+            OperationLine(
+                "filetransfer_receive_recovery_operation_issued",
+                2,
+                scope,
+                "operation_state=Issued; bridge_decision_generation=6"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_execution_start_decided",
+                2,
+                scope,
+                "execution_start_status=Started; bridge_decision_generation=6"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_execution_receipt_applied",
+                2,
+                scope,
+                "execution_outcome=Discarded; execution_mode=soft; bridge_decision_generation=6"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_issued",
+                3,
+                scope,
+                "operation_state=Issued; bridge_decision_generation=7"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_execution_start_decided",
+                3,
+                scope,
+                "execution_start_status=Started; bridge_decision_generation=7"),
+            OperationLine(
+                "filetransfer_receive_recovery_evaluation_requested",
+                3,
+                scope,
+                "source=bridge_started_ttl; reason=missing_callback"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_invalidated",
+                3,
+                scope,
+                "invalidation_reason=missing_callback_ttl"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_issued",
+                4,
+                scope,
+                "operation_state=Issued; bridge_decision_generation=8"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_invalidated",
+                4,
+                scope,
+                "invalidation_reason=coordinator_terminalized; bridge_decision_generation=8"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_issued",
+                5,
+                scope,
+                "operation_state=Issued; bridge_decision_generation=9"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_execution_receipt_applied",
+                5,
+                scope,
+                "execution_outcome=Discarded; execution_mode=(none); bridge_decision_generation=9"),
+            $"event=file_transfer_outbound_terminal; session_id={sessionId}; transfer_id={transferId}; direction=outbound; state=Failed; error_code=timeout"
+        ]);
+
+        var result = await RunAnalyzeFixtureAsync(
+            messages.Select(message => LogLine(message)).ToArray(),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("6", verdict["filetransfer_receive_recovery_operation_raw_count"]);
+        Assert.Equal("5", verdict["filetransfer_receive_recovery_operation_distinct_count"]);
+        var validPhase2 =
+            string.Equals(phase2Mode, "valid", StringComparison.Ordinal);
+        Assert.Equal(
+            validPhase2 ? "4" : "3",
+            verdict["filetransfer_receive_recovery_operation_recovered_count"]);
+        Assert.Equal(
+            validPhase2 ? "1" : "2",
+            verdict["filetransfer_receive_recovery_operation_unresolved_count"]);
+        Assert.Equal("fail", verdict["filetransfer_receive_recovery_operation_verdict"]);
+        Assert.Equal("3", verdict["filetransfer_receive_recovery_operation_started_count"]);
+        Assert.Equal("3", verdict["filetransfer_receive_recovery_operation_execution_receipt_applied_count"]);
+        Assert.Equal(
+            retainedOnly ? "0" : "1",
+            verdict["filetransfer_receive_recovery_operation_proof_observed_count"]);
+        Assert.Equal(
+            proofFirst ? "0" : "1",
+            verdict["filetransfer_receive_recovery_operation_closure_retained_count"]);
+        Assert.Equal(
+            retainedOnly ? "0" : "1",
+            verdict["filetransfer_receive_recovery_operation_closure_adopted_count"]);
+        Assert.Equal(
+            retainedOnly || adoptedOnly ? "0" : "1",
+            verdict["filetransfer_receive_recovery_operation_closure_reserved_count"]);
+        Assert.Equal(
+            retainedOnly || adoptedOnly ? "0" : "1",
+            verdict["filetransfer_receive_recovery_operation_closure_consumed_count"]);
+        Assert.Equal(
+            "0",
+            verdict["runtime_unlock_regular_v4_recovery_lease_not_issued_unresolved_count"]);
+        Assert.Equal(
+            "0",
+            verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count"]);
+        Assert.Equal(
+            "filetransfer_receive_recovery_operation_incomplete",
+            verdict["first_proof_chain_failure_class"]);
+        Assert.Equal(
+            validPhase2
+                ? "filetransfer_receive_recovery_operation_invalidated"
+                : retainedOnly
+                    ? "filetransfer_receive_recovery_operation_closure_retained"
+                    : adoptedOnly
+                        ? "filetransfer_receive_recovery_operation_closure_adopted"
+                        : "filetransfer_receive_recovery_operation_closure_consumed",
+            verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
+        Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_ReceiveRecoveryOperation_RequiresProofAndHonorsExactInvalidation(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string sessionId = "sess_receive_recovery_terminal_rules";
+        const string transferId = "transfer_receive_recovery_terminal_rules";
+        const string commonScope =
+            $"session_id={sessionId}; transfer_id={transferId}; direction=outbound; " +
+            "live_route_epoch=1; route_publication_generation=6; runtime_generation=4; " +
+            "terminal_generation=0; leg_generation=9; transport_epoch=2; " +
+            "bridge_recovery_generation=3; checkpoint_request_id=(none); " +
+            "data_session_identity=data-session-11; data_session_generation=11; " +
+            "route_commit_generation=0; route_commit_transaction_generation=0; " +
+            "route_commit_offer_generation=0; route_commit_path_lease_generation=0; " +
+            "route_commit_probe_ack_id=(none)";
+        static string OperationLine(
+            string eventName,
+            int generation,
+            string scope,
+            int leaseGeneration,
+            string suffix)
+            =>
+                $"event={eventName}; receive_recovery_operation_generation={generation}; " +
+                $"receive_recovery_operation_authority_id=fta2-receive-recovery-terminal-{generation}; " +
+                $"observation_identity=receive-recovery-terminal-observation-{generation}; " +
+                $"observation_generation={generation}; observation_source=test; " +
+                $"observation_reason=test_receive_recovery; observation_utc_ms={2000 + generation}; " +
+                $"{scope}; bridge_decision_generation={generation + 10}; " +
+                $"recovery_liveness_lease_authority_id={(leaseGeneration > 0 ? $"fta2-recovery-lease-{leaseGeneration}" : "(none)")}; " +
+                $"recovery_liveness_lease_generation={leaseGeneration}; {suffix}";
+
+        var regularScope =
+            $"{commonScope}; route=regular_nkn_v4_fast; protocol_version=4";
+        var fallbackScope =
+            $"{commonScope}; route=post_tuna_fallback_v6; protocol_version=6";
+        var messages = new[]
+        {
+            OperationLine(
+                "filetransfer_receive_recovery_operation_issued",
+                1,
+                regularScope,
+                5,
+                "operation_state=Issued"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_execution_start_decided",
+                1,
+                regularScope,
+                5,
+                "execution_start_status=Started"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_execution_receipt_applied",
+                1,
+                regularScope,
+                5,
+                "execution_outcome=Completed; execution_mode=soft"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_closure_retained",
+                1,
+                regularScope,
+                5,
+                "closure_generation=1; closure_state=Retained"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_proof_observed",
+                1,
+                regularScope,
+                5,
+                "proof_identity=receive-proof-1; proof_observed_utc_ms=2010"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_closure_adopted",
+                1,
+                regularScope,
+                5,
+                "closure_generation=1; closure_state=Adopted"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_closure_reserved",
+                1,
+                regularScope,
+                5,
+                "closure_generation=1; closure_state=Reserved"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_invalidated",
+                1,
+                regularScope,
+                5,
+                "closure_generation=1; closure_state=None; invalidation_reason=coordinator_terminalized"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_issued",
+                2,
+                fallbackScope,
+                0,
+                "operation_state=Issued"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_execution_start_decided",
+                2,
+                fallbackScope,
+                0,
+                "execution_start_status=Started"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_execution_receipt_applied",
+                2,
+                fallbackScope,
+                0,
+                "execution_outcome=Completed; execution_mode=soft"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_proof_observed",
+                2,
+                fallbackScope.Replace(
+                    "data-session-11",
+                    "other-data-session",
+                    StringComparison.Ordinal),
+                0,
+                "proof_identity=mutated-receive-proof-2; proof_observed_utc_ms=2020"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_issued",
+                3,
+                fallbackScope,
+                0,
+                "operation_state=Issued"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_execution_start_decided",
+                3,
+                fallbackScope,
+                0,
+                "execution_start_status=Started"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_proof_observed",
+                3,
+                fallbackScope,
+                0,
+                "proof_identity=receive-proof-3; proof_observed_utc_ms=2030"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_execution_receipt_applied",
+                3,
+                fallbackScope,
+                0,
+                "execution_outcome=Completed; execution_mode=soft"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_issued",
+                4,
+                regularScope,
+                6,
+                "operation_state=Issued"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_execution_start_decided",
+                4,
+                regularScope,
+                6,
+                "execution_start_status=Started"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_execution_receipt_applied",
+                4,
+                regularScope,
+                6,
+                "execution_outcome=Completed; execution_mode=soft"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_closure_retained",
+                4,
+                regularScope,
+                6,
+                "closure_generation=1; closure_state=Retained"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_invalidated",
+                4,
+                regularScope,
+                6,
+                "invalidation_reason=missing_callback_ttl"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_issued",
+                5,
+                fallbackScope,
+                0,
+                "operation_state=Issued"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_execution_start_decided",
+                5,
+                fallbackScope,
+                0,
+                "execution_start_status=Started"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_execution_receipt_applied",
+                5,
+                fallbackScope,
+                0,
+                "execution_outcome=Completed; execution_mode=soft"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_proof_observed",
+                5,
+                fallbackScope,
+                0,
+                "proof_identity=receive-proof-5; proof_observed_utc_ms=2050"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_issued",
+                6,
+                fallbackScope,
+                0,
+                "operation_state=Issued"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_execution_start_decided",
+                6,
+                fallbackScope,
+                0,
+                "execution_start_status=Started"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_proof_observed",
+                6,
+                fallbackScope,
+                0,
+                "proof_identity=receive-proof-6; proof_observed_utc_ms=2060"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_execution_receipt_applied",
+                6,
+                fallbackScope,
+                0,
+                "execution_outcome=Completed; execution_mode=soft"),
+            OperationLine(
+                "filetransfer_receive_recovery_operation_closure_retained",
+                6,
+                fallbackScope,
+                0,
+                "closure_generation=1; closure_state=Retained"),
+            $"event=file_transfer_outbound_terminal; session_id={sessionId}; transfer_id={transferId}; direction=outbound; state=Failed; error_code=timeout"
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            messages.Select(message => LogLine(message)).ToArray(),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-operator-verdict.txt");
+        Assert.Equal(
+            "6",
+            verdict["filetransfer_receive_recovery_operation_raw_count"]);
+        Assert.Equal(
+            "6",
+            verdict["filetransfer_receive_recovery_operation_distinct_count"]);
+        Assert.Equal(
+            "3",
+            verdict["filetransfer_receive_recovery_operation_recovered_count"]);
+        Assert.Equal(
+            "3",
+            verdict["filetransfer_receive_recovery_operation_unresolved_count"]);
+        Assert.Equal(
+            "fail",
+            verdict["filetransfer_receive_recovery_operation_verdict"]);
+        Assert.Equal(
+            "filetransfer_receive_recovery_operation_execution_receipt_applied",
+            verdict["first_proof_chain_failure_event"]);
+        Assert.Equal(
+            "receive_recovery_operation_terminal_handoff_incomplete",
+            verdict["first_proof_chain_failure_reason"]);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task AnalyzeRetained_UncommittedTunaFallbackPrecommitAuthorityMisbound_HasFullCompactParity(
