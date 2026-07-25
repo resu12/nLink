@@ -712,12 +712,28 @@ public sealed partial class SessionFileTransferService
     private static void ApplyRuntimeUnlockRetryLifecycleStateLocked(
         OutboundTransferContext context,
         FileTransferCoordinatorState state)
-        => context.CoordinatorPersistentState = state.PersistentState;
+    {
+        var previous =
+            context.CoordinatorPersistentState.FileTransferReceiveRecovery;
+        context.CoordinatorPersistentState = state.PersistentState;
+        LogReceiveRecoveryOperationTransitions(
+            previous,
+            state.PersistentState.FileTransferReceiveRecovery,
+            "runtime_unlock_retry_lifecycle_transition");
+    }
 
     private static void ApplyRuntimeUnlockRetryLifecycleStateLocked(
         InboundTransferContext context,
         FileTransferCoordinatorState state)
-        => context.CoordinatorPersistentState = state.PersistentState;
+    {
+        var previous =
+            context.CoordinatorPersistentState.FileTransferReceiveRecovery;
+        context.CoordinatorPersistentState = state.PersistentState;
+        LogReceiveRecoveryOperationTransitions(
+            previous,
+            state.PersistentState.FileTransferReceiveRecovery,
+            "runtime_unlock_retry_lifecycle_transition");
+    }
 
     private bool TryInvalidateRuntimeUnlockRetryLifecycleForScopeReplacementLocked(
         OutboundTransferContext context,
@@ -849,277 +865,6 @@ public sealed partial class SessionFileTransferService
         return true;
     }
 
-    private void OnRuntimeUnlockRegularV4RecoverySettlementReported(
-        object? sender,
-        RuntimeUnlockRegularV4RecoverySettlementReportedEventArgs args)
-    {
-        if (sender is not IRuntimeUnlockRetryDispatchAuthorityBridge bridge)
-        {
-            return;
-        }
-
-        RuntimeUnlockRegularV4RecoverySettlementDecision? decision = null;
-        lock (gate)
-        {
-            var report = args.Report;
-            var bridgeIsCurrentTransport =
-                transport is IRuntimeUnlockRetryDispatchAuthorityBridge currentBridge &&
-                ReferenceEquals(currentBridge, bridge);
-            if (bridgeIsCurrentTransport && report.IsDefault)
-            {
-                if (outboundTransfer is { } defaultOutbound)
-                {
-                    decision = ObserveRuntimeUnlockRegularV4RecoverySettlementLocked(defaultOutbound, report);
-                }
-                else if (inboundTransfer is { } defaultInbound)
-                {
-                    decision = ObserveRuntimeUnlockRegularV4RecoverySettlementLocked(defaultInbound, report);
-                }
-            }
-            else if (bridgeIsCurrentTransport &&
-                     report.Settlement.Direction == FileTransferDirection.Outbound &&
-                     outboundTransfer is { } outbound)
-            {
-                decision = ObserveRuntimeUnlockRegularV4RecoverySettlementLocked(outbound, report);
-            }
-            else if (bridgeIsCurrentTransport &&
-                     report.Settlement.Direction == FileTransferDirection.Inbound &&
-                     inboundTransfer is { } inbound)
-            {
-                decision = ObserveRuntimeUnlockRegularV4RecoverySettlementLocked(inbound, report);
-            }
-            else if (outboundTransfer is { } rejectionOutbound)
-            {
-                decision = new RuntimeUnlockRegularV4RecoverySettlementDecision(
-                    RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected,
-                    "retry_dispatch_regular_v4_recovery_settlement_transfer_missing",
-                    report)
-                {
-                    State = CreateCoordinatorStateLocked(rejectionOutbound),
-                };
-            }
-            else if (inboundTransfer is { } rejectionInbound)
-            {
-                decision = new RuntimeUnlockRegularV4RecoverySettlementDecision(
-                    RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected,
-                    "retry_dispatch_regular_v4_recovery_settlement_transfer_missing",
-                    report)
-                {
-                    State = CreateCoordinatorStateLocked(rejectionInbound),
-                };
-            }
-        }
-
-        if (decision is not { } resolvedDecision)
-        {
-            // No coordinator state exists for this late report. Returning no
-            // disposition makes the bridge's synchronous report flow fail closed.
-            return;
-        }
-
-        // Infra owns accelerationGate while applying this disposition. Keep the
-        // coordinator-to-Infra callback outside the Core transfer lock.
-        bridge.ObserveRuntimeUnlockRegularV4RecoverySettlementDecision(resolvedDecision);
-    }
-
-    private void OnRuntimeUnlockRegularV4RecoveryLifecycleReported(
-        object? sender,
-        RuntimeUnlockRegularV4RecoveryLifecycleReportedEventArgs args)
-    {
-        if (sender is not IRuntimeUnlockRetryDispatchAuthorityBridge bridge)
-        {
-            return;
-        }
-
-        RuntimeUnlockRegularV4RecoveryLifecycleDecision? decision = null;
-        lock (gate)
-        {
-            var report = args.Report;
-            var bridgeIsCurrentTransport =
-                transport is IRuntimeUnlockRetryDispatchAuthorityBridge currentBridge &&
-                ReferenceEquals(currentBridge, bridge);
-            if (!report.IsDefault &&
-                bridgeIsCurrentTransport &&
-                report.Authority.Direction == FileTransferDirection.Outbound &&
-                outboundTransfer is { } outbound &&
-                string.Equals(report.Authority.SessionId, outbound.SessionId, StringComparison.Ordinal) &&
-                string.Equals(report.Authority.TransferId, outbound.TransferId, StringComparison.Ordinal))
-            {
-                decision = IsBridgeRecoveryExecutionLifecycleAwaitingReceipt(
-                    outbound.CurrentBridgeRecoveryExecutionCommand,
-                    outbound.CurrentBridgeRecoveryExecutionState,
-                    report)
-                    ? new RuntimeUnlockRegularV4RecoveryLifecycleDecision(
-                        RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Rejected,
-                        "bridge_recovery_execution_receipt_required",
-                        report)
-                    {
-                        State = CreateCoordinatorStateLocked(outbound),
-                    }
-                    : ObserveRuntimeUnlockRegularV4RecoveryLifecycleLocked(outbound, report);
-            }
-            else if (!report.IsDefault &&
-                     bridgeIsCurrentTransport &&
-                     report.Authority.Direction == FileTransferDirection.Inbound &&
-                     inboundTransfer is { } inbound &&
-                     string.Equals(report.Authority.SessionId, inbound.SessionId, StringComparison.Ordinal) &&
-                     string.Equals(report.Authority.TransferId, inbound.TransferId, StringComparison.Ordinal))
-            {
-                decision = IsBridgeRecoveryExecutionLifecycleAwaitingReceipt(
-                    inbound.CurrentBridgeRecoveryExecutionCommand,
-                    inbound.CurrentBridgeRecoveryExecutionState,
-                    report)
-                    ? new RuntimeUnlockRegularV4RecoveryLifecycleDecision(
-                        RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Rejected,
-                        "bridge_recovery_execution_receipt_required",
-                        report)
-                    {
-                        State = CreateCoordinatorStateLocked(inbound),
-                    }
-                    : ObserveRuntimeUnlockRegularV4RecoveryLifecycleLocked(inbound, report);
-            }
-            else if (outboundTransfer is { } rejectionOutbound)
-            {
-                decision = new RuntimeUnlockRegularV4RecoveryLifecycleDecision(
-                    RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Rejected,
-                    "regular_v4_recovery_lifecycle_transfer_missing",
-                    report)
-                {
-                    State = CreateCoordinatorStateLocked(rejectionOutbound),
-                };
-            }
-            else if (inboundTransfer is { } rejectionInbound)
-            {
-                decision = new RuntimeUnlockRegularV4RecoveryLifecycleDecision(
-                    RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Rejected,
-                    "regular_v4_recovery_lifecycle_transfer_missing",
-                    report)
-                {
-                    State = CreateCoordinatorStateLocked(rejectionInbound),
-                };
-            }
-        }
-
-        if (decision is { } resolvedDecision)
-        {
-            bridge.ObserveRuntimeUnlockRegularV4RecoveryLifecycleDecision(resolvedDecision);
-        }
-    }
-
-    private static bool IsBridgeRecoveryExecutionLifecycleAwaitingReceipt(
-        FileTransferBridgeRecoveryExecutionCommand? command,
-        FileTransferBridgeRecoveryExecutionState? executionState,
-        RuntimeUnlockRegularV4RecoveryLifecycleReport report)
-        => report.Outcome is not RuntimeUnlockRegularV4RecoveryLifecycleOutcome.ReceiveProofObserved &&
-           executionState is
-               FileTransferBridgeRecoveryExecutionState.Issued or
-               FileTransferBridgeRecoveryExecutionState.Running &&
-           command is
-           {
-               IsDefault: false,
-               RecoveryLivenessLease: { } recoveryLivenessLease,
-           } currentCommand &&
-           currentCommand.Decision.BridgeDecisionGeneration ==
-               report.Authority.BridgeDecisionGeneration &&
-           currentCommand.Decision.RuntimeOwner.SessionId == report.Authority.SessionId &&
-           currentCommand.Decision.RuntimeOwner.TransferId == report.Authority.TransferId &&
-           currentCommand.Decision.RuntimeOwner.Direction == report.Authority.Direction &&
-           recoveryLivenessLease == report.RecoveryAuthority.RecoveryLivenessLease;
-
-    private static RuntimeUnlockRegularV4RecoveryLifecycleDecision
-        ObserveRuntimeUnlockRegularV4RecoveryLifecycleLocked(
-            OutboundTransferContext context,
-            RuntimeUnlockRegularV4RecoveryLifecycleReport report)
-    {
-        var decision = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoveryLifecycle(
-            CreateCoordinatorStateLocked(context),
-            context.LastRuntimeUnlockRegularV4RecoveryLifecycle,
-            report);
-        if (decision.State is not null)
-        {
-            context.CurrentRecoveryLivenessLease = decision.State.CurrentRecoveryLivenessLease;
-            context.LastRetiredRecoveryLivenessLease = decision.State.LastRetiredRecoveryLivenessLease;
-            context.LastRecoveryLivenessLeaseGeneration = decision.State.LastRecoveryLivenessLeaseGeneration;
-            context.LastRuntimeUnlockRegularV4RecoveryLifecycle =
-                decision.State.LastRuntimeUnlockRegularV4RecoveryLifecycle;
-            context.RuntimeUnlockRecoveryLeaseClosureAvailable =
-                decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable;
-        }
-
-        return decision;
-    }
-
-    private static RuntimeUnlockRegularV4RecoveryLifecycleDecision
-        ObserveRuntimeUnlockRegularV4RecoveryLifecycleLocked(
-            InboundTransferContext context,
-            RuntimeUnlockRegularV4RecoveryLifecycleReport report)
-    {
-        var decision = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoveryLifecycle(
-            CreateCoordinatorStateLocked(context),
-            context.LastRuntimeUnlockRegularV4RecoveryLifecycle,
-            report);
-        if (decision.State is not null)
-        {
-            context.CurrentRecoveryLivenessLease = decision.State.CurrentRecoveryLivenessLease;
-            context.LastRetiredRecoveryLivenessLease = decision.State.LastRetiredRecoveryLivenessLease;
-            context.LastRecoveryLivenessLeaseGeneration = decision.State.LastRecoveryLivenessLeaseGeneration;
-            context.LastRuntimeUnlockRegularV4RecoveryLifecycle =
-                decision.State.LastRuntimeUnlockRegularV4RecoveryLifecycle;
-            context.RuntimeUnlockRecoveryLeaseClosureAvailable =
-                decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable;
-        }
-
-        return decision;
-    }
-
-    private static RuntimeUnlockRegularV4RecoverySettlementDecision
-        ObserveRuntimeUnlockRegularV4RecoverySettlementLocked(
-            OutboundTransferContext context,
-            RuntimeUnlockRegularV4RecoverySettlementReport report)
-    {
-        var decision = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoverySettlement(
-            CreateCoordinatorStateLocked(context),
-            context.LastRuntimeUnlockRegularV4RecoverySettlement,
-            report);
-        if (decision.State is not null)
-        {
-            context.LastRuntimeUnlockRegularV4RecoverySettlement =
-                decision.State.LastRuntimeUnlockRegularV4RecoverySettlement;
-            context.LastCoordinatorIssuedRegularV4RecoverySettlement =
-                decision.State.LastCoordinatorIssuedRegularV4RecoverySettlement;
-            context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
-                decision.State.RuntimeUnlockRegularV4RecoverySettlementAvailable;
-            context.RuntimeUnlockRecoveryLeaseClosureAvailable =
-                decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable;
-        }
-
-        return decision;
-    }
-
-    private static RuntimeUnlockRegularV4RecoverySettlementDecision
-        ObserveRuntimeUnlockRegularV4RecoverySettlementLocked(
-            InboundTransferContext context,
-            RuntimeUnlockRegularV4RecoverySettlementReport report)
-    {
-        var decision = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoverySettlement(
-            CreateCoordinatorStateLocked(context),
-            context.LastRuntimeUnlockRegularV4RecoverySettlement,
-            report);
-        if (decision.State is not null)
-        {
-            context.LastRuntimeUnlockRegularV4RecoverySettlement =
-                decision.State.LastRuntimeUnlockRegularV4RecoverySettlement;
-            context.LastCoordinatorIssuedRegularV4RecoverySettlement =
-                decision.State.LastCoordinatorIssuedRegularV4RecoverySettlement;
-            context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
-                decision.State.RuntimeUnlockRegularV4RecoverySettlementAvailable;
-            context.RuntimeUnlockRecoveryLeaseClosureAvailable =
-                decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable;
-        }
-
-        return decision;
-    }
-
     private static RuntimeUnlockRetryDispatchSettlementDecision
         ObserveRuntimeUnlockRetryDispatchSettlementLocked(
             OutboundTransferContext context,
@@ -1149,12 +894,6 @@ public sealed partial class SessionFileTransferService
         RuntimeUnlockRetryDispatchSettlementDecision decision)
     {
         ApplyRuntimeUnlockRetryLifecycleStateLocked(context, decision.State);
-        context.LastCoordinatorIssuedRegularV4RecoverySettlement =
-            decision.State.LastCoordinatorIssuedRegularV4RecoverySettlement;
-        context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
-            decision.State.RuntimeUnlockRegularV4RecoverySettlementAvailable;
-        context.RuntimeUnlockRecoveryLeaseClosureAvailable =
-            decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable;
     }
 
     private static void ApplyRuntimeUnlockRetryDispatchSettlementDecisionLocked(
@@ -1162,12 +901,6 @@ public sealed partial class SessionFileTransferService
         RuntimeUnlockRetryDispatchSettlementDecision decision)
     {
         ApplyRuntimeUnlockRetryLifecycleStateLocked(context, decision.State);
-        context.LastCoordinatorIssuedRegularV4RecoverySettlement =
-            decision.State.LastCoordinatorIssuedRegularV4RecoverySettlement;
-        context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
-            decision.State.RuntimeUnlockRegularV4RecoverySettlementAvailable;
-        context.RuntimeUnlockRecoveryLeaseClosureAvailable =
-            decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable;
     }
 
     private static void ApplyRuntimeUnlockRetryDispatchAuthorityDecisionLocked(
@@ -1183,10 +916,20 @@ public sealed partial class SessionFileTransferService
                 out _))
         {
             ApplyRuntimeUnlockRetryLifecycleStateLocked(context, decision.State);
-            context.LastRuntimeUnlockRegularV4RecoverySettlement =
-                decision.State.LastRuntimeUnlockRegularV4RecoverySettlement;
-            context.LastCoordinatorIssuedRegularV4RecoverySettlement =
-                decision.State.LastCoordinatorIssuedRegularV4RecoverySettlement;
+            return;
+        }
+
+        if (decision.Status ==
+                RuntimeUnlockRetryDispatchDecisionStatus.Held &&
+            string.Equals(
+                decision.Reason,
+                "receive_recovery_lease_pending",
+                StringComparison.Ordinal) &&
+            decision.State is not null)
+        {
+            ApplyRuntimeUnlockRetryLifecycleStateLocked(
+                context,
+                decision.State);
             return;
         }
 
@@ -1216,10 +959,20 @@ public sealed partial class SessionFileTransferService
                 out _))
         {
             ApplyRuntimeUnlockRetryLifecycleStateLocked(context, decision.State);
-            context.LastRuntimeUnlockRegularV4RecoverySettlement =
-                decision.State.LastRuntimeUnlockRegularV4RecoverySettlement;
-            context.LastCoordinatorIssuedRegularV4RecoverySettlement =
-                decision.State.LastCoordinatorIssuedRegularV4RecoverySettlement;
+            return;
+        }
+
+        if (decision.Status ==
+                RuntimeUnlockRetryDispatchDecisionStatus.Held &&
+            string.Equals(
+                decision.Reason,
+                "receive_recovery_lease_pending",
+                StringComparison.Ordinal) &&
+            decision.State is not null)
+        {
+            ApplyRuntimeUnlockRetryLifecycleStateLocked(
+                context,
+                decision.State);
             return;
         }
 
@@ -1241,14 +994,6 @@ public sealed partial class SessionFileTransferService
         FileTransferCoordinatorState state)
     {
         ApplyRuntimeUnlockRetryLifecycleStateLocked(context, state);
-        context.LastRuntimeUnlockRegularV4RecoverySettlement =
-            state.LastRuntimeUnlockRegularV4RecoverySettlement;
-        context.LastCoordinatorIssuedRegularV4RecoverySettlement =
-            state.LastCoordinatorIssuedRegularV4RecoverySettlement;
-        context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
-            state.RuntimeUnlockRegularV4RecoverySettlementAvailable;
-        context.RuntimeUnlockRecoveryLeaseClosureAvailable =
-            state.RuntimeUnlockRecoveryLeaseClosureAvailable;
     }
 
     private static void ApplyBoundedRuntimeUnlockRetryDispatchClosureLocked(
@@ -1256,13 +1001,5 @@ public sealed partial class SessionFileTransferService
         FileTransferCoordinatorState state)
     {
         ApplyRuntimeUnlockRetryLifecycleStateLocked(context, state);
-        context.LastRuntimeUnlockRegularV4RecoverySettlement =
-            state.LastRuntimeUnlockRegularV4RecoverySettlement;
-        context.LastCoordinatorIssuedRegularV4RecoverySettlement =
-            state.LastCoordinatorIssuedRegularV4RecoverySettlement;
-        context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
-            state.RuntimeUnlockRegularV4RecoverySettlementAvailable;
-        context.RuntimeUnlockRecoveryLeaseClosureAvailable =
-            state.RuntimeUnlockRecoveryLeaseClosureAvailable;
     }
 }

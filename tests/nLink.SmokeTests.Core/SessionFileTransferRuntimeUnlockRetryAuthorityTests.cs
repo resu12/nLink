@@ -23,8 +23,6 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         Assert.Equal(1, bridge.DeadlineEvaluationSubscriberCount);
         Assert.Equal(1, bridge.ExecutionObservationSubscriberCount);
         Assert.Equal(1, bridge.SuccessorEvaluationSubscriberCount);
-        Assert.Equal(1, bridge.RegularV4SettlementReportSubscriberCount);
-        Assert.Equal(1, bridge.RegularV4LifecycleReportSubscriberCount);
 
         service.DetachTransport();
 
@@ -33,8 +31,6 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         Assert.Equal(0, bridge.DeadlineEvaluationSubscriberCount);
         Assert.Equal(0, bridge.ExecutionObservationSubscriberCount);
         Assert.Equal(0, bridge.SuccessorEvaluationSubscriberCount);
-        Assert.Equal(0, bridge.RegularV4SettlementReportSubscriberCount);
-        Assert.Equal(0, bridge.RegularV4LifecycleReportSubscriberCount);
     }
 
     [Fact]
@@ -45,9 +41,10 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             "transfer_retry_two_phase_install");
         fixture.Bridge.CoreGateForInstallProbe = GetCoreGate(fixture.Service);
         var logStart = GetOperationalLogLength();
-        Assert.True(GetRequiredProperty<bool>(
-            fixture.Context,
-            "RuntimeUnlockRecoveryLeaseClosureAvailable"));
+        Assert.Equal(
+            FileTransferReceiveRecoveryClosureState.Adopted,
+            GetReceiveRecoverySubstate(fixture.Context)
+                .CurrentOperation?.ClosureState);
 
         fixture.Bridge.RaiseAuthorityRequest(fixture.InitialRequest);
 
@@ -77,9 +74,10 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         Assert.Same(contract, fixture.Bridge.InfraCurrentContract);
         Assert.Equal(contract.Authority, GetCurrentAttempt(fixture.Context)?.Authority);
         Assert.Equal(install.Receipt, GetCurrentInstallReceipt(fixture.Context));
-        Assert.False(GetRequiredProperty<bool>(
-            fixture.Context,
-            "RuntimeUnlockRecoveryLeaseClosureAvailable"));
+        Assert.Equal(
+            FileTransferReceiveRecoveryClosureState.Consumed,
+            GetReceiveRecoverySubstate(fixture.Context)
+                .LastTerminalOperation?.ClosureState);
 
         var duplicate = fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(install.Receipt);
 
@@ -172,9 +170,10 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         Assert.Null(fixture.Bridge.InfraCurrentContract);
         Assert.Null(GetCurrentInstallReceipt(fixture.Context));
         Assert.Equal(0, fixture.Bridge.InstallCount);
-        Assert.True(GetRequiredProperty<bool>(
-            fixture.Context,
-            "RuntimeUnlockRecoveryLeaseClosureAvailable"));
+        Assert.Equal(
+            FileTransferReceiveRecoveryClosureState.Reserved,
+            GetReceiveRecoverySubstate(fixture.Context)
+                .CurrentOperation?.ClosureState);
 
         var terminal = await fixture.Service.CancelTransferAsync(
             fixture.TransferId,
@@ -708,458 +707,6 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
     }
 
     [Fact]
-    public async Task RegularV4RecoverySettlementReport_IsProcessedUnderCoreGate_AndAuthorizesExactRequest()
-    {
-        using var fixture = await CreateFixtureAsync(
-            "session_retry_regular_v4_handoff",
-            "transfer_retry_regular_v4_handoff");
-        var report = SeedRegularV4RecoverySettlement(fixture.Context);
-        var coreGate = GetCoreGate(fixture.Service);
-
-        Task delivery;
-        Monitor.Enter(coreGate);
-        try
-        {
-            delivery = Task.Run(() => fixture.Bridge.RaiseRegularV4SettlementReport(report));
-            Assert.False(
-                delivery.Wait(TimeSpan.FromMilliseconds(100)),
-                "Regular-V4 recovery settlement escaped the Core transfer lock.");
-        }
-        finally
-        {
-            Monitor.Exit(coreGate);
-        }
-
-        await delivery.WaitAsync(TimeSpan.FromSeconds(3));
-        var accepted = fixture.Bridge.DequeueRegularV4SettlementDecision();
-        Assert.Equal(
-            RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Accepted,
-            accepted.Status);
-        Assert.Equal(report, GetLastRegularV4Settlement(fixture.Context));
-
-        fixture.Bridge.RaiseRegularV4SettlementReport(report);
-        var duplicate = fixture.Bridge.DequeueRegularV4SettlementDecision();
-        Assert.Equal(
-            RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Idempotent,
-            duplicate.Status);
-        Assert.True(GetRequiredProperty<bool>(
-            fixture.Context,
-            "RuntimeUnlockRegularV4RecoverySettlementAvailable"));
-
-        var settlementRequest = fixture.InitialRequest with
-        {
-            RegularV4LivenessGeneration = report.RegularV4LivenessGeneration,
-            BridgeDecisionGeneration = report.BridgeDecisionGeneration,
-        };
-        var contract = Grant(fixture, settlementRequest);
-        Assert.Equal(
-            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
-            contract.Authority.ReleaseKind);
-        Assert.Equal(report.Settlement.AuthorityId, contract.Authority.ReleaseAuthorityId);
-        Assert.Equal(report.Settlement.DecisionGeneration, contract.Authority.ReleaseGeneration);
-        Assert.False(GetRequiredProperty<bool>(
-            fixture.Context,
-            "RuntimeUnlockRegularV4RecoverySettlementAvailable"));
-    }
-
-    [Fact]
-    public async Task RegularV4RecoveryLifecycleReport_IsProcessedUnderCoreGate_AndRetiresLeaseOnce()
-    {
-        using var fixture = await CreateFixtureAsync(
-            "session_retry_regular_v4_lifecycle",
-            "transfer_retry_regular_v4_lifecycle");
-        var report = SeedRegularV4RecoveryLifecycle(fixture.Context);
-        var coreGate = GetCoreGate(fixture.Service);
-
-        Task delivery;
-        Monitor.Enter(coreGate);
-        try
-        {
-            delivery = Task.Run(() => fixture.Bridge.RaiseRegularV4LifecycleReport(report));
-            Assert.False(
-                delivery.Wait(TimeSpan.FromMilliseconds(100)),
-                "Regular-V4 recovery lifecycle escaped the Core transfer lock.");
-        }
-        finally
-        {
-            Monitor.Exit(coreGate);
-        }
-
-        await delivery.WaitAsync(TimeSpan.FromSeconds(3));
-        var accepted = fixture.Bridge.DequeueRegularV4LifecycleDecision();
-        Assert.Equal(RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted, accepted.Status);
-        Assert.Null(GetOptionalStructProperty<RecoveryLivenessLease>(fixture.Context, "CurrentRecoveryLivenessLease"));
-        Assert.NotNull(GetOptionalStructProperty<RecoveryLivenessLease>(fixture.Context, "LastRetiredRecoveryLivenessLease"));
-        Assert.Equal(
-            report,
-            GetOptionalStructProperty<RuntimeUnlockRegularV4RecoveryLifecycleReport>(
-                fixture.Context,
-                "LastRuntimeUnlockRegularV4RecoveryLifecycle"));
-        Assert.True(GetRequiredProperty<bool>(
-            fixture.Context,
-            "RuntimeUnlockRecoveryLeaseClosureAvailable"));
-
-        fixture.Bridge.RaiseRegularV4LifecycleReport(report);
-        var duplicate = fixture.Bridge.DequeueRegularV4LifecycleDecision();
-        Assert.Equal(RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Idempotent, duplicate.Status);
-        Assert.True(GetRequiredProperty<bool>(
-            fixture.Context,
-            "RuntimeUnlockRecoveryLeaseClosureAvailable"));
-    }
-
-    [Fact]
-    public async Task BridgeRecoveryExecutionCompletion_ReceiptPrecedesLifecycle_AndDuplicateIsIdempotent()
-    {
-        using var fixture = await CreateFixtureAsync(
-            "session_retry_bridge_execution_completion",
-            "transfer_retry_bridge_execution_completion");
-        var (request, receipt) = SeedRunningBridgeRecoveryExecution(
-            fixture.Context,
-            FileTransferBridgeRecoveryExecutionOutcome.Completed);
-
-        await ObserveBridgeRecoveryExecutionCompletionAsync(fixture, request, receipt);
-
-        Assert.Equal("receipt", fixture.Bridge.DequeueBridgeRecoveryCompletionObservation());
-        Assert.Equal("lifecycle", fixture.Bridge.DequeueBridgeRecoveryCompletionObservation());
-        var acceptedReceipt = fixture.Bridge.DequeueBridgeRecoveryExecutionReceiptDecision();
-        Assert.Equal(receipt, acceptedReceipt.Receipt);
-        Assert.True(acceptedReceipt.Accepted);
-        Assert.Equal(
-            "bridge_recovery_execution_receipt_accepted",
-            acceptedReceipt.Reason);
-        var acceptedLifecycle = fixture.Bridge.DequeueRegularV4LifecycleDecision();
-        Assert.Equal(
-            RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted,
-            acceptedLifecycle.Status);
-        Assert.Equal(receipt, acceptedLifecycle.ExecutionReceipt);
-        Assert.True(GetRequiredProperty<bool>(
-            fixture.Context,
-            "RuntimeUnlockRecoveryLeaseClosureAvailable"));
-        var retainedLease = Assert.IsType<RecoveryLivenessLease>(
-            GetOptionalStructProperty<RecoveryLivenessLease>(
-                fixture.Context,
-                "LastRetiredRecoveryLivenessLease"));
-
-        await ObserveBridgeRecoveryExecutionCompletionAsync(fixture, request, receipt);
-
-        Assert.Equal("receipt", fixture.Bridge.DequeueBridgeRecoveryCompletionObservation());
-        Assert.Equal("lifecycle", fixture.Bridge.DequeueBridgeRecoveryCompletionObservation());
-        var duplicateReceipt = fixture.Bridge.DequeueBridgeRecoveryExecutionReceiptDecision();
-        Assert.Equal(receipt, duplicateReceipt.Receipt);
-        Assert.True(duplicateReceipt.Accepted);
-        Assert.Equal(
-            "bridge_recovery_execution_receipt_duplicate",
-            duplicateReceipt.Reason);
-        var duplicateLifecycle = fixture.Bridge.DequeueRegularV4LifecycleDecision();
-        Assert.Equal(
-            RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Idempotent,
-            duplicateLifecycle.Status);
-        Assert.Equal(receipt, duplicateLifecycle.ExecutionReceipt);
-        Assert.Equal(
-            retainedLease,
-            GetOptionalStructProperty<RecoveryLivenessLease>(
-                fixture.Context,
-                "LastRetiredRecoveryLivenessLease"));
-        Assert.True(GetRequiredProperty<bool>(
-            fixture.Context,
-            "RuntimeUnlockRecoveryLeaseClosureAvailable"));
-    }
-
-    [Theory]
-    [InlineData("Exhausted")]
-    [InlineData("Discarded")]
-    public async Task BridgeRecoveryExecutionCompletion_NonCompletedReceiptRetiresLifecycleWithoutClosure(
-        string outcomeName)
-    {
-        var outcome = Enum.Parse<FileTransferBridgeRecoveryExecutionOutcome>(outcomeName);
-        using var fixture = await CreateFixtureAsync(
-            $"session_retry_bridge_execution_{outcome.ToString().ToLowerInvariant()}",
-            $"transfer_retry_bridge_execution_{outcome.ToString().ToLowerInvariant()}");
-        var (request, receipt) = SeedRunningBridgeRecoveryExecution(
-            fixture.Context,
-            outcome);
-
-        await ObserveBridgeRecoveryExecutionCompletionAsync(fixture, request, receipt);
-
-        Assert.Equal("receipt", fixture.Bridge.DequeueBridgeRecoveryCompletionObservation());
-        Assert.Equal("lifecycle", fixture.Bridge.DequeueBridgeRecoveryCompletionObservation());
-        var observedReceipt = fixture.Bridge.DequeueBridgeRecoveryExecutionReceiptDecision();
-        Assert.Equal(receipt, observedReceipt.Receipt);
-        Assert.True(observedReceipt.Accepted);
-        var lifecycle = fixture.Bridge.DequeueRegularV4LifecycleDecision();
-        Assert.Equal(
-            RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted,
-            lifecycle.Status);
-        Assert.Equal(receipt, lifecycle.ExecutionReceipt);
-        Assert.Equal(
-            outcome == FileTransferBridgeRecoveryExecutionOutcome.Exhausted
-                ? RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Exhausted
-                : RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Discarded,
-            lifecycle.Report.Outcome);
-        Assert.Null(GetOptionalStructProperty<RecoveryLivenessLease>(
-            fixture.Context,
-            "CurrentRecoveryLivenessLease"));
-        Assert.NotNull(GetOptionalStructProperty<RecoveryLivenessLease>(
-            fixture.Context,
-            "LastRetiredRecoveryLivenessLease"));
-        Assert.False(GetRequiredProperty<bool>(
-            fixture.Context,
-            "RuntimeUnlockRecoveryLeaseClosureAvailable"));
-    }
-
-    [Fact]
-    public async Task BridgeRecoveryExecutionCompletion_ReceiptNotificationFailureWithholdsLifecycle()
-    {
-        using var fixture = await CreateFixtureAsync(
-            "session_retry_bridge_execution_receipt_notification_failure",
-            "transfer_retry_bridge_execution_receipt_notification_failure");
-        var (request, receipt) = SeedRunningBridgeRecoveryExecution(
-            fixture.Context,
-            FileTransferBridgeRecoveryExecutionOutcome.Completed);
-        fixture.Bridge.ThrowOnBridgeRecoveryExecutionReceiptDecision = true;
-
-        await ObserveBridgeRecoveryExecutionCompletionAsync(fixture, request, receipt);
-
-        Assert.Equal("receipt", fixture.Bridge.DequeueBridgeRecoveryCompletionObservation());
-        Assert.Equal(0, fixture.Bridge.RegularV4LifecycleDecisionCount);
-        Assert.Contains(
-            "event=filetransfer_bridge_recovery_execution_receipt_notification_failed;",
-            LocalOperationalLog.GetRecentLogText(),
-            StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task BridgeRecoveryExecutionCompletion_InboundReceiptPrecedesLifecycle()
-    {
-        const string sessionId = "session_retry_bridge_execution_completion_inbound";
-        const string transferId = "transfer_retry_bridge_execution_completion_inbound";
-        using var bridge = new RetryAuthorityLoopbackTransport(sessionId);
-        using var peerTransport = new LoopbackFileTransferTransport(sessionId);
-        using var service = new SessionFileTransferService();
-        using var peerService = new SessionFileTransferService();
-        bridge.Connect(peerTransport);
-        service.AttachTransport(bridge);
-        peerService.AttachTransport(peerTransport);
-        var started = await peerService.TryStartSendAsync(
-            new FileTransferSendDescriptor("inbound-recovery.bin", 1, transferId, 4096),
-            _ => Task.FromResult<Stream>(new MemoryStream([0x33], writable: false)),
-            CancellationToken.None);
-        Assert.NotNull(started);
-        await WaitUntilAsync(() => service.Snapshot.Inbound?.TransferId == transferId);
-        var context = GetInboundContext(service);
-        var (request, receipt) = SeedRunningBridgeRecoveryExecution(
-            context,
-            FileTransferBridgeRecoveryExecutionOutcome.Completed,
-            FileTransferDirection.Inbound);
-
-        await ObserveBridgeRecoveryExecutionCompletionAsync(service, bridge, request, receipt);
-
-        Assert.Equal("receipt", bridge.DequeueBridgeRecoveryCompletionObservation());
-        Assert.Equal("lifecycle", bridge.DequeueBridgeRecoveryCompletionObservation());
-        var receiptDecision = bridge.DequeueBridgeRecoveryExecutionReceiptDecision();
-        Assert.True(receiptDecision.Accepted);
-        Assert.Equal(receipt, receiptDecision.Receipt);
-        var lifecycle = bridge.DequeueRegularV4LifecycleDecision();
-        Assert.Equal(FileTransferDirection.Inbound, lifecycle.Report.Authority.Direction);
-        Assert.Equal(receipt, lifecycle.ExecutionReceipt);
-        Assert.Equal(
-            RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted,
-            lifecycle.Status);
-    }
-
-    [Fact]
-    public async Task RecoveryLeaseClosureContinuation_DefersOnlyWithinExactRetainedProofWindow()
-    {
-        using var fixture = await CreateFixtureAsync(
-            "session_retry_closure_liveness",
-            "transfer_retry_closure_liveness");
-        var lifecycle = Assert.IsType<RuntimeUnlockRegularV4RecoveryLifecycleReport>(
-            GetOptionalStructProperty<RuntimeUnlockRegularV4RecoveryLifecycleReport>(
-                fixture.Context,
-                "LastRuntimeUnlockRegularV4RecoveryLifecycle"));
-        var retiredLease = Assert.IsType<RecoveryLivenessLease>(
-            GetOptionalStructProperty<RecoveryLivenessLease>(
-                fixture.Context,
-                "LastRetiredRecoveryLivenessLease"));
-        var leg = GetRequiredProperty<FileTransferLeg>(fixture.Context, "CurrentTransferLeg");
-        var route = GetRequiredProperty<FileTransferRouteSelection>(fixture.Context, "RouteSelection");
-        var maximumDeadline = DateTimeOffset.UtcNow.AddSeconds(90);
-        var proof = new RuntimeUnlockRegularV4RecoveryLeaseClosureContinuationProof(
-            lifecycle,
-            retiredLease,
-            RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted,
-            "regular_v4_recovery_lifecycle_accepted",
-            maximumDeadline);
-        var snapshot = new FileTransferRecoveryLivenessSnapshot(
-            fixture.InitialRequest.SessionId,
-            fixture.TransferId,
-            route.TelemetryToken,
-            route.ProtocolVersion,
-            leg.LiveRouteEpochId,
-            leg.Generation,
-            leg.BridgeRecoveryGeneration,
-            leg.TransportEpochId,
-            leg.CheckpointRequestId,
-            "bridge_lifecycle_completed",
-            FileTransferRecoveryLivenessState.BridgeRecoveryCompletedAwaitingProof,
-            DateTimeOffset.UtcNow.AddSeconds(-1),
-            maximumDeadline,
-            BridgeRecoveryRequested: true,
-            BridgeRecoveryStarted: true,
-            BridgeRecoveryCompleted: true,
-            ReceiveProofObserved: false,
-            RecoveryExhausted: false,
-            AuthorityCompleted: false,
-            TerminalRecommended: false)
-        {
-            RegularV4RecoveryLeaseClosureContinuationProof = proof,
-        };
-
-        Assert.True(fixture.Service.TryAuthorizeRecoveryLivenessDeferral(
-            snapshot,
-            "session_liveness_recovery_state",
-            maximumDeadline,
-            out var grant));
-        Assert.NotNull(grant);
-        Assert.Equal(retiredLease.LeaseGeneration, grant!.LeaseGeneration);
-        Assert.Equal(RecoveryLivenessLeaseState.Retired.ToString(), grant.LeaseState);
-        Assert.Null(GetOptionalStructProperty<RecoveryLivenessLease>(
-            fixture.Context,
-            "CurrentRecoveryLivenessLease"));
-        Assert.Equal(retiredLease, GetOptionalStructProperty<RecoveryLivenessLease>(
-            fixture.Context,
-            "LastRetiredRecoveryLivenessLease"));
-        Assert.True(GetRequiredProperty<bool>(
-            fixture.Context,
-            "RuntimeUnlockRecoveryLeaseClosureAvailable"));
-
-        Assert.True(fixture.Service.TryAuthorizeRecoveryLivenessDeferral(
-            snapshot,
-            "session_liveness_recovery_state",
-            maximumDeadline,
-            out var duplicateGrant));
-        Assert.Equal(grant, duplicateGrant);
-
-        Assert.False(fixture.Service.TryAuthorizeRecoveryLivenessDeferral(
-            snapshot,
-            "session_liveness_recovery_state",
-            maximumDeadline.AddMinutes(7),
-            out var excessiveGrant));
-        Assert.Null(excessiveGrant);
-        Assert.Null(GetOptionalStructProperty<RecoveryLivenessLease>(
-            fixture.Context,
-            "CurrentRecoveryLivenessLease"));
-
-        Assert.False(fixture.Service.TryAuthorizeRecoveryLivenessDeferral(
-            snapshot with { RegularV4RecoveryLeaseClosureContinuationProof = null },
-            "session_liveness_recovery_state",
-            maximumDeadline,
-            out var syntheticGrant));
-        Assert.Null(syntheticGrant);
-
-        Assert.False(fixture.Service.TryAuthorizeRecoveryLivenessDeferral(
-            snapshot with
-            {
-                State = FileTransferRecoveryLivenessState.BridgeRecoveryStarted,
-            },
-            "session_liveness_recovery_state",
-            maximumDeadline,
-            out var wrongStateGrant));
-        Assert.Null(wrongStateGrant);
-        Assert.True(GetRequiredProperty<bool>(
-            fixture.Context,
-            "RuntimeUnlockRecoveryLeaseClosureAvailable"));
-    }
-
-    [Fact]
-    public async Task RecoveryLeaseClosureContinuation_SameTransferIdInBothDirectionsTargetsProofDirection()
-    {
-        const string sessionId = "session_retry_closure_direction_collision";
-        const string transferId = "transfer_retry_closure_direction_collision";
-        using var localTransport = new LoopbackFileTransferTransport(sessionId);
-        using var peerTransport = new LoopbackFileTransferTransport(sessionId);
-        localTransport.Connect(peerTransport);
-        using var localService = new SessionFileTransferService();
-        using var peerService = new SessionFileTransferService();
-        localService.AttachTransport(localTransport);
-        peerService.AttachTransport(peerTransport);
-
-        var localOutbound = await localService.TryStartSendAsync(
-            new FileTransferSendDescriptor("local-outbound.bin", 1, transferId, 4096),
-            _ => Task.FromResult<Stream>(new MemoryStream([0x11], writable: false)),
-            CancellationToken.None);
-        var peerOutbound = await peerService.TryStartSendAsync(
-            new FileTransferSendDescriptor("peer-outbound.bin", 1, transferId, 4096),
-            _ => Task.FromResult<Stream>(new MemoryStream([0x22], writable: false)),
-            CancellationToken.None);
-        Assert.NotNull(localOutbound);
-        Assert.NotNull(peerOutbound);
-        await WaitUntilAsync(() =>
-            localService.Snapshot.Inbound?.TransferId == transferId);
-
-        var outboundContext = GetOutboundContext(localService);
-        var inboundContext = GetInboundContext(localService);
-        SeedRetiredRecoveryLivenessLease(
-            inboundContext,
-            FileTransferDirection.Inbound);
-        var lifecycle = Assert.IsType<RuntimeUnlockRegularV4RecoveryLifecycleReport>(
-            GetOptionalStructProperty<RuntimeUnlockRegularV4RecoveryLifecycleReport>(
-                inboundContext,
-                "LastRuntimeUnlockRegularV4RecoveryLifecycle"));
-        var retiredLease = Assert.IsType<RecoveryLivenessLease>(
-            GetOptionalStructProperty<RecoveryLivenessLease>(
-                inboundContext,
-                "LastRetiredRecoveryLivenessLease"));
-        var leg = GetRequiredProperty<FileTransferLeg>(inboundContext, "CurrentTransferLeg");
-        var route = GetRequiredProperty<FileTransferRouteSelection>(inboundContext, "RouteSelection");
-        var maximumDeadline = DateTimeOffset.UtcNow.AddSeconds(90);
-        var proof = new RuntimeUnlockRegularV4RecoveryLeaseClosureContinuationProof(
-            lifecycle,
-            retiredLease,
-            RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted,
-            "regular_v4_recovery_lifecycle_accepted",
-            maximumDeadline);
-        var snapshot = new FileTransferRecoveryLivenessSnapshot(
-            sessionId,
-            transferId,
-            route.TelemetryToken,
-            route.ProtocolVersion,
-            leg.LiveRouteEpochId,
-            leg.Generation,
-            leg.BridgeRecoveryGeneration,
-            leg.TransportEpochId,
-            leg.CheckpointRequestId,
-            "bridge_lifecycle_completed",
-            FileTransferRecoveryLivenessState.BridgeRecoveryCompletedAwaitingProof,
-            DateTimeOffset.UtcNow.AddSeconds(-1),
-            maximumDeadline,
-            BridgeRecoveryRequested: true,
-            BridgeRecoveryStarted: true,
-            BridgeRecoveryCompleted: true,
-            ReceiveProofObserved: false,
-            RecoveryExhausted: false,
-            AuthorityCompleted: false,
-            TerminalRecommended: false)
-        {
-            RegularV4RecoveryLeaseClosureContinuationProof = proof,
-        };
-
-        Assert.True(localService.TryAuthorizeRecoveryLivenessDeferral(
-            snapshot,
-            "session_liveness_recovery_state",
-            maximumDeadline,
-            out var grant));
-        Assert.NotNull(grant);
-        Assert.Equal(retiredLease.LeaseGeneration, grant!.LeaseGeneration);
-        Assert.True(GetRequiredProperty<bool>(
-            inboundContext,
-            "RuntimeUnlockRecoveryLeaseClosureAvailable"));
-        Assert.Null(GetOptionalStructProperty<RecoveryLivenessLease>(
-            outboundContext,
-            "LastRetiredRecoveryLivenessLease"));
-    }
-
-    [Fact]
     public async Task AuthorityRequest_FromStaleBridge_IsRejectedWithoutInstallingContract()
     {
         using var fixture = await CreateFixtureAsync(
@@ -1679,7 +1226,10 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             Assert.NotNull(started);
 
             var context = GetOutboundContext(service);
-            var recoveryClosure = SeedRetiredRecoveryLivenessLease(context);
+            var recoveryClosure = await SeedAdoptedReceiveRecoveryClosureAsync(
+                service,
+                bridge,
+                context);
             var publicationToken = GetRequiredProperty<RoutePublicationToken>(
                 context,
                 "CurrentRoutePublicationToken");
@@ -1710,322 +1260,73 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         }
     }
 
-    private static (int LeaseGeneration, int BridgeDecisionGeneration)
-        SeedRetiredRecoveryLivenessLease(
+    private static async Task<(int LeaseGeneration, int BridgeDecisionGeneration)>
+        SeedAdoptedReceiveRecoveryClosureAsync(
+            SessionFileTransferService service,
+            RetryAuthorityLoopbackTransport bridge,
             object context,
-            FileTransferDirection direction = FileTransferDirection.Outbound)
+        FileTransferDirection direction = FileTransferDirection.Outbound)
     {
         var sessionId = GetRequiredProperty<string>(context, "SessionId");
         var transferId = GetRequiredProperty<string>(context, "TransferId");
-        var route = GetRequiredProperty<FileTransferRouteSelection>(context, "RouteSelection");
-        var epoch = GetOptionalProperty<LiveRouteEpoch>(context, "CurrentLiveRouteEpoch");
-        var leg = GetRequiredProperty<FileTransferLeg>(context, "CurrentTransferLeg");
-        var owner = GetRequiredProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner");
-        var terminalGeneration = GetRequiredProperty<int>(context, "TerminalGeneration");
-        const int leaseGeneration = 1;
-        const int bridgeDecisionGeneration = 1;
-        const string bridgeReason = "test_recovery_bridge";
-        const string lifecycleReason = "bridge_lifecycle_completed";
-        var activeLease = new RecoveryLivenessLease(
-            sessionId,
-            transferId,
-            direction,
-            owner,
-            route.Route,
-            route.TelemetryToken,
-            route.ProtocolVersion,
-            epoch?.EpochId ?? 0,
-            owner.RuntimeGeneration,
-            terminalGeneration,
-            leg.Generation,
-            leg.TransportEpochId,
-            leg.BridgeRecoveryGeneration,
-            LeaseGeneration: leaseGeneration,
-            new FileTransferAuthorityId(
-                $"fta2-test-recovery-lease-{direction.ToString().ToLowerInvariant()}-{transferId}"),
-            RecoveryLivenessLeaseState.Active,
-            bridgeReason);
-        var bridgeDecision = new BridgeRecoveryDecision(
-            true,
-            BridgeRecoveryKind.BridgeReceiveStallRecovery,
-            bridgeReason,
-            bridgeDecisionGeneration,
-            route.Route,
-            route.ProtocolVersion,
-            epoch?.EpochId ?? 0,
-            owner.RuntimeGeneration,
-            terminalGeneration,
-            leg.Generation,
-            leg.TransportEpochId,
-            leg.BridgeRecoveryGeneration,
-            owner);
-        var bridgeAuthority = new FileTransferBridgeRecoveryAuthority(
-            sessionId,
-            transferId,
-            direction,
-            route.TelemetryToken,
-            route.ProtocolVersion,
-            epoch?.EpochId ?? 0,
-            owner.RuntimeGeneration,
-            terminalGeneration,
-            leg.Generation,
-            leg.TransportEpochId,
-            leg.BridgeRecoveryGeneration,
-            bridgeDecisionGeneration,
-            BridgeRecoveryKind.BridgeReceiveStallRecovery.ToString(),
-            bridgeReason);
-        var lifecycle = new RuntimeUnlockRegularV4RecoveryLifecycleReport(
-            new RuntimeUnlockRegularV4RecoveryAuthority(bridgeAuthority, activeLease),
-            RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed,
-            lifecycleReason);
-        var retiredLease = activeLease with
+        if (GetRequiredProperty<long>(context, "DataSessionGeneration") <= 0)
         {
-            State = RecoveryLivenessLeaseState.Retired,
-            Reason = lifecycleReason,
-        };
-        SetProperty(context, "CurrentRecoveryLivenessLease", null);
-        SetProperty(context, "LastRetiredRecoveryLivenessLease", retiredLease);
-        SetProperty(context, "LastRecoveryLivenessLeaseGeneration", leaseGeneration);
-        SetProperty(context, "CurrentBridgeRecoveryDecision", bridgeDecision);
-        SetProperty(context, "LastBridgeRecoveryDecisionGeneration", bridgeDecisionGeneration);
-        SetProperty(context, "LastRuntimeUnlockRegularV4RecoveryLifecycle", lifecycle);
-        SetProperty(context, "RuntimeUnlockRecoveryLeaseClosureAvailable", true);
-        return (leaseGeneration, bridgeDecisionGeneration);
-    }
+            var dataSession = await bridge.OpenFileTransferDataSessionAsync(
+                sessionId,
+                transferId,
+                CancellationToken.None);
+            SetProperty(context, "DataSession", dataSession);
+            SetProperty(context, "DataSessionGeneration", 1L);
+        }
 
-    private static RuntimeUnlockRegularV4RecoverySettlementReport
-        SeedRegularV4RecoverySettlement(object context)
-    {
-        var sessionId = GetRequiredProperty<string>(context, "SessionId");
-        var transferId = GetRequiredProperty<string>(context, "TransferId");
-        var route = GetRequiredProperty<FileTransferRouteSelection>(context, "RouteSelection");
-        var epoch = GetOptionalProperty<LiveRouteEpoch>(context, "CurrentLiveRouteEpoch");
-        var leg = GetRequiredProperty<FileTransferLeg>(context, "CurrentTransferLeg");
-        var owner = GetRequiredProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner");
-        var terminalGeneration = GetRequiredProperty<int>(context, "TerminalGeneration");
-        var publication = GetRequiredProperty<RoutePublicationToken>(
-            context,
-            "CurrentRoutePublicationToken");
-        const int repairGeneration = 7;
-        var authorityId = new FileTransferAuthorityId(
-            $"fta2-test-regular-v4-handoff-{transferId}");
-        var repairDecision = new RepairReplayDecision(
-            Accepted: true,
-            RepairReplayKind.V4Repair,
-            "test_regular_v4_handoff",
-            repairGeneration,
-            route.Route,
-            route.ProtocolVersion,
-            epoch?.EpochId ?? 0,
-            owner.RuntimeGeneration,
-            terminalGeneration,
-            leg.Generation,
-            leg.TransportEpochId,
-            leg.BridgeRecoveryGeneration,
-            owner,
-            authorityId,
-            PredecessorAuthorityId: null,
-            BridgeDecisionGeneration: 0,
-            publication);
-        SetProperty(context, "CurrentRepairReplayDecision", repairDecision);
-        SetProperty(context, "LastRepairReplayGeneration", repairGeneration);
-
-        var settlement = new FileTransferRegularV4FrontierRepairSettlement(
-            sessionId,
-            transferId,
-            FileTransferDirection.Outbound,
-            route.TelemetryToken,
-            route.ProtocolVersion,
-            epoch?.EpochId ?? 0,
-            owner.RuntimeGeneration,
-            terminalGeneration,
-            leg.Generation,
-            leg.TransportEpochId,
-            leg.BridgeRecoveryGeneration,
-            BridgeDecisionGeneration: 0,
-            publication.PublicationGeneration,
-            publication.RouteCommitGeneration,
-            "regular-v4-frontier:0:test",
-            FrontierChunkIndex: 0,
-            DurableReceivedHighestChunkIndex: -1,
-            RequestedChunkCount: 1,
-            repairGeneration,
-            "test_regular_v4_handoff_consumed",
-            FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch,
-            FileTransferTransportKind.RegularNkn)
-        {
-            AuthorityId = authorityId,
-        };
-        SetProperty(context, "LastCoordinatorIssuedRegularV4RecoverySettlement", settlement);
-        SetProperty(context, "RuntimeUnlockRegularV4RecoverySettlementAvailable", false);
-        SetProperty(context, "CurrentRecoveryLivenessLease", null);
-        SetProperty(context, "LastRetiredRecoveryLivenessLease", null);
-        SetProperty(context, "LastRuntimeUnlockRegularV4RecoveryLifecycle", null);
-        SetProperty(context, "RuntimeUnlockRecoveryLeaseClosureAvailable", false);
-        return new RuntimeUnlockRegularV4RecoverySettlementReport(
-            settlement,
-            RegularV4LivenessGeneration: 0,
-            BridgeDecisionGeneration: 0,
-            RuntimeUnlockRegularV4RecoverySettlementDisposition.Consumed,
-            "test_regular_v4_handoff_consumed");
-    }
-
-    private static RuntimeUnlockRegularV4RecoveryLifecycleReport
-        SeedRegularV4RecoveryLifecycle(
-            object context,
-            FileTransferDirection direction = FileTransferDirection.Outbound)
-    {
-        var sessionId = GetRequiredProperty<string>(context, "SessionId");
-        var transferId = GetRequiredProperty<string>(context, "TransferId");
-        var route = GetRequiredProperty<FileTransferRouteSelection>(context, "RouteSelection");
-        var epoch = GetOptionalProperty<LiveRouteEpoch>(context, "CurrentLiveRouteEpoch");
-        var leg = GetRequiredProperty<FileTransferLeg>(context, "CurrentTransferLeg");
-        var owner = GetRequiredProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner");
-        var terminalGeneration = GetRequiredProperty<int>(context, "TerminalGeneration");
-        const int bridgeDecisionGeneration = 1;
-        var bridge = new BridgeRecoveryDecision(
-            true,
-            BridgeRecoveryKind.BridgeReceiveStallRecovery,
-            "test_regular_v4_lifecycle",
-            bridgeDecisionGeneration,
-            route.Route,
-            route.ProtocolVersion,
-            epoch?.EpochId ?? 0,
-            owner.RuntimeGeneration,
-            terminalGeneration,
-            leg.Generation,
-            leg.TransportEpochId,
-            leg.BridgeRecoveryGeneration,
-            owner);
-        SetProperty(context, "CurrentBridgeRecoveryDecision", bridge);
-        SetProperty(context, "LastBridgeRecoveryDecisionGeneration", bridgeDecisionGeneration);
-        var lease = new RecoveryLivenessLease(
-            sessionId,
-            transferId,
-            direction,
-            owner,
-            route.Route,
-            route.TelemetryToken,
-            route.ProtocolVersion,
-            epoch?.EpochId ?? 0,
-            owner.RuntimeGeneration,
-            terminalGeneration,
-            leg.Generation,
-            leg.TransportEpochId,
-            leg.BridgeRecoveryGeneration,
-            LeaseGeneration: 1,
-            new FileTransferAuthorityId($"fta2-test-lifecycle-lease-{transferId}"),
-            RecoveryLivenessLeaseState.Active,
-            "test_regular_v4_lifecycle");
-        SetProperty(context, "CurrentRecoveryLivenessLease", lease);
-        SetProperty(context, "LastRecoveryLivenessLeaseGeneration", 1);
-        SetProperty(context, "LastRetiredRecoveryLivenessLease", null);
-        SetProperty(context, "LastRuntimeUnlockRegularV4RecoveryLifecycle", null);
-        SetProperty(context, "RuntimeUnlockRecoveryLeaseClosureAvailable", false);
-        var authority = new FileTransferBridgeRecoveryAuthority(
-            sessionId,
-            transferId,
-            direction,
-            route.TelemetryToken,
-            route.ProtocolVersion,
-            epoch?.EpochId ?? 0,
-            owner.RuntimeGeneration,
-            terminalGeneration,
-            leg.Generation,
-            leg.TransportEpochId,
-            leg.BridgeRecoveryGeneration,
-            bridgeDecisionGeneration,
-            BridgeRecoveryKind.BridgeReceiveStallRecovery.ToString(),
-            "test_regular_v4_lifecycle");
-        return new RuntimeUnlockRegularV4RecoveryLifecycleReport(
-            new RuntimeUnlockRegularV4RecoveryAuthority(authority, lease),
-            RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed,
-            "bridge_lifecycle_completed");
-    }
-
-    private static (
-        FileTransferReceiveRecoveryRequest Request,
-        FileTransferBridgeRecoveryExecutionReceipt Receipt)
-        SeedRunningBridgeRecoveryExecution(
-            object context,
-            FileTransferBridgeRecoveryExecutionOutcome outcome,
-            FileTransferDirection direction = FileTransferDirection.Outbound)
-    {
-        var lifecycle = SeedRegularV4RecoveryLifecycle(context, direction);
-        var bridgeDecision = GetRequiredProperty<BridgeRecoveryDecision>(
-            context,
-            "CurrentBridgeRecoveryDecision");
-        var leg = GetRequiredProperty<FileTransferLeg>(context, "CurrentTransferLeg");
-        var command = new FileTransferBridgeRecoveryExecutionCommand(
-            bridgeDecision,
-            lifecycle.RecoveryAuthority.RecoveryLivenessLease,
-            leg.CheckpointRequestId);
-        SetProperty(context, "CurrentBridgeRecoveryExecutionCommand", command);
-        SetProperty(
-            context,
-            "CurrentBridgeRecoveryExecutionState",
-            FileTransferBridgeRecoveryExecutionState.Running);
-        SetProperty(context, "LastBridgeRecoveryExecutionReceipt", null);
-
-        var receipt = new FileTransferBridgeRecoveryExecutionReceipt(
-            command,
-            outcome,
-            "hard_restart",
-            outcome switch
-            {
-                FileTransferBridgeRecoveryExecutionOutcome.Completed =>
-                    "bridge_recovery_completed",
-                FileTransferBridgeRecoveryExecutionOutcome.Exhausted =>
-                    "bridge_recovery_exhausted",
-                _ => "bridge_recovery_discarded",
-            });
-        var authority = lifecycle.Authority;
         var request = new FileTransferReceiveRecoveryRequest(
-            authority.SessionId,
-            authority.TransferId,
-            authority.Direction,
-            receipt.Reason)
-        {
-            RouteToken = authority.RouteToken,
-            ProtocolVersion = authority.ProtocolVersion,
-            LiveRouteEpoch = authority.LiveRouteEpoch,
-            TransferLegGeneration = authority.TransferLegGeneration,
-            BridgeRecoveryGeneration = authority.BridgeRecoveryGeneration,
-            TransportEpoch = authority.TransportEpoch,
-            CheckpointRequestId = leg.CheckpointRequestId,
-            AuthorityReason = authority.Reason,
-            BridgeRecoveryAuthority = authority,
-            RegularV4RecoveryAuthority = lifecycle.RecoveryAuthority,
-            BridgeRecoveryExecutionCommand = command,
-        };
-        return (request, receipt);
-    }
+            sessionId,
+            transferId,
+            direction,
+            "test_receive_recovery_operation");
+        var captureCurrentObservation = Assert.IsAssignableFrom<MethodInfo>(
+            typeof(SessionFileTransferService).GetMethod(
+                "TryRequestFileTransferReceiveRecovery",
+                BindingFlags.Instance | BindingFlags.NonPublic,
+                binder: null,
+                types: [typeof(FileTransferReceiveRecoveryRequest)],
+                modifiers: null));
+        var recoveryRequested = Assert.IsType<bool>(
+            captureCurrentObservation.Invoke(service, [request]));
+        var recoveryState = GetReceiveRecoverySubstate(context);
+        Assert.True(
+            recoveryRequested,
+            $"current_operation={recoveryState.CurrentOperation?.ExecutionState.ToString() ?? "missing"}; " +
+            $"last_terminal={recoveryState.LastTerminalOperation?.ExecutionState.ToString() ?? "missing"}; " +
+            $"commands={bridge.BridgeRecoveryExecutionCommands.Count}; " +
+            $"invalidations={bridge.InvalidatedBridgeRecoveryExecutionCommands.Count}; " +
+            $"data_session_generation={GetRequiredProperty<long>(context, "DataSessionGeneration")}; " +
+            $"publication_present={context.GetType().GetProperty("CurrentRoutePublicationToken")?.GetValue(context) is not null}");
 
-    private static async Task ObserveBridgeRecoveryExecutionCompletionAsync(
-        RetryFixture fixture,
-        FileTransferReceiveRecoveryRequest request,
-        FileTransferBridgeRecoveryExecutionReceipt receipt)
-        => await ObserveBridgeRecoveryExecutionCompletionAsync(
-            fixture.Service,
-            fixture.Bridge,
-            request,
-            receipt);
+        var command = Assert.Single(bridge.BridgeRecoveryExecutionCommands);
+        var lease = Assert.IsType<RecoveryLivenessLease>(
+            command.RecoveryLivenessLease);
+        var receipt = bridge.CompleteBridgeRecoveryExecution(
+            command,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            "test_receive_recovery_completed");
+        await WaitUntilAsync(() =>
+            bridge.BridgeRecoveryExecutionReceiptDecisions.Any(decision =>
+                decision.Receipt == receipt &&
+                decision.Accepted));
 
-    private static async Task ObserveBridgeRecoveryExecutionCompletionAsync(
-        SessionFileTransferService service,
-        RetryAuthorityLoopbackTransport bridge,
-        FileTransferReceiveRecoveryRequest request,
-        FileTransferBridgeRecoveryExecutionReceipt receipt)
-    {
-        var method = typeof(SessionFileTransferService).GetMethod(
-            "ObserveBridgeRecoveryExecutionCompletionAsync",
-            BindingFlags.Instance | BindingFlags.NonPublic);
-        Assert.NotNull(method);
-        var invocation = method!.Invoke(
-            service,
-            [request, Task.FromResult(receipt), bridge]);
-        var task = Assert.IsAssignableFrom<Task>(invocation);
-        await task.WaitAsync(TimeSpan.FromSeconds(3));
+        bridge.RaiseReceiveRecoveryProof(
+            command,
+            "test_receive_recovery_proof",
+            "test_receive_recovery_proof_observed");
+        await WaitUntilAsync(() =>
+            GetReceiveRecoverySubstate(context).CurrentOperation
+                ?.ClosureState ==
+            FileTransferReceiveRecoveryClosureState.Adopted);
+
+        return (
+            lease.LeaseGeneration,
+            command.Decision.BridgeDecisionGeneration);
     }
 
     private static object GetOutboundContext(SessionFileTransferService service)
@@ -2140,17 +1441,45 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             }
             case "bridge_decision":
             {
-                var bridgeDecision = GetOptionalStructProperty<BridgeRecoveryDecision>(
-                    context,
-                    "CurrentBridgeRecoveryDecision");
-                Assert.NotNull(bridgeDecision);
-                SetProperty(
-                    context,
-                    "CurrentBridgeRecoveryDecision",
-                    bridgeDecision.Value with
+                var persistentState = GetCoordinatorPersistentState(context);
+                var recoveryState =
+                    persistentState.FileTransferReceiveRecovery;
+                var operation =
+                    Assert.IsType<FileTransferReceiveRecoveryOperation>(
+                        recoveryState.CurrentOperation);
+                var bridgeDecision =
+                    operation.Authority.BridgeRecoveryDecision with
                     {
                         BridgeDecisionGeneration = checked(
-                            bridgeDecision.Value.BridgeDecisionGeneration + 1),
+                            operation.Authority.BridgeRecoveryDecision
+                                .BridgeDecisionGeneration + 1),
+                    };
+                var authority = operation.Authority with
+                {
+                    BridgeRecoveryDecision = bridgeDecision,
+                    CompatibilityBridgeAuthority =
+                        operation.Authority.CompatibilityBridgeAuthority with
+                        {
+                            BridgeDecisionGeneration =
+                                bridgeDecision.BridgeDecisionGeneration,
+                        },
+                    ExecutionCommand =
+                        operation.Authority.ExecutionCommand with
+                        {
+                            Decision = bridgeDecision,
+                        },
+                };
+                SetCoordinatorPersistentState(
+                    context,
+                    persistentState with
+                    {
+                        FileTransferReceiveRecovery = recoveryState with
+                        {
+                            CurrentOperation = operation with
+                            {
+                                Authority = authority,
+                            },
+                        },
                     });
                 break;
             }
@@ -2182,6 +1511,10 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         => GetRequiredProperty<FileTransferCoordinatorPersistentState>(
             context,
             "CoordinatorPersistentState");
+
+    private static FileTransferReceiveRecoverySubstate
+        GetReceiveRecoverySubstate(object context)
+        => GetCoordinatorPersistentState(context).FileTransferReceiveRecovery;
 
     private static void SetCoordinatorPersistentState(
         object context,
@@ -2235,17 +1568,6 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             .RuntimeUnlockRetryLifecycle
             .LastInstallGeneration;
 
-    private static RuntimeUnlockRegularV4RecoverySettlementReport? GetLastRegularV4Settlement(
-        object context)
-    {
-        var value = context.GetType()
-            .GetProperty(
-                "LastRuntimeUnlockRegularV4RecoverySettlement",
-                BindingFlags.Instance | BindingFlags.Public)!
-            .GetValue(context);
-        return value is RuntimeUnlockRegularV4RecoverySettlementReport report ? report : null;
-    }
-
     private sealed class RetryFixture(
         SessionFileTransferService service,
         RetryAuthorityLoopbackTransport bridge,
@@ -2274,8 +1596,7 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
 
     private sealed class RetryAuthorityLoopbackTransport(string sessionId) :
         LoopbackFileTransferTransport(sessionId),
-        IRuntimeUnlockRetryDispatchAuthorityBridge,
-        IFileTransferBridgeRecoveryExecutionBridge
+        IRuntimeUnlockRetryDispatchAuthorityBridge
     {
         private readonly ConcurrentQueue<RuntimeUnlockRetryDispatchDecision> authorityDecisions = [];
         private readonly ConcurrentQueue<RuntimeUnlockRetryDispatchDecisionStageResult> stageResults = [];
@@ -2283,13 +1604,6 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         private readonly ConcurrentQueue<RuntimeUnlockRetryDispatchSuccessorDecision>
             successorDecisions = [];
         private readonly ConcurrentQueue<RuntimeUnlockRetryDispatchSettlementDecision> settlementDecisions = [];
-        private readonly ConcurrentQueue<RuntimeUnlockRegularV4RecoverySettlementDecision> regularV4SettlementDecisions = [];
-        private readonly ConcurrentQueue<RuntimeUnlockRegularV4RecoveryLifecycleDecision> regularV4LifecycleDecisions = [];
-        private readonly ConcurrentQueue<(
-            FileTransferBridgeRecoveryExecutionReceipt Receipt,
-            bool Accepted,
-            string Reason)> bridgeRecoveryExecutionReceiptDecisions = [];
-        private readonly ConcurrentQueue<string> bridgeRecoveryCompletionObservations = [];
         private EventHandler<RuntimeUnlockRetryDispatchInitialEvaluationRequestedEventArgs>?
             initialEvaluationRequested;
         private EventHandler<RuntimeUnlockRetryDispatchAuthorityRequestedEventArgs>? authorityRequested;
@@ -2300,9 +1614,6 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             executionObserved;
         private EventHandler<RuntimeUnlockRetryDispatchSuccessorEvaluationEventArgs>?
             successorEvaluationRequested;
-        private EventHandler<RuntimeUnlockRegularV4RecoverySettlementReportedEventArgs>? regularV4SettlementReported;
-        private EventHandler<RuntimeUnlockRegularV4RecoveryLifecycleReportedEventArgs>? regularV4LifecycleReported;
-        private EventHandler<FileTransferBridgeRecoveryEvaluationRequestedEventArgs>? bridgeRecoveryEvaluationRequested;
         private RuntimeUnlockRetryDispatchAuthorityRequest? pendingRequest;
         private RuntimeUnlockRetryDispatchDecision? pendingStage;
         private long pendingStageStagedUtcMs;
@@ -2362,33 +1673,8 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             remove => successorEvaluationRequested -= value;
         }
 
-        public event EventHandler<RuntimeUnlockRegularV4RecoverySettlementReportedEventArgs>?
-            RuntimeUnlockRegularV4RecoverySettlementReported
-        {
-            add => regularV4SettlementReported += value;
-            remove => regularV4SettlementReported -= value;
-        }
-
-        public event EventHandler<RuntimeUnlockRegularV4RecoveryLifecycleReportedEventArgs>?
-            RuntimeUnlockRegularV4RecoveryLifecycleReported
-        {
-            add => regularV4LifecycleReported += value;
-            remove => regularV4LifecycleReported -= value;
-        }
-
-        public event EventHandler<FileTransferBridgeRecoveryEvaluationRequestedEventArgs>?
-            BridgeRecoveryEvaluationRequested
-        {
-            add => bridgeRecoveryEvaluationRequested += value;
-            remove => bridgeRecoveryEvaluationRequested -= value;
-        }
-
         public int AuthorityRequestSubscriberCount =>
             authorityRequested?.GetInvocationList().Length ?? 0;
-
-        public bool ThrowOnBridgeRecoveryExecutionReceiptDecision { get; set; }
-
-        public int RegularV4LifecycleDecisionCount => regularV4LifecycleDecisions.Count;
 
         public int SettlementReportSubscriberCount =>
             settlementReported?.GetInvocationList().Length ?? 0;
@@ -2401,12 +1687,6 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
 
         public int SuccessorEvaluationSubscriberCount =>
             successorEvaluationRequested?.GetInvocationList().Length ?? 0;
-
-        public int RegularV4SettlementReportSubscriberCount =>
-            regularV4SettlementReported?.GetInvocationList().Length ?? 0;
-
-        public int RegularV4LifecycleReportSubscriberCount =>
-            regularV4LifecycleReported?.GetInvocationList().Length ?? 0;
 
         public RuntimeUnlockRetryDispatchContract? InfraCurrentContract { get; private set; }
 
@@ -2479,18 +1759,6 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
                 this,
                 new RuntimeUnlockRetryDispatchSuccessorEvaluationEventArgs(evaluation));
 
-        public void RaiseRegularV4SettlementReport(
-            RuntimeUnlockRegularV4RecoverySettlementReport report)
-            => regularV4SettlementReported?.Invoke(
-                this,
-                new RuntimeUnlockRegularV4RecoverySettlementReportedEventArgs(report));
-
-        public void RaiseRegularV4LifecycleReport(
-            RuntimeUnlockRegularV4RecoveryLifecycleReport report)
-            => regularV4LifecycleReported?.Invoke(
-                this,
-                new RuntimeUnlockRegularV4RecoveryLifecycleReportedEventArgs(report));
-
         public RuntimeUnlockRetryDispatchDecision DequeueAuthorityDecision()
         {
             Assert.True(authorityDecisions.TryDequeue(out var decision));
@@ -2519,33 +1787,6 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         {
             Assert.True(settlementDecisions.TryDequeue(out var decision));
             return decision;
-        }
-
-        public RuntimeUnlockRegularV4RecoverySettlementDecision DequeueRegularV4SettlementDecision()
-        {
-            Assert.True(regularV4SettlementDecisions.TryDequeue(out var decision));
-            return decision;
-        }
-
-        public RuntimeUnlockRegularV4RecoveryLifecycleDecision DequeueRegularV4LifecycleDecision()
-        {
-            Assert.True(regularV4LifecycleDecisions.TryDequeue(out var decision));
-            return decision;
-        }
-
-        public (
-            FileTransferBridgeRecoveryExecutionReceipt Receipt,
-            bool Accepted,
-            string Reason) DequeueBridgeRecoveryExecutionReceiptDecision()
-        {
-            Assert.True(bridgeRecoveryExecutionReceiptDecisions.TryDequeue(out var decision));
-            return decision;
-        }
-
-        public string DequeueBridgeRecoveryCompletionObservation()
-        {
-            Assert.True(bridgeRecoveryCompletionObservations.TryDequeue(out var observation));
-            return observation;
         }
 
         public bool ObserveRuntimeUnlockRetryDispatchNonGrantDecision(
@@ -3066,47 +2307,5 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             return true;
         }
 
-        public bool ObserveRuntimeUnlockRegularV4RecoverySettlementDecision(
-            RuntimeUnlockRegularV4RecoverySettlementDecision decision)
-        {
-            regularV4SettlementDecisions.Enqueue(decision);
-            return true;
-        }
-
-        public bool ObserveRuntimeUnlockRegularV4RecoveryLifecycleDecision(
-            RuntimeUnlockRegularV4RecoveryLifecycleDecision decision)
-        {
-            bridgeRecoveryCompletionObservations.Enqueue("lifecycle");
-            regularV4LifecycleDecisions.Enqueue(decision);
-            return true;
-        }
-
-        public FileTransferBridgeRecoveryExecutionStartResult BeginBridgeRecoveryExecution(
-            FileTransferBridgeRecoveryExecutionCommand command)
-            => new(
-                command,
-                FileTransferBridgeRecoveryExecutionStartStatus.Rejected,
-                "test_bridge_recovery_execution_not_started",
-                Completion: null);
-
-        public void ObserveBridgeRecoveryExecutionReceiptDecision(
-            FileTransferBridgeRecoveryExecutionReceipt receipt,
-            bool accepted,
-            string reason)
-        {
-            bridgeRecoveryCompletionObservations.Enqueue("receipt");
-            if (ThrowOnBridgeRecoveryExecutionReceiptDecision)
-            {
-                throw new InvalidOperationException(
-                    "test_bridge_recovery_execution_receipt_notification_failed");
-            }
-
-            bridgeRecoveryExecutionReceiptDecisions.Enqueue((receipt, accepted, reason));
-        }
-
-        public bool InvalidateBridgeRecoveryExecution(
-            FileTransferBridgeRecoveryExecutionCommand command,
-            string reason)
-            => true;
     }
 }

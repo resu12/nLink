@@ -1581,6 +1581,17 @@ public sealed partial class SessionFileTransferService
                         publicationCurrent = false;
                     }
 
+                    if (publicationCurrent &&
+                        !ReferenceEquals(
+                            context.DataSession,
+                            openedDataSession) &&
+                        !TryInvalidateReceiveRecoveryOperationForScopeReplacementLocked(
+                            context,
+                            "data_session_replaced"))
+                    {
+                        publicationCurrent = false;
+                    }
+
                     if (publicationCurrent)
                     {
                         if (!ReferenceEquals(context.DataSession, openedDataSession))
@@ -8197,9 +8208,6 @@ public sealed partial class SessionFileTransferService
             outboundRepair.AuthorityId == settlement.AuthorityId &&
             outboundRepair.RepairGeneration == settlement.DecisionGeneration)
         {
-            outbound.LastCoordinatorIssuedRegularV4RecoverySettlement = settlement;
-            outbound.LastRuntimeUnlockRegularV4RecoverySettlement = null;
-            outbound.RuntimeUnlockRegularV4RecoverySettlementAvailable = false;
             return;
         }
 
@@ -8211,9 +8219,6 @@ public sealed partial class SessionFileTransferService
             inboundRepair.AuthorityId == settlement.AuthorityId &&
             inboundRepair.RepairGeneration == settlement.DecisionGeneration)
         {
-            inbound.LastCoordinatorIssuedRegularV4RecoverySettlement = settlement;
-            inbound.LastRuntimeUnlockRegularV4RecoverySettlement = null;
-            inbound.RuntimeUnlockRegularV4RecoverySettlementAvailable = false;
         }
     }
 

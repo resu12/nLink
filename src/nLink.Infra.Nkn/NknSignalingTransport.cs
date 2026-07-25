@@ -16,7 +16,7 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.Nkn;
 
 #pragma warning disable CS0067
-public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, IBridgeBootstrapReadinessSignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, ISessionLivenessSignalingTransport, ISessionRecoveryStateContract, ITransportAccelerationStatus, ITransportAccelerationControl, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferSessionContextProvider, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferControlPlaneDeliveryTransport, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferBridgeRecoveryExecutionBridge, IFileTransferRecoveryLivenessState, IFileTransferRecoveryLivenessAuthorityObserver, IFileTransferTerminalObserver, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRegularV4FrontierRepairPressureInstallBridge, IFileTransferRouteTransitionBridge, IFileTransferRegularV4FrontierRepairSettlementObserver, IFileTransferPostTunaFallbackControlPlanePressureObserver, IFileTransferRouteCompletionObserver, IFileTransferRouteHintObserver, IFileTransferInitialTunaReadinessProvider, IRuntimeUnlockRouteCommitProofProvider, IRuntimeUnlockPreCommitProbeLaunchObserver, IRuntimeUnlockRetryDispatchAuthorityBridge, IAuthoritativeConnectedAddressSource
+public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, IBridgeBootstrapReadinessSignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, ISessionLivenessSignalingTransport, ISessionRecoveryStateContract, ITransportAccelerationStatus, ITransportAccelerationControl, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferSessionContextProvider, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferControlPlaneDeliveryTransport, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferBridgeRecoveryExecutionBridge, IFileTransferTerminalObserver, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRegularV4FrontierRepairPressureInstallBridge, IFileTransferRouteTransitionBridge, IFileTransferRegularV4FrontierRepairSettlementObserver, IFileTransferPostTunaFallbackControlPlanePressureObserver, IFileTransferRouteCompletionObserver, IFileTransferRouteHintObserver, IFileTransferInitialTunaReadinessProvider, IRuntimeUnlockRouteCommitProofProvider, IRuntimeUnlockPreCommitProbeLaunchObserver, IRuntimeUnlockRetryDispatchAuthorityBridge, IAuthoritativeConnectedAddressSource
 {
     private readonly record struct FileTransferV6TransportEpochKey(
         string SessionId,
@@ -495,12 +495,21 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     internal event EventHandler<BridgeLifecycleEvent>? BridgeLifecycle;
     private event EventHandler<FileTransferBridgeRecoveryEvaluationRequestedEventArgs>?
         FileTransferBridgeRecoveryEvaluationRequested;
+    private event EventHandler<FileTransferReceiveRecoveryProofObservedEventArgs>?
+        FileTransferReceiveRecoveryProofObserved;
 
     event EventHandler<FileTransferBridgeRecoveryEvaluationRequestedEventArgs>?
         IFileTransferBridgeRecoveryExecutionBridge.BridgeRecoveryEvaluationRequested
     {
         add => FileTransferBridgeRecoveryEvaluationRequested += value;
         remove => FileTransferBridgeRecoveryEvaluationRequested -= value;
+    }
+
+    event EventHandler<FileTransferReceiveRecoveryProofObservedEventArgs>?
+        IFileTransferBridgeRecoveryExecutionBridge.ReceiveRecoveryProofObserved
+    {
+        add => FileTransferReceiveRecoveryProofObserved += value;
+        remove => FileTransferReceiveRecoveryProofObserved -= value;
     }
     public event EventHandler<ScreenShareFrameCompletedEventArgs>? ScreenShareFrameCompleted;
     public event EventHandler? ScreenShareStopped;
@@ -3110,69 +3119,20 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             return;
         }
 
-        if (e.RecoveryExecutionCommand is { } terminalCommand &&
-            e.Kind is
-                BridgeLifecycleEventKind.ReceiveStallRecoveryCompleted or
-                BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted)
-        {
-            var terminalDisposition = "stale";
-            lock (accelerationGate)
-            {
-                if (lastFileTransferBridgeRecoveryExecutionReceipt is { } acceptedReceipt &&
-                    acceptedReceipt.Command.Equals(terminalCommand) &&
-                    IsBridgeRecoveryTerminalLifecycleForReceipt(e.Kind, acceptedReceipt))
-                {
-                    if (lastAppliedFileTransferBridgeRecoveryExecutionReceipt is { } appliedReceipt &&
-                        appliedReceipt.Equals(acceptedReceipt))
-                    {
-                        terminalDisposition = "duplicate";
-                    }
-                    else
-                    {
-                        lastAppliedFileTransferBridgeRecoveryExecutionReceipt = acceptedReceipt;
-                        terminalDisposition = "accepted";
-                    }
-                }
-                else if (fileTransferBridgeRecoveryExecutionCommand is { } currentCommand &&
-                         currentCommand.Equals(terminalCommand))
-                {
-                    if (pendingFileTransferBridgeRecoveryTerminalLifecycle is null)
-                    {
-                        pendingFileTransferBridgeRecoveryTerminalLifecycle = e;
-                        terminalDisposition = "buffered";
-                    }
-                    else if (pendingFileTransferBridgeRecoveryTerminalLifecycle.Value.Equals(e))
-                    {
-                        terminalDisposition = "duplicate_buffered";
-                    }
-                    else
-                    {
-                        terminalDisposition = "conflicting_terminal";
-                    }
-                }
-            }
-
-            if (!string.Equals(terminalDisposition, "accepted", StringComparison.Ordinal))
-            {
-                LocalOperationalLog.Info(
-                    "NKN.Tuna",
-                    $"event=filetransfer_bridge_recovery_terminal_lifecycle_deferred; lifecycle={e.Kind.ToString().ToLowerInvariant()}; disposition={terminalDisposition}; bridge_decision_generation={terminalCommand.Decision.BridgeDecisionGeneration}; reason=coordinator_receipt_decision_required");
-                PublishCompatibilityLifecycle(e);
-                return;
-            }
-        }
-
         if (e.RecoveryExecutionCommand is { } executionCommand &&
             (e.Kind is
                 BridgeLifecycleEventKind.ReceiveStallRecoveryStarted or
                 BridgeLifecycleEventKind.ReceiveStallRecoveryCompleted or
                 BridgeLifecycleEventKind.ReceiveStallRecoveryReceiveResumed or
-                BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted) &&
-            !IsFileTransferBridgeRecoveryLifecycleCurrent(e.Kind, executionCommand))
+                BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted))
         {
+            var current =
+                IsFileTransferBridgeRecoveryLifecycleCurrent(
+                    e.Kind,
+                    executionCommand);
             LocalOperationalLog.Info(
                 "NKN.Tuna",
-                $"event=filetransfer_bridge_recovery_lifecycle_diagnostic_only; lifecycle={e.Kind.ToString().ToLowerInvariant()}; reason=bridge_recovery_execution_command_not_current; bridge_decision_generation={executionCommand.Decision.BridgeDecisionGeneration}");
+                $"event=filetransfer_bridge_recovery_lifecycle_diagnostic_only; lifecycle={e.Kind.ToString().ToLowerInvariant()}; reason={(current ? "coordinator_operation_receipt_or_proof_required" : "bridge_recovery_execution_command_not_current")}; bridge_decision_generation={executionCommand.Decision.BridgeDecisionGeneration}");
             PublishCompatibilityLifecycle(e);
             return;
         }
@@ -3182,8 +3142,6 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             Volatile.Write(ref bridgeReceiveStallRecoveryActive, 1);
             var recoveryReason = string.IsNullOrWhiteSpace(e.ExitReasonText) ? "receive_stall_recovery" : e.ExitReasonText;
             var sessionId = currentSessionSecurityState.SessionId?.Value;
-            MarkFileTransferFallbackLegAuthorityBridgeRecoveryLifecycle("started", recoveryReason);
-            MarkFileTransferRegularV4RecoveryLivenessBridgeRecoveryLifecycle("started", recoveryReason);
             var interruptedRuntimeUnlockOffer = InterruptRuntimeUnlockOfferForBridgeRecovery(
                 "offer_interrupted_by_bridge_recovery",
                 recoveryReason,
@@ -3293,7 +3251,6 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
 
         if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryCompleted)
         {
-            MarkFileTransferFallbackLegAuthorityBridgeRecoveryLifecycle("completed", e.ExitReasonText);
             // The exact execution receipt is the coordinator lifecycle boundary.
             // Command-tagged compatibility lifecycle telemetry must not retire the
             // lease before Core has accepted that receipt.
@@ -3309,8 +3266,6 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
 
         if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryReceiveResumed)
         {
-            MarkFileTransferFallbackLegAuthorityBridgeRecoveryLifecycle("receive_resumed", e.ExitReasonText);
-            MarkFileTransferRegularV4RecoveryLivenessBridgeRecoveryLifecycle("receive_resumed", e.ExitReasonText);
             RaiseBridgeReceiveStallSessionLivenessProof(e);
             MarkFileTransferTunaActivationBridgeRecoverySettled("receive_resumed");
             Volatile.Write(ref bridgeReceiveStallRecoveryActive, 0);
@@ -3326,7 +3281,6 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted)
         {
             Volatile.Write(ref bridgeReceiveStallRecoveryActive, 0);
-            MarkFileTransferFallbackLegAuthorityBridgeRecoveryLifecycle("exhausted", e.ExitReasonText);
             MarkFileTransferTunaActivationBridgeRecoverySettled("receive_stall_recovery_exhausted");
             var sessionId = SanitizeLogToken(currentSessionSecurityState.SessionId?.Value ?? "none");
             var reason = string.IsNullOrWhiteSpace(e.ExitReasonText)
@@ -3396,44 +3350,13 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         PublishCompatibilityLifecycle(e);
     }
 
-    private static bool IsBridgeRecoveryTerminalLifecycleForReceipt(
-        BridgeLifecycleEventKind lifecycleKind,
-        FileTransferBridgeRecoveryExecutionReceipt receipt)
-        => lifecycleKind switch
-        {
-            BridgeLifecycleEventKind.ReceiveStallRecoveryCompleted =>
-                receipt.Outcome == FileTransferBridgeRecoveryExecutionOutcome.Completed,
-            BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted =>
-                receipt.Outcome == FileTransferBridgeRecoveryExecutionOutcome.Exhausted,
-            _ => false,
-        };
-
     private bool IsFileTransferBridgeRecoveryLifecycleCurrent(
         BridgeLifecycleEventKind lifecycleKind,
         FileTransferBridgeRecoveryExecutionCommand command)
-    {
-        lock (accelerationGate)
-        {
-            if (lifecycleKind == BridgeLifecycleEventKind.ReceiveStallRecoveryReceiveResumed)
-            {
-                return lastFileTransferBridgeRecoveryExecutionReceipt is { } receipt &&
-                       receipt.Command.Equals(command) &&
-                       receipt.Outcome == FileTransferBridgeRecoveryExecutionOutcome.Completed;
-            }
-
-            if (lifecycleKind is
-                    BridgeLifecycleEventKind.ReceiveStallRecoveryCompleted or
-                    BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted)
-            {
-                return lastFileTransferBridgeRecoveryExecutionReceipt is { } receipt &&
-                       receipt.Command.Equals(command) &&
-                       IsBridgeRecoveryTerminalLifecycleForReceipt(lifecycleKind, receipt);
-            }
-
-            return fileTransferBridgeRecoveryExecutionCommand is { } current &&
-                   current.Equals(command);
-        }
-    }
+        => client is RealNknClientAdapter realClient &&
+           realClient.IsFileTransferBridgeRecoveryLifecycleCurrent(
+               lifecycleKind,
+               command);
 
     private void OnBridgeRecoveryEvaluationRequested(
         object? sender,

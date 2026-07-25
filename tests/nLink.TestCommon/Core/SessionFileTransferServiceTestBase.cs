@@ -355,11 +355,19 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public event EventHandler<TransportAccelerationStateChangedEventArgs>? TransportAccelerationStateChanged;
         private event EventHandler<FileTransferBridgeRecoveryEvaluationRequestedEventArgs>?
             bridgeRecoveryEvaluationRequested;
+        private event EventHandler<FileTransferReceiveRecoveryProofObservedEventArgs>?
+            receiveRecoveryProofObserved;
         event EventHandler<FileTransferBridgeRecoveryEvaluationRequestedEventArgs>?
             IFileTransferBridgeRecoveryExecutionBridge.BridgeRecoveryEvaluationRequested
         {
             add => bridgeRecoveryEvaluationRequested += value;
             remove => bridgeRecoveryEvaluationRequested -= value;
+        }
+        event EventHandler<FileTransferReceiveRecoveryProofObservedEventArgs>?
+            IFileTransferBridgeRecoveryExecutionBridge.ReceiveRecoveryProofObserved
+        {
+            add => receiveRecoveryProofObserved += value;
+            remove => receiveRecoveryProofObserved -= value;
         }
         public void Connect(LoopbackFileTransferTransport other)
         {
@@ -537,6 +545,19 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             return receipt;
         }
 
+        internal void RaiseReceiveRecoveryProof(
+            FileTransferBridgeRecoveryExecutionCommand command,
+            string proofIdentity = "loopback_receive_proof",
+            string reason = "loopback_receive_proof_observed")
+            => receiveRecoveryProofObserved?.Invoke(
+                this,
+                new FileTransferReceiveRecoveryProofObservedEventArgs(
+                    new FileTransferReceiveRecoveryProofObservation(
+                        command,
+                        proofIdentity,
+                        reason,
+                        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())));
+
         void IFileTransferBridgeRecoveryExecutionBridge.ObserveBridgeRecoveryExecutionReceiptDecision(
             FileTransferBridgeRecoveryExecutionReceipt receipt,
             bool accepted,
@@ -568,13 +589,6 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                 decision.BridgeDecisionGeneration,
                 decision.RecoveryKind.ToString(),
                 decision.Reason);
-            RuntimeUnlockRegularV4RecoveryAuthority? regularV4Authority =
-                command.RecoveryLivenessLease is { } recoveryLivenessLease
-                ? new RuntimeUnlockRegularV4RecoveryAuthority(
-                    bridgeAuthority,
-                    recoveryLivenessLease)
-                : null;
-
             return new FileTransferReceiveRecoveryRequest(
                 owner.SessionId,
                 owner.TransferId,
@@ -590,7 +604,6 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                 CheckpointRequestId = command.CheckpointRequestId,
                 AuthorityReason = decision.Reason,
                 BridgeRecoveryAuthority = bridgeAuthority,
-                RegularV4RecoveryAuthority = regularV4Authority,
                 BridgeRecoveryExecutionCommand = command,
             };
         }

@@ -360,120 +360,6 @@ public sealed partial class SessionFileTransferV4SenderTests
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
-    public void RegularV4Projection_SettledStalledRecoveryRebindAuthorizesOneFreshIndependentProjection()
-    {
-        const string transferId = "transfer_regular_v4_projection_recovery_rebind";
-        using var service = new SessionFileTransferService();
-        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
-        service.AttachTransport(transport);
-        var serviceType = typeof(SessionFileTransferService);
-        var context = CreateProjectionInboundContext(transferId);
-        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "projection_recovery_rebind");
-
-        var initial = CreateInboundState(service, context, "frontier_stall_repair_due", forceMissingRange: true);
-        var repairStates = Assert.IsAssignableFrom<IDictionary>(GetPrivatePropertyValue(context, "V4ReceiverRepairRequests"));
-        var repairKey = Assert.Single(repairStates.Keys.Cast<string>());
-        var retiredContract = GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract");
-        Assert.NotNull(retiredContract);
-        var retiredAuthority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(
-            GetPrivatePropertyValue(retiredContract, "Authority"));
-
-        Assert.True(Assert.IsType<bool>(serviceType
-            .GetMethod("TrySettleInboundRegularV4FrontierRepairStalledLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(
-                service,
-                [
-                    context,
-                    repairKey,
-                    "unit_test_projection_recovery_rebind",
-                    initial.ContiguousCommittedChunkIndex,
-                    initial.DurableReceivedHighestChunkIndex,
-                    initial.MissingRanges[0].ChunkCount,
-                    12,
-                    11_000L,
-                ])));
-
-        while (transport.RegularV4ControlFeedbackPressures.TryDequeue(out _))
-        {
-        }
-
-        var owner = Assert.IsType<RuntimeOwnerToken>(GetPrivatePropertyValue(context, "CurrentRuntimeOwner"));
-        var leg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
-        var recovery = FileTransferCoordinator.AuthorizeAction(
-            CreateCoordinatorStateForTest(context),
-            new FileTransferCoordinatorActionRequest(
-                FileTransferCoordinatorActionKind.BridgeReceiveStallRecovery,
-                Source: "test",
-                Reason: "unit_test_projection_recovery_rebind",
-                RuntimeOwner: owner,
-                Route: leg.RouteSelection.Route,
-                ProtocolVersion: leg.ProtocolVersion,
-                LiveRouteEpoch: leg.LiveRouteEpochId,
-                LegGeneration: leg.Generation,
-                TransportEpochId: leg.TransportEpochId,
-                BridgeRecoveryGeneration: leg.BridgeRecoveryGeneration,
-                BridgeRecoveryKind: BridgeRecoveryKind.BridgeReceiveStallRecovery));
-        Assert.True(recovery.Accepted);
-        var bridgeDecision = Assert.IsType<BridgeRecoveryDecision>(recovery.BridgeRecoveryDecision);
-        var activeLease = Assert.IsType<RecoveryLivenessLease>(recovery.RecoveryLivenessLease);
-        Assert.True(bridgeDecision.BridgeDecisionGeneration > retiredAuthority.BridgeDecisionGeneration);
-
-        ApplyCoordinatorActionDecisionForTest(context, recovery);
-        Assert.Null(GetPrivatePropertyValue(context, "V4RegularFrontierRepairProjection"));
-        Assert.True(GetPrivateProperty<bool>(context, "V4RegularFrontierRepairProjectionRefreshRequired"));
-
-        var lifecycleReport = CreateProjectionRecoveryLifecycleReport(
-            recovery.State,
-            bridgeDecision,
-            activeLease);
-        var lifecycleDecision = ObserveRegularV4RecoveryLifecycleForTest(context, lifecycleReport);
-        Assert.Equal(RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted, lifecycleDecision.Status);
-        Assert.True(GetPrivateProperty<bool>(context, "RuntimeUnlockRecoveryLeaseClosureAvailable"));
-        Assert.Null(GetPrivatePropertyValue(context, "CurrentRecoveryLivenessLease"));
-        var retiredLease = GetPrivatePropertyValue(context, "LastRetiredRecoveryLivenessLease");
-        var retryLifecycle = FileTransferCoordinator.GetRuntimeUnlockRetryLifecycle(
-            CreateCoordinatorStateForTest(context));
-
-        var rebound = CreateInboundState(service, context, "chunk_batch_committed");
-
-        var reboundRange = Assert.Single(rebound.MissingRanges);
-        Assert.Equal(initial.MissingRanges[0].StartChunkIndex, reboundRange.StartChunkIndex);
-        Assert.Equal(initial.MissingRanges[0].ChunkCount, reboundRange.ChunkCount);
-        var reboundProjection = GetPrivatePropertyValue(context, "V4RegularFrontierRepairProjection");
-        Assert.NotNull(reboundProjection);
-        var reboundContract = GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract");
-        Assert.NotNull(reboundContract);
-        Assert.NotSame(retiredContract, reboundContract);
-        var reboundAuthority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(
-            GetPrivatePropertyValue(reboundContract, "Authority"));
-        Assert.NotEqual(retiredAuthority.AuthorityId, reboundAuthority.AuthorityId);
-        Assert.Null(reboundAuthority.PredecessorAuthorityId);
-        Assert.Equal(bridgeDecision.BridgeDecisionGeneration, reboundAuthority.BridgeDecisionGeneration);
-        Assert.False(GetPrivateProperty<bool>(context, "V4RegularFrontierRepairProjectionRefreshRequired"));
-        Assert.Single(transport.RegularV4ControlFeedbackPressures);
-
-        var duplicate = CreateInboundState(service, context, "chunk_batch_committed");
-        Assert.Equal(rebound.MissingRanges, duplicate.MissingRanges);
-        Assert.Same(reboundContract, GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
-        Assert.Single(transport.RegularV4ControlFeedbackPressures);
-
-        var retiredLifecycle = GetPrivatePropertyValue(retiredContract, "Lifecycle");
-        Assert.True(GetPrivateProperty<bool>(retiredLifecycle!, "IsSettled"));
-        Assert.Equal(
-            FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled,
-            Assert.IsType<FileTransferRegularV4FrontierRepairSettlementOutcome>(
-                GetPrivatePropertyValue(retiredLifecycle!, "SettlementOutcome")));
-        Assert.Equal(lifecycleReport, GetPrivatePropertyValue(context, "LastRuntimeUnlockRegularV4RecoveryLifecycle"));
-        Assert.Equal(retiredLease, GetPrivatePropertyValue(context, "LastRetiredRecoveryLivenessLease"));
-        Assert.True(GetPrivateProperty<bool>(context, "RuntimeUnlockRecoveryLeaseClosureAvailable"));
-        Assert.Equal(
-            retryLifecycle,
-            FileTransferCoordinator.GetRuntimeUnlockRetryLifecycle(
-                CreateCoordinatorStateForTest(context)));
-    }
-
-    [Fact]
-    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
     public void RegularV4Projection_RecoveryRebindMissingPressureRetainsLatchAndReusesFreshAuthority()
     {
         const string transferId = "transfer_regular_v4_projection_recovery_pressure_missing";
@@ -482,6 +368,11 @@ public sealed partial class SessionFileTransferV4SenderTests
         service.AttachTransport(transport);
         var serviceType = typeof(SessionFileTransferService);
         var context = CreateProjectionInboundContext(transferId);
+        serviceType
+            .GetField(
+                "inboundTransfer",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
         SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "projection_recovery_pressure_missing");
 
         var initial = CreateInboundState(service, context, "frontier_stall_repair_due", forceMissingRange: true);
@@ -514,29 +405,31 @@ public sealed partial class SessionFileTransferV4SenderTests
         {
         }
 
-        var owner = Assert.IsType<RuntimeOwnerToken>(GetPrivatePropertyValue(context, "CurrentRuntimeOwner"));
-        var leg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
-        var recovery = FileTransferCoordinator.AuthorizeAction(
-            CreateCoordinatorStateForTest(context),
-            new FileTransferCoordinatorActionRequest(
-                FileTransferCoordinatorActionKind.BridgeReceiveStallRecovery,
-                Source: "test",
-                Reason: "unit_test_projection_recovery_pressure_missing",
-                RuntimeOwner: owner,
-                Route: leg.RouteSelection.Route,
-                ProtocolVersion: leg.ProtocolVersion,
-                LiveRouteEpoch: leg.LiveRouteEpochId,
-                LegGeneration: leg.Generation,
-                TransportEpochId: leg.TransportEpochId,
-                BridgeRecoveryGeneration: leg.BridgeRecoveryGeneration,
-                BridgeRecoveryKind: BridgeRecoveryKind.BridgeReceiveStallRecovery));
-        Assert.True(recovery.Accepted);
-        var bridgeDecision = Assert.IsType<BridgeRecoveryDecision>(recovery.BridgeRecoveryDecision);
-        var activeLease = Assert.IsType<RecoveryLivenessLease>(recovery.RecoveryLivenessLease);
-        ApplyCoordinatorActionDecisionForTest(context, recovery);
-        _ = ObserveRegularV4RecoveryLifecycleForTest(
-            context,
-            CreateProjectionRecoveryLifecycleReport(recovery.State, bridgeDecision, activeLease));
+        Assert.True(
+            InvokeReceiveRecovery(
+                service,
+                new FileTransferReceiveRecoveryRequest(
+                    $"session_{transferId}",
+                    transferId,
+                    FileTransferDirection.Inbound,
+                    "unit_test_projection_recovery_pressure_missing")));
+        var recoveryRequest = Assert.Single(transport.ReceiveRecoveryRequests);
+        var executionCommand =
+            Assert.IsType<FileTransferBridgeRecoveryExecutionCommand>(
+                recoveryRequest.BridgeRecoveryExecutionCommand);
+        var bridgeDecision = executionCommand.Decision;
+        Assert.NotNull(executionCommand.RecoveryLivenessLease);
+        var executionReceipt = transport.CompleteBridgeRecoveryExecution(
+            executionCommand,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            "unit_test_projection_recovery_pressure_missing_completed");
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => transport.BridgeRecoveryExecutionReceiptDecisions.Any(
+                    decision =>
+                        decision.Receipt == executionReceipt &&
+                        decision.Accepted),
+                TimeSpan.FromSeconds(2)));
 
         var transportField = serviceType.GetField("transport", BindingFlags.Instance | BindingFlags.NonPublic)!;
         transportField.SetValue(service, null);
@@ -1638,34 +1531,6 @@ public sealed partial class SessionFileTransferV4SenderTests
         return Assert.IsType<FileTransferStateFrameV4>(typeof(SessionFileTransferService)
             .GetMethod("CreateInboundV4StateLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, reason, false, forceMissingRange]));
-    }
-
-    private static RuntimeUnlockRegularV4RecoveryLifecycleReport CreateProjectionRecoveryLifecycleReport(
-        FileTransferCoordinatorState state,
-        BridgeRecoveryDecision bridgeDecision,
-        RecoveryLivenessLease activeLease)
-    {
-        var owner = Assert.IsType<RuntimeOwnerToken>(state.CurrentRuntimeOwner);
-        var leg = Assert.IsType<FileTransferLeg>(state.CurrentLeg);
-        var bridgeAuthority = new FileTransferBridgeRecoveryAuthority(
-            state.SessionId,
-            state.TransferId,
-            state.Direction,
-            state.RouteSelection.TelemetryToken,
-            state.RouteSelection.ProtocolVersion,
-            state.CurrentLiveRouteEpoch?.EpochId ?? 0,
-            owner.RuntimeGeneration,
-            state.TerminalGeneration,
-            leg.Generation,
-            leg.TransportEpochId,
-            leg.BridgeRecoveryGeneration,
-            bridgeDecision.BridgeDecisionGeneration,
-            bridgeDecision.RecoveryKind.ToString(),
-            bridgeDecision.Reason);
-        return new RuntimeUnlockRegularV4RecoveryLifecycleReport(
-            new RuntimeUnlockRegularV4RecoveryAuthority(bridgeAuthority, activeLease),
-            RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed,
-            "unit_test_projection_recovery_completed");
     }
 
     private static FileTransferStateFrameV4 CreatePeerProjectionState(string transferId, int epoch)

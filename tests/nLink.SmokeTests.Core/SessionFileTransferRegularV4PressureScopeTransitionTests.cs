@@ -566,8 +566,14 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Null(GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
         var recoveryRequest = Assert.Single(transport.ReceiveRecoveryRequests);
         Assert.NotNull(recoveryRequest.BridgeRecoveryAuthority);
-        Assert.NotNull(recoveryRequest.RegularV4RecoveryAuthority);
+        var executionCommand =
+            Assert.IsType<FileTransferBridgeRecoveryExecutionCommand>(
+                recoveryRequest.BridgeRecoveryExecutionCommand);
+        Assert.NotNull(executionCommand.RecoveryLivenessLease);
         Assert.Equal(binding.Authority.BridgeDecisionGeneration + 1, recoveryRequest.BridgeRecoveryAuthority!.BridgeDecisionGeneration);
+        Assert.Equal(
+            recoveryRequest.BridgeRecoveryAuthority.BridgeDecisionGeneration,
+            executionCommand.Decision.BridgeDecisionGeneration);
         Assert.Equal(1, Volatile.Read(ref applyCount));
         Assert.True(
             SpinWait.SpinUntil(
@@ -651,17 +657,20 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Equal(originalAttemptCount, GetPrivateProperty<int>(repairState, "AttemptCount"));
         Assert.Equal("489:12:489:12", GetPrivateProperty<string>(repairState, "RepairRequestKey"));
         var recoveryRequest = Assert.Single(transport.ReceiveRecoveryRequests);
-        var recoveryAuthority = Assert.IsType<RuntimeUnlockRegularV4RecoveryAuthority>(
-            recoveryRequest.RegularV4RecoveryAuthority);
-        var lifecycleDecision = ObserveRegularV4RecoveryLifecycleForTest(
-            context,
-            new RuntimeUnlockRegularV4RecoveryLifecycleReport(
-                recoveryAuthority,
-                RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed,
-                "unit_test_unmaterialized_projection_recovery_completed"));
-        Assert.Equal(
-            RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted,
-            lifecycleDecision.Status);
+        var executionCommand =
+            Assert.IsType<FileTransferBridgeRecoveryExecutionCommand>(
+                recoveryRequest.BridgeRecoveryExecutionCommand);
+        var executionReceipt = transport.CompleteBridgeRecoveryExecution(
+            executionCommand,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            "unit_test_unmaterialized_projection_recovery_completed");
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => transport.BridgeRecoveryExecutionReceiptDecisions.Any(
+                    decision =>
+                        decision.Receipt == executionReceipt &&
+                        decision.Accepted),
+                TimeSpan.FromSeconds(2)));
 
         SetPrivateProperty(context, "PullHighestReceivedChunkIndex", 581);
         var reboundState = CreateInboundState(
@@ -677,7 +686,9 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.NotSame(originalContract, freshContract);
         Assert.NotEqual(originalAuthority.AuthorityId, freshAuthority.AuthorityId);
         Assert.Null(freshAuthority.PredecessorAuthorityId);
-        Assert.Equal(1, freshAuthority.BridgeDecisionGeneration);
+        Assert.Equal(
+            executionCommand.Decision.BridgeDecisionGeneration,
+            freshAuthority.BridgeDecisionGeneration);
         Assert.Equal("489:12:489:12", freshAuthority.RepairKey);
         var missingRange = Assert.Single(reboundState.MissingRanges);
         Assert.Equal(489, missingRange.StartChunkIndex);
@@ -736,7 +747,10 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Null(GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
         Assert.Null(GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
         var recoveryRequest = Assert.Single(transport.ReceiveRecoveryRequests);
-        Assert.NotNull(recoveryRequest.RegularV4RecoveryAuthority);
+        Assert.NotNull(recoveryRequest.BridgeRecoveryExecutionCommand);
+        Assert.NotNull(
+            recoveryRequest.BridgeRecoveryExecutionCommand
+                ?.RecoveryLivenessLease);
         Assert.True(
             SpinWait.SpinUntil(
                 () => transport.RegularV4FrontierRepairSettlements.Count == 1,
@@ -784,7 +798,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Same(contract, GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
         Assert.Same(contract, GetPrivatePropertyValue(repairState, "RegularV4RepairContract"));
         Assert.Empty(transport.ReceiveRecoveryRequests);
-        Assert.Null(GetPrivatePropertyValue(context, "CurrentRecoveryLivenessLease"));
+        Assert.Null(GetReceiveRecoverySubstate(context).CurrentOperation);
     }
 
     [Fact]
@@ -821,7 +835,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Same(contract, GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
         Assert.Same(contract, GetPrivatePropertyValue(repairState, "RegularV4RepairContract"));
         Assert.Empty(transport.ReceiveRecoveryRequests);
-        Assert.Null(GetPrivatePropertyValue(context, "CurrentRecoveryLivenessLease"));
+        Assert.Null(GetReceiveRecoverySubstate(context).CurrentOperation);
     }
 
     [Fact]
@@ -860,12 +874,12 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Same(contract, GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
         Assert.Same(contract, GetPrivatePropertyValue(repairState, "RegularV4RepairContract"));
         Assert.Empty(recoveryOnlyTransport.ReceiveRecoveryRequests);
-        Assert.Null(GetPrivatePropertyValue(context, "CurrentRecoveryLivenessLease"));
+        Assert.Null(GetReceiveRecoverySubstate(context).CurrentOperation);
     }
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
-    public void RegularV4FrontierRepairPressure_ControllerFailureDiscardsIssuedRecoveryWithoutReapplyingPressure()
+    public void RegularV4FrontierRepairPressure_ControllerFailureInvalidatesIssuedRecoveryWithoutReapplyingPressure()
     {
         const string transferId = "transfer_regular_v4_pressure_recovery_handoff_controller_throw";
         var logStart = GetOperationalLogLength();
@@ -905,11 +919,27 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Equal(1, Volatile.Read(ref applyCount));
         Assert.Null(GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
         Assert.Null(GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
-        Assert.Null(GetPrivatePropertyValue(context, "CurrentRecoveryLivenessLease"));
+        var receiveRecovery = GetReceiveRecoverySubstate(context);
+        Assert.Null(receiveRecovery.CurrentOperation);
+        Assert.Equal(
+            FileTransferReceiveRecoveryExecutionState.Invalidated,
+            Assert.IsType<FileTransferReceiveRecoveryOperation>(
+                receiveRecovery.LastTerminalOperation).ExecutionState);
         Assert.Empty(transport.ReceiveRecoveryRequests);
         var log = ReadOperationalLogTail(logStart);
-        Assert.Contains("lifecycle_outcome=Discarded", log, StringComparison.Ordinal);
+        Assert.Contains(
+            "event=filetransfer_receive_recovery_operation_invalidation_decided;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "invalidation_reason=bridge_recovery_execution_begin_InvalidOperationException",
+            log,
+            StringComparison.Ordinal);
         Assert.Contains("decision_status=Accepted", log, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=filetransfer_receive_recovery_operation_execution_receipt_decision_observed;",
+            log,
+            StringComparison.Ordinal);
     }
 
     private static bool PrepareInboundRegularV4ToTunaRouteTransitionForPressureTest(
@@ -989,9 +1019,69 @@ public sealed partial class SessionFileTransferV4SenderTests
     private static bool InvokeReceiveRecovery(
         SessionFileTransferService service,
         FileTransferReceiveRecoveryRequest request)
-        => Assert.IsType<bool>(typeof(SessionFileTransferService)
-            .GetMethod("TryRequestFileTransferReceiveRecovery", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [request]));
+    {
+        var serviceType = typeof(SessionFileTransferService);
+        var context = serviceType
+            .GetField(
+                request.Direction == FileTransferDirection.Inbound
+                    ? "inboundTransfer"
+                    : "outboundTransfer",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(service);
+        Assert.NotNull(context);
+        Assert.NotNull(GetPrivatePropertyValue(context, "DataSession"));
+        if (GetPrivateProperty<long>(context, "DataSessionGeneration") <= 0)
+        {
+            // These reflection fixtures install their data session directly.
+            // Mirror the production installation boundary before capturing the
+            // exact coordinator observation.
+            SetPrivateProperty(context, "DataSessionGeneration", 1L);
+        }
+        var observation = Assert.IsType<FileTransferReceiveRecoveryObservationSnapshot>(
+            serviceType
+                .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+                .Single(candidate =>
+                {
+                    if (!string.Equals(
+                            candidate.Name,
+                            "CreateReceiveRecoveryObservationSnapshotLocked",
+                            StringComparison.Ordinal))
+                    {
+                        return false;
+                    }
+
+                    var parameters = candidate.GetParameters();
+                    return parameters.Length == 6 &&
+                           parameters[0].ParameterType == context.GetType();
+                })
+                .Invoke(
+                    null,
+                    [
+                        context,
+                        request.Direction,
+                        "unit_test_receive_recovery",
+                        request.Reason,
+                        null,
+                        null,
+                    ]));
+        var exactRequest = request with
+        {
+            Observation = observation,
+        };
+        Assert.Equal(observation, exactRequest.Observation);
+        return Assert.IsType<bool>(
+            serviceType
+                .GetMethod(
+                    "TryRequestFileTransferReceiveRecoveryIfCurrent",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(service, [exactRequest, null, null, false]));
+    }
+
+    private static FileTransferReceiveRecoverySubstate GetReceiveRecoverySubstate(
+        object context)
+        => GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+            context,
+            "CoordinatorPersistentState").FileTransferReceiveRecovery;
 
     private static object GetSingleInboundRepairState(object context)
     {

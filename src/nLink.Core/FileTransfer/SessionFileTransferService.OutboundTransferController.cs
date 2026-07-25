@@ -1222,6 +1222,9 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
+            _ = TryInvalidateReceiveRecoveryOperationForScopeReplacementLocked(
+                context,
+                "local_transfer_failure");
             context.CancelLifetime();
             context.State = FileTransferTransferState.Failed;
             context.ErrorCode = NormalizeErrorCode(failureCode);
@@ -1259,6 +1262,9 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
+            _ = TryInvalidateReceiveRecoveryOperationForScopeReplacementLocked(
+                context,
+                "local_transfer_failure");
             context.CancelLifetime();
             context.State = FileTransferTransferState.Failed;
             context.ErrorCode = NormalizeErrorCode(failureCode);
@@ -1333,16 +1339,14 @@ public sealed partial class SessionFileTransferService
                     OnRuntimeUnlockRetryDispatchExecutionObserved;
                 retryDispatchBridge.RuntimeUnlockRetryDispatchSuccessorEvaluationRequested -=
                     OnRuntimeUnlockRetryDispatchSuccessorEvaluationRequested;
-                retryDispatchBridge.RuntimeUnlockRegularV4RecoverySettlementReported -=
-                    OnRuntimeUnlockRegularV4RecoverySettlementReported;
-                retryDispatchBridge.RuntimeUnlockRegularV4RecoveryLifecycleReported -=
-                    OnRuntimeUnlockRegularV4RecoveryLifecycleReported;
             }
 
             if (previousTransport is IFileTransferBridgeRecoveryExecutionBridge bridgeRecoveryExecutionBridge)
             {
                 bridgeRecoveryExecutionBridge.BridgeRecoveryEvaluationRequested -=
                     OnBridgeRecoveryEvaluationRequested;
+                bridgeRecoveryExecutionBridge.ReceiveRecoveryProofObserved -=
+                    OnReceiveRecoveryProofObserved;
             }
         }
 
@@ -1376,14 +1380,20 @@ public sealed partial class SessionFileTransferService
 
     private SessionFileTransferSnapshot CreateSnapshotLocked()
         => new(
-            Outbound: outboundTransfer?.ToSnapshot(),
-            Inbound: inboundTransfer?.ToSnapshot());
+            Outbound: outboundTransfer is { } outbound
+                ? CreateTransferSnapshotLocked(outbound)
+                : null,
+            Inbound: inboundTransfer is { } inbound
+                ? CreateTransferSnapshotLocked(inbound)
+                : null);
 
     private FileTransferTransferSnapshot? CaptureCurrentOutboundSnapshot()
     {
         lock (gate)
         {
-            return outboundTransfer?.ToSnapshot();
+            return outboundTransfer is { } outbound
+                ? CreateTransferSnapshotLocked(outbound)
+                : null;
         }
     }
 
@@ -1391,9 +1401,219 @@ public sealed partial class SessionFileTransferService
     {
         lock (gate)
         {
-            return inboundTransfer?.ToSnapshot();
+            return inboundTransfer is { } inbound
+                ? CreateTransferSnapshotLocked(inbound)
+                : null;
         }
     }
+
+    private static FileTransferTransferSnapshot CreateTransferSnapshotLocked(
+        OutboundTransferContext context)
+        => context.ToSnapshot() with
+        {
+            ReceiveRecoveryObservation =
+                CreateReceiveRecoveryObservationSnapshotLocked(
+                    context,
+                    FileTransferDirection.Outbound),
+        };
+
+    private static FileTransferTransferSnapshot CreateTransferSnapshotLocked(
+        InboundTransferContext context)
+        => context.ToSnapshot() with
+        {
+            ReceiveRecoveryObservation =
+                CreateReceiveRecoveryObservationSnapshotLocked(
+                    context,
+                    FileTransferDirection.Inbound),
+        };
+
+    private static FileTransferReceiveRecoveryObservationSnapshot
+        CreateReceiveRecoveryObservationSnapshotLocked(
+            OutboundTransferContext context,
+            FileTransferDirection direction,
+            string source = "filetransfer_snapshot",
+            string reason = "active_transfer_snapshot",
+            string? observationIdentity = null,
+            long? exactObservedUtcMs = null)
+    {
+        var observationGeneration =
+            NextReceiveRecoveryObservationGeneration(
+                context.LastReceiveRecoveryObservationGeneration);
+        context.LastReceiveRecoveryObservationGeneration =
+            observationGeneration;
+        var normalizedSource =
+            NormalizeReason(source) ?? "filetransfer_snapshot";
+        var normalizedReason =
+            NormalizeReason(reason) ?? "active_transfer_snapshot";
+        var observedUtc = exactObservedUtcMs is > 0
+            ? DateTimeOffset.FromUnixTimeMilliseconds(exactObservedUtcMs.Value)
+            : DateTimeOffset.UtcNow;
+        var exactObservationIdentity = string.IsNullOrWhiteSpace(observationIdentity)
+            ? $"{normalizedSource}:{observationGeneration}"
+            : observationIdentity.Trim();
+        var dataSessionIdentity = CreateReceiveRecoveryDataSessionIdentity(
+            context.TransferId,
+            context.DataSession,
+            context.DataSessionGeneration);
+        var snapshot = new FileTransferReceiveRecoveryObservationSnapshot(
+            context.SessionId,
+            context.TransferId,
+            direction,
+            context.RouteSelection.TelemetryToken,
+            context.NegotiatedDataProtocolVersion,
+            context.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0,
+            context.TerminalGeneration,
+            context.CurrentTransferLeg?.Generation ?? 0,
+            context.CurrentTransferLeg?.TransportEpochId ?? 0,
+            context.CurrentTransferLeg?.BridgeRecoveryGeneration ?? 0,
+            context.CurrentRoutePublicationToken?.PublicationGeneration ?? 0,
+            context.RuntimeUnlockRouteCommitToken?.CommitGeneration,
+            context.CurrentTransferLeg?.CheckpointRequestId,
+            dataSessionIdentity,
+            context.DataSessionGeneration,
+            observationGeneration,
+            normalizedSource,
+            normalizedReason,
+            observedUtc);
+        if (context.CurrentRuntimeOwner is not { } owner ||
+            context.CurrentRoutePublicationToken is not { } publication ||
+            context.CurrentTransferLeg is not { } leg ||
+            context.DataSession is null ||
+            context.DataSessionGeneration <= 0)
+        {
+            return snapshot;
+        }
+
+        return snapshot with
+        {
+            CoordinatorObservation =
+                new FileTransferReceiveRecoveryObservation(
+                    context.SessionId,
+                    context.TransferId,
+                    direction,
+                    context.RouteSelection.Route,
+                    context.RouteSelection.TelemetryToken,
+                    context.NegotiatedDataProtocolVersion,
+                    context.CurrentLiveRouteEpoch?.EpochId ?? 0,
+                    owner,
+                    publication,
+                    context.RuntimeUnlockRouteCommitToken,
+                    context.TerminalGeneration,
+                    leg.Generation,
+                    leg.TransportEpochId,
+                    leg.BridgeRecoveryGeneration,
+                    leg.CheckpointRequestId,
+                    dataSessionIdentity,
+                    context.DataSessionGeneration,
+                    normalizedSource,
+                    normalizedReason,
+                    exactObservationIdentity,
+                    observationGeneration,
+                    observedUtc.ToUnixTimeMilliseconds()),
+        };
+    }
+
+    private static FileTransferReceiveRecoveryObservationSnapshot
+        CreateReceiveRecoveryObservationSnapshotLocked(
+            InboundTransferContext context,
+            FileTransferDirection direction,
+            string source = "filetransfer_snapshot",
+            string reason = "active_transfer_snapshot",
+            string? observationIdentity = null,
+            long? exactObservedUtcMs = null)
+    {
+        var observationGeneration =
+            NextReceiveRecoveryObservationGeneration(
+                context.LastReceiveRecoveryObservationGeneration);
+        context.LastReceiveRecoveryObservationGeneration =
+            observationGeneration;
+        var normalizedSource =
+            NormalizeReason(source) ?? "filetransfer_snapshot";
+        var normalizedReason =
+            NormalizeReason(reason) ?? "active_transfer_snapshot";
+        var observedUtc = exactObservedUtcMs is > 0
+            ? DateTimeOffset.FromUnixTimeMilliseconds(exactObservedUtcMs.Value)
+            : DateTimeOffset.UtcNow;
+        var exactObservationIdentity = string.IsNullOrWhiteSpace(observationIdentity)
+            ? $"{normalizedSource}:{observationGeneration}"
+            : observationIdentity.Trim();
+        var dataSessionIdentity = CreateReceiveRecoveryDataSessionIdentity(
+            context.TransferId,
+            context.DataSession,
+            context.DataSessionGeneration);
+        var snapshot = new FileTransferReceiveRecoveryObservationSnapshot(
+            context.SessionId,
+            context.TransferId,
+            direction,
+            context.RouteSelection.TelemetryToken,
+            context.NegotiatedDataProtocolVersion,
+            context.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0,
+            context.TerminalGeneration,
+            context.CurrentTransferLeg?.Generation ?? 0,
+            context.CurrentTransferLeg?.TransportEpochId ?? 0,
+            context.CurrentTransferLeg?.BridgeRecoveryGeneration ?? 0,
+            context.CurrentRoutePublicationToken?.PublicationGeneration ?? 0,
+            context.RuntimeUnlockRouteCommitToken?.CommitGeneration,
+            context.CurrentTransferLeg?.CheckpointRequestId,
+            dataSessionIdentity,
+            context.DataSessionGeneration,
+            observationGeneration,
+            normalizedSource,
+            normalizedReason,
+            observedUtc);
+        if (context.CurrentRuntimeOwner is not { } owner ||
+            context.CurrentRoutePublicationToken is not { } publication ||
+            context.CurrentTransferLeg is not { } leg ||
+            context.DataSession is null ||
+            context.DataSessionGeneration <= 0)
+        {
+            return snapshot;
+        }
+
+        return snapshot with
+        {
+            CoordinatorObservation =
+                new FileTransferReceiveRecoveryObservation(
+                    context.SessionId,
+                    context.TransferId,
+                    direction,
+                    context.RouteSelection.Route,
+                    context.RouteSelection.TelemetryToken,
+                    context.NegotiatedDataProtocolVersion,
+                    context.CurrentLiveRouteEpoch?.EpochId ?? 0,
+                    owner,
+                    publication,
+                    context.RuntimeUnlockRouteCommitToken,
+                    context.TerminalGeneration,
+                    leg.Generation,
+                    leg.TransportEpochId,
+                    leg.BridgeRecoveryGeneration,
+                    leg.CheckpointRequestId,
+                    dataSessionIdentity,
+                    context.DataSessionGeneration,
+                    normalizedSource,
+                    normalizedReason,
+                    exactObservationIdentity,
+                    observationGeneration,
+                    observedUtc.ToUnixTimeMilliseconds()),
+        };
+    }
+
+    private static string CreateReceiveRecoveryDataSessionIdentity(
+        string transferId,
+        IFileTransferDataSession? dataSession,
+        long dataSessionGeneration)
+        => dataSession is null
+            ? "(none)"
+            : $"{transferId}:{dataSessionGeneration}";
+
+    private static long NextReceiveRecoveryObservationGeneration(
+        long lastGeneration)
+        => lastGeneration < long.MaxValue
+            ? lastGeneration + 1
+            : long.MaxValue;
 
     private void RaiseTransferChanged(SessionFileTransferSnapshot snapshot)
     {

@@ -2704,22 +2704,8 @@ public sealed partial class NknSignalingTransport
                 fileTransferPostTunaFallbackYieldRuntimeUnlockRetries.RemoveWhere(
                     key => key.StartsWith(normalizedTransferId + "|", StringComparison.Ordinal));
             }
-            MarkFileTransferFallbackLegAuthoritySupersededByRouteHint(
-                normalizedTransferId,
-                selection.TelemetryToken,
-                normalizedProtocolVersion,
-                normalizedSource);
         }
 
-        if (route != FileTransferRoute.RegularNknV4Fast ||
-            normalizedProtocolVersion != FileTransferProtocol.ProtocolVersionV4)
-        {
-            MarkFileTransferRegularV4RecoveryLivenessSupersededByRouteHint(
-                normalizedTransferId,
-                selection.TelemetryToken,
-                normalizedProtocolVersion,
-                normalizedSource);
-        }
     }
 
     private bool TryGetFileTransferDataPathRouteAuthority(
@@ -4345,7 +4331,7 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
-        MarkFileTransferRegularV4RecoveryLivenessReceiveProofReceived(
+        ObserveFileTransferReceiveRecoveryProof(
             frame.SessionId,
             frame.TransferId,
             "file_transfer_data_frame",

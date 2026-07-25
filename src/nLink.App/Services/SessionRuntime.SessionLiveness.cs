@@ -688,14 +688,15 @@ public sealed partial class SessionRuntime
     {
         if (!string.Equals(recoveryRequest.RouteToken, FileTransferRouteResolver.RegularNknV4FastToken, StringComparison.Ordinal) ||
             recoveryRequest.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
-            recoveryRequest.LiveRouteEpoch != 0 ||
-            transport is not IFileTransferRecoveryLivenessState recoveryState)
+            recoveryRequest.LiveRouteEpoch != 0)
         {
             return false;
         }
 
         var now = nowProvider();
-        if (recoveryState.TryGetActiveFileTransferRecoveryLivenessSnapshot(sessionIdSnapshot, out var snapshot) &&
+        if (fileTransferService.TryGetActiveFileTransferRecoveryLivenessSnapshot(
+                sessionIdSnapshot,
+                out var snapshot) &&
             string.Equals(snapshot.TransferId, recoveryRequest.TransferId, StringComparison.Ordinal) &&
             string.Equals(snapshot.RouteToken, FileTransferRouteResolver.RegularNknV4FastToken, StringComparison.Ordinal) &&
             snapshot.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
@@ -718,8 +719,9 @@ public sealed partial class SessionRuntime
         long generation,
         TimeSpan silence)
     {
-        if (transport is not IFileTransferRecoveryLivenessState recoveryState ||
-            !recoveryState.TryGetActiveFileTransferRecoveryLivenessSnapshot(sessionIdSnapshot, out var snapshot))
+        if (!fileTransferService.TryGetActiveFileTransferRecoveryLivenessSnapshot(
+                sessionIdSnapshot,
+                out var snapshot))
         {
             return false;
         }
@@ -748,12 +750,11 @@ public sealed partial class SessionRuntime
             if (metadataValid &&
                 routeCurrent &&
                 snapshot.TerminalRecommended &&
-                !snapshot.ReceiveProofObserved &&
-                transport is IFileTransferRecoveryLivenessAuthorityObserver recoveryAuthorityObserver)
+                !snapshot.ReceiveProofObserved)
             {
-                recoveryAuthorityObserver.NotifyFileTransferRecoveryLivenessAuthorityRejected(
-                    snapshot,
-                    "recovery_liveness_terminal_without_proof");
+                LocalOperationalLog.Warn(
+                    "Session",
+                    $"event=filetransfer_recovery_liveness_authority_rejection_observed; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId}; state={snapshot.State.ToString().ToLowerInvariant()}; reason=recovery_liveness_terminal_without_proof; mutation_applied=0; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
             }
 
             LocalOperationalLog.Warn(
@@ -773,12 +774,9 @@ public sealed partial class SessionRuntime
                 out var livenessGrant) ||
             livenessGrant is null)
         {
-            if (transport is IFileTransferRecoveryLivenessAuthorityObserver recoveryAuthorityObserver)
-            {
-                recoveryAuthorityObserver.NotifyFileTransferRecoveryLivenessAuthorityRejected(
-                    snapshot,
-                    "recovery_liveness_lease_rejected");
-            }
+            LocalOperationalLog.Warn(
+                "Session",
+                $"event=filetransfer_recovery_liveness_authority_rejection_observed; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId}; state={snapshot.State.ToString().ToLowerInvariant()}; reason=recovery_liveness_lease_rejected; mutation_applied=0; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
 
             LocalOperationalLog.Warn(
                 "Session",
@@ -1167,8 +1165,9 @@ public sealed partial class SessionRuntime
         out FileTransferRecoveryLivenessSnapshot snapshot)
     {
         snapshot = default!;
-        if (transport is not IFileTransferRecoveryLivenessState recoveryState ||
-            !recoveryState.TryGetActiveFileTransferRecoveryLivenessSnapshot(sessionIdSnapshot, out var candidate) ||
+        if (!fileTransferService.TryGetActiveFileTransferRecoveryLivenessSnapshot(
+                sessionIdSnapshot,
+                out var candidate) ||
             !IsValidFileTransferRecoveryLivenessSnapshot(sessionIdSnapshot, candidate) ||
             !IsCurrentFileTransferRecoveryLivenessSnapshot(sessionIdSnapshot, candidate, out _, out _, out _) ||
             !IsActiveFileTransferRecoveryLivenessSnapshot(candidate, now))
@@ -1736,8 +1735,9 @@ public sealed partial class SessionRuntime
         string bridgeReason,
         DateTimeOffset now)
     {
-        if (transport is not IFileTransferRecoveryLivenessState recoveryState ||
-            !recoveryState.TryGetActiveFileTransferRecoveryLivenessSnapshot(sessionIdSnapshot, out var snapshot))
+        if (!fileTransferService.TryGetActiveFileTransferRecoveryLivenessSnapshot(
+                sessionIdSnapshot,
+                out var snapshot))
         {
             return false;
         }
@@ -1984,6 +1984,7 @@ public sealed partial class SessionRuntime
             transfer.Direction,
             reason)
         {
+            Observation = transfer.ReceiveRecoveryObservation,
             RouteToken = transfer.RouteToken,
             ProtocolVersion = transfer.ProtocolVersion ?? 0,
             AuthorityReason = regularV4LocalOnlyStartupRecovery

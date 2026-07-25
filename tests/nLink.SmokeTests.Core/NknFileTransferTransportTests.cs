@@ -464,7 +464,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
     }
 
     [Fact]
-    public async Task NknTransport_CommandBackedBridgeReceiveResumedPeerTrafficRaisesLivenessProof()
+    public async Task NknTransport_CommandBackedCompatibilityLifecycleIsEvidenceOnly()
     {
         FakeNknClient.ResetNetwork();
         try
@@ -509,20 +509,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                     RuntimeOwner: runtimeOwner),
                 RecoveryLivenessLease: null,
                 CheckpointRequestId: null);
-            SetPrivateField(
-                host,
-                "fileTransferBridgeRecoveryExecutionCommand",
-                (FileTransferBridgeRecoveryExecutionCommand?)recoveryCommand);
-            Assert.IsAssignableFrom<IFileTransferBridgeRecoveryExecutionBridge>(host)
-                .ObserveBridgeRecoveryExecutionReceiptDecision(
-                    new FileTransferBridgeRecoveryExecutionReceipt(
-                        recoveryCommand,
-                        FileTransferBridgeRecoveryExecutionOutcome.Completed,
-                        "hard",
-                        recoveryReason),
-                    accepted: true,
-                    "test_receipt_accepted");
-
+            var logStart = GetOperationalLogLength();
             CoreSmokeTestsBase.InvokePrivateMethod(
                 host,
                 "OnBridgeLifecycle",
@@ -543,12 +530,17 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                     BulkMessagesReceivedSinceLast: 1,
                     RecoveryExecutionCommand: recoveryCommand));
 
-            await WaitUntilAsync(
-                () => proofs.Any(e =>
-                    e.SessionId == sessionId &&
-                    e.ProofKind == "bridge_receive_stall_recovery_receive_resumed" &&
-                    e.Lane == "bridge_bulk"),
-                TimeSpan.FromSeconds(1));
+            await Task.Delay(TimeSpan.FromMilliseconds(50), cts.Token);
+            Assert.Empty(proofs);
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=filetransfer_bridge_recovery_lifecycle_diagnostic_only;",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "reason=bridge_recovery_execution_command_not_current",
+                logTail,
+                StringComparison.Ordinal);
         }
         finally
         {

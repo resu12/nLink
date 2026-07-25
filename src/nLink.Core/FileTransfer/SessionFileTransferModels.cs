@@ -153,6 +153,35 @@ public sealed record FileTransferIncomingOffer(
     long FileSizeBytes,
     string? Sha256Base64);
 
+internal sealed record FileTransferReceiveRecoveryObservationSnapshot(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    string RouteToken,
+    int ProtocolVersion,
+    int LiveRouteEpoch,
+    int RuntimeGeneration,
+    int TerminalGeneration,
+    int TransferLegGeneration,
+    long TransportEpoch,
+    int BridgeRecoveryGeneration,
+    int RoutePublicationGeneration,
+    int? RouteCommitGeneration,
+    string? CheckpointRequestId,
+    string DataSessionIdentity,
+    long DataSessionGeneration,
+    long ObservationGeneration,
+    string Source,
+    string Reason,
+    DateTimeOffset ObservedUtc)
+{
+    internal FileTransferReceiveRecoveryObservation? CoordinatorObservation
+    {
+        get;
+        init;
+    }
+}
+
 public sealed record FileTransferTransferSnapshot(
     string SessionId,
     string TransferId,
@@ -179,6 +208,9 @@ public sealed record FileTransferTransferSnapshot(
     string? RouteToken = null,
     int? ProtocolVersion = null)
 {
+    internal FileTransferReceiveRecoveryObservationSnapshot?
+        ReceiveRecoveryObservation { get; init; }
+
     public bool IsTerminal
         => State is FileTransferTransferState.Completed or
             FileTransferTransferState.Declined or

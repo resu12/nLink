@@ -4763,6 +4763,16 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (!TryInvalidateReceiveRecoveryOperationForScopeReplacementLocked(
+                context,
+                "data_session_replaced"))
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_data_session_replacement_rejected; direction=outbound; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; decision_reason=receive_recovery_operation_invalidation_failed");
+            return false;
+        }
+
         if (context.DataSession is not null)
         {
             UnsubscribeDataSessionEvents(context.DataSession);
@@ -4822,6 +4832,16 @@ public sealed partial class SessionFileTransferService
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_data_session_replacement_rejected; direction=inbound; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; decision_reason=runtime_unlock_retry_scope_invalidation_failed");
+            return false;
+        }
+
+        if (!TryInvalidateReceiveRecoveryOperationForScopeReplacementLocked(
+                context,
+                "data_session_replaced"))
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_data_session_replacement_rejected; direction=inbound; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; decision_reason=receive_recovery_operation_invalidation_failed");
             return false;
         }
 

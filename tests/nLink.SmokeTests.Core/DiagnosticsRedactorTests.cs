@@ -75,6 +75,42 @@ public sealed class DiagnosticsRedactorTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public void OperationalLogRedactor_PreservesReceiveRecoveryAuthorityCorrelationIds()
+    {
+        const string operationAuthorityId =
+            "fta2-receive_recovery_operation-0123456789abcdef0123456789abcdef";
+        const string livenessLeaseAuthorityId =
+            "fta2-recovery_liveness_lease-89abcdef0123456789abcdef01234567";
+        const string retryAuthorityId =
+            "fta2-runtime_unlock_retry_dispatch-fedcba9876543210fedcba9876543210";
+        var sample =
+            $"receive_recovery_operation_authority_id={operationAuthorityId}; " +
+            $"recovery_liveness_lease_authority_id={livenessLeaseAuthorityId}; " +
+            $"retry_authority_id={retryAuthorityId}; secret=arbitrary-secret-value";
+
+        var redacted = SensitiveDataRedactor.Redact(sample);
+
+        Assert.Contains(
+            $"receive_recovery_operation_authority_id={operationAuthorityId}",
+            redacted,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"recovery_liveness_lease_authority_id={livenessLeaseAuthorityId}",
+            redacted,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"retry_authority_id={retryAuthorityId}",
+            redacted,
+            StringComparison.Ordinal);
+        Assert.Contains("[redacted]", redacted, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "arbitrary-secret-value",
+            redacted,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public void DiagnosticsRedactor_Redacts_Seeds_PrivateKeys_AndWalletSecrets()
     {
         var sample = string.Join(Environment.NewLine, new[]
