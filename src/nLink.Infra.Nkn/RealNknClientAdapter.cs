@@ -117,6 +117,11 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private readonly BridgeProtocolClient protocolClient;
     private readonly BridgeProtocolEventRouter protocolEventRouter;
     private readonly ConnectAttemptCoordinator connectAttempts = new();
+    private readonly SemaphoreSlim bridgeSubmissionSemaphore = new(1, 1);
+    private BridgeSubmissionReadySnapshot bridgeSubmissionReadySnapshot;
+    private long bridgeSubmissionEpoch;
+    private bool bridgeRecoverySubmissionBarrierActive;
+    private long bridgeRecoverySubmissionBarrierSourceEpoch;
     private TimeSpan? connectReadyTimeoutOverrideForTests;
     private TimeSpan? fileTransferBridgeRecoverySoftPhaseTimeoutOverrideForTests;
     private TimeSpan? fileTransferBridgeRecoveryTotalTimeoutOverrideForTests;
@@ -224,6 +229,12 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         FileTransferBridgeRecoveryBeforeHardRestartCurrentnessForTests { get; set; }
     internal Action<FileTransferBridgeRecoveryExecutionCommand>?
         FileTransferBridgeRecoveryAfterHardRestartReservationForTests { get; set; }
+    internal Action<FileTransferBridgeRecoveryExecutionCommand>?
+        FileTransferBridgeRecoveryAfterProcessStartedForTests { get; set; }
+    internal Action<NknBridgeChannel>?
+        BridgeSubmissionAfterAdmissionCapturedForTests { get; set; }
+    internal Action<NknBridgeChannel>?
+        BridgeSubmissionAfterGateAcquiredForTests { get; set; }
     internal Action<FileTransferBridgeRecoveryExecutionCommand>?
         FileTransferBridgeRecoveryBeforeTerminalCommitForTests { get; set; }
     private long fileTransferBridgeRecoveryEvaluationGeneration;
@@ -2189,6 +2200,20 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             $"event=nkn_bridge_recovery_execution_hard_restart_decided; session_id={SanitizeLogToken(owner.SessionId)}; transfer_id={SanitizeLogToken(owner.TransferId)}; direction={owner.Direction.ToString().ToLowerInvariant()}; route={decision.CurrentRoute.ToString().ToLowerInvariant()}; protocol_version={decision.CurrentProtocolVersion}; live_route_epoch={decision.CurrentLiveRouteEpoch}; runtime_generation={decision.CurrentRuntimeGeneration}; terminal_generation={decision.CurrentTerminalGeneration}; leg_generation={decision.CurrentLegGeneration}; transport_epoch={decision.TransportEpoch}; bridge_recovery_generation={decision.BridgeRecoveryGeneration}; bridge_decision_generation={decision.BridgeDecisionGeneration}; lease_generation={command.RecoveryLivenessLease?.LeaseGeneration ?? 0}; recovery_liveness_lease_authority_id={SanitizeLogToken(command.RecoveryLivenessLease?.AuthorityId.ToString() ?? "none")}; checkpoint_request_id={SanitizeLogToken(command.CheckpointRequestId ?? "none")}; decision_reason={SanitizeLogToken(decision.Reason)}; lease_reason={SanitizeLogToken(command.RecoveryLivenessLease?.Reason ?? "none")}; decision_status={SanitizeLogToken(decisionStatus)}; execution_mode={SanitizeLogToken(string.Equals(trigger, "soft_failed", StringComparison.Ordinal) ? "soft_then_hard" : "hard")}; trigger={SanitizeLogToken(trigger)}; soft_phase_budget_ms={(long)softPhaseBudget.TotalMilliseconds}; total_execution_budget_ms={(long)totalExecutionBudget.TotalMilliseconds}; elapsed_execution_ms={(long)Math.Max(-1d, elapsedMs)}; remaining_total_ms={remainingMs}; reason={SanitizeLogToken(reason)}");
     }
 
+    private void LogFileTransferBridgeRecoverySubmissionBarrier(
+        string eventName,
+        FileTransferBridgeRecoveryExecutionCommand command,
+        BridgeProcessEpochIdentity sourceIdentity,
+        BridgeProcessEpochIdentity currentIdentity,
+        long submissionEpoch,
+        string reason)
+    {
+        var decision = command.Decision;
+        var owner = decision.RuntimeOwner;
+        Log(
+            $"event={eventName}; session_id={SanitizeLogToken(owner.SessionId)}; transfer_id={SanitizeLogToken(owner.TransferId)}; direction={owner.Direction.ToString().ToLowerInvariant()}; route={decision.CurrentRoute.ToString().ToLowerInvariant()}; protocol_version={decision.CurrentProtocolVersion}; live_route_epoch={decision.CurrentLiveRouteEpoch}; runtime_generation={decision.CurrentRuntimeGeneration}; terminal_generation={decision.CurrentTerminalGeneration}; leg_generation={decision.CurrentLegGeneration}; transport_epoch={decision.TransportEpoch}; bridge_recovery_generation={decision.BridgeRecoveryGeneration}; bridge_decision_generation={decision.BridgeDecisionGeneration}; lease_generation={command.RecoveryLivenessLease?.LeaseGeneration ?? 0}; submission_epoch={submissionEpoch}; source_process_epoch={sourceIdentity.ProcessEpoch}; source_process_id={sourceIdentity.ProcessId}; process_epoch={currentIdentity.ProcessEpoch}; process_id={currentIdentity.ProcessId}; reason={SanitizeLogToken(reason)}");
+    }
+
     private int GetActiveFileTransferRuntimeTransferCountForDiagnostics()
         => activeFileTransferRuntimeTransfers?.Count ?? 0;
 
@@ -3031,10 +3056,16 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     internal async Task StartBridgeAsync(CancellationToken ct)
     {
         ThrowIfDisposed();
+        var submissionGateHeld = false;
         try
         {
+            await bridgeSubmissionSemaphore.WaitAsync(ct).ConfigureAwait(false);
+            submissionGateHeld = true;
             await EnsureProcessStartedAsync(ct);
-            await EnsureHelloHandshakeAsync(ct);
+            await EnsureHelloHandshakeAsync(
+                    ct,
+                    submissionSemaphoreHeld: true)
+                .ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -3045,6 +3076,13 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 SetNknStartFailed("bridge_start", ex.Message);
             }
             throw;
+        }
+        finally
+        {
+            if (submissionGateHeld)
+            {
+                bridgeSubmissionSemaphore.Release();
+            }
         }
     }
 
@@ -3063,26 +3101,83 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     }
 
     public async Task ConnectAsync(CancellationToken ct)
+        => await ConnectAsync(ct, submissionSemaphoreHeld: false).ConfigureAwait(false);
+
+    private async Task ConnectAsync(
+        CancellationToken ct,
+        bool submissionSemaphoreHeld)
     {
         ThrowIfDisposed();
         await AcquireIdentityUsageLeaseAsync(ct).ConfigureAwait(false);
+        if (submissionSemaphoreHeld)
+        {
+            await ConnectCoreAsync(
+                    sequence: -1,
+                    ct: ct,
+                    submissionSemaphoreHeld: true,
+                    expectedSubmissionEpoch: null)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        long expectedSubmissionEpoch;
+        lock (gate)
+        {
+            if (bridgeRecoverySubmissionBarrierActive)
+            {
+                throw new InvalidOperationException(
+                    "NKN bridge recovery submission barrier is active.");
+            }
+
+            expectedSubmissionEpoch = bridgeSubmissionEpoch;
+        }
+
         var connectTask = connectAttempts.GetOrCreateConnectTask(
             bridgeSupervisor.IsProcessRunning,
-            sequence => ConnectCoreAsync(sequence, ct));
+            sequence => ConnectCoreAsync(
+                sequence,
+                ct,
+                submissionSemaphoreHeld: false,
+                expectedSubmissionEpoch: expectedSubmissionEpoch));
         await connectTask.WaitAsync(ct);
     }
 
-    private async Task ConnectCoreAsync(long sequence, CancellationToken ct)
+    private async Task ConnectCoreAsync(
+        long sequence,
+        CancellationToken ct,
+        bool submissionSemaphoreHeld,
+        long? expectedSubmissionEpoch)
     {
         TaskCompletionSource<BridgeReadyInfo> readyWait;
         string connectId = Guid.NewGuid().ToString("N");
+        var ownsSubmissionBarrier = false;
 
         try
         {
+            if (!submissionSemaphoreHeld)
+            {
+                await bridgeSubmissionSemaphore
+                    .WaitAsync(ct)
+                    .ConfigureAwait(false);
+                ownsSubmissionBarrier = true;
+                lock (gate)
+                {
+                    if (bridgeRecoverySubmissionBarrierActive ||
+                        bridgeSubmissionEpoch != expectedSubmissionEpoch)
+                    {
+                        throw new InvalidOperationException(
+                            "NKN bridge submission epoch changed before connect.");
+                    }
+                }
+            }
+
             try
             {
                 await EnsureProcessStartedAsync(ct);
-                await EnsureHelloHandshakeAsync(ct);
+                await EnsureHelloHandshakeAsync(
+                        ct,
+                        submissionSemaphoreHeld: true)
+                    .ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -3128,7 +3223,13 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 payload["fallbackDelayMs"] = options.ReceiveStallRecoveryFallbackDelayMs;
             }
 
-            await SendCommandAndWaitAckAsync("connect", payload, ct, timeoutOverride: ResolveConnectCommandAckTimeout());
+            await SendCommandAndWaitAckAsync(
+                    "connect",
+                    payload,
+                    ct,
+                    timeoutOverride: ResolveConnectCommandAckTimeout(),
+                    submissionSemaphoreHeld: true)
+                .ConfigureAwait(false);
 
             BridgeReadyInfo readyInfo;
             try
@@ -3144,6 +3245,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             }
 
             ValidateBridgeCapabilitiesOrThrow(readyInfo);
+            MarkBridgeSubmissionReadyOrThrow("connect_ready");
 
             lock (gate)
             {
@@ -3184,6 +3286,10 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         finally
         {
             connectAttempts.CompleteAttempt(sequence, connectId);
+            if (ownsSubmissionBarrier)
+            {
+                bridgeSubmissionSemaphore.Release();
+            }
         }
     }
 
@@ -3472,6 +3578,172 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             timeoutOverride: CommandAckTimeout);
     }
 
+    private void MarkBridgeSubmissionReadyOrThrow(string reason)
+    {
+        var identitySnapshot = bridgeSupervisor.CurrentProcessIdentity;
+        if (identitySnapshot.IsDefault)
+        {
+            throw new InvalidOperationException("NKN bridge process identity is not current.");
+        }
+
+        BridgeSubmissionReadySnapshot boundSnapshot;
+        lock (gate)
+        {
+            if (bridgeSubmissionEpoch <= 0)
+            {
+                bridgeSubmissionEpoch = 1;
+            }
+            else if (!bridgeRecoverySubmissionBarrierActive &&
+                     !bridgeSubmissionReadySnapshot.IsDefault &&
+                     bridgeSubmissionReadySnapshot.ProcessIdentity != identitySnapshot)
+            {
+                bridgeSubmissionEpoch = NextBridgeSubmissionEpoch(
+                    bridgeSubmissionEpoch);
+            }
+
+            boundSnapshot = new BridgeSubmissionReadySnapshot(
+                identitySnapshot,
+                bridgeSubmissionEpoch);
+            bridgeSubmissionReadySnapshot = boundSnapshot;
+        }
+
+        Log(
+            "event=nkn_bridge_submission_epoch_bound; " +
+            $"submission_epoch={boundSnapshot.SubmissionEpoch}; process_epoch={boundSnapshot.ProcessIdentity.ProcessEpoch}; process_id={boundSnapshot.ProcessIdentity.ProcessId}; reason={SanitizeLogToken(reason)}");
+    }
+
+    private static long NextBridgeSubmissionEpoch(long current)
+        => current <= 0 ? 1 : checked(current + 1);
+
+    private readonly record struct BridgeSubmissionAdmission(
+        BridgeProcessSubmissionSnapshot ProcessSnapshot,
+        long SubmissionEpoch);
+
+    private readonly record struct BridgeSubmissionReadySnapshot(
+        BridgeProcessEpochIdentity ProcessIdentity,
+        long SubmissionEpoch)
+    {
+        public bool IsDefault =>
+            ProcessIdentity.IsDefault ||
+            SubmissionEpoch <= 0;
+    }
+
+    private BridgeSubmissionAdmission CaptureBridgeSubmissionAdmissionOrThrow(
+        string stage,
+        NknBridgeChannel channel)
+    {
+        BridgeSubmissionReadySnapshot readySnapshot;
+        long currentEpoch;
+        bool barrierActive;
+        lock (gate)
+        {
+            readySnapshot = bridgeSubmissionReadySnapshot;
+            currentEpoch = bridgeSubmissionEpoch;
+            barrierActive = bridgeRecoverySubmissionBarrierActive;
+        }
+
+        if (barrierActive ||
+            readySnapshot.IsDefault ||
+            readySnapshot.SubmissionEpoch != currentEpoch)
+        {
+            Log(
+                "event=nkn_bridge_submission_rejected; " +
+                $"stage={SanitizeLogToken(stage)}; reason=bridge_submission_epoch_not_ready; channel={channel.ToString().ToLowerInvariant()}; " +
+                $"submission_epoch={currentEpoch}; ready_submission_epoch={readySnapshot.SubmissionEpoch}; ready_process_epoch={readySnapshot.ProcessIdentity.ProcessEpoch}; recovery_barrier_active={(barrierActive ? 1 : 0)}");
+            throw new InvalidOperationException("NKN bridge process is not ready for payload submission.");
+        }
+
+        var activeSnapshot = bridgeSupervisor.GetActiveSubmissionSnapshotOrThrow();
+        if (activeSnapshot.Identity != readySnapshot.ProcessIdentity)
+        {
+            Log(
+                "event=nkn_bridge_submission_rejected; " +
+                $"stage={SanitizeLogToken(stage)}; reason=bridge_process_epoch_not_ready; channel={channel.ToString().ToLowerInvariant()}; " +
+                $"submission_epoch={currentEpoch}; process_epoch={activeSnapshot.Identity.ProcessEpoch}; ready_process_epoch={readySnapshot.ProcessIdentity.ProcessEpoch}; recovery_barrier_active={(barrierActive ? 1 : 0)}");
+            throw new InvalidOperationException("NKN bridge process is not ready for payload submission.");
+        }
+
+        return new BridgeSubmissionAdmission(
+            activeSnapshot,
+            readySnapshot.SubmissionEpoch);
+    }
+
+    private BridgeProcessSubmissionSnapshot RevalidateBridgeSubmissionAdmissionOrThrow(
+        BridgeSubmissionAdmission expected,
+        string stage,
+        NknBridgeChannel channel)
+    {
+        BridgeSubmissionReadySnapshot readySnapshot;
+        long currentEpoch;
+        bool barrierActive;
+        lock (gate)
+        {
+            readySnapshot = bridgeSubmissionReadySnapshot;
+            currentEpoch = bridgeSubmissionEpoch;
+            barrierActive = bridgeRecoverySubmissionBarrierActive;
+        }
+
+        if (barrierActive ||
+            currentEpoch != expected.SubmissionEpoch ||
+            readySnapshot.SubmissionEpoch != expected.SubmissionEpoch ||
+            readySnapshot.ProcessIdentity != expected.ProcessSnapshot.Identity)
+        {
+            Log(
+                "event=nkn_bridge_submission_rejected; " +
+                $"stage={SanitizeLogToken(stage)}; reason=bridge_submission_epoch_changed; channel={channel.ToString().ToLowerInvariant()}; " +
+                $"expected_submission_epoch={expected.SubmissionEpoch}; submission_epoch={currentEpoch}; ready_submission_epoch={readySnapshot.SubmissionEpoch}; expected_process_epoch={expected.ProcessSnapshot.Identity.ProcessEpoch}; ready_process_epoch={readySnapshot.ProcessIdentity.ProcessEpoch}; recovery_barrier_active={(barrierActive ? 1 : 0)}");
+            throw new InvalidOperationException("NKN bridge process changed during payload submission.");
+        }
+
+        var currentSnapshot = bridgeSupervisor.GetActiveSubmissionSnapshotOrThrow();
+        if (currentSnapshot.Identity != expected.ProcessSnapshot.Identity ||
+            !ReferenceEquals(
+                currentSnapshot.Writer,
+                expected.ProcessSnapshot.Writer))
+        {
+            throw new InvalidOperationException(
+                "NKN bridge process changed before payload submission.");
+        }
+
+        return currentSnapshot;
+    }
+
+    private void ValidatePhysicalBridgeSubmissionOrThrow(
+        BridgeProcessSubmissionSnapshot expected,
+        string stage,
+        NknBridgeChannel channel)
+    {
+        var current = bridgeSupervisor.CurrentProcessIdentity;
+        if (current != expected.Identity)
+        {
+            Log(
+                "event=nkn_bridge_submission_rejected; " +
+                $"stage={SanitizeLogToken(stage)}; reason=bridge_process_epoch_changed; channel={channel.ToString().ToLowerInvariant()}; " +
+                $"expected_process_epoch={expected.Identity.ProcessEpoch}; process_epoch={current.ProcessEpoch}");
+            throw new InvalidOperationException(
+                "NKN bridge process changed during payload submission.");
+        }
+    }
+
+    private BridgeProtocolSubmissionContext CreateBridgeProtocolSubmissionContext(
+        string operation)
+    {
+        var admission = CaptureBridgeSubmissionAdmissionOrThrow(
+            $"{operation}_pre_wait",
+            NknBridgeChannel.Control);
+        return new BridgeProtocolSubmissionContext(
+            bridgeSubmissionSemaphore,
+            GetValidatedWriter: () => RevalidateBridgeSubmissionAdmissionOrThrow(
+                    admission,
+                    $"{operation}_pre_submit",
+                    NknBridgeChannel.Control)
+                .Writer,
+            ValidateAfterWrite: _ => ValidatePhysicalBridgeSubmissionOrThrow(
+                admission.ProcessSnapshot,
+                $"{operation}_post_submit",
+                NknBridgeChannel.Control));
+    }
+
     private async Task SendCoreAsync(string destination, byte[] payload, NknBridgeChannel channel, CancellationToken ct)
     {
         ThrowIfDisposed();
@@ -3483,26 +3755,49 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         MaybeLogBridgeSendSummary(payload.Length, destination.Length);
         var isScreenSharePayload = channel == NknBridgeChannel.Media;
         var serializedBytes = BridgeBinaryProtocol.MeasureSendFrameBytes(destination, payload);
-        await bridgeSupervisor.GetActiveIoOrThrow().Writer.WriteSendFrameAsync(destination, payload, channel, ct).ConfigureAwait(false);
-        Volatile.Write(ref lastBridgeSendFrameTick, Stopwatch.GetTimestamp());
-        Volatile.Write(ref lastBridgeSendFramePayloadBytes, payload.Length);
-        Volatile.Write(ref lastBridgeSendFrameSerializedBytes, serializedBytes);
-        Volatile.Write(ref lastBridgeSendFrameChannel, (long)channel);
+        var admission = CaptureBridgeSubmissionAdmissionOrThrow(
+            "pre_wait",
+            channel);
+        BridgeSubmissionAfterAdmissionCapturedForTests?.Invoke(channel);
+        await bridgeSubmissionSemaphore.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var submissionSnapshot = RevalidateBridgeSubmissionAdmissionOrThrow(
+                admission,
+                "pre_submit",
+                channel);
+            BridgeSubmissionAfterGateAcquiredForTests?.Invoke(channel);
+            await submissionSnapshot.Writer
+                .WriteSendFrameAsync(destination, payload, channel, ct)
+                .ConfigureAwait(false);
+            ValidatePhysicalBridgeSubmissionOrThrow(
+                submissionSnapshot,
+                "post_submit",
+                channel);
+            Volatile.Write(ref lastBridgeSendFrameTick, Stopwatch.GetTimestamp());
+            Volatile.Write(ref lastBridgeSendFramePayloadBytes, payload.Length);
+            Volatile.Write(ref lastBridgeSendFrameSerializedBytes, serializedBytes);
+            Volatile.Write(ref lastBridgeSendFrameChannel, (long)channel);
 
-        if (isScreenSharePayload)
-        {
-            NknRuntimeDiagnostics.IncrementBridgeMediaMessagesSent();
-            NknRuntimeDiagnostics.AddBridgeMediaBytesSent(serializedBytes);
-            NknRuntimeDiagnostics.AddScreenShareBridgeBytesSent(serializedBytes);
+            if (isScreenSharePayload)
+            {
+                NknRuntimeDiagnostics.IncrementBridgeMediaMessagesSent();
+                NknRuntimeDiagnostics.AddBridgeMediaBytesSent(serializedBytes);
+                NknRuntimeDiagnostics.AddScreenShareBridgeBytesSent(serializedBytes);
+            }
+            else if (channel == NknBridgeChannel.Control)
+            {
+                NknRuntimeDiagnostics.IncrementBridgeControlMessagesSent();
+                NknRuntimeDiagnostics.AddBridgeControlBytesSent(serializedBytes);
+            }
+            else if (channel == NknBridgeChannel.Bulk)
+            {
+                NknRuntimeDiagnostics.AddOutboundLaneSent("file_transfer", payload.Length);
+            }
         }
-        else if (channel == NknBridgeChannel.Control)
+        finally
         {
-            NknRuntimeDiagnostics.IncrementBridgeControlMessagesSent();
-            NknRuntimeDiagnostics.AddBridgeControlBytesSent(serializedBytes);
-        }
-        else if (channel == NknBridgeChannel.Bulk)
-        {
-            NknRuntimeDiagnostics.AddOutboundLaneSent("file_transfer", payload.Length);
+            bridgeSubmissionSemaphore.Release();
         }
     }
 
@@ -5466,7 +5761,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             helloCompleted = false;
             Interlocked.Exchange(ref disconnectedRaised, 0);
             if (!explicitShutdownInProgress &&
-                Volatile.Read(ref disposeStarted) == 0)
+                Volatile.Read(ref disposeStarted) == 0 &&
+                !bridgeRecoverySubmissionBarrierActive)
             {
                 shuttingDown = false;
             }
@@ -5525,7 +5821,9 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         lease?.Release();
     }
 
-    private async Task EnsureHelloHandshakeAsync(CancellationToken ct)
+    private async Task EnsureHelloHandshakeAsync(
+        CancellationToken ct,
+        bool submissionSemaphoreHeld = false)
     {
         long spawnTicksSnapshot;
         int? pidSnapshot;
@@ -5540,7 +5838,11 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         if (alreadyHelloCompleted)
         {
             var pingStopwatch = Stopwatch.StartNew();
-            await SendBridgePingAndWaitPongAsync(PingTimeout, ct);
+            await SendBridgePingAndWaitPongAsync(
+                    PingTimeout,
+                    ct,
+                    submissionSemaphoreHeld)
+                .ConfigureAwait(false);
             pingStopwatch.Stop();
 
             EmitBridgeLifecycle(new BridgeLifecycleEvent(
@@ -5567,11 +5869,16 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 },
                 BridgeWaitKind.HelloOk,
                 HelloTimeout,
-                ct);
+                ct,
+                submissionSemaphoreHeld);
             ValidateHelloProtocolOrThrow(helloResponse);
 
             var pingStopwatch = Stopwatch.StartNew();
-            await SendBridgePingAndWaitPongAsync(PingTimeout, ct);
+            await SendBridgePingAndWaitPongAsync(
+                    PingTimeout,
+                    ct,
+                    submissionSemaphoreHeld)
+                .ConfigureAwait(false);
             pingStopwatch.Stop();
 
             lock (gate)
@@ -5617,13 +5924,23 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         }
     }
 
-    private async Task<JsonElement> SendBridgePingAndWaitPongAsync(TimeSpan timeout, CancellationToken ct)
+    private async Task<JsonElement> SendBridgePingAndWaitPongAsync(
+        TimeSpan timeout,
+        CancellationToken ct,
+        bool submissionSemaphoreHeld = false)
     {
         ThrowIfDisposed();
 
         try
         {
-            return await protocolClient.SendPingAndWaitPongAsync(timeout, ct).ConfigureAwait(false);
+            return await protocolClient
+                .SendPingAndWaitPongAsync(
+                    timeout,
+                    ct,
+                    submissionSemaphoreHeld
+                        ? null
+                        : CreateBridgeProtocolSubmissionContext("ping"))
+                .ConfigureAwait(false);
         }
         catch (TimeoutException ex)
         {
@@ -5637,14 +5954,26 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         Dictionary<string, object?>? payload,
         CancellationToken ct,
         TimeSpan? timeoutOverride = null,
-        Action<int>? onSerialized = null)
+        Action<int>? onSerialized = null,
+        bool submissionSemaphoreHeld = false)
     {
         ThrowIfDisposed();
 
         var timeout = timeoutOverride ?? CommandAckTimeout;
         try
         {
-            await protocolClient.SendCommandAndWaitAckAsync(cmd, payload, timeout, ct, onSerialized).ConfigureAwait(false);
+            await protocolClient
+                .SendCommandAndWaitAckAsync(
+                    cmd,
+                    payload,
+                    timeout,
+                    ct,
+                    onSerialized,
+                    submissionSemaphoreHeld
+                        ? null
+                        : CreateBridgeProtocolSubmissionContext(
+                            $"command_{SanitizeLogToken(cmd)}"))
+                .ConfigureAwait(false);
         }
         catch (TimeoutException ex)
         {
@@ -5662,10 +5991,22 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         Dictionary<string, object?>? payload,
         BridgeWaitKind waitKind,
         TimeSpan timeout,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool submissionSemaphoreHeld = false)
     {
         ThrowIfDisposed();
-        return await protocolClient.SendCommandAndWaitBridgeEventAsync(cmd, payload, waitKind, timeout, ct).ConfigureAwait(false);
+        return await protocolClient
+            .SendCommandAndWaitBridgeEventAsync(
+                cmd,
+                payload,
+                waitKind,
+                timeout,
+                ct,
+                submissionSemaphoreHeld
+                    ? null
+                    : CreateBridgeProtocolSubmissionContext(
+                        $"command_{SanitizeLogToken(cmd)}"))
+            .ConfigureAwait(false);
     }
 
     private void ValidateHelloProtocolOrThrow(JsonElement root)
@@ -6427,6 +6768,11 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             return;
         }
 
+        lock (gate)
+        {
+            bridgeSubmissionReadySnapshot = default;
+        }
+
         NknRuntimeDiagnostics.SetAuthoritativeConnectedAddressResolved(false);
         NknRuntimeDiagnostics.SetMediaPlaneAttached(false);
         SetScreenShareQueueState(new BridgeScreenShareQueueState(
@@ -6509,8 +6855,22 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                             throw new OperationCanceledException("disposed");
                         }
 
-                        await EnsureProcessStartedAsync(ct).ConfigureAwait(false);
-                        await EnsureHelloHandshakeAsync(ct).ConfigureAwait(false);
+                        await bridgeSubmissionSemaphore
+                            .WaitAsync(ct)
+                            .ConfigureAwait(false);
+                        try
+                        {
+                            await EnsureProcessStartedAsync(ct)
+                                .ConfigureAwait(false);
+                            await EnsureHelloHandshakeAsync(
+                                    ct,
+                                    submissionSemaphoreHeld: true)
+                                .ConfigureAwait(false);
+                        }
+                        finally
+                        {
+                            bridgeSubmissionSemaphore.Release();
+                        }
 
                         if (wasConnected)
                         {
@@ -6886,54 +7246,78 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             return false;
         }
 
+        var submissionBarrierHeld = false;
         var hardRestartReserved = false;
-        if (executionCommand is { } command)
+        var restartCompleted = false;
+        var physicalRestartStarted = false;
+        var processStarted = false;
+        var barrierSourceIdentity = default(BridgeProcessEpochIdentity);
+        var barrierSubmissionEpoch = 0L;
+
+        if (executionCommand is { } reservingCommand)
         {
-            var decisionStatus = "Rejected";
-            var decisionReason = "bridge_recovery_execution_command_not_current";
-            FileTransferBridgeRecoveryBeforeHardRestartCurrentnessForTests?.Invoke(command);
+            FileTransferBridgeRecoveryBeforeHardRestartCurrentnessForTests?.Invoke(
+                reservingCommand);
             var totalBudget =
                 executionTotalBudget ?? FileTransferBridgeRecoveryExecutionBudget;
-            bool totalDeadlineElapsed;
+            var reservationAccepted = false;
+            var reservationReason =
+                "bridge_recovery_execution_command_not_current";
             lock (gate)
             {
-                totalDeadlineElapsed = HasBridgeRecoveryTotalDeadlineElapsed(
+                var totalDeadlineElapsed = HasBridgeRecoveryTotalDeadlineElapsed(
                     Stopwatch.GetTimestamp(),
                     executionStartedTick,
                     totalBudget);
                 if (activeFileTransferBridgeRecoveryExecutionCommand is { } activeCommand &&
-                    activeCommand.Equals(command) &&
+                    activeCommand.Equals(reservingCommand) &&
                     executionCompletion is not null &&
-                    ReferenceEquals(activeFileTransferBridgeRecoveryExecutionCompletion, executionCompletion) &&
+                    ReferenceEquals(
+                        activeFileTransferBridgeRecoveryExecutionCompletion,
+                        executionCompletion) &&
                     executionTotalDeadline is not null &&
-                    ReferenceEquals(activeFileTransferBridgeRecoveryExecutionTotalDeadline, executionTotalDeadline) &&
-                    activeFileTransferBridgeRecoveryExecutionStartedTick == executionStartedTick &&
+                    ReferenceEquals(
+                        activeFileTransferBridgeRecoveryExecutionTotalDeadline,
+                        executionTotalDeadline) &&
+                    activeFileTransferBridgeRecoveryExecutionStartedTick ==
+                    executionStartedTick &&
                     activeFileTransferBridgeRecoveryExecutionWorkerStarted &&
                     !executionCompletion.Task.IsCompleted &&
                     !executionTotalDeadline.IsCancellationRequested &&
-                    !totalDeadlineElapsed)
+                    !totalDeadlineElapsed &&
+                    !bridgeRecoverySubmissionBarrierActive)
                 {
+                    barrierSourceIdentity =
+                        bridgeSubmissionReadySnapshot.ProcessIdentity;
+                    barrierSubmissionEpoch = NextBridgeSubmissionEpoch(
+                        bridgeSubmissionEpoch);
+                    bridgeSubmissionEpoch = barrierSubmissionEpoch;
+                    bridgeSubmissionReadySnapshot = default;
+                    bridgeRecoverySubmissionBarrierActive = true;
+                    bridgeRecoverySubmissionBarrierSourceEpoch =
+                        barrierSubmissionEpoch;
                     shuttingDown = true;
-                    hardRestartReserved = true;
-                    decisionStatus = "Started";
-                    decisionReason = "bridge_recovery_execution_hard_restart_started";
+                    reservationAccepted = true;
+                    reservationReason =
+                        "bridge_recovery_execution_submission_barrier_reserved";
                 }
                 else if (totalDeadlineElapsed)
                 {
-                    decisionReason = "bridge_recovery_execution_total_deadline_expired";
+                    reservationReason =
+                        "bridge_recovery_execution_total_deadline_expired";
                 }
             }
 
-            LogFileTransferBridgeRecoveryHardRestartDecision(
-                command,
-                decisionStatus,
-                decisionReason,
-                executionTrigger,
-                executionStartedTick,
-                executionSoftPhaseBudget ?? ReceiveStallRecoveryAttemptBudget,
-                executionTotalBudget ?? FileTransferBridgeRecoveryExecutionBudget);
-            if (!string.Equals(decisionStatus, "Started", StringComparison.Ordinal))
+            if (!reservationAccepted)
             {
+                LogFileTransferBridgeRecoveryHardRestartDecision(
+                    reservingCommand,
+                    "Rejected",
+                    reservationReason,
+                    executionTrigger,
+                    executionStartedTick,
+                    executionSoftPhaseBudget ?? ReceiveStallRecoveryAttemptBudget,
+                    executionTotalBudget ?? FileTransferBridgeRecoveryExecutionBudget);
                 if (executionTotalDeadline?.IsCancellationRequested == true)
                 {
                     executionTotalDeadline.Token.ThrowIfCancellationRequested();
@@ -6941,22 +7325,109 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
                 LogFileTransferBridgeRecoveryExecution(
                     "nkn_bridge_restart_rejected_stale_execution_command",
-                    command,
-                    decisionReason);
+                    reservingCommand,
+                    reservationReason);
                 return false;
             }
-        }
 
-        if (!hardRestartReserved)
+            LogFileTransferBridgeRecoverySubmissionBarrier(
+                "nkn_bridge_recovery_submission_barrier_closed",
+                reservingCommand,
+                barrierSourceIdentity,
+                currentIdentity: default,
+                barrierSubmissionEpoch,
+                reservationReason);
+        }
+        else
         {
             lock (gate)
             {
+                barrierSourceIdentity =
+                    bridgeSubmissionReadySnapshot.ProcessIdentity;
+                barrierSubmissionEpoch = NextBridgeSubmissionEpoch(
+                    bridgeSubmissionEpoch);
+                bridgeSubmissionEpoch = barrierSubmissionEpoch;
+                bridgeSubmissionReadySnapshot = default;
+                bridgeRecoverySubmissionBarrierActive = true;
+                bridgeRecoverySubmissionBarrierSourceEpoch =
+                    barrierSubmissionEpoch;
                 shuttingDown = true;
             }
         }
+
         try
         {
-            executionTotalDeadline?.Token.ThrowIfCancellationRequested();
+            var executionToken =
+                executionTotalDeadline?.Token ?? CancellationToken.None;
+            await bridgeSubmissionSemaphore
+                .WaitAsync(executionToken)
+                .ConfigureAwait(false);
+            submissionBarrierHeld = true;
+
+            if (executionCommand is { } command)
+            {
+                var decisionStatus = "Rejected";
+                var decisionReason = "bridge_recovery_execution_command_not_current";
+                var totalBudget =
+                    executionTotalBudget ?? FileTransferBridgeRecoveryExecutionBudget;
+                bool totalDeadlineElapsed;
+                lock (gate)
+                {
+                    totalDeadlineElapsed = HasBridgeRecoveryTotalDeadlineElapsed(
+                        Stopwatch.GetTimestamp(),
+                        executionStartedTick,
+                        totalBudget);
+                    if (activeFileTransferBridgeRecoveryExecutionCommand is { } activeCommand &&
+                        activeCommand.Equals(command) &&
+                        executionCompletion is not null &&
+                        ReferenceEquals(activeFileTransferBridgeRecoveryExecutionCompletion, executionCompletion) &&
+                        executionTotalDeadline is not null &&
+                        ReferenceEquals(activeFileTransferBridgeRecoveryExecutionTotalDeadline, executionTotalDeadline) &&
+                        activeFileTransferBridgeRecoveryExecutionStartedTick == executionStartedTick &&
+                        activeFileTransferBridgeRecoveryExecutionWorkerStarted &&
+                        !executionCompletion.Task.IsCompleted &&
+                        !executionTotalDeadline.IsCancellationRequested &&
+                        !totalDeadlineElapsed &&
+                        bridgeRecoverySubmissionBarrierActive &&
+                        bridgeRecoverySubmissionBarrierSourceEpoch ==
+                        barrierSubmissionEpoch &&
+                        bridgeSubmissionEpoch == barrierSubmissionEpoch &&
+                        bridgeSubmissionReadySnapshot.IsDefault)
+                    {
+                        hardRestartReserved = true;
+                        decisionStatus = "Started";
+                        decisionReason = "bridge_recovery_execution_hard_restart_started";
+                    }
+                    else if (totalDeadlineElapsed)
+                    {
+                        decisionReason = "bridge_recovery_execution_total_deadline_expired";
+                    }
+                }
+
+                LogFileTransferBridgeRecoveryHardRestartDecision(
+                    command,
+                    decisionStatus,
+                    decisionReason,
+                    executionTrigger,
+                    executionStartedTick,
+                    executionSoftPhaseBudget ?? ReceiveStallRecoveryAttemptBudget,
+                    executionTotalBudget ?? FileTransferBridgeRecoveryExecutionBudget);
+                if (!string.Equals(decisionStatus, "Started", StringComparison.Ordinal))
+                {
+                    if (executionTotalDeadline?.IsCancellationRequested == true)
+                    {
+                        executionTotalDeadline.Token.ThrowIfCancellationRequested();
+                    }
+
+                    LogFileTransferBridgeRecoveryExecution(
+                        "nkn_bridge_restart_rejected_stale_execution_command",
+                        command,
+                        decisionReason);
+                    return false;
+                }
+            }
+
+            executionToken.ThrowIfCancellationRequested();
             if (hardRestartReserved)
             {
                 onHardRestartReserved?.Invoke();
@@ -6964,23 +7435,81 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                     executionCommand!.Value);
             }
 
-            executionTotalDeadline?.Token.ThrowIfCancellationRequested();
+            if (executionCommand is { } revalidatedCommand)
+            {
+                var totalBudget =
+                    executionTotalBudget ?? FileTransferBridgeRecoveryExecutionBudget;
+                var commandStillCurrent = false;
+                lock (gate)
+                {
+                    commandStillCurrent =
+                        activeFileTransferBridgeRecoveryExecutionCommand is { } activeCommand &&
+                        activeCommand.Equals(revalidatedCommand) &&
+                        executionCompletion is not null &&
+                        ReferenceEquals(
+                            activeFileTransferBridgeRecoveryExecutionCompletion,
+                            executionCompletion) &&
+                        executionTotalDeadline is not null &&
+                        ReferenceEquals(
+                            activeFileTransferBridgeRecoveryExecutionTotalDeadline,
+                            executionTotalDeadline) &&
+                        activeFileTransferBridgeRecoveryExecutionStartedTick ==
+                        executionStartedTick &&
+                        activeFileTransferBridgeRecoveryExecutionWorkerStarted &&
+                        !executionCompletion.Task.IsCompleted &&
+                        !executionTotalDeadline.IsCancellationRequested &&
+                        !HasBridgeRecoveryTotalDeadlineElapsed(
+                            Stopwatch.GetTimestamp(),
+                            executionStartedTick,
+                            totalBudget) &&
+                        bridgeRecoverySubmissionBarrierActive &&
+                        bridgeRecoverySubmissionBarrierSourceEpoch ==
+                        barrierSubmissionEpoch &&
+                        bridgeSubmissionEpoch == barrierSubmissionEpoch &&
+                        bridgeSubmissionReadySnapshot.IsDefault;
+                }
+
+                if (!commandStillCurrent)
+                {
+                    executionToken.ThrowIfCancellationRequested();
+                    LogFileTransferBridgeRecoveryExecution(
+                        "nkn_bridge_restart_rejected_stale_execution_command",
+                        revalidatedCommand,
+                        "bridge_recovery_execution_stale_before_physical_restart");
+                    return false;
+                }
+            }
+
+            executionToken.ThrowIfCancellationRequested();
+            FailPendingOperations("bridge_recovery_restart");
+            physicalRestartStarted = true;
             bridgeSupervisor.MarkForcedKillRequested();
             await bridgeSupervisor.CleanupStateAsync(waitForReaders: true, "restart").ConfigureAwait(false);
-            executionTotalDeadline?.Token.ThrowIfCancellationRequested();
+            executionToken.ThrowIfCancellationRequested();
             if (!disposed)
             {
-                var executionToken =
-                    executionTotalDeadline?.Token ?? CancellationToken.None;
                 await EnsureProcessStartedAsync(executionToken);
-                await EnsureHelloHandshakeAsync(executionToken);
+                processStarted = true;
+                if (executionCommand is { } startedCommand)
+                {
+                    FileTransferBridgeRecoveryAfterProcessStartedForTests?.Invoke(
+                        startedCommand);
+                }
+
+                await EnsureHelloHandshakeAsync(
+                        executionToken,
+                        submissionSemaphoreHeld: true)
+                    .ConfigureAwait(false);
                 if (reconnectAfterRestart)
                 {
                     connectAttempts.ResetPendingReadyForNewProcessStart();
                     Interlocked.Exchange(ref receiveStallRecoveryConnectActive, 1);
                     try
                     {
-                        await ConnectAsync(executionToken).ConfigureAwait(false);
+                        await ConnectAsync(
+                                executionToken,
+                                submissionSemaphoreHeld: true)
+                            .ConfigureAwait(false);
                     }
                     finally
                     {
@@ -6988,8 +7517,84 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                     }
                 }
 
-                executionTotalDeadline?.Token.ThrowIfCancellationRequested();
+                executionToken.ThrowIfCancellationRequested();
+                var currentIdentity = bridgeSupervisor.CurrentProcessIdentity;
+                if (currentIdentity.IsDefault)
+                {
+                    throw new InvalidOperationException(
+                        "Bridge restart completed without a current process identity.");
+                }
+
+                if (executionCommand is { } completedCommand)
+                {
+                    var totalBudget =
+                        executionTotalBudget ?? FileTransferBridgeRecoveryExecutionBudget;
+                    var commandStillCurrent = false;
+                    lock (gate)
+                    {
+                        commandStillCurrent =
+                            activeFileTransferBridgeRecoveryExecutionCommand is { } activeCommand &&
+                            activeCommand.Equals(completedCommand) &&
+                            executionCompletion is not null &&
+                            ReferenceEquals(
+                                activeFileTransferBridgeRecoveryExecutionCompletion,
+                                executionCompletion) &&
+                            executionTotalDeadline is not null &&
+                            ReferenceEquals(
+                                activeFileTransferBridgeRecoveryExecutionTotalDeadline,
+                                executionTotalDeadline) &&
+                            activeFileTransferBridgeRecoveryExecutionStartedTick ==
+                            executionStartedTick &&
+                            activeFileTransferBridgeRecoveryExecutionWorkerStarted &&
+                            !executionCompletion.Task.IsCompleted &&
+                            !executionTotalDeadline.IsCancellationRequested &&
+                            !HasBridgeRecoveryTotalDeadlineElapsed(
+                                Stopwatch.GetTimestamp(),
+                                executionStartedTick,
+                                totalBudget) &&
+                            bridgeRecoverySubmissionBarrierActive &&
+                            bridgeRecoverySubmissionBarrierSourceEpoch ==
+                            barrierSubmissionEpoch &&
+                            bridgeSubmissionEpoch == barrierSubmissionEpoch &&
+                            bridgeSubmissionReadySnapshot.ProcessIdentity ==
+                            currentIdentity &&
+                            bridgeSubmissionReadySnapshot.SubmissionEpoch ==
+                            barrierSubmissionEpoch;
+                        if (commandStillCurrent)
+                        {
+                            bridgeRecoverySubmissionBarrierActive = false;
+                            bridgeRecoverySubmissionBarrierSourceEpoch = 0;
+                            shuttingDown = false;
+                        }
+                    }
+
+                    if (!commandStillCurrent)
+                    {
+                        executionToken.ThrowIfCancellationRequested();
+                        throw new InvalidOperationException(
+                            "Bridge recovery execution command became stale before restart publication.");
+                    }
+
+                    LogFileTransferBridgeRecoverySubmissionBarrier(
+                        "nkn_bridge_recovery_submission_barrier_released",
+                        completedCommand,
+                        barrierSourceIdentity,
+                        currentIdentity,
+                        barrierSubmissionEpoch,
+                        "bridge_recovery_execution_connect_ready");
+                }
+                else
+                {
+                    lock (gate)
+                    {
+                        bridgeRecoverySubmissionBarrierActive = false;
+                        bridgeRecoverySubmissionBarrierSourceEpoch = 0;
+                        shuttingDown = false;
+                    }
+                }
+
                 NknRuntimeDiagnostics.IncrementBridgeRestartCount();
+                restartCompleted = true;
                 return true;
             }
 
@@ -7007,12 +7612,76 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         }
         finally
         {
+            if (!restartCompleted && processStarted)
+            {
+                try
+                {
+                    bridgeSupervisor.MarkForcedKillRequested();
+                    await bridgeSupervisor
+                        .CleanupStateAsync(
+                            waitForReaders: true,
+                            "bridge_recovery_restart_unready")
+                        .ConfigureAwait(false);
+                }
+                catch (Exception cleanupException)
+                {
+                    Log(
+                        "event=nkn_bridge_recovery_submission_barrier_cleanup_failed; " +
+                        $"reason={SanitizeLogToken(cleanupException.GetType().Name)}");
+                }
+            }
+
+            var barrierWasInvalidated = false;
+            var physicalIdentityAfterFailure =
+                bridgeSupervisor.CurrentProcessIdentity;
             lock (gate)
             {
+                if (!restartCompleted)
+                {
+                    barrierWasInvalidated = bridgeRecoverySubmissionBarrierActive;
+                    if (!physicalRestartStarted &&
+                        executionCommand is null &&
+                        !disposed &&
+                        !explicitShutdownInProgress &&
+                        !barrierSourceIdentity.IsDefault &&
+                        physicalIdentityAfterFailure ==
+                        barrierSourceIdentity)
+                    {
+                        bridgeSubmissionReadySnapshot =
+                            new BridgeSubmissionReadySnapshot(
+                                barrierSourceIdentity,
+                                barrierSubmissionEpoch);
+                    }
+                    else
+                    {
+                        bridgeSubmissionReadySnapshot = default;
+                    }
+
+                    bridgeRecoverySubmissionBarrierActive = false;
+                    bridgeRecoverySubmissionBarrierSourceEpoch = 0;
+                }
+
                 if (!disposed && !explicitShutdownInProgress)
                 {
                     shuttingDown = false;
                 }
+            }
+
+            if (barrierWasInvalidated &&
+                executionCommand is { } invalidatedCommand)
+            {
+                LogFileTransferBridgeRecoverySubmissionBarrier(
+                    "nkn_bridge_recovery_submission_barrier_invalidated",
+                    invalidatedCommand,
+                    barrierSourceIdentity,
+                    bridgeSupervisor.CurrentProcessIdentity,
+                    barrierSubmissionEpoch,
+                    "bridge_recovery_execution_restart_not_ready");
+            }
+
+            if (submissionBarrierHeld)
+            {
+                bridgeSubmissionSemaphore.Release();
             }
         }
     }

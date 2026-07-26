@@ -30,6 +30,7 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
     private WindowsKillOnCloseProcessJob? processLifetimeGuard;
     private bool forcedKillRequested;
     private long currentBridgeSpawnTicks;
+    private long currentProcessEpoch;
     private int trackedBridgePid;
     private long trackedBridgeStartTimeUtcFileTime;
 
@@ -211,6 +212,7 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
             processLifetimeGuard = newProcessLifetimeGuard;
             forcedKillRequested = false;
             currentBridgeSpawnTicks = Stopwatch.GetTimestamp();
+            currentProcessEpoch = NextProcessEpoch(currentProcessEpoch);
             trackedBridgePid = newProcess.Id;
             trackedBridgeStartTimeUtcFileTime = SafeGetStartTimeUtcFileTime(newProcess);
             readerLoopCts = newReaderLoopCts;
@@ -234,6 +236,53 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
             ExitReasonText: string.Empty));
 
         callbacks.Log($"Bridge process started (pid={newProcess.Id}, node={Path.GetFileName(nodePath)}, script={bridgePath})");
+    }
+
+    private static long NextProcessEpoch(long current)
+        => current <= 0 ? 1 : checked(current + 1);
+
+    public BridgeProcessEpochIdentity CurrentProcessIdentity
+    {
+        get
+        {
+            lock (gate)
+            {
+                if (process is null ||
+                    process.HasExited ||
+                    stdinWriter is null ||
+                    currentProcessEpoch <= 0)
+                {
+                    return default;
+                }
+
+                return new BridgeProcessEpochIdentity(
+                    currentProcessEpoch,
+                    process.Id,
+                    currentBridgeSpawnTicks);
+            }
+        }
+    }
+
+    public BridgeProcessSubmissionSnapshot GetActiveSubmissionSnapshotOrThrow()
+    {
+        lock (gate)
+        {
+            var writer = stdinWriter ??
+                         throw new InvalidOperationException("NKN bridge is not running.");
+            var currentProcess = process ??
+                                 throw new InvalidOperationException("NKN bridge is not running.");
+            if (currentProcess.HasExited || currentProcessEpoch <= 0)
+            {
+                throw new InvalidOperationException("NKN bridge process is not available.");
+            }
+
+            return new BridgeProcessSubmissionSnapshot(
+                writer,
+                new BridgeProcessEpochIdentity(
+                    currentProcessEpoch,
+                    currentProcess.Id,
+                    currentBridgeSpawnTicks));
+        }
     }
 
     private static void ScrubUnsafeBridgeEnvironment(IDictionary<string, string?> environment)
@@ -968,6 +1017,21 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
         int TrackedPid,
         long TrackedStartTimeUtcFileTime);
 }
+
+internal readonly record struct BridgeProcessEpochIdentity(
+    long ProcessEpoch,
+    int ProcessId,
+    long SpawnTicks)
+{
+    public bool IsDefault =>
+        ProcessEpoch <= 0 ||
+        ProcessId <= 0 ||
+        SpawnTicks <= 0;
+}
+
+internal readonly record struct BridgeProcessSubmissionSnapshot(
+    BridgeStdioWriter Writer,
+    BridgeProcessEpochIdentity Identity);
 
 internal sealed class BridgeSupervisorCallbacks
 {

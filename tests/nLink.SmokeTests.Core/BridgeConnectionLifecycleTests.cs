@@ -6473,11 +6473,61 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             var command = CreateBridgeRecoveryExecutionCommand(
                 "transfer-core-filetransfer-recovery",
                 "sender_request_feedback_stalled");
+            using var oldSubmissionEntered = new ManualResetEventSlim();
+            using var releaseOldSubmission = new ManualResetEventSlim();
+            using var freshProcessStarted = new ManualResetEventSlim();
+            using var releaseFreshProcess = new ManualResetEventSlim();
+            adapter.BridgeSubmissionAfterGateAcquiredForTests =
+                channel =>
+                {
+                    adapter.BridgeSubmissionAfterGateAcquiredForTests =
+                        null;
+                    Assert.Equal(NknBridgeChannel.Control, channel);
+                    oldSubmissionEntered.Set();
+                    Assert.True(
+                        releaseOldSubmission.Wait(TimeSpan.FromSeconds(5)));
+                };
+            adapter.FileTransferBridgeRecoveryAfterProcessStartedForTests =
+                observed =>
+                {
+                    adapter.FileTransferBridgeRecoveryAfterProcessStartedForTests =
+                        null;
+                    Assert.Equal(command, observed);
+                    freshProcessStarted.Set();
+                    Assert.True(
+                        releaseFreshProcess.Wait(TimeSpan.FromSeconds(5)));
+                };
+            var admittedOldSubmission = Task.Run(
+                async () => await adapter.SendAsync(
+                    "old-epoch-destination",
+                    [1, 2, 3],
+                    cts.Token));
+            Assert.True(
+                oldSubmissionEntered.Wait(TimeSpan.FromSeconds(2)));
             var started = adapter.BeginFileTransferBridgeRecoveryExecution(command);
             Assert.Equal(
                 FileTransferBridgeRecoveryExecutionStartStatus.Started,
                 started.Status);
             Assert.True(started.Accepted);
+            await WaitUntilAsync(
+                () => Assert.IsType<bool>(
+                    GetPrivateField(
+                        adapter,
+                        "bridgeRecoverySubmissionBarrierActive")),
+                TimeSpan.FromSeconds(2));
+            Assert.False(admittedOldSubmission.IsCompleted);
+            releaseOldSubmission.Set();
+            await admittedOldSubmission.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.True(
+                freshProcessStarted.Wait(TimeSpan.FromSeconds(5)));
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => adapter.SendAsync(
+                    "fresh-unready-destination",
+                    [4, 5, 6],
+                    cts.Token));
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => adapter.ConnectAsync(cts.Token));
+            releaseFreshProcess.Set();
             var duplicate = adapter.BeginFileTransferBridgeRecoveryExecution(command);
             Assert.Equal(
                 FileTransferBridgeRecoveryExecutionStartStatus.Idempotent,
@@ -6529,6 +6579,18 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Assert.Contains("event=nkn_bridge_recovery_execution_started", logText, StringComparison.Ordinal);
             Assert.Contains("event=nkn_bridge_recovery_execution_completed", logText, StringComparison.Ordinal);
             Assert.Contains(
+                "event=nkn_bridge_recovery_submission_barrier_closed",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=nkn_bridge_recovery_submission_barrier_released",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "reason=bridge_submission_epoch_not_ready",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
                 "recovery_liveness_lease_authority_id=",
                 logText,
                 StringComparison.Ordinal);
@@ -6546,15 +6608,141 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 StringComparison.Ordinal);
             var connectCount = int.Parse(File.ReadAllText(countFile).Trim());
             Assert.Equal(2, connectCount);
+
+            using var staleAdmissionCaptured = new ManualResetEventSlim();
+            using var releaseStaleAdmission = new ManualResetEventSlim();
+            adapter.BridgeSubmissionAfterAdmissionCapturedForTests =
+                channel =>
+                {
+                    adapter.BridgeSubmissionAfterAdmissionCapturedForTests =
+                        null;
+                    Assert.Equal(NknBridgeChannel.Control, channel);
+                    staleAdmissionCaptured.Set();
+                    Assert.True(
+                        releaseStaleAdmission.Wait(TimeSpan.FromSeconds(5)));
+                };
+            var staleSubmission = Task.Run(
+                async () => await adapter.SendAsync(
+                    "stale-epoch-destination",
+                    [7, 8, 9],
+                    cts.Token));
+            Assert.True(
+                staleAdmissionCaptured.Wait(TimeSpan.FromSeconds(2)));
+            var epochRaceCommand = CreateBridgeRecoveryExecutionCommand(
+                "transfer-core-filetransfer-recovery",
+                "sender_request_feedback_stalled",
+                bridgeDecisionGeneration: 2);
+            var epochRaceStart =
+                adapter.BeginFileTransferBridgeRecoveryExecution(
+                    epochRaceCommand);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                epochRaceStart.Status);
+            var epochRaceReceipt =
+                await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
+                        epochRaceStart.Completion)
+                    .WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                epochRaceReceipt.Outcome);
+            releaseStaleAdmission.Set();
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                async () => await staleSubmission.WaitAsync(
+                    TimeSpan.FromSeconds(2)));
+            connectCount = int.Parse(File.ReadAllText(countFile).Trim());
+            Assert.Equal(3, connectCount);
+            Assert.Contains(
+                "reason=bridge_submission_epoch_changed",
+                GetRecentLogTextSince(logBaseline),
+                StringComparison.Ordinal);
+
+            using var heldSubmissionEntered = new ManualResetEventSlim();
+            using var releaseHeldSubmission = new ManualResetEventSlim();
+            adapter.BridgeSubmissionAfterGateAcquiredForTests =
+                channel =>
+                {
+                    adapter.BridgeSubmissionAfterGateAcquiredForTests =
+                        null;
+                    Assert.Equal(NknBridgeChannel.Control, channel);
+                    heldSubmissionEntered.Set();
+                    Assert.True(
+                        releaseHeldSubmission.Wait(TimeSpan.FromSeconds(5)));
+                };
+            var heldSubmission = Task.Run(
+                async () => await adapter.SendAsync(
+                    "invalidation-holder-destination",
+                    [10, 11, 12],
+                    cts.Token));
+            Assert.True(
+                heldSubmissionEntered.Wait(TimeSpan.FromSeconds(2)));
+            var invalidatedWhileWaitingCommand =
+                CreateBridgeRecoveryExecutionCommand(
+                    "transfer-core-filetransfer-recovery",
+                    "sender_request_feedback_stalled",
+                    bridgeDecisionGeneration: 3);
+            var invalidatedWhileWaitingStart =
+                adapter.BeginFileTransferBridgeRecoveryExecution(
+                    invalidatedWhileWaitingCommand);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                invalidatedWhileWaitingStart.Status);
+            await WaitUntilAsync(
+                () => Assert.IsType<bool>(
+                    GetPrivateField(
+                        adapter,
+                        "bridgeRecoverySubmissionBarrierActive")),
+                TimeSpan.FromSeconds(2));
+            Assert.True(
+                adapter.InvalidateFileTransferBridgeRecoveryExecution(
+                    invalidatedWhileWaitingCommand,
+                    "terminalized_while_waiting_for_submission_barrier"));
+            var invalidatedWhileWaitingReceipt =
+                await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
+                        invalidatedWhileWaitingStart.Completion)
+                    .WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionOutcome.Discarded,
+                invalidatedWhileWaitingReceipt.Outcome);
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => adapter.SendAsync(
+                    "invalidated-barrier-destination",
+                    [13, 14, 15],
+                    cts.Token));
+            releaseHeldSubmission.Set();
+            await heldSubmission.WaitAsync(TimeSpan.FromSeconds(2));
+            await WaitUntilAsync(
+                () => Assert.IsType<int>(
+                    GetPrivateField(
+                        adapter,
+                        "receiveStallRecoveryInProgress")) == 0,
+                TimeSpan.FromSeconds(2));
+            var invalidatedReadySnapshot =
+                GetPrivateField(adapter, "bridgeSubmissionReadySnapshot");
+            Assert.NotNull(invalidatedReadySnapshot);
+            Assert.Equal(
+                0L,
+                Assert.IsType<long>(
+                    invalidatedReadySnapshot!.GetType()
+                        .GetProperty("SubmissionEpoch")!
+                        .GetValue(invalidatedReadySnapshot)));
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => adapter.SendAsync(
+                    "invalidated-unready-destination",
+                    [16, 17, 18],
+                    cts.Token));
+            Assert.Equal(
+                connectCount,
+                int.Parse(File.ReadAllText(countFile).Trim()));
+
             var terminalReceiptCountBeforeInvalidation =
-                logText.Split(
+                GetRecentLogTextSince(logBaseline).Split(
                     "event=nkn_bridge_recovery_execution_completed;",
                     StringSplitOptions.None).Length - 1;
 
             var invalidatedBeforeCurrentnessCommand = CreateBridgeRecoveryExecutionCommand(
                 "transfer-core-filetransfer-recovery",
                 "sender_request_feedback_stalled",
-                bridgeDecisionGeneration: 2);
+                bridgeDecisionGeneration: 4);
             adapter.FileTransferBridgeRecoveryBeforeHardRestartCurrentnessForTests =
                 observed =>
                 {
@@ -6587,7 +6775,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             var invalidatedCommand = CreateBridgeRecoveryExecutionCommand(
                 "transfer-core-filetransfer-recovery",
                 "sender_request_feedback_stalled",
-                bridgeDecisionGeneration: 3);
+                bridgeDecisionGeneration: 5);
             using var hardRestartReserved = new ManualResetEventSlim();
             using var releaseHardRestart = new ManualResetEventSlim();
             adapter.FileTransferBridgeRecoveryAfterHardRestartReservationForTests =
@@ -6618,7 +6806,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                     CreateBridgeRecoveryExecutionCommand(
                         "transfer-core-filetransfer-recovery",
                         "sender_request_feedback_stalled",
-                        bridgeDecisionGeneration: 4));
+                        bridgeDecisionGeneration: 6));
             Assert.Equal(
                 FileTransferBridgeRecoveryExecutionStartStatus.Rejected,
                 cleanupOverlap.Status);
@@ -6809,7 +6997,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             var hardFailureReceipt =
                 await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
                         fresh.Completion)
-                    .WaitAsync(TimeSpan.FromSeconds(3));
+                    .WaitAsync(TimeSpan.FromSeconds(5));
             Assert.Equal(
                 FileTransferBridgeRecoveryExecutionOutcome.Exhausted,
                 hardFailureReceipt.Outcome);
