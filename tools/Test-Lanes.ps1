@@ -232,6 +232,10 @@ function Invoke-TestLane {
                 -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
                 -Filter "FileTransferInfraSuite=FileTransferRouteTransition" `
                 -ResultSuffix "infra-file-transfer-route-transition"
+            Invoke-DotnetTest `
+                -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
+                -Filter "FileTransferInfraSuite=FallbackTailCoordinatorAggregate" `
+                -ResultSuffix "infra-fallback-tail-coordinator-aggregate"
         }
         "FileTransferNknTransportContract" {
             Invoke-DotnetTest `

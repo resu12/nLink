@@ -1515,8 +1515,20 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_recovery_owner_retired_after_yield') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_retired_owner_update_suppressed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_transport_epoch_reauthorization_staged') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_transport_epoch_reauthorization_rebound') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_transport_epoch_reauthorization_successor_issued') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_transport_epoch_reauthorization_invalidated') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_yield_issued') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_local_proof_receipt_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_local_proof_receipt_applied') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_local_proof_receipt_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_peer_proof_receipt_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_peer_proof_receipt_applied') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_peer_proof_receipt_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_pairing_committed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_paired_release_reserved') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_paired_release_consumed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_paired_release_carried_forward') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_quiescent_yield_granted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_yield_proof_sent') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_yield_proof_received') +
@@ -1526,6 +1538,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_yield_proof_stale_ignored') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_owner_generation_mismatch') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_terminal_proof_consumed') +
+        $runtimeUnlockRetryDispatchInstallEvents +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'transfer_terminal') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_inbound_terminal') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_outbound_terminal')
@@ -1545,6 +1558,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         Get-FileTransferFallbackTailBridgeRecoveryPairingProof -Events $fallbackTailPairingEvents
     $fallbackTailTransportEpochReauthorizationProof =
         Get-FileTransferFallbackTailTransportEpochReauthorizationProof -Events $fallbackTailPairingEvents
+    $fallbackTailCoordinatorAggregateProof =
+        $fallbackTailTransportEpochReauthorizationProof.CoordinatorAggregateProof
+    $fallbackTailYieldAuthorityRejectedCount +=
+        $fallbackTailCoordinatorAggregateProof.InvalidUnresolvedCount
     [object[]]$fileTunaV4DataPathEvents = @(
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_data_path_send_result') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_data_path_receive_result') +
@@ -1605,8 +1622,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             -RouteCommitSendDrainProof $runtimeUnlockRegularV4RouteCommitSendDrainProof
     $validFallbackTerminalProofCount =
         @($fallbackTailBridgeRecoveryPairingProof.ValidTerminalProofEvents).Count
-    $fallbackPairedYield = @($fallbackTailBridgeRecoveryPairingProof.LifecycleValidPairedEvents).Count -gt 0 -or
+    $fallbackPairedYield =
+        @($fallbackTailCoordinatorAggregateProof.ValidPairingEvents).Count -gt 0 -or
+        @($fallbackTailBridgeRecoveryPairingProof.LifecycleValidPairedEvents).Count -gt 0 -or
         ($fallbackSchema2YieldCount -eq 0 -and
+            $fallbackTailCoordinatorAggregateProof.AuthoritativeEventCount -eq 0 -and
             $fallbackOwnerGenerationMismatchRawCount -eq 0 -and
             ($fallbackPairedYieldGrantedCount -gt 0 -or
                 ($fallbackOutboundYieldCount -gt 0 -and $fallbackInboundYieldCount -gt 0)))
@@ -1766,7 +1786,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     }
     foreach ($candidateEvent in @(
             $fallbackTailYieldAuthorityRejectedEvents +
-            @($fallbackTailPairedYieldValidation.InvalidPairedEvents))) {
+            @($fallbackTailPairedYieldValidation.InvalidPairedEvents) +
+            @($fallbackTailCoordinatorAggregateProof.InvalidEvents))) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'fallback_tail_yield_authority_invalid'
             Event = $candidateEvent
@@ -2063,6 +2084,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch',
                 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing',
                 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound',
+                'fallback_tail_yield_authority_invalid',
                 'filetransfer_route_transition_incomplete',
                 'runtime_unlock_regular_v4_route_commit_send_drain_missing')) {
             $verdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
@@ -2131,6 +2153,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound',
             'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid',
             'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing',
+            'fallback_tail_yield_authority_invalid',
             'regular_v4_frontier_tail_repair_state_publication_missing',
             'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery',
             'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch',
@@ -2143,8 +2166,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     }
 
     $runtimeUnlockProbeCommitVerdict = if ($probeAckCount -gt 0 -and $pairedCommitCount -gt 0) { 'pass' } else { 'none' }
-    $fallbackTailQuiescenceVerdict = if ($fallbackPairedYield -or $validFallbackTerminalProofCount -gt 0) { 'pass' } elseif ($fallbackYieldCount -gt 0) { 'fail' } elseif ($guiCompleted) { 'pass' } else { 'pending' }
-    $fallbackTailPairedYieldVerdict = if ($fallbackPairedYield -or $validFallbackTerminalProofCount -gt 0) { 'pass' } elseif ($fallbackYieldCount -gt 0) { 'fail' } else { 'none' }
+    $fallbackTailQuiescenceVerdict = if ($fallbackPairedYield -or $validFallbackTerminalProofCount -gt 0) { 'pass' } elseif ($fallbackYieldCount -gt 0 -or $fallbackTailCoordinatorAggregateProof.YieldIssuedCount -gt 0) { 'fail' } elseif ($guiCompleted) { 'pass' } else { 'pending' }
+    $fallbackTailPairedYieldVerdict = if ($fallbackPairedYield -or $validFallbackTerminalProofCount -gt 0) { 'pass' } elseif ($fallbackYieldCount -gt 0 -or $fallbackTailCoordinatorAggregateProof.YieldIssuedCount -gt 0) { 'fail' } else { 'none' }
     $liveRouteProofVerdict = if ($liveRouteChanges.Count -gt 0 -or $LiveRouteProofMode -eq 'None') { 'pass' } else { 'none' }
     $selectedRouteDetailLines = New-Object System.Collections.Generic.List[string]
     $selectedRouteDetailLines.Add(("route_selected_count={0}" -f $selectedRouteChanges.Count)) | Out-Null
@@ -2379,6 +2402,26 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_unresolved_count={0}" -f $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.UnresolvedCount),
         ("post_tuna_fallback_outbound_receive_worker_handoff_missing_count={0}" -f $outboundReceiveWorkerHandoffProof.Count),
         ("fallback_tail_yield_authority_rejected_count={0}" -f $fallbackTailYieldAuthorityRejectedCount),
+        ("fallback_tail_coordinator_aggregate_verdict={0}" -f $fallbackTailCoordinatorAggregateProof.Verdict),
+        ("fallback_tail_coordinator_yield_issued_count={0}" -f $fallbackTailCoordinatorAggregateProof.YieldIssuedCount),
+        ("fallback_tail_coordinator_local_proof_receipt_decided_count={0}" -f $fallbackTailCoordinatorAggregateProof.LocalProofReceiptDecidedCount),
+        ("fallback_tail_coordinator_peer_proof_receipt_decided_count={0}" -f $fallbackTailCoordinatorAggregateProof.PeerProofReceiptDecidedCount),
+        ("fallback_tail_coordinator_pairing_committed_count={0}" -f $fallbackTailCoordinatorAggregateProof.PairingCommittedCount),
+        ("fallback_tail_coordinator_valid_pairing_count={0}" -f $fallbackTailCoordinatorAggregateProof.ValidPairingCount),
+        ("fallback_tail_coordinator_paired_release_reserved_count={0}" -f $fallbackTailCoordinatorAggregateProof.PairedReleaseReservedCount),
+        ("fallback_tail_coordinator_valid_paired_release_reserved_count={0}" -f $fallbackTailCoordinatorAggregateProof.ValidPairedReleaseReservedCount),
+        ("fallback_tail_coordinator_paired_release_consumed_count={0}" -f $fallbackTailCoordinatorAggregateProof.PairedReleaseConsumedCount),
+        ("fallback_tail_coordinator_valid_paired_release_consumed_count={0}" -f $fallbackTailCoordinatorAggregateProof.ValidPairedReleaseConsumedCount),
+        ("fallback_tail_coordinator_paired_release_carry_forward_count={0}" -f $fallbackTailCoordinatorAggregateProof.PairedReleaseCarryForwardCount),
+        ("fallback_tail_coordinator_valid_paired_release_carry_forward_count={0}" -f $fallbackTailCoordinatorAggregateProof.ValidPairedReleaseCarryForwardCount),
+        ("fallback_tail_coordinator_invalid_raw_count={0}" -f $fallbackTailCoordinatorAggregateProof.InvalidRawCount),
+        ("fallback_tail_coordinator_invalid_distinct_count={0}" -f $fallbackTailCoordinatorAggregateProof.InvalidDistinctCount),
+        ("fallback_tail_coordinator_invalid_recovered_count={0}" -f $fallbackTailCoordinatorAggregateProof.InvalidRecoveredCount),
+        ("fallback_tail_coordinator_invalid_unresolved_count={0}" -f $fallbackTailCoordinatorAggregateProof.InvalidUnresolvedCount),
+        ("fallback_tail_coordinator_reauthorization_staged_count={0}" -f $fallbackTailCoordinatorAggregateProof.ReauthorizationStagedCount),
+        ("fallback_tail_coordinator_reauthorization_rebound_count={0}" -f $fallbackTailCoordinatorAggregateProof.ReauthorizationReboundCount),
+        ("fallback_tail_coordinator_reauthorization_successor_issued_count={0}" -f $fallbackTailCoordinatorAggregateProof.ReauthorizationSuccessorIssuedCount),
+        ("fallback_tail_coordinator_reauthorization_invalidated_count={0}" -f $fallbackTailCoordinatorAggregateProof.ReauthorizationInvalidatedCount),
         ("fallback_tail_owner_generation_mismatch_count={0}" -f $fallbackTailOwnerGenerationMismatchCount),
         ("fallback_tail_bridge_recovery_generation_pairing_verdict={0}" -f $fallbackTailBridgeRecoveryPairingProof.Verdict),
         ("fallback_tail_bridge_recovery_generation_mismatch_raw_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.RawCount),
@@ -2607,6 +2650,26 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_recovered_count={0}" -f $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.RecoveredCount),
         ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_unresolved_count={0}" -f $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.UnresolvedCount),
         ("fallback_tail_yield_authority_rejected_count={0}" -f $fallbackTailYieldAuthorityRejectedCount),
+        ("fallback_tail_coordinator_aggregate_verdict={0}" -f $fallbackTailCoordinatorAggregateProof.Verdict),
+        ("fallback_tail_coordinator_yield_issued_count={0}" -f $fallbackTailCoordinatorAggregateProof.YieldIssuedCount),
+        ("fallback_tail_coordinator_local_proof_receipt_decided_count={0}" -f $fallbackTailCoordinatorAggregateProof.LocalProofReceiptDecidedCount),
+        ("fallback_tail_coordinator_peer_proof_receipt_decided_count={0}" -f $fallbackTailCoordinatorAggregateProof.PeerProofReceiptDecidedCount),
+        ("fallback_tail_coordinator_pairing_committed_count={0}" -f $fallbackTailCoordinatorAggregateProof.PairingCommittedCount),
+        ("fallback_tail_coordinator_valid_pairing_count={0}" -f $fallbackTailCoordinatorAggregateProof.ValidPairingCount),
+        ("fallback_tail_coordinator_paired_release_reserved_count={0}" -f $fallbackTailCoordinatorAggregateProof.PairedReleaseReservedCount),
+        ("fallback_tail_coordinator_valid_paired_release_reserved_count={0}" -f $fallbackTailCoordinatorAggregateProof.ValidPairedReleaseReservedCount),
+        ("fallback_tail_coordinator_paired_release_consumed_count={0}" -f $fallbackTailCoordinatorAggregateProof.PairedReleaseConsumedCount),
+        ("fallback_tail_coordinator_valid_paired_release_consumed_count={0}" -f $fallbackTailCoordinatorAggregateProof.ValidPairedReleaseConsumedCount),
+        ("fallback_tail_coordinator_paired_release_carry_forward_count={0}" -f $fallbackTailCoordinatorAggregateProof.PairedReleaseCarryForwardCount),
+        ("fallback_tail_coordinator_valid_paired_release_carry_forward_count={0}" -f $fallbackTailCoordinatorAggregateProof.ValidPairedReleaseCarryForwardCount),
+        ("fallback_tail_coordinator_invalid_raw_count={0}" -f $fallbackTailCoordinatorAggregateProof.InvalidRawCount),
+        ("fallback_tail_coordinator_invalid_distinct_count={0}" -f $fallbackTailCoordinatorAggregateProof.InvalidDistinctCount),
+        ("fallback_tail_coordinator_invalid_recovered_count={0}" -f $fallbackTailCoordinatorAggregateProof.InvalidRecoveredCount),
+        ("fallback_tail_coordinator_invalid_unresolved_count={0}" -f $fallbackTailCoordinatorAggregateProof.InvalidUnresolvedCount),
+        ("fallback_tail_coordinator_reauthorization_staged_count={0}" -f $fallbackTailCoordinatorAggregateProof.ReauthorizationStagedCount),
+        ("fallback_tail_coordinator_reauthorization_rebound_count={0}" -f $fallbackTailCoordinatorAggregateProof.ReauthorizationReboundCount),
+        ("fallback_tail_coordinator_reauthorization_successor_issued_count={0}" -f $fallbackTailCoordinatorAggregateProof.ReauthorizationSuccessorIssuedCount),
+        ("fallback_tail_coordinator_reauthorization_invalidated_count={0}" -f $fallbackTailCoordinatorAggregateProof.ReauthorizationInvalidatedCount),
         ("fallback_tail_owner_generation_mismatch_count={0}" -f $fallbackTailOwnerGenerationMismatchCount),
         ("fallback_tail_bridge_recovery_generation_pairing_verdict={0}" -f $fallbackTailBridgeRecoveryPairingProof.Verdict),
         ("fallback_tail_bridge_recovery_generation_mismatch_raw_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.RawCount),
@@ -2819,6 +2882,26 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_verdict={0}" -f $runtimeUnlockUncommittedTunaFallbackPrecommitAuthorityProof.Verdict),
         ("post_tuna_fallback_outbound_receive_worker_handoff_missing_count={0}" -f $outboundReceiveWorkerHandoffProof.Count),
         ("fallback_tail_yield_authority_rejected_count={0}" -f $fallbackTailYieldAuthorityRejectedCount),
+        ("fallback_tail_coordinator_aggregate_verdict={0}" -f $fallbackTailCoordinatorAggregateProof.Verdict),
+        ("fallback_tail_coordinator_yield_issued_count={0}" -f $fallbackTailCoordinatorAggregateProof.YieldIssuedCount),
+        ("fallback_tail_coordinator_local_proof_receipt_decided_count={0}" -f $fallbackTailCoordinatorAggregateProof.LocalProofReceiptDecidedCount),
+        ("fallback_tail_coordinator_peer_proof_receipt_decided_count={0}" -f $fallbackTailCoordinatorAggregateProof.PeerProofReceiptDecidedCount),
+        ("fallback_tail_coordinator_pairing_committed_count={0}" -f $fallbackTailCoordinatorAggregateProof.PairingCommittedCount),
+        ("fallback_tail_coordinator_valid_pairing_count={0}" -f $fallbackTailCoordinatorAggregateProof.ValidPairingCount),
+        ("fallback_tail_coordinator_paired_release_reserved_count={0}" -f $fallbackTailCoordinatorAggregateProof.PairedReleaseReservedCount),
+        ("fallback_tail_coordinator_valid_paired_release_reserved_count={0}" -f $fallbackTailCoordinatorAggregateProof.ValidPairedReleaseReservedCount),
+        ("fallback_tail_coordinator_paired_release_consumed_count={0}" -f $fallbackTailCoordinatorAggregateProof.PairedReleaseConsumedCount),
+        ("fallback_tail_coordinator_valid_paired_release_consumed_count={0}" -f $fallbackTailCoordinatorAggregateProof.ValidPairedReleaseConsumedCount),
+        ("fallback_tail_coordinator_paired_release_carry_forward_count={0}" -f $fallbackTailCoordinatorAggregateProof.PairedReleaseCarryForwardCount),
+        ("fallback_tail_coordinator_valid_paired_release_carry_forward_count={0}" -f $fallbackTailCoordinatorAggregateProof.ValidPairedReleaseCarryForwardCount),
+        ("fallback_tail_coordinator_invalid_raw_count={0}" -f $fallbackTailCoordinatorAggregateProof.InvalidRawCount),
+        ("fallback_tail_coordinator_invalid_distinct_count={0}" -f $fallbackTailCoordinatorAggregateProof.InvalidDistinctCount),
+        ("fallback_tail_coordinator_invalid_recovered_count={0}" -f $fallbackTailCoordinatorAggregateProof.InvalidRecoveredCount),
+        ("fallback_tail_coordinator_invalid_unresolved_count={0}" -f $fallbackTailCoordinatorAggregateProof.InvalidUnresolvedCount),
+        ("fallback_tail_coordinator_reauthorization_staged_count={0}" -f $fallbackTailCoordinatorAggregateProof.ReauthorizationStagedCount),
+        ("fallback_tail_coordinator_reauthorization_rebound_count={0}" -f $fallbackTailCoordinatorAggregateProof.ReauthorizationReboundCount),
+        ("fallback_tail_coordinator_reauthorization_successor_issued_count={0}" -f $fallbackTailCoordinatorAggregateProof.ReauthorizationSuccessorIssuedCount),
+        ("fallback_tail_coordinator_reauthorization_invalidated_count={0}" -f $fallbackTailCoordinatorAggregateProof.ReauthorizationInvalidatedCount),
         ("fallback_tail_owner_generation_mismatch_count={0}" -f $fallbackTailOwnerGenerationMismatchCount),
         ("fallback_tail_bridge_recovery_generation_pairing_verdict={0}" -f $fallbackTailBridgeRecoveryPairingProof.Verdict),
         ("fallback_tail_bridge_recovery_generation_mismatch_raw_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.RawCount),
@@ -3020,6 +3103,26 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound_unresolved_count={0}" -f $runtimeUnlockUncommittedTunaFallbackPrecommitAuthorityProof.UnresolvedCount),
         ("runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_verdict={0}" -f $runtimeUnlockUncommittedTunaFallbackPrecommitAuthorityProof.Verdict),
         ("fallback_tail_yield_authority_rejected_count={0}" -f $fallbackTailYieldAuthorityRejectedCount),
+        ("fallback_tail_coordinator_aggregate_verdict={0}" -f $fallbackTailCoordinatorAggregateProof.Verdict),
+        ("fallback_tail_coordinator_yield_issued_count={0}" -f $fallbackTailCoordinatorAggregateProof.YieldIssuedCount),
+        ("fallback_tail_coordinator_local_proof_receipt_decided_count={0}" -f $fallbackTailCoordinatorAggregateProof.LocalProofReceiptDecidedCount),
+        ("fallback_tail_coordinator_peer_proof_receipt_decided_count={0}" -f $fallbackTailCoordinatorAggregateProof.PeerProofReceiptDecidedCount),
+        ("fallback_tail_coordinator_pairing_committed_count={0}" -f $fallbackTailCoordinatorAggregateProof.PairingCommittedCount),
+        ("fallback_tail_coordinator_valid_pairing_count={0}" -f $fallbackTailCoordinatorAggregateProof.ValidPairingCount),
+        ("fallback_tail_coordinator_paired_release_reserved_count={0}" -f $fallbackTailCoordinatorAggregateProof.PairedReleaseReservedCount),
+        ("fallback_tail_coordinator_valid_paired_release_reserved_count={0}" -f $fallbackTailCoordinatorAggregateProof.ValidPairedReleaseReservedCount),
+        ("fallback_tail_coordinator_paired_release_consumed_count={0}" -f $fallbackTailCoordinatorAggregateProof.PairedReleaseConsumedCount),
+        ("fallback_tail_coordinator_valid_paired_release_consumed_count={0}" -f $fallbackTailCoordinatorAggregateProof.ValidPairedReleaseConsumedCount),
+        ("fallback_tail_coordinator_paired_release_carry_forward_count={0}" -f $fallbackTailCoordinatorAggregateProof.PairedReleaseCarryForwardCount),
+        ("fallback_tail_coordinator_valid_paired_release_carry_forward_count={0}" -f $fallbackTailCoordinatorAggregateProof.ValidPairedReleaseCarryForwardCount),
+        ("fallback_tail_coordinator_invalid_raw_count={0}" -f $fallbackTailCoordinatorAggregateProof.InvalidRawCount),
+        ("fallback_tail_coordinator_invalid_distinct_count={0}" -f $fallbackTailCoordinatorAggregateProof.InvalidDistinctCount),
+        ("fallback_tail_coordinator_invalid_recovered_count={0}" -f $fallbackTailCoordinatorAggregateProof.InvalidRecoveredCount),
+        ("fallback_tail_coordinator_invalid_unresolved_count={0}" -f $fallbackTailCoordinatorAggregateProof.InvalidUnresolvedCount),
+        ("fallback_tail_coordinator_reauthorization_staged_count={0}" -f $fallbackTailCoordinatorAggregateProof.ReauthorizationStagedCount),
+        ("fallback_tail_coordinator_reauthorization_rebound_count={0}" -f $fallbackTailCoordinatorAggregateProof.ReauthorizationReboundCount),
+        ("fallback_tail_coordinator_reauthorization_successor_issued_count={0}" -f $fallbackTailCoordinatorAggregateProof.ReauthorizationSuccessorIssuedCount),
+        ("fallback_tail_coordinator_reauthorization_invalidated_count={0}" -f $fallbackTailCoordinatorAggregateProof.ReauthorizationInvalidatedCount),
         ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_raw_count={0}" -f $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.RawCount),
         ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_distinct_count={0}" -f $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.DistinctCount),
         ("runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_recovered_count={0}" -f $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.RecoveredCount),
@@ -3255,6 +3358,26 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing_unresolved_count = $runtimeUnlockUncommittedTunaFallbackProofAuthorityProof.UnresolvedCount
         post_tuna_fallback_outbound_receive_worker_handoff_missing_count = $outboundReceiveWorkerHandoffProof.Count
         fallback_tail_yield_authority_rejected_count = $fallbackTailYieldAuthorityRejectedCount
+        fallback_tail_coordinator_aggregate_verdict = $fallbackTailCoordinatorAggregateProof.Verdict
+        fallback_tail_coordinator_yield_issued_count = $fallbackTailCoordinatorAggregateProof.YieldIssuedCount
+        fallback_tail_coordinator_local_proof_receipt_decided_count = $fallbackTailCoordinatorAggregateProof.LocalProofReceiptDecidedCount
+        fallback_tail_coordinator_peer_proof_receipt_decided_count = $fallbackTailCoordinatorAggregateProof.PeerProofReceiptDecidedCount
+        fallback_tail_coordinator_pairing_committed_count = $fallbackTailCoordinatorAggregateProof.PairingCommittedCount
+        fallback_tail_coordinator_valid_pairing_count = $fallbackTailCoordinatorAggregateProof.ValidPairingCount
+        fallback_tail_coordinator_paired_release_reserved_count = $fallbackTailCoordinatorAggregateProof.PairedReleaseReservedCount
+        fallback_tail_coordinator_valid_paired_release_reserved_count = $fallbackTailCoordinatorAggregateProof.ValidPairedReleaseReservedCount
+        fallback_tail_coordinator_paired_release_consumed_count = $fallbackTailCoordinatorAggregateProof.PairedReleaseConsumedCount
+        fallback_tail_coordinator_valid_paired_release_consumed_count = $fallbackTailCoordinatorAggregateProof.ValidPairedReleaseConsumedCount
+        fallback_tail_coordinator_paired_release_carry_forward_count = $fallbackTailCoordinatorAggregateProof.PairedReleaseCarryForwardCount
+        fallback_tail_coordinator_valid_paired_release_carry_forward_count = $fallbackTailCoordinatorAggregateProof.ValidPairedReleaseCarryForwardCount
+        fallback_tail_coordinator_invalid_raw_count = $fallbackTailCoordinatorAggregateProof.InvalidRawCount
+        fallback_tail_coordinator_invalid_distinct_count = $fallbackTailCoordinatorAggregateProof.InvalidDistinctCount
+        fallback_tail_coordinator_invalid_recovered_count = $fallbackTailCoordinatorAggregateProof.InvalidRecoveredCount
+        fallback_tail_coordinator_invalid_unresolved_count = $fallbackTailCoordinatorAggregateProof.InvalidUnresolvedCount
+        fallback_tail_coordinator_reauthorization_staged_count = $fallbackTailCoordinatorAggregateProof.ReauthorizationStagedCount
+        fallback_tail_coordinator_reauthorization_rebound_count = $fallbackTailCoordinatorAggregateProof.ReauthorizationReboundCount
+        fallback_tail_coordinator_reauthorization_successor_issued_count = $fallbackTailCoordinatorAggregateProof.ReauthorizationSuccessorIssuedCount
+        fallback_tail_coordinator_reauthorization_invalidated_count = $fallbackTailCoordinatorAggregateProof.ReauthorizationInvalidatedCount
         fallback_tail_owner_generation_mismatch_count = $fallbackTailOwnerGenerationMismatchCount
         fallback_tail_bridge_recovery_generation_pairing_verdict = $fallbackTailBridgeRecoveryPairingProof.Verdict
         fallback_tail_bridge_recovery_generation_mismatch_raw_count = $fallbackTailBridgeRecoveryPairingProof.RawCount
