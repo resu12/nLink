@@ -93,13 +93,6 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         string CoordinatorDecisionReason,
         DateTimeOffset RecordedUtc);
 
-    private readonly record struct FileTransferPostTunaFallbackRepairProofHint(
-        string SessionId,
-        string TransferId,
-        string ProofKind,
-        string Direction,
-        DateTimeOffset ObservedUtc);
-
     private sealed class RecoveryBurstLease
     {
         public string SessionId { get; init; } = string.Empty;
@@ -150,7 +143,6 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private static readonly TimeSpan ScreenShareControlBootstrapFollowerRetryDelay = TimeSpan.FromMilliseconds(140);
     private static readonly TimeSpan ScreenShareLaneRecentDropWindow = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan FileTransferFallbackUnprovenProbeDelay = TimeSpan.FromSeconds(3);
-    private static readonly TimeSpan FileTransferPostTunaFallbackRepairProofFreshness = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan FileTransferCancelEchoMinInterval = TimeSpan.FromMilliseconds(750);
     private static readonly TimeSpan FileTransferCompleteEchoMinInterval = TimeSpan.FromMilliseconds(750);
     private static readonly TimeSpan FileTransferControlReceiveStallRecoveryBroadcastCooldown = TimeSpan.FromSeconds(30);
@@ -205,8 +197,6 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly Dictionary<FileTransferRouteHintKey, FileTransferRoutePublicationAuthority> fileTransferRoutePublicationAuthorities = new();
     private readonly Dictionary<string, PostTunaFallbackHandoffEvidence> fileTransferPostTunaFallbackHandoffEvidence = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FileTransferRuntimeUnlockAuthorityRequirement> fileTransferRuntimeUnlockAuthorityRequirements = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, FileTransferPostTunaFallbackRepairProofHint> fileTransferPostTunaFallbackRepairProofHints = new(StringComparer.Ordinal);
-    private readonly HashSet<string> fileTransferPostTunaFallbackYieldRuntimeUnlockRetries = new(StringComparer.Ordinal);
     private int fileTransferRoutePublicationAuthorityForTestsGeneration;
     private readonly HashSet<string> fileTransferDataSessionRemoteOpenSuppressed = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FileTransferV6PendingHandoffIntent> pendingFileTransferV6HandoffsBySession = new(StringComparer.Ordinal);
@@ -3151,24 +3141,14 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                 MarkFileTransferTunaActivationBridgeRecoveryStarted(recoveryReason);
             }
             var sessionLivenessReceiveRecovery = IsSessionLivenessReceiveRecoveryReason(recoveryReason);
-            var protectedActivePostTunaFallbackRepair =
-                ShouldProtectPostTunaFallbackAvailabilityDuringRuntimeUnlockRecovery(
-                    sessionId,
-                    recoveryReason,
+            if (ShouldSuppressFileTransferTransportRecoveredForTunaActivationPause(
                     "receive_stall_recovery_started",
-                    out _);
-            if (!protectedActivePostTunaFallbackRepair &&
-                ShouldSuppressFileTransferTransportRecoveredForTunaActivationPause("receive_stall_recovery_started", out _))
+                    out _))
             {
                 return;
             }
 
-            if (protectedActivePostTunaFallbackRepair)
-            {
-                // Runtime-unlock offer recovery still retires/retries the Tuna offer, but it must
-                // not publish transport unavailability into an actively repairing fallback V6 route.
-            }
-            else if (sessionLivenessReceiveRecovery)
+            if (sessionLivenessReceiveRecovery)
             {
                 LocalOperationalLog.Info(
                     "NKN.Tuna",

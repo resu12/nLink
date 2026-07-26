@@ -2242,23 +2242,31 @@ public sealed partial class SessionFileTransferV4SenderTests
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
 
+        var initialDataSessionGeneration =
+            GetPrivateProperty<long>(context, "DataSessionGeneration");
         var firstSession = new RecordingDataSession($"session_{transferId}", transferId);
         ReplaceOutboundDataSession(service, context, firstSession);
-        Assert.Equal(1L, GetPrivateProperty<long>(context, "DataSessionGeneration"));
+        Assert.Equal(
+            initialDataSessionGeneration + 1,
+            GetPrivateProperty<long>(context, "DataSessionGeneration"));
 
         var install = CreateSparsePumpInstall(context, installGeneration: 1, predecessorInstallGeneration: 0);
         SetPrivateProperty(context, "PendingOutboundSparsePumpInstall", install);
         SetPrivateProperty(context, "InstalledOutboundSparsePump", install);
 
         ReplaceOutboundDataSession(service, context, firstSession);
-        Assert.Equal(1L, GetPrivateProperty<long>(context, "DataSessionGeneration"));
+        Assert.Equal(
+            initialDataSessionGeneration + 1,
+            GetPrivateProperty<long>(context, "DataSessionGeneration"));
         Assert.Same(install, GetPrivatePropertyValue(context, "PendingOutboundSparsePumpInstall"));
         Assert.Same(install, GetPrivatePropertyValue(context, "InstalledOutboundSparsePump"));
 
         var secondSession = new RecordingDataSession($"session_{transferId}", transferId);
         ReplaceOutboundDataSession(service, context, secondSession);
 
-        Assert.Equal(2L, GetPrivateProperty<long>(context, "DataSessionGeneration"));
+        Assert.Equal(
+            initialDataSessionGeneration + 2,
+            GetPrivateProperty<long>(context, "DataSessionGeneration"));
         Assert.Null(GetPrivatePropertyValue(context, "PendingOutboundSparsePumpInstall"));
         Assert.Null(GetPrivatePropertyValue(context, "InstalledOutboundSparsePump"));
     }
@@ -2284,6 +2292,11 @@ public sealed partial class SessionFileTransferV4SenderTests
         typeof(SessionFileTransferService)
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
+        using var dataSession = await senderTransport.OpenFileTransferDataSessionAsync(
+            sessionId,
+            transferId,
+            CancellationToken.None);
+        ReplaceOutboundDataSession(service, context, dataSession);
 
         var runtimeKindType = typeof(SessionFileTransferService)
             .GetNestedType("FileTransferSparseCreditRuntimeKind", BindingFlags.NonPublic)!;
@@ -2742,6 +2755,11 @@ public sealed partial class SessionFileTransferV4SenderTests
         typeof(SessionFileTransferService)
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
+        using var dataSession = await senderTransport.OpenFileTransferDataSessionAsync(
+            sessionId,
+            transferId,
+            CancellationToken.None);
+        ReplaceOutboundDataSession(service, context, dataSession);
 
         var completionReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseCompletion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -3302,15 +3320,20 @@ public sealed partial class SessionFileTransferV4SenderTests
         SetPrivateProperty(context, "Sha256Base64", Convert.ToBase64String(new byte[32]));
         SetPrivateProperty(context, "PullPostTunaRecoveryActive", false);
         SetPrivateProperty(context, "PullTransportFrontierOnlyRepairActive", false);
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        using var dataSession = await transport.OpenFileTransferDataSessionAsync(
+            sessionId,
+            transferId,
+            CancellationToken.None);
+        ReplaceOutboundDataSession(service, context, dataSession);
         var leg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
         SeedPairedFallbackTailYieldForTest(context, leg);
         SeedRuntimeUnlockAdmissionForTest(
             context,
             FileTransferDirection.Outbound,
             "unit_test_sparse_precommit_ack_race");
-        typeof(SessionFileTransferService)
-            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .SetValue(service, context);
         var logStart = GetOperationalLogLength();
         string ReadTestLog() => FilterV4SenderTransferLog(ReadOperationalLogTail(logStart), transferId);
         var supervisor = StartSparseReceiveSupervisor(service, context);

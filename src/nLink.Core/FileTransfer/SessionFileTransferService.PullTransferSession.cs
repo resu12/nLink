@@ -1953,7 +1953,7 @@ public sealed partial class SessionFileTransferService
             ControlPlanePressurePending: false,
             BridgeRecoveryPending: context.PullPostTunaRecoveryActive,
             FallbackTailRepairPending: fallbackTailRepairPending,
-            PairedFallbackYieldGranted: HasPairedFallbackTailYieldForCurrentOwner(context));
+            PairedFallbackYieldGranted: false);
     }
 
     private static RuntimeUnlockFallbackSurvivalState BuildRuntimeUnlockFallbackSurvivalStateLocked(
@@ -1979,7 +1979,7 @@ public sealed partial class SessionFileTransferService
             ControlPlanePressurePending: !string.IsNullOrWhiteSpace(context.PostTunaFallbackControlPlanePressureTuple),
             BridgeRecoveryPending: context.PullPostTunaRecoveryActive,
             FallbackTailRepairPending: fallbackTailRepairPending,
-            PairedFallbackYieldGranted: HasPairedFallbackTailYieldForCurrentOwner(context));
+            PairedFallbackYieldGranted: false);
     }
 
     private static RuntimeUnlockAdmissionDecision RequestRuntimeUnlockAdmissionLocked(
@@ -2633,14 +2633,15 @@ public sealed partial class SessionFileTransferService
         OutboundTransferContext context,
         string reason)
     {
-        if (context.LastFallbackTailYieldDecision is not { } tailYield)
+        if (GetCurrentFallbackTailYieldOperation(context)?.PairedRelease is
+            not { } pairedRelease)
         {
             return;
         }
 
         TryQueueFallbackPairedTailYieldRuntimeUnlockRetryDispatchLocked(
             context,
-            tailYield,
+            pairedRelease,
             reason);
     }
 
@@ -2648,22 +2649,17 @@ public sealed partial class SessionFileTransferService
         InboundTransferContext context,
         string reason)
     {
-        if (context.LastFallbackTailYieldDecision is not { } tailYield)
+        if (GetCurrentFallbackTailYieldOperation(context)?.PairedRelease is
+            not { } pairedRelease)
         {
             return;
         }
 
         TryQueueFallbackPairedTailYieldRuntimeUnlockRetryDispatchLocked(
             context,
-            tailYield,
+            pairedRelease,
             reason);
     }
-
-    private static bool IsFallbackTailQuiescentRuntimeUnlockResumeReason(string reason)
-        => string.Equals(
-            NormalizeReason(reason),
-            "fallback_tail_quiescent",
-            StringComparison.OrdinalIgnoreCase);
 
     private static void MarkOutboundRuntimeUnlockWaitingForFallbackSurvivalLocked(
         OutboundTransferContext context,
@@ -3953,16 +3949,31 @@ public sealed partial class SessionFileTransferService
            string.Equals(reason, "bridge_receive_stall", StringComparison.Ordinal) ||
            string.Equals(reason, "bulk_receive_stalled", StringComparison.Ordinal);
 
-    private void StartOutboundPostTunaRecoveryLocked(OutboundTransferContext context, string reason)
+    private void StartOutboundPostTunaRecoveryLocked(
+        OutboundTransferContext context,
+        string reason)
         => StartOutboundPostTunaRecoveryCoreLocked(
             context,
             reason,
-            forceNewGeneration: false);
+            forceNewGeneration: false,
+            capturedReauthorizationRequest: null);
+
+    private void StartOutboundPostTunaRecoveryWithReauthorizationLocked(
+        OutboundTransferContext context,
+        string reason,
+        FallbackTailYieldTransportEpochReauthorizationRequest capturedReauthorizationRequest)
+        => StartOutboundPostTunaRecoveryCoreLocked(
+            context,
+            reason,
+            forceNewGeneration: false,
+            capturedReauthorizationRequest);
 
     private void StartOutboundPostTunaRecoveryCoreLocked(
         OutboundTransferContext context,
         string reason,
-        bool forceNewGeneration)
+        bool forceNewGeneration,
+        FallbackTailYieldTransportEpochReauthorizationRequest?
+            capturedReauthorizationRequest = null)
     {
         if (context.ChunkCount <= 0)
         {
@@ -3970,6 +3981,7 @@ public sealed partial class SessionFileTransferService
         }
 
         if (!forceNewGeneration &&
+            capturedReauthorizationRequest is null &&
             IsPostTunaFallbackBridgeRecoveryEpochRefreshReason(reason) &&
             TrySuppressPostYieldFallbackRecoveryRestartLocked(
                 context,
@@ -3997,11 +4009,25 @@ public sealed partial class SessionFileTransferService
             context.CurrentTransferLeg is { } currentLeg &&
             IsCurrentPostTunaFallbackLeg(currentLeg) &&
             currentLeg.LiveRouteEpochId == (context.CurrentLiveRouteEpoch?.EpochId ?? 0);
+        var hasNewerAuthorizedTransportEpoch =
+            context.CurrentTransportEpochDecision is
+            {
+                Accepted: true,
+                ActionKind: TransportEpochActionKind.Adopt,
+                TargetRoute: FileTransferRoute.PostTunaFallbackV6,
+                TargetProtocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                TargetTransport: FileTransferTransportKind.RegularNkn,
+            } transportEpochDecision &&
+            context.CurrentTransferLeg is { } transportEpochLeg &&
+            transportEpochDecision.TargetTransportEpoch >
+                transportEpochLeg.TransportEpochId;
         if (!forceNewGeneration &&
             context.PullPostTunaRecoveryActive &&
             IsPostTunaFallbackBridgeRecoveryEpochRefreshReason(reason) &&
             currentFallbackLegMatchesLiveEpoch &&
-            context.CurrentTransferLeg is { State: FileTransferLegState.RecoveryActive })
+            context.CurrentTransferLeg is
+                { State: FileTransferLegState.RecoveryActive } &&
+            !hasNewerAuthorizedTransportEpoch)
         {
             return;
         }
@@ -4011,33 +4037,50 @@ public sealed partial class SessionFileTransferService
             currentFallbackLegMatchesLiveEpoch &&
             context.PullPostTunaRecoveryGeneration == generation &&
             context.PullPostTunaRecoveryFrontierChunkIndex == frontier &&
-            context.PendingFallbackTailYieldTransportEpochReauthorizationRequest is null)
+            capturedReauthorizationRequest is null &&
+            !hasNewerAuthorizedTransportEpoch)
         {
             return;
         }
 
         var transportEpoch = ResolveOutboundFallbackCurrentTransportEpochLocked(context, generation);
-        var pendingFallbackTailYieldTransportEpochReauthorizationRequest =
-            context.PendingFallbackTailYieldTransportEpochReauthorizationRequest;
         var pendingFallbackTailYieldTransportEpochReauthorization =
-            context.PendingFallbackTailYieldTransportEpochReauthorization;
+            GetPendingFallbackTailYieldTransportEpochReauthorization(context);
+        if (!forceNewGeneration &&
+            capturedReauthorizationRequest is null &&
+            pendingFallbackTailYieldTransportEpochReauthorization is
+                { } exactPendingReauthorization &&
+            exactPendingReauthorization.TargetTransportEpoch == transportEpoch &&
+            FileTransferCoordinator
+                .IsFallbackTailYieldTransportEpochReauthorizationCurrent(
+                    CreateCoordinatorStateLocked(context),
+                    exactPendingReauthorization,
+                    out _))
+        {
+            return;
+        }
+
+        FallbackTailYieldTransportEpochReauthorizationRequest?
+            checkpointBoundReauthorizationRequest = null;
         if (pendingFallbackTailYieldTransportEpochReauthorization is { } pendingReauthorization &&
-            !TryRetireExpectedOutboundFallbackCheckpointBeforeReauthorizationRestartLocked(
+            !TryCaptureExpectedOutboundFallbackCheckpointReauthorizationRestartLocked(
                 context,
                 pendingReauthorization,
                 transportEpoch,
-                reason))
+                reason,
+                out checkpointBoundReauthorizationRequest))
         {
             return;
         }
 
         var fallbackTailYieldTransportEpochReauthorizationRequest =
-            ResolveFallbackTailYieldTransportEpochReauthorizationRequestLocked(
+            capturedReauthorizationRequest ??
+            checkpointBoundReauthorizationRequest ??
+            TryCreateFallbackTailYieldTransportEpochReauthorizationRequestLocked(
                 context,
                 transportEpoch,
                 reason);
-        if ((pendingFallbackTailYieldTransportEpochReauthorization is not null ||
-             pendingFallbackTailYieldTransportEpochReauthorizationRequest is not null) &&
+        if (pendingFallbackTailYieldTransportEpochReauthorization is not null &&
             fallbackTailYieldTransportEpochReauthorizationRequest is null)
         {
             return;
@@ -4093,12 +4136,16 @@ public sealed partial class SessionFileTransferService
             $"event=filetransfer_post_tuna_recovery_started; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; recovery_generation={generation}; frontier_chunk_index={frontier}; remote_credit_until_chunk_index_exclusive={context.RemoteGrantedUntilExclusive}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}");
     }
 
-    private bool TryRetireExpectedOutboundFallbackCheckpointBeforeReauthorizationRestartLocked(
+    private static bool
+        TryCaptureExpectedOutboundFallbackCheckpointReauthorizationRestartLocked(
         OutboundTransferContext context,
         FallbackTailYieldTransportEpochReauthorization pendingReauthorization,
         long targetTransportEpoch,
-        string reason)
+        string reason,
+        out FallbackTailYieldTransportEpochReauthorizationRequest?
+            reauthorizationRequest)
     {
+        reauthorizationRequest = null;
         if (targetTransportEpoch <= pendingReauthorization.TargetTransportEpoch)
         {
             return true;
@@ -4114,42 +4161,37 @@ public sealed partial class SessionFileTransferService
         var currentCheckpointSnapshot =
             FileTransferCoordinator.NormalizeFallbackTailYieldCheckpointRequestId(
                 state.CurrentFallbackCheckpointLease);
-        if (state.PendingFallbackTailYieldTransportEpochReauthorization != pendingReauthorization ||
-            state.LastFallbackTailYieldDecision is not null ||
-            context.FallbackTailYieldTransportEpochReauthorizationDataSessionGeneration !=
-            context.DataSessionGeneration ||
-            !string.Equals(
-                pendingReauthorization.TargetCheckpointRequestIdSnapshot,
-                "(none)",
-                StringComparison.Ordinal) ||
+        if (state.PersistentState.FallbackTailYield.PendingReauthorization !=
+                pendingReauthorization ||
+            state.PersistentState.FallbackTailYield.CurrentOperation is not
+                null ||
             !string.Equals(
                 currentCheckpointSnapshot,
                 leg.CheckpointRequestId,
                 StringComparison.Ordinal) ||
+            !string.Equals(
+                pendingReauthorization.TargetCheckpointRequestIdSnapshot,
+                currentCheckpointSnapshot,
+                StringComparison.Ordinal) ||
+            pendingReauthorization.TargetCheckpointGeneration !=
+                leg.CheckpointGeneration ||
+            pendingReauthorization.TargetCheckpointLease !=
+                state.CurrentFallbackCheckpointLease ||
             !FileTransferCoordinator.IsFallbackTailYieldTransportEpochReauthorizationTargetScopeCurrent(
                 state,
-                pendingReauthorization with
-                {
-                    TargetCheckpointRequestIdSnapshot = currentCheckpointSnapshot,
-                },
+                pendingReauthorization,
+                allowTransportEpochDecisionReplacement: true,
                 out _))
         {
             return false;
         }
 
-        if (!RetireOutboundFallbackCheckpointExchangeLocked(
+        reauthorizationRequest =
+            TryCreateFallbackTailYieldTransportEpochReauthorizationRequestLocked(
                 context,
-                leg.CheckpointRequestId,
-                reason))
-        {
-            return false;
-        }
-
-        return context.PendingFallbackTailYieldTransportEpochReauthorization == pendingReauthorization &&
-               FileTransferCoordinator.IsFallbackTailYieldTransportEpochReauthorizationCurrent(
-                   CreateCoordinatorStateLocked(context),
-                   pendingReauthorization,
-                   out _);
+                targetTransportEpoch,
+                reason);
+        return reauthorizationRequest is not null;
     }
 
     private void StartOutboundPostTunaRecoveryWithSafetyReplayLocked(OutboundTransferContext context, string reason)
@@ -4158,7 +4200,7 @@ public sealed partial class SessionFileTransferService
         StartOutboundPostTunaRecoveryLocked(context, reason);
         if (ReferenceEquals(previousLeg, context.CurrentTransferLeg) &&
             (IsPostYieldFallbackTailOwnerRetiredAndYieldedLocked(context, context.CurrentTransferLeg) ||
-             HasPairedFallbackTailYieldForCurrentOwner(context)))
+             HasCoordinatorPairedFallbackTailRelease(context)))
         {
             return;
         }
@@ -4254,14 +4296,36 @@ public sealed partial class SessionFileTransferService
         }
     }
 
-    private void StartInboundPostTunaRecoveryLocked(InboundTransferContext context, string reason)
+    private void StartInboundPostTunaRecoveryLocked(
+        InboundTransferContext context,
+        string reason)
+        => StartInboundPostTunaRecoveryCoreLocked(
+            context,
+            reason,
+            capturedReauthorizationRequest: null);
+
+    private void StartInboundPostTunaRecoveryWithReauthorizationLocked(
+        InboundTransferContext context,
+        string reason,
+        FallbackTailYieldTransportEpochReauthorizationRequest capturedReauthorizationRequest)
+        => StartInboundPostTunaRecoveryCoreLocked(
+            context,
+            reason,
+            capturedReauthorizationRequest);
+
+    private void StartInboundPostTunaRecoveryCoreLocked(
+        InboundTransferContext context,
+        string reason,
+        FallbackTailYieldTransportEpochReauthorizationRequest?
+            capturedReauthorizationRequest)
     {
         if (context.ChunkCount <= 0)
         {
             return;
         }
 
-        if (IsPostTunaFallbackBridgeRecoveryEpochRefreshReason(reason) &&
+        if (capturedReauthorizationRequest is null &&
+            IsPostTunaFallbackBridgeRecoveryEpochRefreshReason(reason) &&
             TrySuppressPostYieldFallbackRecoveryRestartLocked(
                 context,
                 "post_tuna_fallback_recovery_restart",
@@ -4276,11 +4340,40 @@ public sealed partial class SessionFileTransferService
             context.CurrentTransferLeg is { } currentLeg &&
             IsCurrentPostTunaFallbackLeg(currentLeg) &&
             currentLeg.LiveRouteEpochId == (context.CurrentLiveRouteEpoch?.EpochId ?? 0);
+        var hasNewerAuthorizedTransportEpoch =
+            context.CurrentTransportEpochDecision is
+            {
+                Accepted: true,
+                ActionKind: TransportEpochActionKind.Adopt,
+                TargetRoute: FileTransferRoute.PostTunaFallbackV6,
+                TargetProtocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                TargetTransport: FileTransferTransportKind.RegularNkn,
+            } transportEpochDecision &&
+            context.CurrentTransferLeg is { } transportEpochLeg &&
+            transportEpochDecision.TargetTransportEpoch >
+                transportEpochLeg.TransportEpochId;
         if (context.PullPostTunaRecoveryActive &&
             currentFallbackLegMatchesLiveEpoch &&
             context.PullPostTunaRecoveryGeneration == generation &&
             context.PullPostTunaRecoveryFrontierChunkIndex == frontier &&
-            context.PendingFallbackTailYieldTransportEpochReauthorizationRequest is null)
+            capturedReauthorizationRequest is null &&
+            !hasNewerAuthorizedTransportEpoch)
+        {
+            return;
+        }
+
+        var transportEpoch = context.V6TransportEpoch?.EpochId ?? generation;
+        var pendingFallbackTailYieldTransportEpochReauthorization =
+            GetPendingFallbackTailYieldTransportEpochReauthorization(context);
+        if (capturedReauthorizationRequest is null &&
+            pendingFallbackTailYieldTransportEpochReauthorization is
+                { } exactPendingReauthorization &&
+            exactPendingReauthorization.TargetTransportEpoch == transportEpoch &&
+            FileTransferCoordinator
+                .IsFallbackTailYieldTransportEpochReauthorizationCurrent(
+                    CreateCoordinatorStateLocked(context),
+                    exactPendingReauthorization,
+                    out _))
         {
             return;
         }
@@ -4349,18 +4442,13 @@ public sealed partial class SessionFileTransferService
                 reason);
         }
 
-        var transportEpoch = context.V6TransportEpoch?.EpochId ?? generation;
-        var pendingFallbackTailYieldTransportEpochReauthorizationRequest =
-            context.PendingFallbackTailYieldTransportEpochReauthorizationRequest;
-        var pendingFallbackTailYieldTransportEpochReauthorization =
-            context.PendingFallbackTailYieldTransportEpochReauthorization;
         var fallbackTailYieldTransportEpochReauthorizationRequest =
-            ResolveFallbackTailYieldTransportEpochReauthorizationRequestLocked(
+            capturedReauthorizationRequest ??
+            TryCreateFallbackTailYieldTransportEpochReauthorizationRequestLocked(
                 context,
                 transportEpoch,
                 reason);
-        if ((pendingFallbackTailYieldTransportEpochReauthorization is not null ||
-             pendingFallbackTailYieldTransportEpochReauthorizationRequest is not null) &&
+        if (pendingFallbackTailYieldTransportEpochReauthorization is not null &&
             fallbackTailYieldTransportEpochReauthorizationRequest is null)
         {
             return;

@@ -407,7 +407,6 @@ public sealed partial class NknSignalingTransport
 
         if (postSendAuthorityCurrent)
         {
-            RecordPostTunaFallbackControlPlaneProofHint(request, result);
         }
 
         var deliveryFrameCorrelation = FormatControlPlaneFrameCorrelationSuffix(frame);
@@ -494,7 +493,6 @@ public sealed partial class NknSignalingTransport
             {
                 fileTransferDataSessions.Remove(normalizedTransferId);
                 RemoveFileTransferRouteHintsForTransferUnsafe(normalizedTransferId, normalizedSessionId);
-                fileTransferPostTunaFallbackRepairProofHints.Remove(normalizedTransferId);
                 fileTransferPostTunaFallbackHandoffEvidence.Remove(normalizedTransferId);
                 LocalOperationalLog.Warn(
                     "SessionSecurity",
@@ -1623,7 +1621,6 @@ public sealed partial class NknSignalingTransport
             {
                 fileTransferDataSessions.Remove(staleTransferId);
                 RemoveFileTransferRouteHintsForTransferUnsafe(staleTransferId);
-                fileTransferPostTunaFallbackRepairProofHints.Remove(staleTransferId);
                 fileTransferPostTunaFallbackHandoffEvidence.Remove(staleTransferId);
             }
 
@@ -2667,22 +2664,6 @@ public sealed partial class NknSignalingTransport
             if (route == FileTransferRoute.PostTunaFallbackV6)
             {
                 realClient.MarkActiveFileTransferPostTunaFallbackRuntime(normalizedTransferId, normalizedSource);
-                if (normalizedProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
-                    notification.FallbackLegGeneration is > 0 and <= int.MaxValue &&
-                    notification.FallbackTransportEpoch > 0)
-                {
-                    realClient.MarkActiveFileTransferPostTunaFallbackLegAuthority(
-                        normalizedTransferId,
-                        normalizedSessionId,
-                        (int)notification.FallbackLegGeneration,
-                        selection.TelemetryToken,
-                        normalizedProtocolVersion,
-                        authority.LiveRouteEpoch,
-                        notification.FallbackTransportEpoch,
-                        notification.FallbackBridgeRecoveryGeneration,
-                        sanitizedCheckpointRequestId,
-                        normalizedSource);
-                }
             }
             else
             {
@@ -2694,16 +2675,6 @@ public sealed partial class NknSignalingTransport
             normalizedProtocolVersion == FileTransferProtocol.ProtocolVersionV6)
         {
             NotifyTransportAccelerationStateChanged("post_tuna_fallback_route_active");
-        }
-
-        if (route != FileTransferRoute.PostTunaFallbackV6 ||
-            normalizedProtocolVersion != FileTransferProtocol.ProtocolVersionV6)
-        {
-            lock (gate)
-            {
-                fileTransferPostTunaFallbackYieldRuntimeUnlockRetries.RemoveWhere(
-                    key => key.StartsWith(normalizedTransferId + "|", StringComparison.Ordinal));
-            }
         }
 
     }
@@ -7577,7 +7548,6 @@ public sealed partial class NknSignalingTransport
             {
                 fileTransferDataSessions.Remove(session.TransferId);
                 RemoveFileTransferRouteHintsForTransferUnsafe(session.TransferId, session.SessionId);
-                fileTransferPostTunaFallbackRepairProofHints.Remove(session.TransferId);
                 fileTransferPostTunaFallbackHandoffEvidence.Remove(session.TransferId);
                 removed = true;
                 LocalOperationalLog.Info(

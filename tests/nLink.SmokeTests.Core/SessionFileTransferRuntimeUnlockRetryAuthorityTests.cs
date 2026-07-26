@@ -753,16 +753,24 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
 
         var leg = GetRequiredProperty<FileTransferLeg>(fixture.Context, "CurrentTransferLeg");
         var priorTransportEpoch = leg.TransportEpochId;
-        leg.TransportEpochId++;
         SeedPairedFallbackTailYield(fixture.Context, tailYield);
+        leg.TransportEpochId++;
+        CarryForwardPairedFallbackTailYield(
+            fixture.Context,
+            leg.TransportEpochId);
 
-        fixture.Bridge.RaiseAuthorityRequest(request);
+        var reboundRequest = Assert.IsType<
+            RuntimeUnlockRetryDispatchAuthorityRequest>(
+            GetCoordinatorPersistentState(fixture.Context)
+                .FallbackTailYield
+                .PendingRetryRecheckRequest);
+        fixture.Bridge.RaiseAuthorityRequest(reboundRequest);
 
         var granted = fixture.Bridge.DequeueAuthorityDecision();
         Assert.True(
             granted.Granted,
             $"status={granted.Status} reason={granted.Reason}");
-        Assert.Equal(request, granted.Request);
+        Assert.Equal(reboundRequest, granted.Request);
         Assert.Equal(priorTransportEpoch + 1, granted.Contract!.Authority.TransportEpoch);
         Assert.Equal(tailYield.AuthorityId, granted.Contract.Authority.ReleaseAuthorityId);
         Assert.Equal(tailYield.YieldGeneration, granted.Contract.Authority.ReleaseGeneration);
@@ -1155,23 +1163,85 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         object context,
         FallbackTailYieldDecision tailYield)
     {
-        SetProperty(context, "PairedFallbackTailYieldGranted", true);
-        SetProperty(context, "LocalFallbackTailYieldGranted", true);
-        SetProperty(context, "PeerFallbackTailYieldGranted", true);
-        SetProperty(context, "LocalFallbackTailYieldAuthorityId", tailYield.AuthorityId.ToString());
-        SetProperty(
-            context,
-            "PeerFallbackTailYieldAuthorityId",
+        var state = CreateCoordinatorState(context);
+        var operation = Assert.IsType<FileTransferFallbackTailYieldOperation>(
+            state.PersistentState.FallbackTailYield.CurrentOperation);
+        Assert.Equal(tailYield, operation.Decision);
+        var localReceipt =
+            FileTransferCoordinator.CreateFallbackTailLocalProofReceipt(
+                state,
+                tailYield,
+                "retry-fallback-tail-local-proof",
+                "retry-fallback-tail-local-frame",
+                10_000);
+        var localApplied =
+            FileTransferCoordinator.ApplyFallbackTailLocalProofReceipt(
+                state,
+                localReceipt);
+        Assert.True(localApplied.Accepted, localApplied.Reason);
+
+        var scope = operation.Scope;
+        var peerAuthority = new FileTransferAuthorityId(
             "fta2-fallback_tail_yield-0123456789abcdef01234567");
-        SetProperty(context, "PeerFallbackTailYieldGeneration", 1L);
-        SetProperty(context, "LocalFallbackTailYieldOwnerKey", tailYield.OwnerKey);
-        SetProperty(context, "PeerFallbackTailYieldOwnerKey", tailYield.OwnerKey);
-        SetProperty(context, "LocalFallbackTailYieldPairKey", tailYield.PairKey);
-        SetProperty(context, "PeerFallbackTailYieldPairKey", tailYield.PairKey);
-        SetProperty(
+        var peerOwnerKey =
+            FileTransferCoordinator.BuildFallbackTailYieldOwnerKey(
+                scope.SessionId,
+                scope.TransferId,
+                scope.RouteToken,
+                scope.ProtocolVersion,
+                scope.LiveRouteEpoch,
+                scope.LegGeneration,
+                scope.BridgeRecoveryGeneration,
+                scope.TransportEpoch,
+                scope.CheckpointRequestIdSnapshot);
+        var peerProof = new FileTransferFallbackTailPeerProof(
+            scope.SessionId,
+            scope.TransferId,
+            FileTransferDirection.Inbound,
+            peerAuthority,
+            PredecessorAuthorityId: null,
+            YieldGeneration: 1,
+            peerOwnerKey,
+            scope.PairKey,
+            scope.LiveRouteEpoch,
+            scope.LegGeneration,
+            scope.BridgeRecoveryGeneration,
+            scope.TransportEpoch,
+            scope.CheckpointRequestIdSnapshot,
+            CommittedChunkIndex: 0,
+            HighestObservedChunkIndex: 0,
+            "retry-fallback-tail-peer-frame");
+        var peerReceipt =
+            FileTransferCoordinator.CreateFallbackTailPeerProofReceipt(
+                localApplied.State,
+                peerProof,
+                "retry-fallback-tail-peer-proof",
+                10_001);
+        var paired =
+            FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(
+                localApplied.State,
+                peerReceipt);
+        Assert.True(paired.Accepted, paired.Reason);
+        Assert.NotNull(paired.PairedRelease);
+        SetCoordinatorPersistentState(
             context,
-            "RuntimeUnlockFallbackSurvivalState",
-            tailYield.FallbackSurvivalState with { PairedFallbackYieldGranted = true });
+            paired.State.PersistentState);
+    }
+
+    private static void CarryForwardPairedFallbackTailYield(
+        object context,
+        long targetTransportEpoch)
+    {
+        var carried =
+            FileTransferCoordinator
+                .CarryForwardFallbackTailPairedReleaseToTransportEpoch(
+                    CreateCoordinatorState(context),
+                    targetTransportEpoch,
+                    "retry-fallback-tail-transport-epoch");
+        Assert.True(carried.Accepted, carried.Reason);
+        SetCoordinatorPersistentState(
+            context,
+            carried.State.PersistentState);
     }
 
     private static FileTransferCoordinatorState CreateCoordinatorState(object context)

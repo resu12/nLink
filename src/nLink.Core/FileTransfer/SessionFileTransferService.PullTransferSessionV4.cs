@@ -13101,7 +13101,18 @@ public sealed partial class SessionFileTransferService
             }
             else
             {
-                var suppressLegacyHandoff = postYieldFallbackTailOwnerRetired ||
+                var coordinatorFallbackTailYieldCurrent =
+                    context.CurrentTransferLeg is { } fallbackLeg &&
+                    GetCurrentFallbackTailYieldOperation(context) is
+                    { Decision: var fallbackTailYieldDecision } &&
+                    TryValidateOutboundFallbackTailYieldDecisionLocked(
+                        context,
+                        fallbackLeg,
+                        fallbackTailYieldDecision,
+                        out _);
+                var suppressLegacyHandoff =
+                    postYieldFallbackTailOwnerRetired ||
+                    coordinatorFallbackTailYieldCurrent ||
                     ShouldSuppressLegacyV6HandoffForDedicatedV6EpochLocked(
                         context,
                         repairRequest.TransportEpoch);

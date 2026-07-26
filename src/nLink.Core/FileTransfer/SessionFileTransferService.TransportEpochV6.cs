@@ -530,7 +530,15 @@ public sealed partial class SessionFileTransferService
 
         if (transport is not IRuntimeUnlockRouteCommitProofProvider proofProvider)
         {
-            if (dataSession is not null && IsFallbackTailQuiescentRuntimeUnlockResumeReason(reason))
+            if (dataSession is not null &&
+                HasEffectiveFallbackTailPairedReleaseForRuntimeUnlockPreCommit(
+                    direction,
+                    sessionId,
+                    transferId,
+                    dataSession,
+                    acceptedDataSessionGeneration,
+                    runtimeOwner,
+                    admissionToken))
             {
                 LogRuntimeUnlockPreCommitProbeWaitingForTransportProof(
                     direction,
@@ -584,7 +592,15 @@ public sealed partial class SessionFileTransferService
         }
         else if (!proofProvider.TryGetRuntimeUnlockRouteCommitProof(sessionId, transferId, out snapshot))
         {
-            if (dataSession is not null && IsFallbackTailQuiescentRuntimeUnlockResumeReason(reason))
+            if (dataSession is not null &&
+                HasEffectiveFallbackTailPairedReleaseForRuntimeUnlockPreCommit(
+                    direction,
+                    sessionId,
+                    transferId,
+                    dataSession,
+                    acceptedDataSessionGeneration,
+                    runtimeOwner,
+                    admissionToken))
             {
                 LogRuntimeUnlockPreCommitProbeWaitingForTransportProof(
                     direction,
@@ -685,7 +701,14 @@ public sealed partial class SessionFileTransferService
                 transferId,
                 sessionId,
                 "snapshot_not_usable");
-            if (IsFallbackTailQuiescentRuntimeUnlockResumeReason(reason))
+            if (HasEffectiveFallbackTailPairedReleaseForRuntimeUnlockPreCommit(
+                    direction,
+                    sessionId,
+                    transferId,
+                    dataSession,
+                    acceptedDataSessionGeneration,
+                    runtimeOwner,
+                    admissionToken))
             {
                 LogRuntimeUnlockPreCommitProbePendingRejected(
                     direction,
@@ -937,6 +960,72 @@ public sealed partial class SessionFileTransferService
                 sessionId,
                 transferId,
                 ex.GetType().Name);
+        }
+    }
+
+    private bool
+        HasEffectiveFallbackTailPairedReleaseForRuntimeUnlockPreCommit(
+            FileTransferDirection direction,
+            string sessionId,
+            string transferId,
+            IFileTransferDataSession dataSession,
+            long dataSessionGeneration,
+            RuntimeOwnerToken runtimeOwner,
+            RuntimeUnlockAdmissionToken admissionToken)
+    {
+        lock (gate)
+        {
+            if (direction == FileTransferDirection.Outbound &&
+                outboundTransfer is { IsTerminal: false } outbound &&
+                string.Equals(
+                    outbound.SessionId,
+                    sessionId,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    outbound.TransferId,
+                    transferId,
+                    StringComparison.Ordinal) &&
+                ReferenceEquals(outbound.DataSession, dataSession) &&
+                outbound.DataSessionGeneration == dataSessionGeneration &&
+                outbound.CurrentRuntimeOwner == runtimeOwner)
+            {
+                var state = CreateCoordinatorStateLocked(outbound);
+                return FileTransferCoordinator
+                           .IsRuntimeUnlockAdmissionTokenCurrent(
+                               state,
+                               admissionToken,
+                               out _) &&
+                       FileTransferCoordinator
+                           .HasEffectiveFallbackTailPairedReleaseForRouteTransition(
+                               state);
+            }
+
+            if (direction == FileTransferDirection.Inbound &&
+                inboundTransfer is { IsTerminal: false } inbound &&
+                string.Equals(
+                    inbound.SessionId,
+                    sessionId,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    inbound.TransferId,
+                    transferId,
+                    StringComparison.Ordinal) &&
+                ReferenceEquals(inbound.DataSession, dataSession) &&
+                inbound.DataSessionGeneration == dataSessionGeneration &&
+                inbound.CurrentRuntimeOwner == runtimeOwner)
+            {
+                var state = CreateCoordinatorStateLocked(inbound);
+                return FileTransferCoordinator
+                           .IsRuntimeUnlockAdmissionTokenCurrent(
+                               state,
+                               admissionToken,
+                               out _) &&
+                       FileTransferCoordinator
+                           .HasEffectiveFallbackTailPairedReleaseForRouteTransition(
+                               state);
+            }
+
+            return false;
         }
     }
 
@@ -4197,7 +4286,11 @@ public sealed partial class SessionFileTransferService
 
             epoch = context.V6TransportEpoch;
             dataSession = context.DataSession;
-            if (!TryAuthorizeTransportEpochActionLocked(
+            if (TryCreateFallbackTailYieldTransportEpochReauthorizationRequestLocked(
+                    context,
+                    epoch.EpochId,
+                    "v6_transport_epoch_probe") is null &&
+                !TryAuthorizeTransportEpochActionLocked(
                     context,
                     FileTransferCoordinatorActionKind.TransportEpochAdoption,
                     TransportEpochActionKind.Adopt,
@@ -4228,7 +4321,11 @@ public sealed partial class SessionFileTransferService
                 IsV6TransportEpochUnresolved(epoch) &&
                 epoch.State == V6TransportEpochState.TargetProofPending)
             {
-                if (!TryAuthorizeTransportEpochActionLocked(
+                if (TryCreateFallbackTailYieldTransportEpochReauthorizationRequestLocked(
+                        context,
+                        epoch.EpochId,
+                        "v6_transport_epoch_probe") is null &&
+                    !TryAuthorizeTransportEpochActionLocked(
                         context,
                         FileTransferCoordinatorActionKind.TransportEpochAdoption,
                         TransportEpochActionKind.Adopt,
@@ -4278,7 +4375,11 @@ public sealed partial class SessionFileTransferService
 
             epoch = context.V6TransportEpoch;
             dataSession = context.DataSession;
-            if (!TryAuthorizeTransportEpochActionLocked(
+            if (TryCreateFallbackTailYieldTransportEpochReauthorizationRequestLocked(
+                    context,
+                    epoch.EpochId,
+                    "v6_transport_epoch_probe") is null &&
+                !TryAuthorizeTransportEpochActionLocked(
                     context,
                     FileTransferCoordinatorActionKind.TransportEpochAdoption,
                     TransportEpochActionKind.Adopt,
@@ -4309,7 +4410,11 @@ public sealed partial class SessionFileTransferService
                 IsV6TransportEpochUnresolved(epoch) &&
                 epoch.State == V6TransportEpochState.TargetProofPending)
             {
-                if (!TryAuthorizeTransportEpochActionLocked(
+                if (TryCreateFallbackTailYieldTransportEpochReauthorizationRequestLocked(
+                        context,
+                        epoch.EpochId,
+                        "v6_transport_epoch_probe") is null &&
+                    !TryAuthorizeTransportEpochActionLocked(
                         context,
                         FileTransferCoordinatorActionKind.TransportEpochAdoption,
                         TransportEpochActionKind.Adopt,
@@ -4703,6 +4808,7 @@ public sealed partial class SessionFileTransferService
         var kind = ParseFileTransferTransportHandoffKind(message.HandoffKind);
         var reason = NormalizeReason(message.Reason) ?? "peer_transport_epoch";
         var normalizedTarget = NormalizeV6TargetTransport(kind, target);
+        TransportEpochDecision? transportEpochDecision;
         if (context.V6TransportEpoch is { } current &&
             IsV6TransportEpochUnresolved(current))
         {
@@ -4730,7 +4836,8 @@ public sealed partial class SessionFileTransferService
                     context.RouteSelection.Route,
                     context.NegotiatedDataProtocolVersion,
                     normalizedTarget,
-                    out _))
+                    out transportEpochDecision,
+                    targetTransportEpochId: message.TransportEpoch))
             {
                 return;
             }
@@ -4750,7 +4857,13 @@ public sealed partial class SessionFileTransferService
                 context.RouteSelection.Route,
                 context.NegotiatedDataProtocolVersion,
                 normalizedTarget,
-                out _))
+                out transportEpochDecision,
+                targetTransportEpochId: message.TransportEpoch))
+        {
+            return;
+        }
+
+        if (transportEpochDecision is null)
         {
             return;
         }
@@ -4794,11 +4907,16 @@ public sealed partial class SessionFileTransferService
             context,
             epoch.EpochId,
             "peer_transport_epoch_adopted");
-        AdoptOutboundFallbackLegTransportEpochLocked(context, epoch.EpochId, reason);
+        var reauthorizationRequest =
+            AdoptOutboundFallbackLegTransportEpochLocked(
+                context,
+                epoch.EpochId,
+                reason);
         if (TryStartOutboundFallbackTailTransportEpochReauthorizationRestartLocked(
                 context,
                 epoch.EpochId,
-                "peer_transport_epoch_adopted"))
+                "peer_transport_epoch_adopted",
+                reauthorizationRequest))
         {
             ResolveOutboundFallbackTailSurvivalLocked(context, "transport_epoch_adopted");
         }
@@ -4824,6 +4942,7 @@ public sealed partial class SessionFileTransferService
         var adoptionTargetProtocol = adoptionTargetRoute == FileTransferRoute.PostTunaFallbackV6
             ? FileTransferProtocol.ProtocolVersionV6
             : context.NegotiatedDataProtocolVersion;
+        TransportEpochDecision? transportEpochDecision;
         if (context.V6TransportEpoch is { } current &&
             IsV6TransportEpochUnresolved(current))
         {
@@ -4848,9 +4967,36 @@ public sealed partial class SessionFileTransferService
                         adoptionTargetRoute,
                         adoptionTargetProtocol,
                         normalizedTarget,
-                        out _))
+                        out transportEpochDecision,
+                        targetTransportEpochId: message.TransportEpoch))
                 {
                     return;
+                }
+
+                if (GetPendingFallbackTailYieldTransportEpochReauthorization(
+                        context) is { } pendingReauthorization)
+                {
+                    var rebindDecision =
+                        FileTransferCoordinator
+                            .RebindFallbackTailYieldTransportEpochReauthorization(
+                                CreateCoordinatorStateLocked(context),
+                                pendingReauthorization,
+                                message.TransportEpoch,
+                                reason);
+                    if (string.IsNullOrWhiteSpace(
+                            rebindDecision.MutationRejectedReason))
+                    {
+                        ApplyCoordinatorDecisionToContextLocked(
+                            context,
+                            rebindDecision);
+                    }
+                    else
+                    {
+                        InvalidateFallbackTailYieldTransportEpochReauthorizationLocked(
+                            context,
+                            rebindDecision.MutationRejectedReason);
+                        return;
+                    }
                 }
 
                 context.V6ReceiverTransportEpoch = current.EpochId;
@@ -4870,7 +5016,8 @@ public sealed partial class SessionFileTransferService
                     adoptionTargetRoute,
                     adoptionTargetProtocol,
                     normalizedTarget,
-                    out _))
+                    out transportEpochDecision,
+                    targetTransportEpochId: message.TransportEpoch))
             {
                 return;
             }
@@ -4890,7 +5037,13 @@ public sealed partial class SessionFileTransferService
                 adoptionTargetRoute,
                 adoptionTargetProtocol,
                 normalizedTarget,
-                out _))
+                out transportEpochDecision,
+                targetTransportEpochId: message.TransportEpoch))
+        {
+            return;
+        }
+
+        if (transportEpochDecision is null)
         {
             return;
         }
@@ -4927,11 +5080,16 @@ public sealed partial class SessionFileTransferService
         context.V6ReceiverTransportEpoch = epoch.EpochId;
         context.V6LastReceiverStateSentUtc = null;
         context.V6LastFrontierRequestSentUtc = null;
-        AdoptInboundFallbackLegTransportEpochLocked(context, epoch.EpochId, reason);
+        var reauthorizationRequest =
+            AdoptInboundFallbackLegTransportEpochLocked(
+                context,
+                epoch.EpochId,
+                reason);
         if (TryStartInboundFallbackTailTransportEpochReauthorizationRestartLocked(
                 context,
                 epoch.EpochId,
-                "peer_transport_epoch_adopted"))
+                "peer_transport_epoch_adopted",
+                reauthorizationRequest))
         {
             ResolveInboundFallbackTailSurvivalLocked(context, "transport_epoch_adopted");
         }
@@ -5701,12 +5859,19 @@ public sealed partial class SessionFileTransferService
                 fallbackFrontierContractHandoff) &&
             !fallbackFrontierContractHandoff.Lifecycle.IsSettled;
         var fallbackTailYieldReauthorizationExpected =
-            context.PendingFallbackTailYieldTransportEpochReauthorizationRequest is not null ||
-            context.RequiredFallbackTailYieldTransportEpochReauthorization is
+            GetPendingFallbackTailYieldTransportEpochReauthorization(context) is
             {
                 TargetTransportEpoch: var requiredTransportEpoch,
             } &&
-            requiredTransportEpoch == epoch!.EpochId;
+            requiredTransportEpoch == epoch!.EpochId ||
+            TryCreateFallbackTailYieldTransportEpochReauthorizationRequestLocked(
+                context,
+                epoch!.EpochId,
+                reason) is
+            {
+                TargetTransportEpoch: var unstagedRequiredTransportEpoch,
+            } &&
+            unstagedRequiredTransportEpoch == epoch.EpochId;
         var fallbackTailYieldReauthorizationRequired =
             IsFallbackTailYieldTransportEpochReauthorizationRequiredLocked(
                 context,
@@ -5714,7 +5879,8 @@ public sealed partial class SessionFileTransferService
         if (fallbackTailYieldReauthorizationExpected)
         {
             if (!fallbackTailYieldReauthorizationRequired ||
-                context.PendingFallbackTailYieldTransportEpochReauthorization is null ||
+                GetPendingFallbackTailYieldTransportEpochReauthorization(
+                    context) is null ||
                 !TryMarkOutboundFallbackTailLocalYieldFromCurrentLegLocked(
                     context,
                     "transport_epoch_reauthorization",
@@ -5846,12 +6012,19 @@ public sealed partial class SessionFileTransferService
         }
 
         var fallbackTailYieldReauthorizationExpected =
-            context.PendingFallbackTailYieldTransportEpochReauthorizationRequest is not null ||
-            context.RequiredFallbackTailYieldTransportEpochReauthorization is
+            GetPendingFallbackTailYieldTransportEpochReauthorization(context) is
             {
                 TargetTransportEpoch: var requiredTransportEpoch,
             } &&
-            requiredTransportEpoch == epoch!.EpochId;
+            requiredTransportEpoch == epoch!.EpochId ||
+            TryCreateFallbackTailYieldTransportEpochReauthorizationRequestLocked(
+                context,
+                epoch!.EpochId,
+                reason) is
+            {
+                TargetTransportEpoch: var unstagedRequiredTransportEpoch,
+            } &&
+            unstagedRequiredTransportEpoch == epoch.EpochId;
         var fallbackTailYieldReauthorizationRequired =
             IsFallbackTailYieldTransportEpochReauthorizationRequiredLocked(
                 context,
@@ -5859,7 +6032,8 @@ public sealed partial class SessionFileTransferService
         if (fallbackTailYieldReauthorizationExpected)
         {
             if (!fallbackTailYieldReauthorizationRequired ||
-                context.PendingFallbackTailYieldTransportEpochReauthorization is null ||
+                GetPendingFallbackTailYieldTransportEpochReauthorization(
+                    context) is null ||
                 !TryMarkInboundFallbackTailLocalYieldFromCurrentLegLocked(
                     context,
                     "transport_epoch_reauthorization",
