@@ -723,7 +723,9 @@ internal static class RuntimeUnlockTransaction
         var survivalState = coordinatorState.RuntimeUnlockFallbackSurvivalState;
         if (coordinatorState.RouteRuntime.UsesPostTunaFallbackV6Runtime &&
             !survivalState.FallbackTerminalized &&
-            !survivalState.PairedFallbackYieldGranted)
+            !FileTransferCoordinator
+                .HasEffectiveFallbackTailPairedReleaseForRouteTransition(
+                    coordinatorState))
         {
             rejectionReason = "paired_fallback_tail_yield_missing";
             return false;
