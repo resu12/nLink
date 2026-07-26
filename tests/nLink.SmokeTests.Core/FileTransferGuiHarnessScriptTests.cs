@@ -1599,6 +1599,68 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task RepairSettlementRequiresExactCleanup_ForCurrentPressureOutcomes()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = Regex.Replace(guiText, @"(?m)^ {4}", string.Empty);
+        var fieldValueBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Test-TunaGuiLogLineHasEvent");
+        var hasEventBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineHasEvent",
+            "Test-TunaGuiLogLineFieldMatch");
+        var fieldMatchBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineFieldMatch",
+            "Test-TunaGuiRuntimeUnlockFileTransferOwnerRejectionUnresolved");
+        var settlementClosedBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiRegularV4FrontierRepairSettlementClosed",
+            "Test-TunaGuiRegularV4PredecessorSettlementClosedSuccessor");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
+            function Test-TunaGuiLogLineHasEvent { {{hasEventBody}} }
+            function Test-TunaGuiLogLineFieldMatch { {{fieldMatchBody}} }
+            function Test-TunaGuiRegularV4FrontierRepairSettlementClosed { {{settlementClosedBody}} }
+
+            $scope = 'session_id=session-a; transfer_id=transfer-a; direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn'
+            $authority = 'fta2-repair_replay-current'
+            $repairKey = '42:12:42:12'
+            foreach ($outcome in @('ProgressObserved', 'MissingDispatch', 'SettledStalled')) {
+                $lines = @(
+                    "event=filetransfer_regular_v4_frontier_repair_pressure_binding_committed; authority_id=$authority; predecessor_authority_id=(none); $scope; repair_request_key=$repairKey; install_generation=7; binding_state=Installed",
+                    "event=filetransfer_regular_v4_frontier_repair_settlement_accepted; authority_id=$authority; successor_authority_id=(none); successor_install_generation=7; outcome=$outcome; repair_request_key=$repairKey; $scope",
+                    "event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided; session_id=session-a; transfer_id=transfer-a; direction=inbound; authority_id=[redacted]; successor_authority_id=(none); current_authority_id=[redacted]; retained_predecessor_authority_id=(none); install_generation=7; settlement_outcome=$outcome; apply_status=Applied; current_authority_cleared=1; retained_predecessor_cleared=0",
+                    "event=filetransfer_regular_v4_frontier_repair_pressure_binding_retired; authority_id=$authority; predecessor_authority_id=(none); $scope; repair_request_key=$repairKey; install_generation=7; binding_state=Installed; install_boundary=settlement",
+                    "event=filetransfer_regular_v4_frontier_repair_contract_settled; authority_id=$authority; successor_authority_id=(none); repair_request_key=$repairKey; settlement_outcome=$outcome"
+                )
+                if (-not (Test-TunaGuiRegularV4FrontierRepairSettlementClosed -Lines $lines)) {
+                    throw "exact current-binding cleanup was not accepted for $outcome"
+                }
+
+                $ambiguous = @($lines[0], $lines[1], $lines[2],
+                    $lines[2].Replace('apply_status=Applied', 'apply_status=Idempotent'),
+                    $lines[3], $lines[4])
+                if (Test-TunaGuiRegularV4FrontierRepairSettlementClosed -Lines $ambiguous) {
+                    throw "ambiguous redacted current-binding apply was accepted for $outcome"
+                }
+            }
+
+            Write-Output 'gui-current-pressure-cleanup-correlation-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Current-pressure GUI classification test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-current-pressure-cleanup-correlation-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task FallbackAuthorityMatcher_CurrentSchemaRequiresCompleteIdentityAndIsolatesLegacy()
     {
         var matcherPath = Path.Combine(FindRepoRoot(), "tools", "FileTransferAuthorityMatching.ps1")

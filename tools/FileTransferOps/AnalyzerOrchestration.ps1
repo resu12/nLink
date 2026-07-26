@@ -1109,6 +1109,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'nkn_bridge_receive_stall_recovery_hard_restart') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'nkn_bridge_recovery_execution_hard_restart_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'nkn_bridge_restart_rejected_stale_execution_command') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'bridge_spawned') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'bridge_ready') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_bridge_recovery_execution_receipt_decision_observed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_bridge_recovery_execution_completion_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_recovery_liveness_lease_granted') +
@@ -1182,6 +1184,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $bridgeRecoveryExecutionSoftToHardHandoffProof =
         Get-FileTransferBridgeRecoveryExecutionSoftToHardHandoffCorrelation `
             -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
+    $bridgeRecoveryExecutionStartupPayloadIsolationProof =
+        Get-FileTransferBridgeRecoveryExecutionStartupPayloadIsolationCorrelation `
+            -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
     $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof =
         Get-FileTransferRuntimeUnlockRegularV4RecoveryClosureOfferTimeoutCorrelation `
             -Events $runtimeUnlockRegularV4RecoveryLeaseEvents `
@@ -1218,6 +1223,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_peer_silence_safety_replay_started') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_settlement_accepted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_settlement_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_settlement_observed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_projection_retained') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_projection_published') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_projection_cleared') +
@@ -1838,6 +1844,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Reason = 'bridge_recovery_execution_timeout_before_soft_to_hard_fallback'
         }) | Out-Null
     }
+    foreach ($candidateEvent in @($bridgeRecoveryExecutionStartupPayloadIsolationProof.UnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing'
+            Event = $candidateEvent
+            Reason = 'bridge_recovery_execution_timeout_after_pre_ready_payload_submission'
+        }) | Out-Null
+    }
     foreach ($candidateEvent in @($runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureHoldNotPreservedUnresolvedCandidateEvents)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved'
@@ -2024,6 +2037,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedUnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureLivenessUnresolvedCount -gt 0 -or
+        $bridgeRecoveryExecutionStartupPayloadIsolationProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRetryFallbackTailUnblockRecheckProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RecoverySettlementProof.HandoffBypassCount -gt 0 -or
@@ -2073,6 +2087,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'runtime_unlock_regular_v4_recovery_lease_not_issued',
                 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted',
                 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved',
+                'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing',
                 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing',
                 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing',
                 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
@@ -2145,6 +2160,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'filetransfer_route_transition_incomplete',
             'runtime_unlock_regular_v4_route_commit_send_drain_missing',
             'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved',
+            'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing',
             'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing',
             'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing',
             'runtime_unlock_precommit_probe_start_handoff_missing',
@@ -2341,6 +2357,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_recovered_count={0}" -f $bridgeRecoveryExecutionSoftToHardHandoffProof.RecoveredCount),
         ("filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_unresolved_count={0}" -f $bridgeRecoveryExecutionSoftToHardHandoffProof.UnresolvedCount),
         ("filetransfer_bridge_recovery_execution_soft_to_hard_handoff_verdict={0}" -f $bridgeRecoveryExecutionSoftToHardHandoffProof.Verdict),
+        ("filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_raw_count={0}" -f $bridgeRecoveryExecutionStartupPayloadIsolationProof.RawCount),
+        ("filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_distinct_count={0}" -f $bridgeRecoveryExecutionStartupPayloadIsolationProof.DistinctCount),
+        ("filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_recovered_count={0}" -f $bridgeRecoveryExecutionStartupPayloadIsolationProof.RecoveredCount),
+        ("filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_unresolved_count={0}" -f $bridgeRecoveryExecutionStartupPayloadIsolationProof.UnresolvedCount),
+        ("filetransfer_bridge_recovery_execution_startup_payload_isolation_verdict={0}" -f $bridgeRecoveryExecutionStartupPayloadIsolationProof.Verdict),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureLivenessVerdict),
         ("runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureHoldNotPreservedRawCount),
         ("runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureHoldNotPreservedDistinctCount),
@@ -2585,6 +2606,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_recovered_count={0}" -f $bridgeRecoveryExecutionSoftToHardHandoffProof.RecoveredCount),
         ("filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_unresolved_count={0}" -f $bridgeRecoveryExecutionSoftToHardHandoffProof.UnresolvedCount),
         ("filetransfer_bridge_recovery_execution_soft_to_hard_handoff_verdict={0}" -f $bridgeRecoveryExecutionSoftToHardHandoffProof.Verdict),
+        ("filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_raw_count={0}" -f $bridgeRecoveryExecutionStartupPayloadIsolationProof.RawCount),
+        ("filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_distinct_count={0}" -f $bridgeRecoveryExecutionStartupPayloadIsolationProof.DistinctCount),
+        ("filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_recovered_count={0}" -f $bridgeRecoveryExecutionStartupPayloadIsolationProof.RecoveredCount),
+        ("filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_unresolved_count={0}" -f $bridgeRecoveryExecutionStartupPayloadIsolationProof.UnresolvedCount),
+        ("filetransfer_bridge_recovery_execution_startup_payload_isolation_verdict={0}" -f $bridgeRecoveryExecutionStartupPayloadIsolationProof.Verdict),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureLivenessVerdict),
         ("runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureHoldNotPreservedRawCount),
         ("runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureHoldNotPreservedDistinctCount),
@@ -2825,6 +2851,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_recovered_count={0}" -f $bridgeRecoveryExecutionSoftToHardHandoffProof.RecoveredCount),
         ("filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_unresolved_count={0}" -f $bridgeRecoveryExecutionSoftToHardHandoffProof.UnresolvedCount),
         ("filetransfer_bridge_recovery_execution_soft_to_hard_handoff_verdict={0}" -f $bridgeRecoveryExecutionSoftToHardHandoffProof.Verdict),
+        ("filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_raw_count={0}" -f $bridgeRecoveryExecutionStartupPayloadIsolationProof.RawCount),
+        ("filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_distinct_count={0}" -f $bridgeRecoveryExecutionStartupPayloadIsolationProof.DistinctCount),
+        ("filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_recovered_count={0}" -f $bridgeRecoveryExecutionStartupPayloadIsolationProof.RecoveredCount),
+        ("filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_unresolved_count={0}" -f $bridgeRecoveryExecutionStartupPayloadIsolationProof.UnresolvedCount),
+        ("filetransfer_bridge_recovery_execution_startup_payload_isolation_verdict={0}" -f $bridgeRecoveryExecutionStartupPayloadIsolationProof.Verdict),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureLivenessVerdict),
         ("runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureHoldNotPreservedRawCount),
         ("runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureHoldNotPreservedDistinctCount),
@@ -3047,6 +3078,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_recovered_count={0}" -f $bridgeRecoveryExecutionSoftToHardHandoffProof.RecoveredCount),
         ("filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_unresolved_count={0}" -f $bridgeRecoveryExecutionSoftToHardHandoffProof.UnresolvedCount),
         ("filetransfer_bridge_recovery_execution_soft_to_hard_handoff_verdict={0}" -f $bridgeRecoveryExecutionSoftToHardHandoffProof.Verdict),
+        ("filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_raw_count={0}" -f $bridgeRecoveryExecutionStartupPayloadIsolationProof.RawCount),
+        ("filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_distinct_count={0}" -f $bridgeRecoveryExecutionStartupPayloadIsolationProof.DistinctCount),
+        ("filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_recovered_count={0}" -f $bridgeRecoveryExecutionStartupPayloadIsolationProof.RecoveredCount),
+        ("filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_unresolved_count={0}" -f $bridgeRecoveryExecutionStartupPayloadIsolationProof.UnresolvedCount),
+        ("filetransfer_bridge_recovery_execution_startup_payload_isolation_verdict={0}" -f $bridgeRecoveryExecutionStartupPayloadIsolationProof.Verdict),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureLivenessVerdict),
         ("runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureHoldNotPreservedRawCount),
         ("runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureHoldNotPreservedDistinctCount),
@@ -3298,6 +3334,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_recovered_count = $bridgeRecoveryExecutionSoftToHardHandoffProof.RecoveredCount
         filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_unresolved_count = $bridgeRecoveryExecutionSoftToHardHandoffProof.UnresolvedCount
         filetransfer_bridge_recovery_execution_soft_to_hard_handoff_verdict = $bridgeRecoveryExecutionSoftToHardHandoffProof.Verdict
+        filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_raw_count = $bridgeRecoveryExecutionStartupPayloadIsolationProof.RawCount
+        filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_distinct_count = $bridgeRecoveryExecutionStartupPayloadIsolationProof.DistinctCount
+        filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_recovered_count = $bridgeRecoveryExecutionStartupPayloadIsolationProof.RecoveredCount
+        filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_unresolved_count = $bridgeRecoveryExecutionStartupPayloadIsolationProof.UnresolvedCount
+        filetransfer_bridge_recovery_execution_startup_payload_isolation_verdict = $bridgeRecoveryExecutionStartupPayloadIsolationProof.Verdict
         runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_raw_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureHoldNotPreservedRawCount
         runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_distinct_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureHoldNotPreservedDistinctCount
         runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_recovered_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureHoldNotPreservedRecoveredCount

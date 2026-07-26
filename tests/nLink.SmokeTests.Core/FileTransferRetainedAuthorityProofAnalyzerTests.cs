@@ -113,6 +113,32 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
         Assert.Equal("PASS", verdict["verdict"]);
     }
 
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "StaleRejectedActionEffectIsolation")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_ReceiveRecoveryOperationConflict_IsKnownDiagnosticOnly()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_receive_recovery_operation_conflict";
+        var lines = BuildAuthorityProofFixture(
+            transferId,
+            $"event=filetransfer_recovery_authority_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; action_kind=ReceiveRecoveryOperation; source=filetransfer_receive_recovery; attempted_action=session_liveness_timeout_pending; rejection_reason=filetransfer_receive_recovery_operation_conflict; reason=filetransfer_receive_recovery_operation_conflict; current_route=regular_nkn_v4_fast; current_protocol_version=4; current_live_route_epoch=0; current_runtime_generation=1; current_terminal_generation=0; attempted_route=regular_nkn_v4_fast; attempted_protocol_version=4; attempted_live_route_epoch=0; attempted_runtime_generation=1; attempted_terminal_generation=0; attempted_leg_generation=1; attempted_transport_epoch=0; attempted_bridge_recovery_generation=0; recovery_decision_generation=1; recovery_liveness_lease_generation=0",
+            $"event=filetransfer_receive_recovery_requested; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; reason=current_receive_recovery_operation");
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["stale_rejected_action_effect_isolation_verdict"]);
+        Assert.Equal("1", route["stale_rejected_action_count"]);
+        Assert.Equal("0", route["stale_rejected_action_forbidden_effect_count"]);
+        Assert.Equal("0", route["stale_rejected_bridge_recovery_effect_count"]);
+        Assert.Equal("0", route["stale_rejected_unknown_action_count"]);
+    }
+
     [Theory]
     [Trait("RetainedAuthorityProofSuite", "StaleRejectedActionEffectIsolation")]
     [Trait("Category", "Smoke")]

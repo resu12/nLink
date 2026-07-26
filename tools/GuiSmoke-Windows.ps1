@@ -4643,7 +4643,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
 
         foreach ($accepted in $acceptedSettlements) {
             $settlementOutcome = Get-TunaGuiLogLineFieldValue -Line $accepted.Line -Name 'outcome'
-            if ($settlementOutcome -eq 'Superseded') {
+            $normalizedSettlementOutcome = $settlementOutcome.Replace('_', '').ToLowerInvariant()
+            if ($normalizedSettlementOutcome -eq 'superseded') {
                 $predecessorAuthority = Get-TunaGuiLogLineFieldValue -Line $accepted.Line -Name 'authority_id'
                 $successorAuthority = Get-TunaGuiLogLineFieldValue -Line $accepted.Line -Name 'successor_authority_id'
                 $successorInstallGeneration = Get-TunaGuiLogLineFieldValue `
@@ -4713,8 +4714,22 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'session_id') -and
                     (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'transfer_id') -and
                     (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'direction')
-                } | Select-Object -First 1)
-                if ($apply.Count -eq 0) {
+                } | Group-Object {
+                    [string]::Join('|', @(
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id'),
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id'),
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction'),
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id'),
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'install_generation'),
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'settlement_outcome'),
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'apply_status'),
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'current_authority_cleared'),
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'retained_predecessor_cleared'))).
+                        ToLowerInvariant()
+                } | ForEach-Object {
+                    @($_.Group | Sort-Object Index)[0]
+                } | Sort-Object Index)
+                if ($apply.Count -ne 1) {
                     return $false
                 }
 
@@ -4751,6 +4766,122 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     return $false
                 }
 
+                continue
+            }
+
+            if ($normalizedSettlementOutcome -in @('progressobserved', 'missingdispatch', 'settledstalled')) {
+                $authority = Get-TunaGuiLogLineFieldValue -Line $accepted.Line -Name 'authority_id'
+                $installGeneration = Get-TunaGuiLogLineFieldValue `
+                    -Line $accepted.Line `
+                    -Name 'successor_install_generation'
+                $repairKey = Get-TunaGuiLogLineFieldValue -Line $accepted.Line -Name 'repair_request_key'
+                if ([string]::IsNullOrWhiteSpace($authority) -or
+                    $authority -in @('[redacted]', 'redacted') -or
+                    [string]::IsNullOrWhiteSpace($installGeneration) -or
+                    [string]::IsNullOrWhiteSpace($repairKey)) {
+                    return $false
+                }
+
+                $binding = @($indexedLines | Where-Object {
+                    $_.Index -lt $accepted.Index -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_regular_v4_frontier_repair_pressure_binding_committed')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq $authority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'install_generation') -eq
+                        $installGeneration -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'repair_request_key') -eq $repairKey -and
+                    (Test-TunaGuiRegularV4SupersededScopeMatch `
+                        -SourceLine $accepted.Line `
+                        -CandidateLine $_.Line)
+                } | Select-Object -Last 1)
+                if ($binding.Count -eq 0) {
+                    return $false
+                }
+
+                $retirement = @($indexedLines | Where-Object {
+                    $_.Index -gt $accepted.Index -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_regular_v4_frontier_repair_pressure_binding_retired')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq $authority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'install_generation') -eq
+                        $installGeneration -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'repair_request_key') -eq $repairKey -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'install_boundary') -eq 'settlement' -and
+                    (Test-TunaGuiRegularV4SupersededScopeMatch `
+                        -SourceLine $accepted.Line `
+                        -CandidateLine $_.Line)
+                } | Select-Object -First 1)
+                if ($retirement.Count -eq 0) {
+                    return $false
+                }
+
+                $apply = @($indexedLines | Where-Object {
+                    $_.Index -gt $accepted.Index -and
+                    $_.Index -lt $retirement[0].Index -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'install_generation') -eq
+                        $installGeneration -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'settlement_outcome').Replace('_', '').ToLowerInvariant() -eq
+                        $normalizedSettlementOutcome -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'apply_status').ToLowerInvariant() -in
+                        @('applied', 'idempotent') -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'current_authority_cleared') -eq '1' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'retained_predecessor_cleared') -eq '0' -and
+                    (Test-TunaGuiVisibleAuthorityMatch `
+                        -Actual (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') `
+                        -Expected $authority) -and
+                    (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'session_id') -and
+                    (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'transfer_id') -and
+                    (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'direction')
+                } | Group-Object {
+                    [string]::Join('|', @(
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id'),
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id'),
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction'),
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id'),
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'successor_authority_id'),
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'current_authority_id'),
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'retained_predecessor_authority_id'),
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'install_generation'),
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'settlement_outcome'),
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'apply_status'),
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'current_authority_cleared'),
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'retained_predecessor_cleared'))).
+                        ToLowerInvariant()
+                } | ForEach-Object {
+                    @($_.Group | Sort-Object Index)[0]
+                } | Sort-Object Index)
+                if ($apply.Count -ne 1) {
+                    return $false
+                }
+
+                $acceptedSuccessor = Get-TunaGuiLogLineFieldValue `
+                    -Line $accepted.Line `
+                    -Name 'successor_authority_id'
+                $contractSettled = @($indexedLines | Where-Object {
+                    $_.Index -gt $retirement[0].Index -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_regular_v4_frontier_repair_contract_settled')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq $authority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'successor_authority_id') -eq
+                        $acceptedSuccessor -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'repair_request_key') -eq $repairKey -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'settlement_outcome').Replace('_', '').ToLowerInvariant() -eq
+                        $normalizedSettlementOutcome
+                } | Group-Object {
+                    [string]::Join('|', @(
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id'),
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'successor_authority_id'),
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'repair_request_key'),
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'settlement_outcome'))).
+                        ToLowerInvariant()
+                } | ForEach-Object {
+                    @($_.Group | Sort-Object Index)[0]
+                })
+                if ($contractSettled.Count -ne 1) {
+                    return $false
+                }
                 continue
             }
 

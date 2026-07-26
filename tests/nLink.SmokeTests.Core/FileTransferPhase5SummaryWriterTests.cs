@@ -1291,6 +1291,98 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
     }
 
     [Fact]
+    public async Task RunFileTransferRouteAcceptance_BridgeRecoveryStartupPayloadIsolationReachesScenarioAndRootSummaries()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string scenario = "regular-v4-live-activation-off-on-off-256mb";
+        const string candidate = "filetransfer_bridge_recovery_execution_startup_payload_isolation_missing";
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(
+            repoRoot,
+            "artifacts",
+            "filetransfer-route-acceptance-test",
+            Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(
+            artifactRoot,
+            "phase5-bridge-recovery-startup-payload-isolation-summary-propagation");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment(
+                "phase5-bridge-recovery-startup-payload-isolation-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_BRIDGE_RECOVERY_STARTUP_PAYLOAD_ISOLATION_SUMMARY_FIXTURE"] = "1";
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ScenarioName", scenario,
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Expected fake bridge-recovery startup propagation run to pass.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+
+            var evidence = ReadArtifactReport(Path.Combine(runRoot, scenario), "filetransfer-operator-verdict.txt");
+            Assert.Equal(candidate, evidence["first_proof_chain_failure_class"]);
+            Assert.Equal("nkn_bridge_recovery_execution_completed", evidence["first_proof_chain_failure_event"]);
+            Assert.Equal(
+                "bridge_recovery_execution_timeout_after_pre_ready_payload_submission",
+                evidence["first_proof_chain_failure_reason"]);
+            Assert.Equal("3258", evidence["first_proof_chain_failure_sequence"]);
+            Assert.Equal("1597", evidence["first_proof_chain_failure_writer_sequence"]);
+            Assert.Equal("1", evidence["filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_raw_count"]);
+            Assert.Equal("1", evidence["filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_distinct_count"]);
+            Assert.Equal("0", evidence["filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_recovered_count"]);
+            Assert.Equal("1", evidence["filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_unresolved_count"]);
+            Assert.Equal("fail", evidence["filetransfer_bridge_recovery_execution_startup_payload_isolation_verdict"]);
+
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal(candidate, summary["runtime_failure_candidate"]);
+            Assert.Equal("route_runtime", summary["semantic_failure_domain"]);
+            Assert.Equal("1", summary["filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_raw_count"]);
+            Assert.Equal("1", summary["filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_distinct_count"]);
+            Assert.Equal("0", summary["filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_recovered_count"]);
+            Assert.Equal("1", summary["filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_unresolved_count"]);
+            Assert.Equal("fail", summary["filetransfer_bridge_recovery_execution_startup_payload_isolation_verdict"]);
+            Assert.Equal(candidate, summary[$"{scenario}.runtime_failure_candidate"]);
+            Assert.Equal("1", summary[$"{scenario}.filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_raw_count"]);
+            Assert.Equal("1", summary[$"{scenario}.filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_unresolved_count"]);
+            Assert.Equal("fail", summary[$"{scenario}.filetransfer_bridge_recovery_execution_startup_payload_isolation_verdict"]);
+
+            using var summaryJson = JsonDocument.Parse(
+                await File.ReadAllTextAsync(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.json")));
+            var root = summaryJson.RootElement;
+            Assert.Equal(candidate, root.GetProperty("runtimeFailureCandidate").GetString());
+            Assert.Equal("route_runtime", root.GetProperty("semanticFailureDomain").GetString());
+            Assert.Equal(1, root.GetProperty("fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingRawCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingDistinctCount").GetInt32());
+            Assert.Equal(0, root.GetProperty("fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingRecoveredCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingUnresolvedCount").GetInt32());
+            Assert.Equal("fail", root.GetProperty("fileTransferBridgeRecoveryExecutionStartupPayloadIsolationVerdict").GetString());
+
+            var run = Assert.Single(root.GetProperty("runs").EnumerateArray());
+            Assert.Equal(candidate, run.GetProperty("runtimeFailureCandidate").GetString());
+            Assert.Equal("route_runtime", run.GetProperty("semanticFailureDomain").GetString());
+            Assert.Equal(1, run.GetProperty("fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingRawCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingUnresolvedCount").GetInt32());
+            Assert.Equal("fail", run.GetProperty("fileTransferBridgeRecoveryExecutionStartupPayloadIsolationVerdict").GetString());
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
     public async Task RunFileTransferRouteAcceptance_FallbackTailUnblockRecheckCountsReachScenarioAndRootSummaries()
     {
         if (!OperatingSystem.IsWindows())
