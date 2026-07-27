@@ -1153,6 +1153,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_evaluation_requested') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_activation_offer_not_observed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_activation_offer_retry_not_scheduled') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_runtime_unlock_retry_after_recovery_armed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_install_rejected') +
         $runtimeUnlockRetryLifecycleEvents +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_contract_settled') +
@@ -1217,6 +1218,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
     $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof =
         Get-FileTransferRuntimeUnlockRegularV4RecoveryClosureOfferTimeoutCorrelation `
+            -Events $runtimeUnlockRegularV4RecoveryLeaseEvents `
+            -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents
+    $runtimeUnlockInitialOfferRetryLifecycleHandoffProof =
+        Get-FileTransferRuntimeUnlockInitialOfferRetryLifecycleHandoffCorrelation `
             -Events $runtimeUnlockRegularV4RecoveryLeaseEvents `
             -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents
     [object[]]$runtimeUnlockRetryDispatchAuthorityTupleMismatchEvents = @(
@@ -1292,6 +1297,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_prepared') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_committed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_operation_issued') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_recovery_authority_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_bridge_recovery_authority_granted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_recovery_liveness_lease_granted') +
@@ -1919,6 +1925,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             }
         }) | Out-Null
     }
+    foreach ($candidateEvent in @($runtimeUnlockInitialOfferRetryLifecycleHandoffProof.UnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing'
+            Event = $candidateEvent
+            Reason = 'runtime_unlock_offer_send_not_observed_retry_install_state_missing'
+        }) | Out-Null
+    }
     foreach ($candidateEvent in @($regularV4FrontierRepairMissingRangePreservationProof.UnresolvedCandidateEvents)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'regular_v4_frontier_repair_missing_range_not_preserved'
@@ -2091,6 +2104,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $bridgeRecoveryExecutionSubmissionBarrierDrainProof.UnresolvedCount -gt 0 -or
         $bridgeRecoveryExecutionStartupPayloadIsolationProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.UnresolvedCount -gt 0 -or
+        $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRetryFallbackTailUnblockRecheckProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RecoverySettlementProof.HandoffBypassCount -gt 0 -or
         $runtimeUnlockUncommittedTunaFallbackPrecommitAuthorityProof.UnresolvedCount -gt 0 -or
@@ -2145,6 +2159,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing',
                 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing',
                 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing',
+                'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing',
                 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
                 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected',
                 'runtime_unlock_retry_dispatch_authority_tuple_mismatch',
@@ -2221,6 +2236,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing',
             'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing',
             'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing',
+            'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing',
             'runtime_unlock_precommit_probe_start_handoff_missing',
             'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing',
             'runtime_unlock_precommit_fallback_recovery_handoff_suppressed',
@@ -2446,6 +2462,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.RecoveredCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_unresolved_count={0}" -f $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.UnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_verdict={0}" -f $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.Verdict),
+        ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_raw_count={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.RawCount),
+        ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_distinct_count={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.DistinctCount),
+        ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_recovered_count={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.RecoveredCount),
+        ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_unresolved_count={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.UnresolvedCount),
+        ("runtime_unlock_initial_offer_retry_lifecycle_handoff_verdict={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.Verdict),
        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.RequestedCount),
        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DecidedCount),
        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DiscardedCount),
@@ -2710,6 +2731,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.RecoveredCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_unresolved_count={0}" -f $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.UnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_verdict={0}" -f $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.Verdict),
+        ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_raw_count={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.RawCount),
+        ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_distinct_count={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.DistinctCount),
+        ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_recovered_count={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.RecoveredCount),
+        ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_unresolved_count={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.UnresolvedCount),
+        ("runtime_unlock_initial_offer_retry_lifecycle_handoff_verdict={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.Verdict),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.RequestedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DecidedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DiscardedCount),
@@ -2970,6 +2996,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.RecoveredCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_unresolved_count={0}" -f $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.UnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_verdict={0}" -f $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.Verdict),
+        ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_raw_count={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.RawCount),
+        ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_distinct_count={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.DistinctCount),
+        ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_recovered_count={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.RecoveredCount),
+        ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_unresolved_count={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.UnresolvedCount),
+        ("runtime_unlock_initial_offer_retry_lifecycle_handoff_verdict={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.Verdict),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.RequestedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DecidedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DiscardedCount),
@@ -3212,6 +3243,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.RecoveredCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_unresolved_count={0}" -f $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.UnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_verdict={0}" -f $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.Verdict),
+        ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_raw_count={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.RawCount),
+        ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_distinct_count={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.DistinctCount),
+        ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_recovered_count={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.RecoveredCount),
+        ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_unresolved_count={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.UnresolvedCount),
+        ("runtime_unlock_initial_offer_retry_lifecycle_handoff_verdict={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.Verdict),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.RequestedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DecidedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DiscardedCount),
@@ -3482,6 +3518,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_recovered_count = $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.RecoveredCount
         runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing_unresolved_count = $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.UnresolvedCount
         runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_verdict = $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.Verdict
+        runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_raw_count = $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.RawCount
+        runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_distinct_count = $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.DistinctCount
+        runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_recovered_count = $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.RecoveredCount
+        runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_unresolved_count = $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.UnresolvedCount
+        runtime_unlock_initial_offer_retry_lifecycle_handoff_verdict = $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.Verdict
         runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.RequestedCount
         runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DecidedCount
         runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DiscardedCount
@@ -4411,6 +4452,10 @@ function Invoke-FileTransferRetainedAnalysis {
         indexed_event_count = 0
         log_file_count = 0
         compact_mode = 0
+        compact_requested = 0
+        compact_for_large_slice = 0
+        compact_selection_reason = 'not_selected'
+        artifact_write_started = 0
         artifact_dir = $resolvedArtifactDir
     }
 
@@ -4439,8 +4484,19 @@ function Invoke-FileTransferRetainedAnalysis {
 
         $compactRequested = [string]::Equals($env:NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT, '1', [System.StringComparison]::OrdinalIgnoreCase)
         $compactForLargeSlice = $eventsForArtifacts.Count -gt 25000 -and -not $IncludeRawSlices
+        $stageDiagnostics['compact_requested'] = if ($compactRequested) { 1 } else { 0 }
+        $stageDiagnostics['compact_for_large_slice'] = if ($compactForLargeSlice) { 1 } else { 0 }
         if ($compactRequested -or $compactForLargeSlice) {
             $stageDiagnostics['compact_mode'] = 1
+            $stageDiagnostics['compact_selection_reason'] = if ($compactRequested) {
+                'environment_requested'
+            }
+            else {
+                'large_slice_without_raw_slices'
+            }
+            $stageDiagnostics['artifact_write_started'] = 1
+            $stageDiagnostics['total_ms'] = $totalStopwatch.ElapsedMilliseconds
+            Write-FileTransferRetainedAnalysisStageDiagnostics -ArtifactDir $resolvedArtifactDir -Diagnostics $stageDiagnostics
             $artifactStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
             $compactArtifactArgs = @{
                 ArtifactDir = $resolvedArtifactDir
@@ -4455,6 +4511,7 @@ function Invoke-FileTransferRetainedAnalysis {
             Write-FileTransferEfficiencySummaryArtifacts @efficiencyArtifactArgs
             $artifactStopwatch.Stop()
             $stageDiagnostics['artifact_write_ms'] = $artifactStopwatch.ElapsedMilliseconds
+            $stageDiagnostics['artifact_write_started'] = 0
             $totalStopwatch.Stop()
             $stageDiagnostics['total_ms'] = $totalStopwatch.ElapsedMilliseconds
             Write-FileTransferRetainedAnalysisStageDiagnostics -ArtifactDir $resolvedArtifactDir -Diagnostics $stageDiagnostics
@@ -4469,6 +4526,11 @@ function Invoke-FileTransferRetainedAnalysis {
                 StageDiagnostics = [pscustomobject]$stageDiagnostics
             }
         }
+
+        $stageDiagnostics['compact_selection_reason'] = 'full_analysis_requested'
+        $stageDiagnostics['artifact_write_started'] = 1
+        $stageDiagnostics['total_ms'] = $totalStopwatch.ElapsedMilliseconds
+        Write-FileTransferRetainedAnalysisStageDiagnostics -ArtifactDir $resolvedArtifactDir -Diagnostics $stageDiagnostics
 
         $summaryStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         $summary = New-FileTransferRetainedSummary -Events $eventsForArtifacts -LogFiles $logFiles -RequestedTransferId $TransferId -AllTransfers:$AllTransfers
@@ -4489,6 +4551,7 @@ function Invoke-FileTransferRetainedAnalysis {
         Write-FileTransferEfficiencySummaryArtifacts -ArtifactDir $resolvedArtifactDir -Index $index -Events $eventsForArtifacts -Summary $summary -GateResult $gate
         $artifactStopwatch.Stop()
         $stageDiagnostics['artifact_write_ms'] = $artifactStopwatch.ElapsedMilliseconds
+        $stageDiagnostics['artifact_write_started'] = 0
 
         $totalStopwatch.Stop()
         $stageDiagnostics['total_ms'] = $totalStopwatch.ElapsedMilliseconds

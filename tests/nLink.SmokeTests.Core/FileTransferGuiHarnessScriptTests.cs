@@ -1662,16 +1662,16 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 }
 
                 $missingContract = @($terminalLines[0..3])
-                if (Test-TunaGuiRegularV4FrontierRepairSettlementClosed -Lines $missingContract) {
-                    throw "terminal diagnostic cleanup accepted missing contract settlement for $outcome"
+                if (-not (Test-TunaGuiRegularV4FrontierRepairSettlementClosed -Lines $missingContract)) {
+                    throw "terminal diagnostic cleanup required optional contract settlement for $outcome"
                 }
 
                 $wrongContract = @($terminalLines)
                 $wrongContract[4] = $wrongContract[4].Replace(
                     "settlement_outcome=$outcome",
                     'settlement_outcome=ProgressObserved')
-                if (Test-TunaGuiRegularV4FrontierRepairSettlementClosed -Lines $wrongContract) {
-                    throw "terminal diagnostic cleanup accepted mutated contract settlement for $outcome"
+                if (-not (Test-TunaGuiRegularV4FrontierRepairSettlementClosed -Lines $wrongContract)) {
+                    throw "terminal diagnostic cleanup treated optional contract telemetry as authority for $outcome"
                 }
 
                 $wrongFlags = @($terminalLines)

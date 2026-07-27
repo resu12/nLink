@@ -10449,6 +10449,51 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         ];
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_InitialRuntimeUnlockOfferRetryRequiresCoordinatorLifecycle(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_initial_offer_retry_lifecycle";
+        var lines = BuildRuntimeUnlockRetryDispatchProofFixture(
+            transferId,
+            "event=tuna_acceleration_activation_offer_not_observed; trigger=runtime_unlock; session_id=sess_runtime_unlock_dispatch_proof; payer_decision_id=4; generation=1; retry_scheduled=1; retry_after_recovery_armed=0; dispatch_successor_requested=0; replay_scheduled=0; answer_timeout_scheduled=0; recovery_requested=0; recovery_reason=tuna_activation_offer_send_timeout",
+            "event=runtime_unlock_retry_dispatch_install_rejected; authority_id=(none); direction=outbound; session_id=(none); transfer_id=(none); contract_generation=0; retired_generation=0; dispatch_attempt_generation=0; missing_dispatch_successor_generation=0; install_generation=0; install_status=Rejected; decision_reason=retry_dispatch_install_state_missing_retry_schedule",
+            "event=tuna_acceleration_activation_offer_retry_not_scheduled; trigger=runtime_unlock; session_id=sess_runtime_unlock_dispatch_proof; payer_decision_id=4; generation=1; retry_reason=runtime_unlock_offer_send_not_observed; log_writer_sequence=3109");
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_unresolved_count"]);
+        Assert.Equal("fail", verdict["runtime_unlock_initial_offer_retry_lifecycle_handoff_verdict"]);
+        Assert.Equal(
+            "runtime_unlock_initial_offer_retry_lifecycle_handoff_missing",
+            verdict["recovery_failure_class"]);
+        Assert.Equal(
+            "tuna_acceleration_activation_offer_retry_not_scheduled",
+            verdict["first_proof_chain_failure_event"]);
+        Assert.Equal(
+            "runtime_unlock_offer_send_not_observed_retry_install_state_missing",
+            verdict["first_proof_chain_failure_reason"]);
+    }
+
     private static string[] BuildRuntimeUnlockRetryDispatchProofFixture(
         string transferId,
         params string[] middleMessages)

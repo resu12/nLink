@@ -5909,6 +5909,110 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     return $false
                 }
 
+                if ($normalizedSettlementOutcome -eq 'stalerejected') {
+                    $prepared = @($indexedLines | Where-Object {
+                        $_.Index -lt $accepted.Index -and
+                        (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                            'filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_prepared')) -and
+                        (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq $authority -and
+                        (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'install_generation') -eq
+                            $installGeneration -and
+                        (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'session_id') -and
+                        (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'transfer_id') -and
+                        (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'direction') -and
+                        (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'route') -and
+                        (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'protocol_version') -and
+                        (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'live_route_epoch') -and
+                        (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'runtime_generation') -and
+                        (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'terminal_generation') -and
+                        (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'leg_generation') -and
+                        (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'source_bridge_decision_generation') -eq
+                            (Get-TunaGuiLogLineFieldValue -Line $accepted.Line -Name 'bridge_decision_generation')
+                    } | Select-Object -Last 1)
+                    $committed = @($indexedLines | Where-Object {
+                        $_.Index -gt $accepted.Index -and
+                        (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                            'filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_committed')) -and
+                        (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq $authority -and
+                        (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'install_generation') -eq
+                            $installGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'settlement_outcome').
+                            Replace('_', '').ToLowerInvariant() -eq $normalizedSettlementOutcome -and
+                        (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'apply_status').
+                            ToLowerInvariant() -in @('applied', 'idempotent') -and
+                        (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'current_authority_cleared') -eq '1' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'retained_predecessor_cleared') -eq '0' -and
+                        (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'session_id') -and
+                        (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'transfer_id') -and
+                        (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'direction') -and
+                        (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'route') -and
+                        (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'protocol_version') -and
+                        (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'live_route_epoch') -and
+                        (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'runtime_generation') -and
+                        (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'terminal_generation') -and
+                        (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'leg_generation') -and
+                        (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'source_bridge_decision_generation') -eq
+                            (Get-TunaGuiLogLineFieldValue -Line $accepted.Line -Name 'bridge_decision_generation')
+                    } | Select-Object -First 1)
+                    if ($prepared.Count -eq 1 -and $committed.Count -eq 1) {
+                        $atomicApply = @($indexedLines | Where-Object {
+                            $_.Index -gt $accepted.Index -and
+                            $_.Index -lt $committed[0].Index -and
+                            (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                                'filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided')) -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'install_generation') -eq
+                                $installGeneration -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'settlement_outcome').
+                                Replace('_', '').ToLowerInvariant() -eq $normalizedSettlementOutcome -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'apply_status').
+                                ToLowerInvariant() -in @('applied', 'idempotent') -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'current_authority_cleared') -eq '1' -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'retained_predecessor_cleared') -eq '0' -and
+                            (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'session_id') -and
+                            (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'transfer_id') -and
+                            (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'direction')
+                        })
+                        $operationGeneration = Get-TunaGuiLogLineFieldValue `
+                            -Line $committed[0].Line `
+                            -Name 'recovery_operation_generation'
+                        $leaseAuthority = Get-TunaGuiLogLineFieldValue `
+                            -Line $committed[0].Line `
+                            -Name 'recovery_liveness_lease_authority_id'
+                        $leaseGeneration = Get-TunaGuiLogLineFieldValue `
+                            -Line $committed[0].Line `
+                            -Name 'recovery_liveness_lease_generation'
+                        $operationIssued = @($indexedLines | Where-Object {
+                            $_.Index -gt $committed[0].Index -and
+                            (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                                'filetransfer_receive_recovery_operation_issued')) -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'receive_recovery_operation_generation') -eq
+                                $operationGeneration -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'recovery_liveness_lease_authority_id') -eq
+                                $leaseAuthority -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'recovery_liveness_lease_generation') -eq
+                                $leaseGeneration -and
+                            (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'session_id') -and
+                            (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'transfer_id') -and
+                            (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'direction')
+                        } | Select-Object -First 1)
+                        $contractSettled = @($indexedLines | Where-Object {
+                            $_.Index -gt $committed[0].Index -and
+                            (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                                'filetransfer_regular_v4_frontier_repair_contract_settled')) -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq $authority -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'repair_request_key') -eq
+                                $repairKey -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'settlement_outcome').
+                                Replace('_', '').ToLowerInvariant() -eq $normalizedSettlementOutcome
+                        } | Select-Object -First 1)
+                        if ($atomicApply.Count -eq 1 -and
+                            $operationIssued.Count -eq 1 -and
+                            $contractSettled.Count -eq 1) {
+                            continue
+                        }
+                    }
+                }
+
                 $retirement = @($indexedLines | Where-Object {
                     $_.Index -gt $accepted.Index -and
                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
@@ -6083,34 +6187,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         @($_.Group | Sort-Object Index)[0]
                     })
                     if ($apply.Count -eq 1) {
-                        $acceptedSuccessor = Get-TunaGuiLogLineFieldValue `
-                            -Line $accepted.Line `
-                            -Name 'successor_authority_id'
-                        $contractSettled = @($indexedLines | Where-Object {
-                            $_.Index -gt $retirement[0].Index -and
-                            (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
-                                'filetransfer_regular_v4_frontier_repair_contract_settled')) -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq
-                                $authority -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'successor_authority_id') -eq
-                                $acceptedSuccessor -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'repair_request_key') -eq
-                                $repairKey -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'settlement_outcome').
-                                Replace('_', '').ToLowerInvariant() -eq $normalizedSettlementOutcome
-                        } | Group-Object {
-                            [string]::Join('|', @(
-                                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id'),
-                                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'successor_authority_id'),
-                                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'repair_request_key'),
-                                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'settlement_outcome'))).
-                                ToLowerInvariant()
-                        } | ForEach-Object {
-                            @($_.Group | Sort-Object Index)[0]
-                        })
-                        if ($contractSettled.Count -eq 1) {
-                            continue
-                        }
+                        # TransferTerminal and StaleRejected are diagnostic final
+                        # outcomes. Exact apply plus binding retirement is the
+                        # complete coordinator disposition; contract settlement
+                        # is optional corroboration.
+                        continue
                     }
                 }
 
