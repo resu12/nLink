@@ -1165,6 +1165,11 @@ function New-RouteAcceptanceRunResult {
         fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingRecoveredCount = 0
         fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingUnresolvedCount = 0
         fileTransferBridgeRecoveryExecutionStartupPayloadIsolationVerdict = 'none'
+        fileTransferBridgeRecoveryExecutionPayloadHoldMissingRawCount = 0
+        fileTransferBridgeRecoveryExecutionPayloadHoldMissingDistinctCount = 0
+        fileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount = 0
+        fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount = 0
+        fileTransferBridgeRecoveryExecutionPayloadHoldVerdict = 'none'
         runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount = 0
         runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount = 0
         runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount = 0
@@ -2737,6 +2742,11 @@ function Assert-Phase4OperatorVerdict {
     $Result.fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_recovered_count' -DefaultValue '0')
     $Result.fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_unresolved_count' -DefaultValue '0')
     $Result.fileTransferBridgeRecoveryExecutionStartupPayloadIsolationVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_bridge_recovery_execution_startup_payload_isolation_verdict' -DefaultValue 'none'
+    $Result.fileTransferBridgeRecoveryExecutionPayloadHoldMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_bridge_recovery_execution_payload_hold_missing_raw_count' -DefaultValue '0')
+    $Result.fileTransferBridgeRecoveryExecutionPayloadHoldMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_bridge_recovery_execution_payload_hold_missing_distinct_count' -DefaultValue '0')
+    $Result.fileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_bridge_recovery_execution_payload_hold_missing_recovered_count' -DefaultValue '0')
+    $Result.fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_bridge_recovery_execution_payload_hold_missing_unresolved_count' -DefaultValue '0')
+    $Result.fileTransferBridgeRecoveryExecutionPayloadHoldVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_bridge_recovery_execution_payload_hold_verdict' -DefaultValue 'none'
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_raw_count' -DefaultValue '0')
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_distinct_count' -DefaultValue '0')
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_recovered_count' -DefaultValue '0')
@@ -8371,6 +8381,11 @@ function New-RouteAcceptanceSummaryRunDto {
         fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingRecoveredCount = [int]$Result.fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingRecoveredCount
         fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingUnresolvedCount = [int]$Result.fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingUnresolvedCount
         fileTransferBridgeRecoveryExecutionStartupPayloadIsolationVerdict = [string]$Result.fileTransferBridgeRecoveryExecutionStartupPayloadIsolationVerdict
+        fileTransferBridgeRecoveryExecutionPayloadHoldMissingRawCount = [int]$Result.fileTransferBridgeRecoveryExecutionPayloadHoldMissingRawCount
+        fileTransferBridgeRecoveryExecutionPayloadHoldMissingDistinctCount = [int]$Result.fileTransferBridgeRecoveryExecutionPayloadHoldMissingDistinctCount
+        fileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount = [int]$Result.fileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount
+        fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount = [int]$Result.fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount
+        fileTransferBridgeRecoveryExecutionPayloadHoldVerdict = [string]$Result.fileTransferBridgeRecoveryExecutionPayloadHoldVerdict
         runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount
         runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount
         runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount
@@ -8609,6 +8624,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingDistinctCount = 0
     $fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingRecoveredCount = 0
     $fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingUnresolvedCount = 0
+    $fileTransferBridgeRecoveryExecutionPayloadHoldMissingRawCount = 0
+    $fileTransferBridgeRecoveryExecutionPayloadHoldMissingDistinctCount = 0
+    $fileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount = 0
+    $fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount = 0
     $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount = 0
     $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount = 0
     $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount = 0
@@ -8747,6 +8766,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingDistinctCount += [int]$runDto.fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingDistinctCount
         $fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingRecoveredCount += [int]$runDto.fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingRecoveredCount
         $fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingUnresolvedCount += [int]$runDto.fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingUnresolvedCount
+        $fileTransferBridgeRecoveryExecutionPayloadHoldMissingRawCount += [int]$runDto.fileTransferBridgeRecoveryExecutionPayloadHoldMissingRawCount
+        $fileTransferBridgeRecoveryExecutionPayloadHoldMissingDistinctCount += [int]$runDto.fileTransferBridgeRecoveryExecutionPayloadHoldMissingDistinctCount
+        $fileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount += [int]$runDto.fileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount
+        $fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount += [int]$runDto.fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount
         $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount
         $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount
         $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount
@@ -9221,6 +9244,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_recovered_count={0}" -f $fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingRecoveredCount),
         ("filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_unresolved_count={0}" -f $fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingUnresolvedCount),
         ("filetransfer_bridge_recovery_execution_startup_payload_isolation_verdict={0}" -f ($(if ($fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingUnresolvedCount -gt 0) { 'fail' } elseif ($fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingDistinctCount -gt 0) { 'pass' } else { 'none' }))),
+        ("filetransfer_bridge_recovery_execution_payload_hold_missing_raw_count={0}" -f $fileTransferBridgeRecoveryExecutionPayloadHoldMissingRawCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_missing_distinct_count={0}" -f $fileTransferBridgeRecoveryExecutionPayloadHoldMissingDistinctCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_missing_recovered_count={0}" -f $fileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_missing_unresolved_count={0}" -f $fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_verdict={0}" -f ($(if ($fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount -gt 0) { 'fail' } elseif ($fileTransferBridgeRecoveryExecutionPayloadHoldMissingDistinctCount -gt 0) { 'pass' } else { 'none' }))),
         ("runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount),
         ("runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount),
         ("runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount),
@@ -9444,6 +9472,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_recovered_count={1}" -f $prefix, $result.fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingRecoveredCount)
         $textLines += ("{0}.filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_unresolved_count={1}" -f $prefix, $result.fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingUnresolvedCount)
         $textLines += ("{0}.filetransfer_bridge_recovery_execution_startup_payload_isolation_verdict={1}" -f $prefix, $result.fileTransferBridgeRecoveryExecutionStartupPayloadIsolationVerdict)
+        $textLines += ("{0}.filetransfer_bridge_recovery_execution_payload_hold_missing_raw_count={1}" -f $prefix, $result.fileTransferBridgeRecoveryExecutionPayloadHoldMissingRawCount)
+        $textLines += ("{0}.filetransfer_bridge_recovery_execution_payload_hold_missing_distinct_count={1}" -f $prefix, $result.fileTransferBridgeRecoveryExecutionPayloadHoldMissingDistinctCount)
+        $textLines += ("{0}.filetransfer_bridge_recovery_execution_payload_hold_missing_recovered_count={1}" -f $prefix, $result.fileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount)
+        $textLines += ("{0}.filetransfer_bridge_recovery_execution_payload_hold_missing_unresolved_count={1}" -f $prefix, $result.fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount)
+        $textLines += ("{0}.filetransfer_bridge_recovery_execution_payload_hold_verdict={1}" -f $prefix, $result.fileTransferBridgeRecoveryExecutionPayloadHoldVerdict)
         $textLines += ("{0}.runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_raw_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount)
         $textLines += ("{0}.runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_distinct_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount)
         $textLines += ("{0}.runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_recovered_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount)
@@ -9720,6 +9753,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingRecoveredCount = $fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingRecoveredCount
         fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingUnresolvedCount = $fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingUnresolvedCount
         fileTransferBridgeRecoveryExecutionStartupPayloadIsolationVerdict = if ($fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingUnresolvedCount -gt 0) { 'fail' } elseif ($fileTransferBridgeRecoveryExecutionStartupPayloadIsolationMissingDistinctCount -gt 0) { 'pass' } else { 'none' }
+        fileTransferBridgeRecoveryExecutionPayloadHoldMissingRawCount = $fileTransferBridgeRecoveryExecutionPayloadHoldMissingRawCount
+        fileTransferBridgeRecoveryExecutionPayloadHoldMissingDistinctCount = $fileTransferBridgeRecoveryExecutionPayloadHoldMissingDistinctCount
+        fileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount = $fileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount
+        fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount = $fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount
+        fileTransferBridgeRecoveryExecutionPayloadHoldVerdict = if ($fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount -gt 0) { 'fail' } elseif ($fileTransferBridgeRecoveryExecutionPayloadHoldMissingDistinctCount -gt 0) { 'pass' } else { 'none' }
         runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount = $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount
         runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount = $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount
         runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount = $runtimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount

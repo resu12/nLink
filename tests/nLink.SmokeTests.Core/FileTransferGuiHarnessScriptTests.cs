@@ -1649,6 +1649,40 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 }
             }
 
+            foreach ($outcome in @('TransferTerminal', 'StaleRejected')) {
+                $terminalLines = @(
+                    "event=filetransfer_regular_v4_frontier_repair_pressure_binding_committed; authority_id=$authority; predecessor_authority_id=(none); $scope; repair_request_key=$repairKey; install_generation=7; binding_state=Installed",
+                    "event=filetransfer_regular_v4_frontier_repair_settlement_accepted; authority_id=$authority; successor_authority_id=(none); successor_install_generation=7; outcome=$outcome; repair_request_key=$repairKey; $scope",
+                    "event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided; session_id=session-a; transfer_id=transfer-a; direction=inbound; authority_id=[redacted]; successor_authority_id=(none); current_authority_id=[redacted]; retained_predecessor_authority_id=(none); install_generation=7; settlement_outcome=$outcome; apply_status=Applied; current_authority_cleared=1; retained_predecessor_cleared=0",
+                    "event=filetransfer_regular_v4_frontier_repair_pressure_binding_retired; authority_id=$authority; predecessor_authority_id=(none); $scope; repair_request_key=$repairKey; install_generation=7; binding_state=Installed; install_boundary=settlement",
+                    "event=filetransfer_regular_v4_frontier_repair_contract_settled; authority_id=$authority; successor_authority_id=(none); repair_request_key=$repairKey; settlement_outcome=$outcome"
+                )
+                if (-not (Test-TunaGuiRegularV4FrontierRepairSettlementClosed -Lines $terminalLines)) {
+                    throw "exact terminal diagnostic cleanup was not accepted for $outcome"
+                }
+
+                $missingContract = @($terminalLines[0..3])
+                if (Test-TunaGuiRegularV4FrontierRepairSettlementClosed -Lines $missingContract) {
+                    throw "terminal diagnostic cleanup accepted missing contract settlement for $outcome"
+                }
+
+                $wrongContract = @($terminalLines)
+                $wrongContract[4] = $wrongContract[4].Replace(
+                    "settlement_outcome=$outcome",
+                    'settlement_outcome=ProgressObserved')
+                if (Test-TunaGuiRegularV4FrontierRepairSettlementClosed -Lines $wrongContract) {
+                    throw "terminal diagnostic cleanup accepted mutated contract settlement for $outcome"
+                }
+
+                $wrongFlags = @($terminalLines)
+                $wrongFlags[2] = $wrongFlags[2].Replace(
+                    'current_authority_cleared=1',
+                    'current_authority_cleared=0')
+                if (Test-TunaGuiRegularV4FrontierRepairSettlementClosed -Lines $wrongFlags) {
+                    throw "terminal diagnostic cleanup accepted wrong clear flags for $outcome"
+                }
+            }
+
             Write-Output 'gui-current-pressure-cleanup-correlation-ok'
             """;
 
@@ -1658,6 +1692,92 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             result.ExitCode == 0,
             $"Current-pressure GUI classification test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("gui-current-pressure-cleanup-correlation-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task BridgeRecoveryPayloadHoldRequiresExactRepairEscalation()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = Regex.Replace(guiText, @"(?m)^ {4}", string.Empty);
+        var fieldValueBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Test-TunaGuiLogLineHasEvent");
+        var hasEventBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineHasEvent",
+            "Test-TunaGuiLogLineFieldMatch");
+        var fieldMatchBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineFieldMatch",
+            "Test-TunaGuiRuntimeUnlockFileTransferOwnerRejectionUnresolved");
+        var payloadHoldBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiBridgeRecoveryExecutionPayloadHoldFailure",
+            "Test-TunaGuiRegularV4FrontierRepairSettlementClosed");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
+            function Test-TunaGuiLogLineHasEvent { {{hasEventBody}} }
+            function Test-TunaGuiLogLineFieldMatch { {{fieldMatchBody}} }
+            function Test-TunaGuiBridgeRecoveryExecutionPayloadHoldFailure { {{payloadHoldBody}} }
+
+            $writer = 'writer-payload-hold'
+            $scope = 'session_id=session-a; transfer_id=transfer-a; direction=outbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1'
+            $sourceScope = 'source_route=regular_nkn_v4_fast; source_protocol_version=4; source_live_route_epoch=0; source_runtime_generation=1; source_terminal_generation=0; source_leg_generation=1; source_transport_epoch=0; source_bridge_recovery_generation=0'
+            $authority = 'fta2-repair-replay-payload-hold'
+            $repairKey = 'regular_v4_peer_silence_safety_replay:0:0:64:1'
+            $lines = @(
+                "event=filetransfer_bridge_recovery_execution_command_issued; $scope; recovery_liveness_lease_generation=1; log_writer_id=$writer",
+                "event=nkn_bridge_recovery_execution_started; $scope; lease_generation=1; log_writer_id=$writer",
+                "event=nkn_bridge_recovery_submission_barrier_closed; $scope; lease_generation=1; submission_epoch=2; recovery_barrier_active=1; log_writer_id=$writer",
+                "event=filetransfer_regular_v4_frontier_repair_pressure_binding_committed; $scope; authority_id=$authority; install_generation=1; repair_request_key=$repairKey; log_writer_id=$writer",
+                "event=filetransfer_regular_v4_frontier_repair_authority_granted; $scope; authority_id=$authority; install_generation=1; repair_request_key=$repairKey; log_writer_id=$writer",
+                "event=nkn_bridge_recovery_execution_hard_restart_decided; $scope; lease_generation=1; decision_status=Started; remaining_total_ms=87503; log_writer_id=$writer",
+                "event=filetransfer_regular_v4_physical_send_lease_registered; session_id=session-a; transfer_id=transfer-a; direction=outbound; $sourceScope; send_kind=RegularV4Repair; repair_send=1; repair_request_key=$repairKey; log_writer_id=$writer",
+                "event=nkn_bridge_submission_rejected; stage=pre_wait; reason=bridge_submission_epoch_not_ready; channel=control; submission_epoch=2; recovery_barrier_active=1; log_writer_id=$writer",
+                "event=nkn_bridge_submission_rejected; stage=pre_wait; reason=bridge_submission_epoch_not_ready; channel=bulk; submission_epoch=2; recovery_barrier_active=1; log_writer_id=$writer",
+                "event=filetransfer_v4_repair_delivery_both_failed; session_id=session-a; transfer_id=transfer-a; log_writer_id=$writer",
+                "event=filetransfer_v4_sender_failed; session_id=session-a; transfer_id=transfer-a; log_writer_id=$writer"
+            )
+            if (-not (Test-TunaGuiBridgeRecoveryExecutionPayloadHoldFailure -Lines $lines)) {
+                throw 'exact repair payload-hold escalation was not classified'
+            }
+
+            $wrongSendKind = @($lines)
+            $wrongSendKind[6] = $wrongSendKind[6].Replace(
+                'send_kind=RegularV4Repair',
+                'send_kind=SessionHeartbeat')
+            if (Test-TunaGuiBridgeRecoveryExecutionPayloadHoldFailure -Lines $wrongSendKind) {
+                throw 'non-repair payload rejection was classified'
+            }
+
+            $releasedBeforeFailure = @(
+                $lines[0..9]
+                "event=nkn_bridge_recovery_submission_barrier_released; $scope; lease_generation=1; submission_epoch=2; log_writer_id=$writer"
+                $lines[10]
+            )
+            if (Test-TunaGuiBridgeRecoveryExecutionPayloadHoldFailure -Lines $releasedBeforeFailure) {
+                throw 'post-release sender failure was classified'
+            }
+
+            $heartbeatOnly = @($lines[0..5], $lines[7], $lines[8], $lines[10])
+            if (Test-TunaGuiBridgeRecoveryExecutionPayloadHoldFailure -Lines $heartbeatOnly) {
+                throw 'unlinked barrier rejection was classified'
+            }
+
+            Write-Output 'gui-bridge-recovery-payload-hold-correlation-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Bridge-recovery payload-hold GUI classification test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "gui-bridge-recovery-payload-hold-correlation-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
     }
 
     [Fact]

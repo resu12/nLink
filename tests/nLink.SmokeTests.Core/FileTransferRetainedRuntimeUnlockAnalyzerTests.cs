@@ -6539,6 +6539,99 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(false, "terminal_escalation", "1")]
+    [InlineData(true, "terminal_escalation", "1")]
+    [InlineData(false, "heartbeat_only", "0")]
+    [InlineData(true, "heartbeat_only", "0")]
+    [InlineData(false, "barrier_released", "0")]
+    [InlineData(true, "barrier_released", "0")]
+    public async Task AnalyzeRetained_BridgeRecoveryPayloadHold_ClassifiesOnlyTerminalRepairEscalation(
+        bool compact,
+        string mode,
+        string expectedUnresolvedCount)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_bridge_recovery_payload_hold";
+        const string writerId = "writer-bridge-recovery-payload-hold";
+        const string authorityId = "fta2-repair-replay-payload-hold";
+        const string repairKey = "regular_v4_peer_silence_safety_replay:0:0:64:1";
+        const string scope =
+            $"session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; " +
+            "direction=outbound; route=regular_nkn_v4_fast; protocol_version=4; " +
+            "live_route_epoch=0; runtime_generation=1; terminal_generation=0; " +
+            "leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; " +
+            "bridge_decision_generation=1";
+        var lines = new List<string>
+        {
+            LogLine($"event=filetransfer_route_selected; {scope}; runtime_profile=regular_nkn_v4_fast; frame_family=v4", secondsOffset: 0),
+            LogLine($"event=filetransfer_bridge_recovery_execution_command_issued; {scope}; recovery_liveness_lease_authority_id=fta2-recovery-lease-1; recovery_liveness_lease_generation=1; log_writer_id={writerId}; log_writer_sequence=1", secondsOffset: 1),
+            LogLine($"event=nkn_bridge_recovery_execution_started; {scope}; lease_generation=1; execution_mode=none; outcome=none; physical_execution_terminated=0; reason=bridge_recovery_execution_started; log_writer_id={writerId}; log_writer_sequence=2", secondsOffset: 2),
+            LogLine($"event=nkn_bridge_recovery_submission_barrier_closed; {scope}; lease_generation=1; submission_epoch=2; recovery_barrier_active=1; reason=bridge_recovery_execution_submission_barrier_reserved; log_writer_id={writerId}; log_writer_sequence=3", secondsOffset: 3),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_binding_committed; authority_id={authorityId}; predecessor_authority_id=(none); {scope}; route_publication_generation=1; route_commit_generation=0; repair_request_key={repairKey}; install_generation=1; binding_state=Installed; log_writer_id={writerId}; log_writer_sequence=4", secondsOffset: 4),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_authority_granted; authority_id={authorityId}; predecessor_authority_id=(none); {scope}; route_publication_generation=1; route_commit_generation=0; repair_request_key={repairKey}; install_generation=1; dispatch_authority_source=attached_installed_contract; log_writer_id={writerId}; log_writer_sequence=5", secondsOffset: 5),
+            LogLine($"event=nkn_bridge_recovery_execution_hard_restart_decided; {scope}; lease_generation=1; decision_status=Started; execution_mode=hard; trigger=planned; remaining_total_ms=87503; reason=bridge_recovery_execution_hard_restart_started; log_writer_id={writerId}; log_writer_sequence=6", secondsOffset: 6)
+        };
+
+        if (string.Equals(mode, "heartbeat_only", StringComparison.Ordinal))
+        {
+            lines.Add(LogLine($"event=nkn_bridge_submission_rejected; stage=pre_wait; reason=bridge_submission_epoch_not_ready; channel=control; submission_epoch=2; recovery_barrier_active=1; log_writer_id={writerId}; log_writer_sequence=7", secondsOffset: 7));
+            lines.Add(LogLine($"event=nkn_bridge_submission_rejected; stage=pre_wait; reason=bridge_submission_epoch_not_ready; channel=bulk; submission_epoch=2; recovery_barrier_active=1; log_writer_id={writerId}; log_writer_sequence=8", secondsOffset: 8));
+            lines.Add(LogLine($"event=session_liveness_heartbeat_send_failed; session_id=sess_runtime_unlock_dispatch_proof; generation=1; transfer_id={transferId}; log_writer_id={writerId}; log_writer_sequence=9", secondsOffset: 9));
+        }
+        else
+        {
+            lines.Add(LogLine($"event=filetransfer_regular_v4_physical_send_lease_registered; direction=outbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; send_lease_generation=1; source_route=regular_nkn_v4_fast; source_protocol_version=4; source_live_route_epoch=0; source_runtime_generation=1; source_terminal_generation=0; source_leg_generation=1; source_transport_epoch=0; source_bridge_recovery_generation=0; source_route_publication_generation=1; source_data_session_generation=1; send_kind=RegularV4Repair; repair_send=1; repair_request_key={repairKey}; log_writer_id={writerId}; log_writer_sequence=7", secondsOffset: 7));
+            lines.Add(LogLine($"event=nkn_bridge_submission_rejected; stage=pre_wait; reason=bridge_submission_epoch_not_ready; channel=control; submission_epoch=2; recovery_barrier_active=1; log_writer_id={writerId}; log_writer_sequence=8", secondsOffset: 8));
+            lines.Add(LogLine($"event=nkn_bridge_submission_rejected; stage=pre_wait; reason=bridge_submission_epoch_not_ready; channel=bulk; submission_epoch=2; recovery_barrier_active=1; log_writer_id={writerId}; log_writer_sequence=9", secondsOffset: 9));
+            lines.Add(LogLine($"event=filetransfer_v4_repair_delivery_both_failed; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; first_lane=control; second_lane=bulk; log_writer_id={writerId}; log_writer_sequence=10", secondsOffset: 10));
+            if (string.Equals(mode, "barrier_released", StringComparison.Ordinal))
+            {
+                lines.Add(LogLine($"event=nkn_bridge_recovery_submission_barrier_released; {scope}; lease_generation=1; submission_epoch=2; reason=bridge_recovery_execution_ready; log_writer_id={writerId}; log_writer_sequence=11", secondsOffset: 11));
+            }
+            lines.Add(LogLine($"event=filetransfer_v4_sender_failed; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; error_code=read_failed; reason=File-transfer V4 sender transport send failed.; log_writer_id={writerId}; log_writer_sequence=12", secondsOffset: 12));
+        }
+        lines.Add(LogLine($"event=file_transfer_outbound_terminal; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=outbound; state=Failed; error_code=read_failed; log_writer_id={writerId}; log_writer_sequence=13", secondsOffset: 13));
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        if (expectedUnresolvedCount == "1")
+        {
+            Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
+            Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+            Assert.Equal(
+                "filetransfer_bridge_recovery_execution_payload_hold_missing",
+                verdict["first_proof_chain_failure_class"]);
+            Assert.Equal("filetransfer_v4_sender_failed", verdict["first_proof_chain_failure_event"]);
+            Assert.Equal(
+                "bridge_recovery_submission_hold_rejection_escalated_to_terminal",
+                verdict["first_proof_chain_failure_reason"]);
+            Assert.Equal("12", verdict["first_proof_chain_failure_writer_sequence"]);
+        }
+
+        Assert.Equal(expectedUnresolvedCount, verdict["filetransfer_bridge_recovery_execution_payload_hold_missing_raw_count"]);
+        Assert.Equal(expectedUnresolvedCount, verdict["filetransfer_bridge_recovery_execution_payload_hold_missing_distinct_count"]);
+        Assert.Equal("0", verdict["filetransfer_bridge_recovery_execution_payload_hold_missing_recovered_count"]);
+        Assert.Equal(expectedUnresolvedCount, verdict["filetransfer_bridge_recovery_execution_payload_hold_missing_unresolved_count"]);
+        Assert.Equal(expectedUnresolvedCount == "1" ? "fail" : "none", verdict["filetransfer_bridge_recovery_execution_payload_hold_verdict"]);
+        Assert.Equal("0", verdict["filetransfer_bridge_recovery_execution_startup_payload_isolation_missing_unresolved_count"]);
+        Assert.Equal("0", verdict["filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_unresolved_count"]);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task AnalyzeRetained_CurrentArtifactClosureHoldLostAfterSettledRepair_OwnsFirstProofEdge(
