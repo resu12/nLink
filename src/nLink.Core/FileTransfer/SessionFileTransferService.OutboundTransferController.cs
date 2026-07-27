@@ -1434,7 +1434,9 @@ public sealed partial class SessionFileTransferService
             string source = "filetransfer_snapshot",
             string reason = "active_transfer_snapshot",
             string? observationIdentity = null,
-            long? exactObservedUtcMs = null)
+            long? exactObservedUtcMs = null,
+            FileTransferReceiveRecoveryHealthEvaluationEvidence?
+                healthEvaluationEvidence = null)
     {
         var observationGeneration =
             NextReceiveRecoveryObservationGeneration(
@@ -1475,7 +1477,10 @@ public sealed partial class SessionFileTransferService
             observationGeneration,
             normalizedSource,
             normalizedReason,
-            observedUtc);
+            observedUtc)
+        {
+            HealthEvaluationEvidence = healthEvaluationEvidence,
+        };
         if (context.CurrentRuntimeOwner is not { } owner ||
             context.CurrentRoutePublicationToken is not { } publication ||
             context.CurrentTransferLeg is not { } leg ||
@@ -1510,7 +1515,10 @@ public sealed partial class SessionFileTransferService
                     normalizedReason,
                     exactObservationIdentity,
                     observationGeneration,
-                    observedUtc.ToUnixTimeMilliseconds()),
+                    observedUtc.ToUnixTimeMilliseconds())
+                {
+                    HealthEvaluationEvidence = healthEvaluationEvidence,
+                },
         };
     }
 
@@ -1521,7 +1529,9 @@ public sealed partial class SessionFileTransferService
             string source = "filetransfer_snapshot",
             string reason = "active_transfer_snapshot",
             string? observationIdentity = null,
-            long? exactObservedUtcMs = null)
+            long? exactObservedUtcMs = null,
+            FileTransferReceiveRecoveryHealthEvaluationEvidence?
+                healthEvaluationEvidence = null)
     {
         var observationGeneration =
             NextReceiveRecoveryObservationGeneration(
@@ -1562,7 +1572,10 @@ public sealed partial class SessionFileTransferService
             observationGeneration,
             normalizedSource,
             normalizedReason,
-            observedUtc);
+            observedUtc)
+        {
+            HealthEvaluationEvidence = healthEvaluationEvidence,
+        };
         if (context.CurrentRuntimeOwner is not { } owner ||
             context.CurrentRoutePublicationToken is not { } publication ||
             context.CurrentTransferLeg is not { } leg ||
@@ -1597,7 +1610,10 @@ public sealed partial class SessionFileTransferService
                     normalizedReason,
                     exactObservationIdentity,
                     observationGeneration,
-                    observedUtc.ToUnixTimeMilliseconds()),
+                    observedUtc.ToUnixTimeMilliseconds())
+                {
+                    HealthEvaluationEvidence = healthEvaluationEvidence,
+                },
         };
     }
 

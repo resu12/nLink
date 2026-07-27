@@ -558,6 +558,13 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                         reason,
                         DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())));
 
+        internal void RaiseBridgeRecoveryEvaluation(
+            FileTransferBridgeRecoveryEvaluationRequest request)
+            => bridgeRecoveryEvaluationRequested?.Invoke(
+                this,
+                new FileTransferBridgeRecoveryEvaluationRequestedEventArgs(
+                    request));
+
         void IFileTransferBridgeRecoveryExecutionBridge.ObserveBridgeRecoveryExecutionReceiptDecision(
             FileTransferBridgeRecoveryExecutionReceipt receipt,
             bool accepted,

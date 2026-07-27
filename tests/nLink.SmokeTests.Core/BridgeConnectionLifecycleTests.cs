@@ -2309,6 +2309,9 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Assert.Equal(
                 "transfer-ping-timeout-active-only",
                 evaluation.TransferId);
+            Assert.Equal(
+                FileTransferBridgeRecoveryEvaluationKind.PingTimeout,
+                evaluation.EvaluationKind);
             Assert.Equal("ping_timeout", evaluation.ObservationKind);
             Assert.Equal("bridge_ping_timeout", evaluation.Reason);
             var logText = LocalOperationalLog.GetRecentLogText();
@@ -2527,6 +2530,9 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Assert.Equal(
                 "transfer-ping-timeout-recovery",
                 evaluation.TransferId);
+            Assert.Equal(
+                FileTransferBridgeRecoveryEvaluationKind.PingTimeout,
+                evaluation.EvaluationKind);
             Assert.Equal("ping_timeout", evaluation.ObservationKind);
             Assert.Equal("bridge_ping_timeout", evaluation.Reason);
             Assert.True(evaluation.ObservationGeneration > 0);

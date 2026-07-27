@@ -175,6 +175,13 @@ internal sealed record FileTransferReceiveRecoveryObservationSnapshot(
     string Reason,
     DateTimeOffset ObservedUtc)
 {
+    internal FileTransferReceiveRecoveryHealthEvaluationEvidence?
+        HealthEvaluationEvidence
+    {
+        get;
+        init;
+    }
+
     internal FileTransferReceiveRecoveryObservation? CoordinatorObservation
     {
         get;

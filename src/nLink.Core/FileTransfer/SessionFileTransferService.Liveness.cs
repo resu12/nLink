@@ -377,10 +377,10 @@ public sealed partial class SessionFileTransferService
                         TryRequestFileTransferReceiveRecovery(recoveryRequest);
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_receive_recovery_evaluation_requested; session_id={FormatProtocolLogValue(recoveryRequest?.SessionId ?? evaluation.SessionId)}; transfer_id={FormatProtocolLogValue(recoveryRequest?.TransferId ?? evaluation.TransferId)}; direction={recoveryRequest?.Direction.ToString().ToLowerInvariant() ?? evaluation.Direction?.ToString().ToLowerInvariant() ?? "unknown"}; observation_kind={FormatProtocolLogValue(evaluation.ObservationKind)}; observation_generation={evaluation.ObservationGeneration}; observation_source=infra_health_evidence; observation_reason={FormatProtocolLogValue(evaluation.Reason)}; coordinator_evaluation_requested={(recoveryRequest is not null ? 1 : 0)}; receive_recovery_operation_issued={(requested ? 1 : 0)}; decision_reason={FormatProtocolLogValue(dispositionReason)}");
+            $"event=filetransfer_receive_recovery_evaluation_requested; session_id={FormatProtocolLogValue(recoveryRequest?.SessionId ?? evaluation.SessionId)}; transfer_id={FormatProtocolLogValue(recoveryRequest?.TransferId ?? evaluation.TransferId)}; direction={recoveryRequest?.Direction.ToString().ToLowerInvariant() ?? evaluation.Direction?.ToString().ToLowerInvariant() ?? "unknown"}; evaluation_kind={FormatProtocolLogValue(evaluation.EvaluationKind.ToString())}; observation_kind={FormatProtocolLogValue(evaluation.ObservationKind)}; observation_generation={evaluation.ObservationGeneration}; observation_source=infra_health_evidence; observation_reason={FormatProtocolLogValue(evaluation.Reason)}; coordinator_evaluation_requested={(recoveryRequest is not null ? 1 : 0)}; receive_recovery_operation_issued={(requested ? 1 : 0)}; decision_reason={FormatProtocolLogValue(dispositionReason)}");
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_bridge_recovery_evaluation_decided; session_id={FormatProtocolLogValue(recoveryRequest?.SessionId ?? evaluation.SessionId)}; transfer_id={FormatProtocolLogValue(recoveryRequest?.TransferId ?? evaluation.TransferId)}; direction={recoveryRequest?.Direction.ToString().ToLowerInvariant() ?? evaluation.Direction?.ToString().ToLowerInvariant() ?? "unknown"}; observation_kind={FormatProtocolLogValue(evaluation.ObservationKind)}; observation_generation={evaluation.ObservationGeneration}; consecutive_observations={evaluation.ConsecutiveObservations}; frames_sent_since_last={evaluation.FramesSentSinceLast}; messages_received_since_last={evaluation.MessagesReceivedSinceLast}; control_last_received_age_ms={evaluation.ControlLastReceivedAgeMs}; bulk_last_received_age_ms={evaluation.BulkLastReceivedAgeMs}; coordinator_evaluation_requested={(recoveryRequest is not null ? 1 : 0)}; bridge_recovery_command_issued={(requested ? 1 : 0)}; decision_reason={FormatProtocolLogValue(dispositionReason)}");
+            $"event=filetransfer_bridge_recovery_evaluation_decided; session_id={FormatProtocolLogValue(recoveryRequest?.SessionId ?? evaluation.SessionId)}; transfer_id={FormatProtocolLogValue(recoveryRequest?.TransferId ?? evaluation.TransferId)}; direction={recoveryRequest?.Direction.ToString().ToLowerInvariant() ?? evaluation.Direction?.ToString().ToLowerInvariant() ?? "unknown"}; evaluation_kind={FormatProtocolLogValue(evaluation.EvaluationKind.ToString())}; observation_kind={FormatProtocolLogValue(evaluation.ObservationKind)}; observation_generation={evaluation.ObservationGeneration}; consecutive_observations={evaluation.ConsecutiveObservations}; frames_sent_since_last={evaluation.FramesSentSinceLast}; messages_received_since_last={evaluation.MessagesReceivedSinceLast}; control_last_received_age_ms={evaluation.ControlLastReceivedAgeMs}; bulk_last_received_age_ms={evaluation.BulkLastReceivedAgeMs}; coordinator_evaluation_requested={(recoveryRequest is not null ? 1 : 0)}; bridge_recovery_command_issued={(requested ? 1 : 0)}; decision_reason={FormatProtocolLogValue(dispositionReason)}");
     }
 
     private FileTransferReceiveRecoveryRequest?
@@ -427,6 +427,8 @@ public sealed partial class SessionFileTransferService
             outbound.LastBridgeRecoveryEvaluationObservationGeneration =
                 evaluation.ObservationGeneration;
             reason = "bridge_recovery_evaluation_forwarded";
+            var evidence = CreateReceiveRecoveryHealthEvaluationEvidence(
+                evaluation);
             return new FileTransferReceiveRecoveryRequest(
                 outbound.SessionId,
                 outbound.TransferId,
@@ -439,7 +441,8 @@ public sealed partial class SessionFileTransferService
                     evaluation.ObservationKind,
                     evaluation.Reason,
                     $"{evaluation.ObservationKind}:{evaluation.ObservationGeneration}",
-                    evaluation.ObservedUtcMs),
+                    evaluation.ObservedUtcMs,
+                    evidence),
             };
         }
 
@@ -453,6 +456,8 @@ public sealed partial class SessionFileTransferService
         inbound.LastBridgeRecoveryEvaluationObservationGeneration =
             evaluation.ObservationGeneration;
         reason = "bridge_recovery_evaluation_forwarded";
+        var inboundEvidence = CreateReceiveRecoveryHealthEvaluationEvidence(
+            evaluation);
         return new FileTransferReceiveRecoveryRequest(
             inbound.SessionId,
             inbound.TransferId,
@@ -465,9 +470,25 @@ public sealed partial class SessionFileTransferService
                 evaluation.ObservationKind,
                 evaluation.Reason,
                 $"{evaluation.ObservationKind}:{evaluation.ObservationGeneration}",
-                evaluation.ObservedUtcMs),
+                evaluation.ObservedUtcMs,
+                inboundEvidence),
         };
     }
+
+    private static FileTransferReceiveRecoveryHealthEvaluationEvidence
+        CreateReceiveRecoveryHealthEvaluationEvidence(
+            FileTransferBridgeRecoveryEvaluationRequest evaluation)
+        => new(
+            evaluation.EvaluationKind,
+            evaluation.ObservationKind,
+            evaluation.Reason,
+            evaluation.ObservationGeneration,
+            evaluation.ObservedUtcMs,
+            evaluation.ConsecutiveObservations,
+            evaluation.FramesSentSinceLast,
+            evaluation.MessagesReceivedSinceLast,
+            evaluation.ControlLastReceivedAgeMs,
+            evaluation.BulkLastReceivedAgeMs);
 
     private bool TryRequestFileTransferReceiveRecoveryIfCurrent(
         FileTransferReceiveRecoveryRequest request,

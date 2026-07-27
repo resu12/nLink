@@ -2056,6 +2056,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     }
 
     private void EmitFileTransferBridgeRecoveryEvaluation(
+        FileTransferBridgeRecoveryEvaluationKind evaluationKind,
         string observationKind,
         string reason,
         int consecutiveObservations = 0,
@@ -2073,6 +2074,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             SessionId: null,
             TransferId: transfers.Length == 1 ? transfers[0] : null,
             Direction: null,
+            EvaluationKind: evaluationKind,
             ObservationKind: NormalizeBridgeRecoveryExecutionReason(
                 observationKind,
                 "bridge_recovery_observation"),
@@ -2089,7 +2091,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             BulkLastReceivedAgeMs: bulkLastReceivedAgeMs);
         Log(
             "event=nkn_bridge_recovery_evaluation_requested; " +
-            $"observation_kind={SanitizeLogToken(request.ObservationKind)}; reason={SanitizeLogToken(request.Reason)}; observation_generation={request.ObservationGeneration}; observed_utc_ms={request.ObservedUtcMs}; transfer_id={SanitizeLogToken(request.TransferId ?? "none")}; consecutive_observations={request.ConsecutiveObservations}; frames_sent_since_last={request.FramesSentSinceLast}; messages_received_since_last={request.MessagesReceivedSinceLast}; control_last_received_age_ms={request.ControlLastReceivedAgeMs}; bulk_last_received_age_ms={request.BulkLastReceivedAgeMs}; active_file_transfer_sessions={Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions))}; active_file_transfer_runtime_sessions={activeFileTransferRuntimeTransfers.Count}");
+            $"evaluation_kind={SanitizeLogToken(request.EvaluationKind.ToString())}; observation_kind={SanitizeLogToken(request.ObservationKind)}; reason={SanitizeLogToken(request.Reason)}; observation_generation={request.ObservationGeneration}; observed_utc_ms={request.ObservedUtcMs}; transfer_id={SanitizeLogToken(request.TransferId ?? "none")}; consecutive_observations={request.ConsecutiveObservations}; frames_sent_since_last={request.FramesSentSinceLast}; messages_received_since_last={request.MessagesReceivedSinceLast}; control_last_received_age_ms={request.ControlLastReceivedAgeMs}; bulk_last_received_age_ms={request.BulkLastReceivedAgeMs}; active_file_transfer_sessions={Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions))}; active_file_transfer_runtime_sessions={activeFileTransferRuntimeTransfers.Count}");
         BridgeRecoveryEvaluationRequested?.Invoke(
             this,
             new FileTransferBridgeRecoveryEvaluationRequestedEventArgs(request));
@@ -4757,6 +4759,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         if (fileTransferContextActive)
         {
             EmitFileTransferBridgeRecoveryEvaluation(
+                FileTransferBridgeRecoveryEvaluationKind.ReceiveStall,
                 "receive_stall",
                 stallReason,
                 qualifiedConsecutiveWindows,
@@ -7082,6 +7085,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                     if (GetActiveFileTransferSessionCountForPingRecovery() > 0)
                     {
                         EmitFileTransferBridgeRecoveryEvaluation(
+                            FileTransferBridgeRecoveryEvaluationKind.PingTimeout,
                             "ping_timeout",
                             "bridge_ping_timeout",
                             consecutiveMisses,
@@ -7240,6 +7244,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         }
 
         EmitFileTransferBridgeRecoveryEvaluation(
+            FileTransferBridgeRecoveryEvaluationKind.PingTimeout,
             "ping_timeout",
             "bridge_ping_timeout",
             consecutiveObservations: 3,
@@ -7270,6 +7275,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         if (activeFileTransfer && executionCommand is null)
         {
             EmitFileTransferBridgeRecoveryEvaluation(
+                FileTransferBridgeRecoveryEvaluationKind.Diagnostic,
                 "restart_requested_without_command",
                 "bridge_restart_execution_command_missing");
             Log(

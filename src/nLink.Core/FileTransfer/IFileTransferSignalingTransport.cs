@@ -158,10 +158,19 @@ internal readonly record struct FileTransferBridgeRecoveryExecutionStartResult(
         Completion is not null;
 }
 
+internal enum FileTransferBridgeRecoveryEvaluationKind
+{
+    Unknown = 0,
+    ReceiveStall = 1,
+    PingTimeout = 2,
+    Diagnostic = 3,
+}
+
 internal readonly record struct FileTransferBridgeRecoveryEvaluationRequest(
     string? SessionId,
     string? TransferId,
     FileTransferDirection? Direction,
+    FileTransferBridgeRecoveryEvaluationKind EvaluationKind,
     string ObservationKind,
     string Reason,
     long ObservationGeneration,
@@ -173,6 +182,7 @@ internal readonly record struct FileTransferBridgeRecoveryEvaluationRequest(
     long BulkLastReceivedAgeMs = -1)
 {
     public bool IsDefault =>
+        EvaluationKind == FileTransferBridgeRecoveryEvaluationKind.Unknown ||
         string.IsNullOrWhiteSpace(ObservationKind) ||
         string.IsNullOrWhiteSpace(Reason) ||
         !string.Equals(ObservationKind, ObservationKind.Trim(), StringComparison.Ordinal) ||

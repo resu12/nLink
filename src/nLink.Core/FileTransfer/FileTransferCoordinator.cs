@@ -1335,6 +1335,29 @@ internal readonly record struct RuntimeUnlockRetryDispatchSuccessorDecision(
         AuthorizationDecision is { Granted: true };
 }
 
+internal readonly record struct FileTransferReceiveRecoveryHealthEvaluationEvidence(
+    FileTransferBridgeRecoveryEvaluationKind Kind,
+    string ObservationKind,
+    string Reason,
+    long EvidenceGeneration,
+    long ObservedUtcMs,
+    int ConsecutiveObservations,
+    long FramesSentSinceLast,
+    long MessagesReceivedSinceLast,
+    long ControlLastReceivedAgeMs,
+    long BulkLastReceivedAgeMs)
+{
+    public bool IsDefault =>
+        Kind == FileTransferBridgeRecoveryEvaluationKind.Unknown ||
+        string.IsNullOrWhiteSpace(ObservationKind) ||
+        string.IsNullOrWhiteSpace(Reason) ||
+        EvidenceGeneration <= 0 ||
+        ObservedUtcMs <= 0 ||
+        ConsecutiveObservations < 0 ||
+        FramesSentSinceLast < 0 ||
+        MessagesReceivedSinceLast < 0;
+}
+
 internal readonly record struct FileTransferReceiveRecoveryObservation(
     string SessionId,
     string TransferId,
@@ -1359,6 +1382,9 @@ internal readonly record struct FileTransferReceiveRecoveryObservation(
     long ObservationGeneration,
     long ObservedUtcMs)
 {
+    public FileTransferReceiveRecoveryHealthEvaluationEvidence?
+        HealthEvaluationEvidence { get; init; }
+
     public bool IsDefault =>
         string.IsNullOrWhiteSpace(SessionId) ||
         string.IsNullOrWhiteSpace(TransferId) ||
@@ -1374,7 +1400,8 @@ internal readonly record struct FileTransferReceiveRecoveryObservation(
         string.IsNullOrWhiteSpace(Reason) ||
         string.IsNullOrWhiteSpace(ObservationIdentity) ||
         ObservationGeneration <= 0 ||
-        ObservedUtcMs <= 0;
+        ObservedUtcMs <= 0 ||
+        HealthEvaluationEvidence is { IsDefault: true };
 }
 
 internal readonly record struct FileTransferReceiveRecoveryOperationAuthority(
@@ -1386,6 +1413,10 @@ internal readonly record struct FileTransferReceiveRecoveryOperationAuthority(
     long OperationGeneration,
     FileTransferAuthorityId AuthorityId)
 {
+    public FileTransferAuthorityId? PredecessorAuthorityId { get; init; }
+
+    public long PredecessorOperationGeneration { get; init; }
+
     public bool IsDefault =>
         Observation.IsDefault ||
         BridgeRecoveryDecision.IsDefault ||
@@ -1432,7 +1463,11 @@ internal readonly record struct FileTransferReceiveRecoveryOperationAuthority(
         ExecutionCommand.Decision != BridgeRecoveryDecision ||
         ExecutionCommand.RecoveryLivenessLease != RecoveryLivenessLease ||
         OperationGeneration <= 0 ||
-        AuthorityId.IsDefault;
+        AuthorityId.IsDefault ||
+        (PredecessorAuthorityId is null) !=
+            (PredecessorOperationGeneration == 0) ||
+        PredecessorAuthorityId is { IsDefault: true } ||
+        PredecessorOperationGeneration < 0;
 }
 
 internal enum FileTransferReceiveRecoveryExecutionState
@@ -1487,6 +1522,8 @@ internal readonly record struct FileTransferReceiveRecoveryOperation(
     long LivenessDeferralDeadlineUtcMs = 0,
     FileTransferRecoveryLivenessDeferralGrant? LivenessDeferralGrant = null)
 {
+    public long ExecutionReceiptObservedUtcMs { get; init; }
+
     public bool IsDefault => Authority.IsDefault;
 
     public FileTransferBridgeRecoveryExecutionOutcome? LifecycleOutcome =>
@@ -12098,9 +12135,26 @@ internal static class FileTransferCoordinator
                            currentRepair.AuthorityId == transition.PressureBinding.Authority.AuthorityId
             ? pressureCommit.State with { CurrentRepairReplayDecision = null }
             : pressureCommit.State;
-        var committedState = ApplyIssuedReceiveRecoveryOperation(
+        var operationCommit = IssueReceiveRecoveryOperation(
             settledState,
-            transition.ReceiveRecoveryOperation);
+            transition.ReceiveRecoveryOperation.Observation,
+            BridgeRecoveryKind.BridgeReceiveStallRecovery,
+            transition.ReceiveRecoveryOperation.ExecutionCommand
+                .CheckpointRequestId);
+        if (operationCommit.Status !=
+                FileTransferReceiveRecoveryTransitionStatus.Accepted ||
+            operationCommit.Authority != transition.ReceiveRecoveryOperation)
+        {
+            return RegularV4PressureRecoveryHandoffDecision(
+                state,
+                RegularV4FrontierRepairPressureRecoveryHandoffStatus.Rejected,
+                operationCommit.Status ==
+                    FileTransferReceiveRecoveryTransitionStatus.Accepted
+                    ? "regular_v4_frontier_repair_pressure_recovery_handoff_operation_mismatch"
+                    : operationCommit.Reason);
+        }
+
+        var committedState = operationCommit.State;
         var committedPressureState =
             committedState.PersistentState.RegularV4FrontierRepairPressure with
             {
@@ -12241,14 +12295,6 @@ internal static class FileTransferCoordinator
     {
         rejectionReason = "accepted";
         var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
-        if (state.PersistentState.FileTransferReceiveRecovery
-                .CurrentOperation is not null)
-        {
-            rejectionReason =
-                "filetransfer_receive_recovery_operation_conflict";
-            return false;
-        }
-
         if (state.IsTerminal)
         {
             rejectionReason = "terminal_state";
@@ -12389,6 +12435,40 @@ internal static class FileTransferCoordinator
                     "regular_v4_frontier_repair_pressure_recovery_handoff_operation_mismatch";
                 return false;
             }
+        }
+
+        var projectedPressureState = pressureState with
+        {
+            PendingBinding = null,
+            PendingInstallCommand = null,
+            InstalledBinding = null,
+            InstalledInstallCommand = null,
+            InstalledInstallReceipt = null,
+            LastSettlement = expectedSettlement,
+        };
+        var projectedState = state with
+        {
+            CurrentRepairReplayDecision = null,
+            PersistentState = state.PersistentState with
+            {
+                RegularV4FrontierRepairPressure = projectedPressureState,
+            },
+        };
+        var projectedOperation = IssueReceiveRecoveryOperation(
+            projectedState,
+            observation,
+            BridgeRecoveryKind.BridgeReceiveStallRecovery,
+            observation.CheckpointRequestId);
+        if (projectedOperation.Status !=
+                FileTransferReceiveRecoveryTransitionStatus.Accepted ||
+            projectedOperation.Authority != transition.ReceiveRecoveryOperation)
+        {
+            rejectionReason =
+                projectedOperation.Status ==
+                    FileTransferReceiveRecoveryTransitionStatus.Accepted
+                    ? "regular_v4_frontier_repair_pressure_recovery_handoff_operation_mismatch"
+                    : projectedOperation.Reason;
+            return false;
         }
 
         return true;
@@ -13671,21 +13751,37 @@ internal static class FileTransferCoordinator
             };
 
         var recoveryState = state.PersistentState.FileTransferReceiveRecovery;
+        FileTransferReceiveRecoveryOperation? completedUnprovenPredecessor =
+            null;
         if (recoveryState.CurrentOperation is { } current)
         {
-            return current.Authority.Observation == observation &&
-                   current.Authority.BridgeRecoveryDecision.RecoveryKind == recoveryKind &&
-                   string.Equals(
-                       current.Authority.ExecutionCommand.CheckpointRequestId,
-                       checkpointRequestId,
-                       StringComparison.Ordinal)
-                ? Decision(
+            if (current.Authority.Observation == observation &&
+                current.Authority.BridgeRecoveryDecision.RecoveryKind ==
+                    recoveryKind &&
+                string.Equals(
+                    current.Authority.ExecutionCommand.CheckpointRequestId,
+                    checkpointRequestId,
+                    StringComparison.Ordinal))
+            {
+                return Decision(
                     FileTransferReceiveRecoveryTransitionStatus.Idempotent,
                     "filetransfer_receive_recovery_operation_duplicate",
-                    current.Authority)
-                : Decision(
+                    current.Authority);
+            }
+
+            if (!CanSupersedeCompletedUnprovenReceiveRecoveryOperation(
+                    state,
+                    current,
+                    observation,
+                    recoveryKind,
+                    checkpointRequestId))
+            {
+                return Decision(
                     FileTransferReceiveRecoveryTransitionStatus.Rejected,
                     "filetransfer_receive_recovery_operation_conflict");
+            }
+
+            completedUnprovenPredecessor = current;
         }
 
         if (recoveryState.LastTerminalOperation is { } terminal)
@@ -13816,15 +13912,164 @@ internal static class FileTransferCoordinator
             operationGeneration,
             IssueReceiveRecoveryOperationAuthorityId(
                 state,
-                operationGeneration));
+                operationGeneration))
+        {
+            PredecessorAuthorityId =
+                completedUnprovenPredecessor?.Authority.AuthorityId,
+            PredecessorOperationGeneration =
+                completedUnprovenPredecessor?.Authority.OperationGeneration ??
+                0,
+        };
+        var issuanceState = completedUnprovenPredecessor is { } predecessor
+            ? ApplyCompletedUnprovenReceiveRecoverySupersession(
+                state,
+                predecessor)
+            : state;
         var issuedState = ApplyIssuedReceiveRecoveryOperation(
-            state,
+            issuanceState,
             authority);
         return Decision(
             FileTransferReceiveRecoveryTransitionStatus.Accepted,
-            "filetransfer_receive_recovery_operation_issued",
+            completedUnprovenPredecessor is null
+                ? "filetransfer_receive_recovery_operation_issued"
+                : "filetransfer_receive_recovery_operation_successor_issued",
             authority,
             issuedState);
+    }
+
+    private static bool CanSupersedeCompletedUnprovenReceiveRecoveryOperation(
+        FileTransferCoordinatorState state,
+        FileTransferReceiveRecoveryOperation predecessor,
+        FileTransferReceiveRecoveryObservation observation,
+        BridgeRecoveryKind recoveryKind,
+        string? checkpointRequestId)
+    {
+        if (predecessor.ExecutionState !=
+                FileTransferReceiveRecoveryExecutionState.Completed ||
+            predecessor.ExecutionReceipt is not
+            {
+                Outcome:
+                    FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            } receipt ||
+            receipt.Command != predecessor.Authority.ExecutionCommand ||
+            predecessor.ExecutionReceiptObservedUtcMs <= 0 ||
+            predecessor.ClosureState !=
+                FileTransferReceiveRecoveryClosureState.Retained ||
+            predecessor.ClosureGeneration <= 0 ||
+            predecessor.ReceiveProof is not null ||
+            predecessor.HeldRetryRequest is not null ||
+            predecessor.ReservedRetryRequest is not null ||
+            predecessor.ReservedRetryAuthority is not null ||
+            predecessor.ConsumingInstallReceipt is not null ||
+            predecessor.Authority.RecoveryLivenessLease is not
+                { State: RecoveryLivenessLeaseState.Active } activeLease ||
+            predecessor.RetiredRecoveryLivenessLease is not { } retiredLease ||
+            retiredLease != (activeLease with
+            {
+                State = RecoveryLivenessLeaseState.Retired,
+                Reason = NormalizeReason(receipt.Reason),
+            }) ||
+            predecessor.Authority.BridgeRecoveryDecision.RecoveryKind !=
+                recoveryKind ||
+            recoveryKind != BridgeRecoveryKind.BridgeReceiveStallRecovery ||
+            !string.Equals(
+                predecessor.Authority.ExecutionCommand.CheckpointRequestId,
+                checkpointRequestId,
+                StringComparison.Ordinal) ||
+            observation.HealthEvaluationEvidence is not
+                { IsDefault: false } healthEvidence ||
+            healthEvidence.Kind is not (
+                FileTransferBridgeRecoveryEvaluationKind.PingTimeout or
+                FileTransferBridgeRecoveryEvaluationKind.ReceiveStall) ||
+            healthEvidence.ObservedUtcMs <=
+                predecessor.ExecutionReceiptObservedUtcMs ||
+            observation.ObservedUtcMs != healthEvidence.ObservedUtcMs ||
+            observation.ObservationGeneration <=
+                predecessor.Authority.Observation.ObservationGeneration ||
+            healthEvidence.EvidenceGeneration <=
+                (predecessor.Authority.Observation.HealthEvaluationEvidence
+                    ?.EvidenceGeneration ?? 0) ||
+            !string.Equals(
+                observation.Source,
+                healthEvidence.ObservationKind,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                observation.Reason,
+                healthEvidence.Reason,
+                StringComparison.Ordinal) ||
+            !ReceiveRecoveryObservationScopeEquals(
+                predecessor.Authority.Observation,
+                observation) ||
+            !TryValidateReceiveRecoveryObservationCurrent(
+                state,
+                observation,
+                checkpointRequestId,
+                out _))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool ReceiveRecoveryObservationScopeEquals(
+        FileTransferReceiveRecoveryObservation left,
+        FileTransferReceiveRecoveryObservation right)
+        => string.Equals(left.SessionId, right.SessionId, StringComparison.Ordinal) &&
+           string.Equals(left.TransferId, right.TransferId, StringComparison.Ordinal) &&
+           left.Direction == right.Direction &&
+           left.Route == right.Route &&
+           string.Equals(left.RouteToken, right.RouteToken, StringComparison.Ordinal) &&
+           left.ProtocolVersion == right.ProtocolVersion &&
+           left.LiveRouteEpoch == right.LiveRouteEpoch &&
+           left.RuntimeOwner == right.RuntimeOwner &&
+           left.RoutePublication == right.RoutePublication &&
+           left.RouteCommit == right.RouteCommit &&
+           left.TerminalGeneration == right.TerminalGeneration &&
+           left.LegGeneration == right.LegGeneration &&
+           left.TransportEpoch == right.TransportEpoch &&
+           left.BridgeRecoveryGeneration == right.BridgeRecoveryGeneration &&
+           string.Equals(
+               left.CheckpointRequestId,
+               right.CheckpointRequestId,
+               StringComparison.Ordinal) &&
+           string.Equals(
+               left.DataSessionIdentity,
+               right.DataSessionIdentity,
+               StringComparison.Ordinal) &&
+           left.DataSessionGeneration == right.DataSessionGeneration;
+
+    private static FileTransferCoordinatorState
+        ApplyCompletedUnprovenReceiveRecoverySupersession(
+            FileTransferCoordinatorState state,
+            FileTransferReceiveRecoveryOperation predecessor)
+    {
+        var recoveryState = state.PersistentState.FileTransferReceiveRecovery;
+        var invalidated = predecessor with
+        {
+            ExecutionState =
+                FileTransferReceiveRecoveryExecutionState.Invalidated,
+            ClosureState = FileTransferReceiveRecoveryClosureState.None,
+            HeldRetryRequest = null,
+            ReservedRetryRequest = null,
+            ReservedRetryAuthority = null,
+            ConsumingInstallReceipt = null,
+            InvalidationReason =
+                "completed_unproven_receive_recovery_superseded_by_newer_health_observation",
+            LivenessDeferralDeadlineUtcMs = 0,
+            LivenessDeferralGrant = null,
+        };
+        return state with
+        {
+            PersistentState = state.PersistentState with
+            {
+                FileTransferReceiveRecovery = recoveryState with
+                {
+                    CurrentOperation = null,
+                    LastTerminalOperation = invalidated,
+                },
+            },
+        };
     }
 
     internal static FileTransferReceiveRecoverySubstate
@@ -14428,6 +14673,7 @@ internal static class FileTransferCoordinator
                 RetainTerminalReceiveRecoveryExecutionStartResult(
                     current.ExecutionStartResult),
             ExecutionReceipt = receipt,
+            ExecutionReceiptObservedUtcMs = observedUtcMs,
             RetiredRecoveryLivenessLease = retiredLease,
             ClosureState = regularV4Closure
                 ? current.ReceiveProof is null

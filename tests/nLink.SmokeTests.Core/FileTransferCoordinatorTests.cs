@@ -6663,6 +6663,443 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void FileTransferReceiveRecoveryOperation_CompletedUnprovenClosure_NewerHealthEvidenceIssuesExactSuccessor()
+    {
+        var completed = CreateCompletedUnprovenReceiveRecoveryOperation(
+            receiptObservedUtcMs: 100);
+        var predecessor = completed.Operation;
+        var observation = CreateReceiveRecoveryHealthEvaluationObservation(
+            completed.State,
+            observationGeneration: 2,
+            evidenceGeneration: 1,
+            observedUtcMs: 101);
+
+        var successor = FileTransferCoordinator.IssueReceiveRecoveryOperation(
+            completed.State,
+            observation,
+            BridgeRecoveryKind.BridgeReceiveStallRecovery,
+            completed.State.CurrentLeg?.CheckpointRequestId);
+
+        Assert.True(successor.Accepted, successor.Reason);
+        Assert.Equal(
+            "filetransfer_receive_recovery_operation_successor_issued",
+            successor.Reason);
+        var current = Assert.IsType<FileTransferReceiveRecoveryOperation>(
+            successor.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentOperation);
+        Assert.Equal(
+            FileTransferReceiveRecoveryExecutionState.Issued,
+            current.ExecutionState);
+        Assert.Equal(
+            FileTransferReceiveRecoveryClosureState.None,
+            current.ClosureState);
+        Assert.Equal(
+            predecessor.Authority.OperationGeneration + 1,
+            current.Authority.OperationGeneration);
+        Assert.Equal(
+            predecessor.Authority.AuthorityId,
+            current.Authority.PredecessorAuthorityId);
+        Assert.Equal(
+            predecessor.Authority.OperationGeneration,
+            current.Authority.PredecessorOperationGeneration);
+        Assert.Equal(
+            predecessor.Authority.BridgeRecoveryDecision
+                .BridgeDecisionGeneration + 1,
+            current.Authority.BridgeRecoveryDecision
+                .BridgeDecisionGeneration);
+        Assert.Equal(
+            predecessor.Authority.RecoveryLivenessLease?.LeaseGeneration + 1,
+            current.Authority.RecoveryLivenessLease?.LeaseGeneration);
+
+        var terminal = Assert.IsType<FileTransferReceiveRecoveryOperation>(
+            successor.State.PersistentState.FileTransferReceiveRecovery
+                .LastTerminalOperation);
+        Assert.Equal(predecessor.Authority, terminal.Authority);
+        Assert.Equal(
+            FileTransferReceiveRecoveryExecutionState.Invalidated,
+            terminal.ExecutionState);
+        Assert.Equal(
+            FileTransferReceiveRecoveryClosureState.None,
+            terminal.ClosureState);
+        Assert.Equal(
+            predecessor.ExecutionReceipt,
+            terminal.ExecutionReceipt);
+        Assert.Equal(
+            predecessor.ExecutionReceiptObservedUtcMs,
+            terminal.ExecutionReceiptObservedUtcMs);
+        Assert.Equal(
+            predecessor.RetiredRecoveryLivenessLease,
+            terminal.RetiredRecoveryLivenessLease);
+        Assert.Equal(
+            "completed_unproven_receive_recovery_superseded_by_newer_health_observation",
+            terminal.InvalidationReason);
+    }
+
+    [Fact]
+    public void FileTransferReceiveRecoveryOperation_CompletedUnprovenSuccessor_DuplicateEvidenceIsIdempotent()
+    {
+        var completed = CreateCompletedUnprovenReceiveRecoveryOperation(
+            receiptObservedUtcMs: 100);
+        var observation = CreateReceiveRecoveryHealthEvaluationObservation(
+            completed.State,
+            observationGeneration: 2,
+            evidenceGeneration: 1,
+            observedUtcMs: 101);
+        var successor = FileTransferCoordinator.IssueReceiveRecoveryOperation(
+            completed.State,
+            observation,
+            BridgeRecoveryKind.BridgeReceiveStallRecovery,
+            completed.State.CurrentLeg?.CheckpointRequestId);
+        var authority =
+            Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+                successor.Authority);
+
+        var duplicate = FileTransferCoordinator.IssueReceiveRecoveryOperation(
+            successor.State,
+            observation,
+            BridgeRecoveryKind.BridgeReceiveStallRecovery,
+            successor.State.CurrentLeg?.CheckpointRequestId);
+
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Idempotent,
+            duplicate.Status);
+        Assert.Equal(
+            "filetransfer_receive_recovery_operation_duplicate",
+            duplicate.Reason);
+        Assert.Equal(authority, duplicate.Authority);
+        Assert.Equal(
+            successor.State.PersistentState.FileTransferReceiveRecovery,
+            duplicate.State.PersistentState.FileTransferReceiveRecovery);
+    }
+
+    [Fact]
+    public void FileTransferReceiveRecoveryOperation_ReceiveProofBeforeHealthEvaluationBlocksSupersession()
+    {
+        var completed = CreateCompletedUnprovenReceiveRecoveryOperation(
+            receiptObservedUtcMs: 100);
+        var proof = FileTransferCoordinator.ObserveReceiveRecoveryProof(
+            completed.State,
+            new FileTransferReceiveRecoveryProof(
+                completed.Operation.Authority,
+                "receive-proof-before-successor",
+                "receive_proof_observed",
+                101));
+        Assert.True(proof.Accepted, proof.Reason);
+        Assert.Equal(
+            FileTransferReceiveRecoveryClosureState.Adopted,
+            proof.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentOperation?.ClosureState);
+        var observation = CreateReceiveRecoveryHealthEvaluationObservation(
+            proof.State,
+            observationGeneration: 2,
+            evidenceGeneration: 1,
+            observedUtcMs: 102);
+
+        var rejected = FileTransferCoordinator.IssueReceiveRecoveryOperation(
+            proof.State,
+            observation,
+            BridgeRecoveryKind.BridgeReceiveStallRecovery,
+            proof.State.CurrentLeg?.CheckpointRequestId);
+
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Rejected,
+            rejected.Status);
+        Assert.Equal(
+            "filetransfer_receive_recovery_operation_conflict",
+            rejected.Reason);
+        Assert.Equal(
+            proof.State.PersistentState.FileTransferReceiveRecovery,
+            rejected.State.PersistentState.FileTransferReceiveRecovery);
+    }
+
+    [Fact]
+    public void FileTransferReceiveRecoveryOperation_StaleOrNonNewHealthEvidenceDoesNotSupersede()
+    {
+        var completed = CreateCompletedUnprovenReceiveRecoveryOperation(
+            receiptObservedUtcMs: 100);
+        var staleTimestamp =
+            CreateReceiveRecoveryHealthEvaluationObservation(
+                completed.State,
+                observationGeneration: 2,
+                evidenceGeneration: 1,
+                observedUtcMs: 100);
+        var staleObservationGeneration =
+            CreateReceiveRecoveryHealthEvaluationObservation(
+                completed.State,
+                observationGeneration: 1,
+                evidenceGeneration: 1,
+                observedUtcMs: 101);
+
+        foreach (var observation in new[]
+                 {
+                     staleTimestamp,
+                     staleObservationGeneration,
+                 })
+        {
+            var rejected =
+                FileTransferCoordinator.IssueReceiveRecoveryOperation(
+                    completed.State,
+                    observation,
+                    BridgeRecoveryKind.BridgeReceiveStallRecovery,
+                    completed.State.CurrentLeg?.CheckpointRequestId);
+
+            Assert.Equal(
+                FileTransferReceiveRecoveryTransitionStatus.Rejected,
+                rejected.Status);
+            Assert.Equal(
+                "filetransfer_receive_recovery_operation_conflict",
+                rejected.Reason);
+            Assert.Equal(
+                completed.State.PersistentState.FileTransferReceiveRecovery,
+                rejected.State.PersistentState.FileTransferReceiveRecovery);
+        }
+    }
+
+    [Fact]
+    public void FileTransferReceiveRecoveryOperation_LatePredecessorProofAfterSuccessorIsDiagnosticOnly()
+    {
+        var completed = CreateCompletedUnprovenReceiveRecoveryOperation(
+            receiptObservedUtcMs: 100);
+        var observation = CreateReceiveRecoveryHealthEvaluationObservation(
+            completed.State,
+            observationGeneration: 2,
+            evidenceGeneration: 1,
+            observedUtcMs: 101);
+        var successor = FileTransferCoordinator.IssueReceiveRecoveryOperation(
+            completed.State,
+            observation,
+            BridgeRecoveryKind.BridgeReceiveStallRecovery,
+            completed.State.CurrentLeg?.CheckpointRequestId);
+
+        var late = FileTransferCoordinator.ObserveReceiveRecoveryProof(
+            successor.State,
+            new FileTransferReceiveRecoveryProof(
+                completed.Operation.Authority,
+                "late-predecessor-proof",
+                "receive_proof_observed",
+                102));
+
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Rejected,
+            late.Status);
+        Assert.Equal(
+            "filetransfer_receive_recovery_proof_operation_stale",
+            late.Reason);
+        Assert.Equal(
+            successor.State.PersistentState.FileTransferReceiveRecovery,
+            late.State.PersistentState.FileTransferReceiveRecovery);
+    }
+
+    [Fact]
+    [Trait(
+        "FileTransferCoordinatorSuite",
+        "RegularV4FrontierRepairPressure")]
+    public void FileTransferReceiveRecoveryOperation_CompletedUnprovenSuccessor_PressureHandoffCommitsAtomically()
+    {
+        var completed = CreateCompletedUnprovenReceiveRecoveryOperation(
+            receiptObservedUtcMs: 100);
+        var predecessor = completed.Operation;
+        var (repairState, repairDecision) =
+            AuthorizeRegularV4FrontierRepair(completed.State);
+        var staged =
+            FileTransferCoordinator.StageRegularV4FrontierRepairPressureBinding(
+                repairState,
+                repairDecision,
+                RegularV4PressureAuthorityRequest(
+                    "regular-v4-pressure:completed-unproven-successor"),
+                "regular_v4_receiver_frontier_repair_due");
+        var binding =
+            Assert.IsType<RegularV4FrontierRepairPressureBinding>(
+                staged.Binding);
+        var installed =
+            FileTransferCoordinator.CommitRegularV4FrontierRepairPressureBinding(
+                staged.State,
+                new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                    binding.Authority,
+                    FileTransferRegularV4FrontierRepairPressureInstallStatus
+                        .Installed,
+                    "installed",
+                    binding.InstallGeneration,
+                    binding.PressureReason));
+        Assert.Equal(
+            RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted,
+            installed.Status);
+        var installedBinding =
+            Assert.IsType<RegularV4FrontierRepairPressureBinding>(
+                PressureState(installed.State).InstalledBinding);
+        Assert.Equal(
+            predecessor,
+            installed.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentOperation);
+        var observation = CreateReceiveRecoveryHealthEvaluationObservation(
+            installed.State,
+            observationGeneration: 2,
+            evidenceGeneration: 1,
+            observedUtcMs: 101);
+
+        var prepared =
+            FileTransferCoordinator
+                .PrepareRegularV4FrontierRepairPressureRecoveryHandoff(
+                    installed.State,
+                    observation);
+
+        Assert.Equal(
+            RegularV4FrontierRepairPressureRecoveryHandoffStatus.Prepared,
+            prepared.Status);
+        Assert.Same(installed.State, prepared.State);
+        var transition =
+            Assert.IsType<
+                RegularV4FrontierRepairPressureRecoveryHandoffTransition>(
+                prepared.Transition);
+        Assert.Equal(
+            predecessor.Authority.AuthorityId,
+            transition.ReceiveRecoveryOperation.PredecessorAuthorityId);
+        Assert.Equal(
+            predecessor.Authority.OperationGeneration,
+            transition.ReceiveRecoveryOperation
+                .PredecessorOperationGeneration);
+
+        var rejectedReceipt =
+            new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                transition.SettlementCommand,
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus
+                    .Rejected,
+                "pressure_apply_rejected",
+                CurrentAuthorityCleared: false,
+                RetainedPredecessorCleared: false);
+        var rejected =
+            FileTransferCoordinator
+                .CommitRegularV4FrontierRepairPressureRecoveryHandoff(
+                    installed.State,
+                    transition,
+                    rejectedReceipt);
+        Assert.Equal(
+            RegularV4FrontierRepairPressureRecoveryHandoffStatus.Rejected,
+            rejected.Status);
+        Assert.Same(installed.State, rejected.State);
+        Assert.Equal(
+            installedBinding,
+            PressureState(rejected.State).InstalledBinding);
+        Assert.Equal(
+            predecessor,
+            rejected.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentOperation);
+        Assert.Null(
+            rejected.State.PersistentState.FileTransferReceiveRecovery
+                .LastTerminalOperation);
+
+        var mismatched =
+            FileTransferCoordinator
+                .CommitRegularV4FrontierRepairPressureRecoveryHandoff(
+                    installed.State,
+                    transition,
+                    rejectedReceipt with
+                    {
+                        Command = transition.SettlementCommand with
+                        {
+                            InstallGeneration =
+                                transition.SettlementCommand
+                                    .InstallGeneration + 1,
+                        },
+                        Status =
+                            FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus
+                                .Applied,
+                        CurrentAuthorityCleared = true,
+                    });
+        Assert.Equal(
+            RegularV4FrontierRepairPressureRecoveryHandoffStatus.Rejected,
+            mismatched.Status);
+        Assert.Same(installed.State, mismatched.State);
+
+        var appliedReceipt =
+            rejectedReceipt with
+            {
+                Status =
+                    FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus
+                        .Applied,
+                Reason = "current_authority_cleared",
+                CurrentAuthorityCleared = true,
+            };
+        var committed =
+            FileTransferCoordinator
+                .CommitRegularV4FrontierRepairPressureRecoveryHandoff(
+                    installed.State,
+                    transition,
+                    appliedReceipt);
+
+        Assert.Equal(
+            RegularV4FrontierRepairPressureRecoveryHandoffStatus.Committed,
+            committed.Status);
+        Assert.Null(PressureState(committed.State).InstalledBinding);
+        Assert.Null(committed.State.CurrentRepairReplayDecision);
+        var successor = Assert.IsType<FileTransferReceiveRecoveryOperation>(
+            committed.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentOperation);
+        Assert.Equal(
+            transition.ReceiveRecoveryOperation,
+            successor.Authority);
+        Assert.Equal(
+            FileTransferReceiveRecoveryExecutionState.Issued,
+            successor.ExecutionState);
+        Assert.Equal(
+            predecessor.Authority.AuthorityId,
+            successor.Authority.PredecessorAuthorityId);
+        var superseded = Assert.IsType<FileTransferReceiveRecoveryOperation>(
+            committed.State.PersistentState.FileTransferReceiveRecovery
+                .LastTerminalOperation);
+        Assert.Equal(predecessor.Authority, superseded.Authority);
+        Assert.Equal(
+            FileTransferReceiveRecoveryExecutionState.Invalidated,
+            superseded.ExecutionState);
+        Assert.Equal(
+            FileTransferReceiveRecoveryClosureState.None,
+            superseded.ClosureState);
+        Assert.Equal(
+            predecessor.ExecutionReceipt,
+            superseded.ExecutionReceipt);
+        Assert.Equal(
+            predecessor.RetiredRecoveryLivenessLease,
+            superseded.RetiredRecoveryLivenessLease);
+    }
+
+    [Fact]
+    public void FileTransferReceiveRecoveryOperation_DiagnosticHealthEvidenceDoesNotSupersede()
+    {
+        var completed = CreateCompletedUnprovenReceiveRecoveryOperation(
+            receiptObservedUtcMs: 100);
+        var observation = CreateReceiveRecoveryHealthEvaluationObservation(
+            completed.State,
+            observationGeneration: 2,
+            evidenceGeneration: 1,
+            observedUtcMs: 101);
+        observation = observation with
+        {
+            HealthEvaluationEvidence =
+                observation.HealthEvaluationEvidence!.Value with
+                {
+                    Kind =
+                        FileTransferBridgeRecoveryEvaluationKind.Diagnostic,
+                },
+        };
+
+        var rejected = FileTransferCoordinator.IssueReceiveRecoveryOperation(
+            completed.State,
+            observation,
+            BridgeRecoveryKind.BridgeReceiveStallRecovery,
+            completed.State.CurrentLeg?.CheckpointRequestId);
+
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Rejected,
+            rejected.Status);
+        Assert.Equal(
+            "filetransfer_receive_recovery_operation_conflict",
+            rejected.Reason);
+        Assert.Equal(
+            completed.State.PersistentState.FileTransferReceiveRecovery,
+            rejected.State.PersistentState.FileTransferReceiveRecovery);
+    }
+
+    [Fact]
     public void BridgeRecoveryExecutionPayloadHold_CoordinatorReleasesOnlyOnCompleted()
     {
         var runningFixture = CreateReceiveRecoveryOperationFixture();
@@ -14957,6 +15394,86 @@ public sealed class FileTransferCoordinatorTests
     private static FileTransferCoordinatorState CreateActiveRegularV4RecoveryState()
     {
         return CreateReceiveRecoveryOperationFixture().Decision.State;
+    }
+
+    private static (
+        FileTransferCoordinatorState State,
+        FileTransferReceiveRecoveryOperation Operation)
+        CreateCompletedUnprovenReceiveRecoveryOperation(
+            long receiptObservedUtcMs)
+    {
+        var fixture = CreateReceiveRecoveryOperationFixture();
+        var authority =
+            Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+                fixture.Decision.Authority);
+        var receipt = new FileTransferBridgeRecoveryExecutionReceipt(
+            authority.ExecutionCommand,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            "hard",
+            "bridge_recovery_completed");
+        var started =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(
+                fixture.Decision.State,
+                new FileTransferBridgeRecoveryExecutionStartResult(
+                    authority.ExecutionCommand,
+                    FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                    "bridge_recovery_execution_started",
+                    Task.FromResult(receipt)),
+                observedUtcMs: Math.Max(1, receiptObservedUtcMs - 1));
+        Assert.True(started.Accepted, started.Reason);
+        var completed =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionReceipt(
+                started.State,
+                receipt,
+                observedUtcMs: receiptObservedUtcMs);
+        Assert.True(completed.Accepted, completed.Reason);
+        var operation = Assert.IsType<FileTransferReceiveRecoveryOperation>(
+            completed.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentOperation);
+        Assert.Equal(
+            FileTransferReceiveRecoveryExecutionState.Completed,
+            operation.ExecutionState);
+        Assert.Equal(
+            FileTransferReceiveRecoveryClosureState.Retained,
+            operation.ClosureState);
+        Assert.Null(operation.ReceiveProof);
+        Assert.Equal(
+            receiptObservedUtcMs,
+            operation.ExecutionReceiptObservedUtcMs);
+        return (completed.State, operation);
+    }
+
+    private static FileTransferReceiveRecoveryObservation
+        CreateReceiveRecoveryHealthEvaluationObservation(
+            FileTransferCoordinatorState state,
+            long observationGeneration,
+            long evidenceGeneration,
+            long observedUtcMs)
+    {
+        const string observationKind = "bridge_ping_timeout";
+        const string reason = "bridge_ping_timeout";
+        return CreateReceiveRecoveryObservationForTest(
+                state,
+                reason,
+                observationGeneration) with
+            {
+                Source = observationKind,
+                ObservationIdentity =
+                    $"{observationKind}:{evidenceGeneration}",
+                ObservedUtcMs = observedUtcMs,
+                HealthEvaluationEvidence =
+                    new FileTransferReceiveRecoveryHealthEvaluationEvidence(
+                        FileTransferBridgeRecoveryEvaluationKind.PingTimeout,
+                        observationKind,
+                        reason,
+                        evidenceGeneration,
+                        observedUtcMs,
+                        ConsecutiveObservations: 3,
+                        FramesSentSinceLast: 10,
+                        MessagesReceivedSinceLast: 1,
+                        ControlLastReceivedAgeMs: 10_000,
+                        BulkLastReceivedAgeMs: 10_000),
+            };
     }
 
     private static (

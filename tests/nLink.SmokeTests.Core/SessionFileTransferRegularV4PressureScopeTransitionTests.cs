@@ -942,6 +942,135 @@ public sealed partial class SessionFileTransferV4SenderTests
             StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(FileTransferDirection.Inbound)]
+    [InlineData(FileTransferDirection.Outbound)]
+    [Trait("FileTransferRuntimeSuite", "ReceiveRecoveryOperation")]
+    public void FileTransferReceiveRecoveryOperation_CompletedUnprovenHealthEvaluationDispatchesOneExactSuccessor(
+        FileTransferDirection direction)
+    {
+        var transferId =
+            $"transfer_completed_unproven_successor_{direction.ToString().ToLowerInvariant()}";
+        using var service = new SessionFileTransferService();
+        using var transport =
+            new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        object context;
+        string contextField;
+        if (direction == FileTransferDirection.Inbound)
+        {
+            context = CreateProjectionInboundContext(transferId);
+            contextField = "inboundTransfer";
+        }
+        else
+        {
+            context = CreateRegularNknV4OutboundContext(
+                transferId,
+                remoteNextExpectedChunkIndex: 100,
+                chunksAcceptedForTransport: 256,
+                remoteGrantedUntilExclusive: 256,
+                lastGrantReceivedUtc:
+                    DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+            contextField = "outboundTransfer";
+        }
+
+        typeof(SessionFileTransferService)
+            .GetField(
+                contextField,
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        SeedCurrentRuntimeOwnerForTest(
+            context,
+            direction,
+            "completed_unproven_successor");
+
+        Assert.True(
+            InvokeReceiveRecovery(
+                service,
+                new FileTransferReceiveRecoveryRequest(
+                    $"session_{transferId}",
+                    transferId,
+                    direction,
+                    "session_liveness_timeout_pending")));
+        var predecessorCommand =
+            Assert.Single(transport.BridgeRecoveryExecutionCommands);
+        var predecessorReceipt = transport.CompleteBridgeRecoveryExecution(
+            predecessorCommand,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            "unit_test_completed_unproven_predecessor");
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => GetReceiveRecoverySubstate(context).CurrentOperation is
+                {
+                    ExecutionState:
+                        FileTransferReceiveRecoveryExecutionState.Completed,
+                    ClosureState:
+                        FileTransferReceiveRecoveryClosureState.Retained,
+                },
+                TimeSpan.FromSeconds(2)));
+        var predecessor = Assert.IsType<FileTransferReceiveRecoveryOperation>(
+            GetReceiveRecoverySubstate(context).CurrentOperation);
+        Assert.Equal(predecessorReceipt, predecessor.ExecutionReceipt);
+
+        var successorBeginCount = 0;
+        transport.BridgeRecoveryExecutionBeginObserverForTests =
+            _ => Interlocked.Increment(ref successorBeginCount);
+        var observedUtcMs = Math.Max(
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            predecessor.ExecutionReceiptObservedUtcMs + 1);
+        var evaluation = new FileTransferBridgeRecoveryEvaluationRequest(
+            $"session_{transferId}",
+            transferId,
+            direction,
+            FileTransferBridgeRecoveryEvaluationKind.PingTimeout,
+            "bridge_ping_timeout",
+            "bridge_ping_timeout",
+            ObservationGeneration: 1,
+            ObservedUtcMs: observedUtcMs,
+            ConsecutiveObservations: 1);
+
+        transport.RaiseBridgeRecoveryEvaluation(evaluation);
+
+        Assert.True(
+            SpinWait.SpinUntil(
+                () =>
+                    transport.BridgeRecoveryExecutionCommands.Count == 2 &&
+                    Volatile.Read(ref successorBeginCount) == 1,
+                TimeSpan.FromSeconds(2)));
+        var successor = Assert.IsType<FileTransferReceiveRecoveryOperation>(
+            GetReceiveRecoverySubstate(context).CurrentOperation);
+        Assert.Equal(
+            predecessor.Authority.AuthorityId,
+            successor.Authority.PredecessorAuthorityId);
+        Assert.Equal(
+            predecessor.Authority.OperationGeneration,
+            successor.Authority.PredecessorOperationGeneration);
+        Assert.Equal(
+            predecessor.Authority.OperationGeneration + 1,
+            successor.Authority.OperationGeneration);
+        var superseded =
+            Assert.IsType<FileTransferReceiveRecoveryOperation>(
+                GetReceiveRecoverySubstate(context).LastTerminalOperation);
+        Assert.Equal(
+            FileTransferReceiveRecoveryExecutionState.Invalidated,
+            superseded.ExecutionState);
+        Assert.Equal(
+            FileTransferReceiveRecoveryClosureState.None,
+            superseded.ClosureState);
+        Assert.Equal(predecessorReceipt, superseded.ExecutionReceipt);
+
+        transport.RaiseBridgeRecoveryEvaluation(evaluation);
+
+        Assert.False(
+            SpinWait.SpinUntil(
+                () =>
+                    transport.BridgeRecoveryExecutionCommands.Count > 2 ||
+                    Volatile.Read(ref successorBeginCount) > 1,
+                TimeSpan.FromMilliseconds(250)));
+        Assert.Equal(2, transport.BridgeRecoveryExecutionCommands.Count);
+        Assert.Equal(1, Volatile.Read(ref successorBeginCount));
+    }
+
     private static bool PrepareInboundRegularV4ToTunaRouteTransitionForPressureTest(
         SessionFileTransferService service,
         object context,
@@ -1051,7 +1180,7 @@ public sealed partial class SessionFileTransferV4SenderTests
                     }
 
                     var parameters = candidate.GetParameters();
-                    return parameters.Length == 6 &&
+                    return parameters.Length == 7 &&
                            parameters[0].ParameterType == context.GetType();
                 })
                 .Invoke(
@@ -1061,6 +1190,7 @@ public sealed partial class SessionFileTransferV4SenderTests
                         request.Direction,
                         "unit_test_receive_recovery",
                         request.Reason,
+                        null,
                         null,
                         null,
                     ]));
