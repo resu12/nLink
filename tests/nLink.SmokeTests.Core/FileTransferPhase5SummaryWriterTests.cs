@@ -16,6 +16,35 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptancePhase5TestBase
 {
     [Fact]
+    public async Task RunFileTransferRouteAcceptance_SubmissionBarrierDrainCountersReachScenarioAndRootSummaries()
+    {
+        var repoRoot = FindRepoRoot();
+        var script = await File.ReadAllTextAsync(
+            Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"));
+
+        Assert.Contains(
+            "$Result.fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount = ConvertTo-RouteAcceptanceInt",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount = [int]$Result.fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount += [int]$runDto.fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "{0}.filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_unresolved_count={1}",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainVerdict = if ($fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingUnresolvedCount -gt 0)",
+            script,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RunFileTransferRouteAcceptance_ReceiveRecoveryOperationCountersReachScenarioAndRootSummaries()
     {
         var repoRoot = FindRepoRoot();

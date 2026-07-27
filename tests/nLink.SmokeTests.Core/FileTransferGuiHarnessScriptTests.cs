@@ -1714,7 +1714,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var payloadHoldBody = ExtractPowerShellFunctionBody(
             nestedFunctionText,
             "Test-TunaGuiBridgeRecoveryExecutionPayloadHoldFailure",
-            "Test-TunaGuiRegularV4FrontierRepairSettlementClosed");
+            "Test-TunaGuiBridgeRecoveryExecutionSubmissionBarrierDrainFailure");
         var scriptText = $$"""
             $ErrorActionPreference = 'Stop'
             function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
@@ -1776,6 +1776,91 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $"Bridge-recovery payload-hold GUI classification test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains(
             "gui-bridge-recovery-payload-hold-correlation-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task BridgeRecoverySubmissionBarrierDrainRequiresExactSourceEpochTimeout()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = Regex.Replace(guiText, @"(?m)^ {4}", string.Empty);
+        var fieldValueBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Test-TunaGuiLogLineHasEvent");
+        var hasEventBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineHasEvent",
+            "Test-TunaGuiLogLineFieldMatch");
+        var fieldMatchBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineFieldMatch",
+            "Test-TunaGuiRuntimeUnlockFileTransferOwnerRejectionUnresolved");
+        var drainBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiBridgeRecoveryExecutionSubmissionBarrierDrainFailure",
+            "Test-TunaGuiRegularV4FrontierRepairSettlementClosed");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
+            function Test-TunaGuiLogLineHasEvent { {{hasEventBody}} }
+            function Test-TunaGuiLogLineFieldMatch { {{fieldMatchBody}} }
+            function Test-TunaGuiBridgeRecoveryExecutionSubmissionBarrierDrainFailure { {{drainBody}} }
+
+            $writer = 'writer-submission-drain'
+            $scope = 'session_id=session-a; transfer_id=transfer-a; direction=outbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1'
+            $sourceScope = 'session_id=session-a; transfer_id=transfer-a; direction=outbound; source_route=regular_nkn_v4_fast; source_protocol_version=4; source_live_route_epoch=0; source_runtime_generation=1; source_terminal_generation=0; source_leg_generation=1; source_transport_epoch=0; source_bridge_recovery_generation=0'
+            $processScope = 'submission_epoch=2; source_process_epoch=1; source_process_id=4242'
+            $lines = @(
+                "event=filetransfer_bridge_recovery_execution_command_issued; $scope; recovery_liveness_lease_generation=1; log_writer_id=$writer",
+                "event=nkn_bridge_recovery_execution_started; $scope; lease_generation=1; log_writer_id=$writer",
+                "event=nkn_bridge_recovery_submission_barrier_closed; $scope; lease_generation=1; $processScope; log_writer_id=$writer",
+                "event=filetransfer_bridge_recovery_payload_submission_held; $scope; recovery_execution_state=Running; recovery_liveness_lease_generation=1; log_writer_id=$writer",
+                "event=filetransfer_outbound_physical_send_lease_retired; $sourceScope; registered_send_count=144; retired_send_count=144; log_writer_id=$writer",
+                "event=nkn_bridge_recovery_submission_barrier_invalidated; $scope; lease_generation=1; $processScope; process_epoch=1; process_id=4242; reason=bridge_recovery_execution_restart_not_ready; log_writer_id=$writer",
+                "event=nkn_bridge_recovery_execution_completed; $scope; lease_generation=1; execution_mode=hard; outcome=exhausted; physical_execution_terminated=1; total_deadline_expired=1; reason=bridge_recovery_execution_timeout; log_writer_id=$writer",
+                "event=filetransfer_bridge_recovery_execution_receipt_decision_observed; $scope; recovery_liveness_lease_generation=1; execution_outcome=exhausted; accepted=1; disposition=accepted; log_writer_id=$writer"
+            )
+            if (-not (Test-TunaGuiBridgeRecoveryExecutionSubmissionBarrierDrainFailure -Lines $lines)) {
+                throw 'exact source-epoch submission drain timeout was not classified'
+            }
+
+            $partialDrain = @($lines)
+            $partialDrain[4] = $partialDrain[4].Replace(
+                'retired_send_count=144',
+                'retired_send_count=143')
+            if (Test-TunaGuiBridgeRecoveryExecutionSubmissionBarrierDrainFailure -Lines $partialDrain) {
+                throw 'partial Core lease retirement was classified'
+            }
+
+            $hardAccepted = @(
+                $lines[0..4]
+                "event=nkn_bridge_recovery_execution_hard_restart_decided; $scope; lease_generation=1; decision_status=Started; log_writer_id=$writer"
+                $lines[5..7]
+            )
+            if (Test-TunaGuiBridgeRecoveryExecutionSubmissionBarrierDrainFailure -Lines $hardAccepted) {
+                throw 'timeout after accepted hard restart entered source-gate class'
+            }
+
+            $wrongProcess = @($lines)
+            $wrongProcess[5] = $wrongProcess[5].Replace(
+                'process_id=4242',
+                'process_id=5252')
+            if (Test-TunaGuiBridgeRecoveryExecutionSubmissionBarrierDrainFailure -Lines $wrongProcess) {
+                throw 'replacement-process invalidation was classified as source-gate timeout'
+            }
+
+            Write-Output 'gui-bridge-recovery-submission-drain-correlation-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Bridge-recovery submission-drain GUI classification test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "gui-bridge-recovery-submission-drain-correlation-ok",
             result.Stdout,
             StringComparison.Ordinal);
     }

@@ -6632,6 +6632,118 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(false, "source_gate_timeout", "1", "0")]
+    [InlineData(true, "source_gate_timeout", "1", "0")]
+    [InlineData(false, "drain_completed", "0", "1")]
+    [InlineData(true, "drain_completed", "0", "1")]
+    [InlineData(false, "hard_decision_timeout", "0", "0")]
+    [InlineData(true, "hard_decision_timeout", "0", "0")]
+    public async Task AnalyzeRetained_BridgeRecoverySubmissionBarrierDrain_CorrelatesExactSourceEpoch(
+        bool compact,
+        string mode,
+        string expectedUnresolvedCount,
+        string expectedRecoveredCount)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_bridge_recovery_submission_barrier_drain";
+        const string writerId = "writer-bridge-recovery-submission-drain";
+        const string scope =
+            $"session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; " +
+            "direction=outbound; route=regular_nkn_v4_fast; protocol_version=4; " +
+            "live_route_epoch=0; runtime_generation=1; terminal_generation=0; " +
+            "leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; " +
+            "bridge_decision_generation=1";
+        const string sourceScope =
+            $"session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; " +
+            "direction=outbound; source_route=regular_nkn_v4_fast; source_protocol_version=4; " +
+            "source_live_route_epoch=0; source_runtime_generation=1; source_terminal_generation=0; " +
+            "source_leg_generation=1; source_transport_epoch=0; source_bridge_recovery_generation=0";
+        const string processScope =
+            "submission_epoch=2; source_process_epoch=1; source_process_id=4242";
+        var lines = new List<string>
+        {
+            LogLine($"event=filetransfer_route_selected; {scope}; runtime_profile=regular_nkn_v4_fast; frame_family=v4", secondsOffset: 0),
+            LogLine($"event=filetransfer_bridge_recovery_execution_command_issued; {scope}; recovery_liveness_lease_authority_id=fta2-recovery-lease-1; recovery_liveness_lease_generation=1; log_writer_id={writerId}; log_writer_sequence=1", secondsOffset: 1),
+            LogLine($"event=nkn_bridge_recovery_execution_started; {scope}; lease_generation=1; execution_mode=none; outcome=none; physical_execution_terminated=0; reason=bridge_recovery_execution_started; log_writer_id={writerId}; log_writer_sequence=2", secondsOffset: 2),
+            LogLine($"event=nkn_bridge_recovery_submission_barrier_closed; {scope}; lease_generation=1; {processScope}; reason=bridge_recovery_execution_submission_barrier_reserved; log_writer_id={writerId}; log_writer_sequence=3", secondsOffset: 3),
+            LogLine($"event=filetransfer_bridge_recovery_payload_submission_held; {scope}; recovery_execution_state=Running; recovery_liveness_lease_generation=1; decision_reason=filetransfer_receive_recovery_execution_current; log_writer_id={writerId}; log_writer_sequence=4", secondsOffset: 4),
+            LogLine($"event=filetransfer_outbound_physical_send_lease_retired; {sourceScope}; registered_send_count=144; retired_send_count=144; decision_reason=physical_send_task_completed; log_writer_id={writerId}; log_writer_sequence=5", secondsOffset: 5)
+        };
+
+        if (string.Equals(mode, "drain_completed", StringComparison.Ordinal))
+        {
+            lines.Add(LogLine($"event=nkn_bridge_recovery_execution_hard_restart_decided; {scope}; lease_generation=1; decision_status=Started; remaining_total_ms=85000; reason=bridge_recovery_execution_hard_restart_started; log_writer_id={writerId}; log_writer_sequence=6", secondsOffset: 6));
+            lines.Add(LogLine($"event=nkn_bridge_recovery_submission_barrier_drain_started; {scope}; lease_generation=1; {processScope}; gate_acquired=0; decision_status=Started; reason=bridge_recovery_execution_source_epoch_cleanup_started; log_writer_id={writerId}; log_writer_sequence=7", secondsOffset: 7));
+            lines.Add(LogLine($"event=nkn_bridge_recovery_submission_barrier_drain_completed; {scope}; lease_generation=1; {processScope}; process_epoch=0; process_id=0; gate_acquired=1; decision_status=Completed; reason=bridge_recovery_execution_submission_drain_completed; log_writer_id={writerId}; log_writer_sequence=8", secondsOffset: 8));
+            lines.Add(LogLine($"event=bridge_spawned; pid=5252; start_mode=cold; log_writer_id={writerId}; log_writer_sequence=9", secondsOffset: 9));
+            lines.Add(LogLine($"event=bridge_ready; pid=5252; log_writer_id={writerId}; log_writer_sequence=10", secondsOffset: 10));
+            lines.Add(LogLine($"event=nkn_bridge_recovery_execution_completed; {scope}; lease_generation=1; execution_mode=hard; outcome=completed; physical_execution_terminated=1; total_deadline_expired=0; reason=bridge_recovery_execution_completed; log_writer_id={writerId}; log_writer_sequence=11", secondsOffset: 11));
+            lines.Add(LogLine($"event=filetransfer_bridge_recovery_execution_receipt_decision_observed; {scope}; recovery_liveness_lease_generation=1; execution_outcome=completed; accepted=1; disposition=accepted; log_writer_id={writerId}; log_writer_sequence=12", secondsOffset: 12));
+        }
+        else
+        {
+            if (string.Equals(mode, "hard_decision_timeout", StringComparison.Ordinal))
+            {
+                lines.Add(LogLine($"event=nkn_bridge_recovery_execution_hard_restart_decided; {scope}; lease_generation=1; decision_status=Started; remaining_total_ms=85000; reason=bridge_recovery_execution_hard_restart_started; log_writer_id={writerId}; log_writer_sequence=6", secondsOffset: 6));
+            }
+            lines.Add(LogLine($"event=nkn_bridge_recovery_submission_barrier_invalidated; {scope}; lease_generation=1; {processScope}; process_epoch=1; process_id=4242; reason=bridge_recovery_execution_restart_not_ready; log_writer_id={writerId}; log_writer_sequence=7", secondsOffset: 7));
+            lines.Add(LogLine($"event=nkn_bridge_recovery_execution_completed; {scope}; lease_generation=1; execution_mode=hard; outcome=exhausted; physical_execution_terminated=1; total_deadline_expired=1; reason=bridge_recovery_execution_timeout; log_writer_id={writerId}; log_writer_sequence=8", secondsOffset: 8));
+            lines.Add(LogLine($"event=filetransfer_bridge_recovery_execution_receipt_decision_observed; {scope}; recovery_liveness_lease_generation=1; execution_outcome=exhausted; accepted=1; disposition=accepted; log_writer_id={writerId}; log_writer_sequence=9", secondsOffset: 9));
+        }
+        lines.Add(LogLine($"event=file_transfer_outbound_terminal; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=outbound; state=Failed; error_code=timeout; log_writer_id={writerId}; log_writer_sequence=13", secondsOffset: 13));
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        if (expectedUnresolvedCount == "1")
+        {
+            Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
+            Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+            Assert.Equal(
+                "filetransfer_bridge_recovery_execution_submission_barrier_drain_missing",
+                verdict["first_proof_chain_failure_class"]);
+            Assert.Equal(
+                "nkn_bridge_recovery_submission_barrier_invalidated",
+                verdict["first_proof_chain_failure_event"]);
+            Assert.Equal(
+                "bridge_recovery_execution_restart_not_ready",
+                verdict["first_proof_chain_failure_reason"]);
+            Assert.Equal("7", verdict["first_proof_chain_failure_writer_sequence"]);
+        }
+
+        var expectedRawCount =
+            expectedUnresolvedCount == "1" || expectedRecoveredCount == "1" ? "1" : "0";
+        Assert.Equal(
+            expectedRawCount,
+            verdict["filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_raw_count"]);
+        Assert.Equal(
+            expectedRawCount,
+            verdict["filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_distinct_count"]);
+        Assert.Equal(
+            expectedRecoveredCount,
+            verdict["filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_recovered_count"]);
+        Assert.Equal(
+            expectedUnresolvedCount,
+            verdict["filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_unresolved_count"]);
+        Assert.Equal(
+            expectedUnresolvedCount == "1" ? "fail" : expectedRecoveredCount == "1" ? "pass" : "none",
+            verdict["filetransfer_bridge_recovery_execution_submission_barrier_drain_verdict"]);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task AnalyzeRetained_CurrentArtifactClosureHoldLostAfterSettledRepair_OwnsFirstProofEdge(
