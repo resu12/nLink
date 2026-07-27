@@ -502,6 +502,108 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
         Assert.Equal("pass", verdict["regular_v4_frontier_repair_verdict"]);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RegularV4FutureOnlyTailCaughtUpByNormalPayloadRecovers(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRegularV4FutureOnlyTailCatchUpFixture(
+            "transfer_regular_v4_future_tail_caught_up",
+            skippedFutureCount: 12,
+            skippedObsoleteCount: 0,
+            missingRangeCount: 0);
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "None"],
+            environment: compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.NotEqual("regular_v4_frontier_repair_stalled", verdict["recovery_failure_class"]);
+        if (!compact)
+        {
+            Assert.Equal("1", verdict["regular_v4_frontier_repair_stalled_count"]);
+            Assert.Equal("pass", verdict["regular_v4_frontier_repair_verdict"]);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RegularV4NonFutureTailWithRemainingGapStaysUnresolved(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRegularV4FutureOnlyTailCatchUpFixture(
+            "transfer_regular_v4_non_future_tail_gap",
+            skippedFutureCount: 11,
+            skippedObsoleteCount: 1,
+            missingRangeCount: 1);
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "None"],
+            environment: compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("regular_v4_frontier_repair_stalled", verdict["recovery_failure_class"]);
+        if (!compact)
+        {
+            Assert.Equal("1", verdict["regular_v4_frontier_repair_stalled_count"]);
+            Assert.Equal("fail", verdict["regular_v4_frontier_repair_verdict"]);
+        }
+    }
+
+    private static string[] BuildRegularV4FutureOnlyTailCatchUpFixture(
+        string transferId,
+        int skippedFutureCount,
+        int skippedObsoleteCount,
+        int missingRangeCount)
+    {
+        const string sessionId = "sess_future_tail";
+        const string writerId = "writer_future_tail";
+        const string repairKey = "1179:12:1179:12";
+        const string scope = "direction=outbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; data_session_generation=1; route_publication_generation=1; route_commit_generation=0";
+        return
+        [
+            LogLine($"event=filetransfer_route_selected; session_id={sessionId}; transfer_id={transferId}; {scope}; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=nkn; log_writer_id={writerId}", secondsOffset: 0),
+            LogLine($"event=filetransfer_runtime_started; role=sender; session_id={sessionId}; transfer_id={transferId}; {scope}; runtime_profile=regular_nkn_v4_fast; frame_family=v4; bridge_recovery_policy=regular_nkn_v4_fast; log_writer_id={writerId}", secondsOffset: 1),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_authority_granted; authority_id=repair-future-tail; session_id={sessionId}; transfer_id={transferId}; {scope}; target_transport=regular_nkn; repair_request_key={repairKey}; frontier_chunk_index=1179; durable_received_highest_chunk_index=1178; pending_repair_count=12; decision_generation=6; install_generation=6; requested_chunk_count=12; scheduled_chunk_count=0; log_writer_id={writerId}", secondsOffset: 2),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_stalled; session_id={sessionId}; transfer_id={transferId}; {scope}; target_transport=regular_nkn; repair_request_key={repairKey}; reason=no_schedulable_repair_chunks; frontier_chunk_index=1179; durable_received_highest_chunk_index=1178; requested_chunk_count=12; attempt_count=1; log_writer_id={writerId}", secondsOffset: 3),
+            LogLine($"event=filetransfer_v4_repair_scheduled; session_id={sessionId}; transfer_id={transferId}; {scope}; repair_request_key={repairKey}; requested_chunk_count=12; scheduled_chunk_count=0; first_start_chunk_index=1179; last_end_chunk_exclusive=1191; skipped_obsolete_count={skippedObsoleteCount}; skipped_future_count={skippedFutureCount}; skipped_out_of_bounds_count=0; log_writer_id={writerId}", secondsOffset: 4),
+            LogLine($"event=filetransfer_data_path_send_result; session_id={sessionId}; transfer_id={transferId}; {scope}; frame_type=filetransfer.chunk_batch.v4; delivery_result=sent; start_chunk_index=1179; last_end_chunk_exclusive=1182; frame_chunk_count=3; log_writer_id={writerId}", secondsOffset: 5),
+            LogLine($"event=filetransfer_data_path_send_result; session_id={sessionId}; transfer_id={transferId}; {scope}; frame_type=filetransfer.chunk_batch.v4; delivery_result=sent; start_chunk_index=1182; last_end_chunk_exclusive=1185; frame_chunk_count=3; log_writer_id={writerId}", secondsOffset: 6),
+            LogLine($"event=filetransfer_data_path_send_result; session_id={sessionId}; transfer_id={transferId}; {scope}; frame_type=filetransfer.chunk_batch.v4; delivery_result=sent; start_chunk_index=1185; last_end_chunk_exclusive=1188; frame_chunk_count=3; log_writer_id={writerId}", secondsOffset: 7),
+            LogLine($"event=filetransfer_data_path_send_result; session_id={sessionId}; transfer_id={transferId}; {scope}; frame_type=filetransfer.chunk_batch.v4; delivery_result=sent; start_chunk_index=1188; last_end_chunk_exclusive=1191; frame_chunk_count=3; log_writer_id={writerId}", secondsOffset: 8),
+            LogLine($"event=filetransfer_v4_state_received; session_id={sessionId}; transfer_id={transferId}; {scope}; applied=1; stale=0; contiguous_committed_chunk_index=1191; durable_received_highest_chunk_index=1190; missing_range_count={missingRangeCount}; log_writer_id={writerId}", secondsOffset: 9),
+            LogLine($"event=file_transfer_outbound_terminal; role=Helpee; session_id={sessionId}; transfer_id={transferId}; state=Completed; error_code=(none); sha256_match=1", secondsOffset: 90)
+        ];
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RegularV4UnresolvedSparseFrontierRepairStall_Fails()

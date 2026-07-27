@@ -19355,6 +19355,53 @@ function Get-FileTransferRuntimeUnlockInitialOfferRetryLifecycleHandoffCorrelati
     [object[]]$armedEvents = @($orderedEvents | Where-Object {
         $_.EventName -eq 'tuna_acceleration_runtime_unlock_retry_after_recovery_armed'
     })
+    [object[]]$initialOffers = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_offer_queued' -and
+        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'runtime_unlock' -and
+        -not [string]::IsNullOrWhiteSpace(
+            (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '')) -and
+        [int64](Get-FileTransferEventField -Event $_ -Name 'payer_decision_id' -Default '0') -gt 0 -and
+        [int64](Get-FileTransferEventField -Event $_ -Name 'generation' -Default '0') -gt 0
+    })
+    [object[]]$acceptedAnswers = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_answer_sent' -and
+        (Get-FileTransferEventField -Event $_ -Name 'accepted' -Default '0') -eq '1'
+    })
+    [object[]]$rawAnswers = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_answer_received_raw'
+    })
+    [object[]]$answerLifecycleAcks = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_lifecycle_ack_sent' -and
+        (Get-FileTransferEventField -Event $_ -Name 'message_type' -Default '') -eq
+            'transport_acceleration_answer'
+    })
+    [object[]]$answerInstallRejections = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_install_rejected' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq
+            'retry_dispatch_install_state_missing_answer_received' -and
+        (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '(none)') -in
+            @('', '(none)', 'none') -and
+        [int64](Get-FileTransferEventField -Event $_ -Name 'install_generation' -Default '0') -eq 0
+    })
+    [object[]]$offerBoundaryDecisions = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_offer_authority_boundary_decided'
+    })
+    [object[]]$transactionAnswerEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_transaction_answer_received' -and
+        [int64](Get-FileTransferEventField -Event $_ -Name 'transaction_generation' -Default '0') -gt 0 -and
+        [int64](Get-FileTransferEventField -Event $_ -Name 'offer_generation' -Default '0') -gt 0 -and
+        [int64](Get-FileTransferEventField -Event $_ -Name 'tuna_path_lease_generation' -Default '0') -gt 0
+    })
+    [object[]]$answerAckSentEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_answer_ack_sent'
+    })
+    [object[]]$preCommitHandoffEvents = @($orderedEvents | Where-Object {
+        $_.EventName -in @(
+            'runtime_unlock_precommit_probe_launch_requested',
+            'filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided',
+            'runtime_unlock_precommit_probe_launch_started',
+            'runtime_unlock_precommit_probe_started')
+    })
 
     function Test-InitialOfferIdentityMatch {
         param(
@@ -19376,6 +19423,68 @@ function Get-FileTransferRuntimeUnlockInitialOfferRetryLifecycleHandoffCorrelati
         }
         return (Get-FileTransferEventField -Event $Left -Name 'log_writer_id' -Default '') -eq
             (Get-FileTransferEventField -Event $Right -Name 'log_writer_id' -Default '')
+    }
+
+    function Test-InitialOfferWriterMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Left,
+            [Parameter(Mandatory = $true)]$Right
+        )
+
+        $leftWriter = Get-FileTransferEventField -Event $Left -Name 'log_writer_id' -Default ''
+        $rightWriter = Get-FileTransferEventField -Event $Right -Name 'log_writer_id' -Default ''
+        return -not [string]::IsNullOrWhiteSpace($leftWriter) -and
+            -not [string]::IsNullOrWhiteSpace($rightWriter) -and
+            [string]::Equals(
+                $leftWriter,
+                $rightWriter,
+                [System.StringComparison]::OrdinalIgnoreCase)
+    }
+
+    function Get-InitialOfferBoundaryField {
+        param(
+            [Parameter(Mandatory = $true)]$Event,
+            [Parameter(Mandatory = $true)][string[]]$Names
+        )
+
+        foreach ($name in $Names) {
+            $value = Get-FileTransferEventField -Event $Event -Name $name -Default ''
+            if (-not [string]::IsNullOrWhiteSpace($value) -and
+                $value -notin @('(none)', 'none', '(missing)', '__missing__')) {
+                return $value
+            }
+        }
+        return ''
+    }
+
+    function Test-InitialOfferBoundaryIdentityMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Offer,
+            [Parameter(Mandatory = $true)]$Candidate,
+            [switch]$RequireCompleteCandidate
+        )
+
+        if (-not (Test-InitialOfferWriterMatch -Left $Offer -Right $Candidate)) {
+            return $false
+        }
+
+        foreach ($mapping in @(
+                [pscustomobject]@{ Offer = @('session_id'); Candidate = @('session_id') },
+                [pscustomobject]@{ Offer = @('payer_decision_id'); Candidate = @('payer_decision_id') },
+                [pscustomobject]@{ Offer = @('generation'); Candidate = @('offer_generation', 'generation') })) {
+            $offerValue = Get-InitialOfferBoundaryField -Event $Offer -Names $mapping.Offer
+            $candidateValue = Get-InitialOfferBoundaryField -Event $Candidate -Names $mapping.Candidate
+            if ([string]::IsNullOrWhiteSpace($offerValue) -or
+                ($RequireCompleteCandidate -and [string]::IsNullOrWhiteSpace($candidateValue)) -or
+                (-not [string]::IsNullOrWhiteSpace($candidateValue) -and
+                    -not [string]::Equals(
+                        $offerValue,
+                        $candidateValue,
+                        [System.StringComparison]::OrdinalIgnoreCase))) {
+                return $false
+            }
+        }
+        return $true
     }
 
     $rawCandidates = New-Object System.Collections.Generic.List[object]
@@ -19444,6 +19553,132 @@ function Get-FileTransferRuntimeUnlockInitialOfferRetryLifecycleHandoffCorrelati
         }
         else {
             $unresolvedCandidates.Add($notScheduled) | Out-Null
+        }
+    }
+
+    # Legacy initial activations do not carry a Phase-2 install receipt.  An
+    # accepted answer followed by an empty retry-install rejection is therefore
+    # a distinct handoff failure, not retry-install evidence.  The legacy
+    # rejection is intentionally correlated only inside one complete
+    # same-writer offer interval.
+    [object[]]$answerBoundaryRejections = @(
+        $answerInstallRejections +
+        @($offerBoundaryDecisions | Where-Object {
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('offer_authority_mode', 'authority_mode')) -eq
+                'InitialActivation' -and
+            (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '').Equals(
+                'Rejected',
+                [System.StringComparison]::OrdinalIgnoreCase) -and
+            (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -in @(
+                'initial_offer_answer_misclassified_as_retry_install',
+                'retry_dispatch_install_state_missing_answer_received')
+        })
+    )
+    foreach ($rejection in @($answerBoundaryRejections | Sort-Object Sequence, LineNumber)) {
+        [object[]]$matchingOfferRecords = @(
+            foreach ($offer in $initialOffers) {
+                if ([int64]$offer.Sequence -ge [int64]$rejection.Sequence -or
+                    -not (Test-InitialOfferBoundaryIdentityMatch -Offer $offer -Candidate $rejection)) {
+                    continue
+                }
+
+                $payerDecisionId = Get-FileTransferEventField -Event $offer -Name 'payer_decision_id' -Default ''
+                $acceptedAnswer = @($acceptedAnswers | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$offer.Sequence -and
+                    [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
+                    (Get-FileTransferEventField -Event $_ -Name 'payer_decision_id' -Default '') -eq
+                        $payerDecisionId
+                } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+                if ($acceptedAnswer.Count -ne 1) {
+                    continue
+                }
+
+                $rawAnswer = @($rawAnswers | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$acceptedAnswer[0].Sequence -and
+                    [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
+                    (Test-InitialOfferWriterMatch -Left $offer -Right $_)
+                } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+                if ($rawAnswer.Count -ne 1) {
+                    continue
+                }
+
+                $lifecycleAck = @($answerLifecycleAcks | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$rawAnswer[0].Sequence -and
+                    [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
+                    (Test-InitialOfferWriterMatch -Left $offer -Right $_)
+                } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+                if ($lifecycleAck.Count -ne 1) {
+                    continue
+                }
+
+                [pscustomobject]@{
+                    Offer = $offer
+                    AcceptedAnswer = $acceptedAnswer[0]
+                    RawAnswer = $rawAnswer[0]
+                    LifecycleAck = $lifecycleAck[0]
+                    Rejection = $rejection
+                }
+            }
+        )
+        if ($matchingOfferRecords.Count -ne 1) {
+            continue
+        }
+
+        $record = $matchingOfferRecords[0]
+        $offer = $record.Offer
+        $rawCandidates.Add($rejection) | Out-Null
+        $key = [string]::Join('|', @(
+                (Get-FileTransferEventField -Event $offer -Name 'log_writer_id' -Default ''),
+                (Get-FileTransferEventField -Event $offer -Name 'session_id' -Default ''),
+                (Get-FileTransferEventField -Event $offer -Name 'payer_decision_id' -Default ''),
+                (Get-FileTransferEventField -Event $offer -Name 'generation' -Default ''))).
+            ToLowerInvariant()
+        if ($seen.ContainsKey($key)) {
+            continue
+        }
+        $seen[$key] = $true
+        $distinctCandidates.Add($rejection) | Out-Null
+
+        $transaction = @($transactionAnswerEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$rejection.Sequence -and
+            (Test-InitialOfferBoundaryIdentityMatch -Offer $offer -Candidate $_ -RequireCompleteCandidate)
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        $answerAck = @()
+        $preCommit = @()
+        if ($transaction.Count -eq 1) {
+            $answerAck = @($answerAckSentEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$transaction[0].Sequence -and
+                (Test-InitialOfferBoundaryIdentityMatch -Offer $offer -Candidate $_)
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        }
+        if ($answerAck.Count -eq 1) {
+            $transactionGeneration =
+                Get-FileTransferEventField -Event $transaction[0] -Name 'transaction_generation' -Default ''
+            $offerGeneration =
+                Get-FileTransferEventField -Event $transaction[0] -Name 'offer_generation' -Default ''
+            $leaseGeneration =
+                Get-FileTransferEventField -Event $transaction[0] -Name 'tuna_path_lease_generation' -Default ''
+            $preCommit = @($preCommitHandoffEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$answerAck[0].Sequence -and
+                (Test-InitialOfferWriterMatch -Left $offer -Right $_) -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq
+                    (Get-FileTransferEventField -Event $offer -Name 'session_id' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'transaction_generation' -Default '') -eq
+                    $transactionGeneration -and
+                (Get-FileTransferEventField -Event $_ -Name 'offer_generation' -Default '') -eq
+                    $offerGeneration -and
+                (Get-FileTransferEventField -Event $_ -Name 'tuna_path_lease_generation' -Default '') -eq
+                    $leaseGeneration
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        }
+
+        if ($transaction.Count -eq 1 -and
+            $answerAck.Count -eq 1 -and
+            $preCommit.Count -eq 1) {
+            $recoveredCandidates.Add($rejection) | Out-Null
+        }
+        else {
+            $unresolvedCandidates.Add($rejection) | Out-Null
         }
     }
 
@@ -28730,6 +28965,18 @@ function Get-FileTransferRegularV4FrontierRepairLifecycleProof {
     [object[]]$progressEvents = @($orderedEvents | Where-Object {
         $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_progress_observed'
     })
+    [object[]]$repairScheduledEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_v4_repair_scheduled'
+    })
+    [object[]]$payloadSendEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_data_path_send_result' -and
+        (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -eq
+            'filetransfer.chunk_batch.v4' -and
+        (Get-FileTransferEventField -Event $_ -Name 'delivery_result' -Default '') -eq 'sent'
+    })
+    [object[]]$stateReceivedEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_v4_state_received'
+    })
     if ($null -eq $SettlementDispositionProof) {
         $SettlementDispositionProof =
             Get-FileTransferRegularV4FrontierRepairSettlementDispositionProof -Events $orderedEvents
@@ -28867,6 +29114,144 @@ function Get-FileTransferRegularV4FrontierRepairLifecycleProof {
             return $false
         }
         return $true
+    }
+
+    function Test-RegularV4FutureTailScopeMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Stall,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        foreach ($field in @('session_id', 'transfer_id')) {
+            $stallValue = Get-FileTransferEventField -Event $Stall -Name $field -Default ''
+            $candidateValue = Get-FileTransferEventField -Event $Candidate -Name $field -Default ''
+            if ([string]::IsNullOrWhiteSpace($stallValue) -or
+                [string]::IsNullOrWhiteSpace($candidateValue) -or
+                -not [string]::Equals(
+                    $stallValue,
+                    $candidateValue,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        $stallWriter = Get-FileTransferEventField -Event $Stall -Name 'log_writer_id' -Default ''
+        $candidateWriter = Get-FileTransferEventField -Event $Candidate -Name 'log_writer_id' -Default ''
+        if ([string]::IsNullOrWhiteSpace($stallWriter) -or
+            [string]::IsNullOrWhiteSpace($candidateWriter) -or
+            -not [string]::Equals(
+                $stallWriter,
+                $candidateWriter,
+                [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+
+        foreach ($field in @(
+                'direction',
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'runtime_generation',
+                'terminal_generation',
+                'leg_generation',
+                'transport_epoch',
+                'bridge_recovery_generation',
+                'route_publication_generation',
+                'route_commit_generation')) {
+            $stallValue = Get-FileTransferRegularV4FrontierRepairIdentityField `
+                -Event $Stall `
+                -Names @($field)
+            $candidateValue = Get-FileTransferRegularV4FrontierRepairIdentityField `
+                -Event $Candidate `
+                -Names @($field)
+            if (-not [string]::IsNullOrWhiteSpace($stallValue) -and
+                -not [string]::IsNullOrWhiteSpace($candidateValue) -and
+                -not [string]::Equals(
+                    $stallValue,
+                    $candidateValue,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    function Test-RegularV4FutureTailCaughtUp {
+        param([Parameter(Mandatory = $true)]$Stall)
+
+        if ((Get-FileTransferEventField -Event $Stall -Name 'reason' -Default '') -ne
+            'no_schedulable_repair_chunks') {
+            return $false
+        }
+
+        [int64]$frontier =
+            Get-FileTransferEventInt64Field -Event $Stall -Name 'frontier_chunk_index' -Default -1
+        [int64]$requested =
+            Get-FileTransferEventInt64Field -Event $Stall -Name 'requested_chunk_count' -Default 0
+        if ($frontier -lt 0 -or $requested -le 0) {
+            return $false
+        }
+        [int64]$endExclusive = $frontier + $requested
+
+        $schedule = @($repairScheduledEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$Stall.Sequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'repair_request_key' -Default '') -eq
+                (Get-FileTransferEventField -Event $Stall -Name 'repair_request_key' -Default '') -and
+            (Test-RegularV4FutureTailScopeMatch -Stall $Stall -Candidate $_) -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'first_start_chunk_index' -Default -1) -eq
+                $frontier -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'last_end_chunk_exclusive' -Default -1) -eq
+                $endExclusive -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'requested_chunk_count' -Default 0) -eq
+                $requested -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'scheduled_chunk_count' -Default -1) -eq 0 -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'skipped_future_count' -Default -1) -eq
+                $requested -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'skipped_obsolete_count' -Default -1) -eq 0 -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'skipped_out_of_bounds_count' -Default -1) -eq 0
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($schedule.Count -ne 1) {
+            return $false
+        }
+
+        [int64]$coveredThrough = $frontier
+        [int64]$lastPayloadSequence = [int64]$schedule[0].Sequence
+        foreach ($send in @($payloadSendEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$schedule[0].Sequence -and
+                (Test-RegularV4FutureTailScopeMatch -Stall $Stall -Candidate $_)
+            } | Sort-Object Sequence, LineNumber)) {
+            [int64]$sendStart =
+                Get-FileTransferEventInt64Field -Event $send -Name 'start_chunk_index' -Default -1
+            [int64]$sendEnd =
+                Get-FileTransferEventInt64Field -Event $send -Name 'last_end_chunk_exclusive' -Default -1
+            if ($sendEnd -le $coveredThrough -or $sendStart -ge $endExclusive) {
+                continue
+            }
+            if ($sendStart -gt $coveredThrough) {
+                break
+            }
+            $coveredThrough = [Math]::Max($coveredThrough, $sendEnd)
+            $lastPayloadSequence = [int64]$send.Sequence
+            if ($coveredThrough -ge $endExclusive) {
+                break
+            }
+        }
+        if ($coveredThrough -lt $endExclusive) {
+            return $false
+        }
+
+        $caughtUpState = @($stateReceivedEvents | Where-Object {
+            [int64]$_.Sequence -gt $lastPayloadSequence -and
+            (Test-RegularV4FutureTailScopeMatch -Stall $Stall -Candidate $_) -and
+            (Get-FileTransferEventField -Event $_ -Name 'applied' -Default '0') -eq '1' -and
+            (Get-FileTransferEventField -Event $_ -Name 'stale' -Default '0') -eq '0' -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'contiguous_committed_chunk_index' -Default -1) -ge
+                $endExclusive -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'durable_received_highest_chunk_index' -Default -1) -ge
+                ($endExclusive - 1) -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'missing_range_count' -Default -1) -eq 0
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        return $caughtUpState.Count -eq 1
     }
     [object[]]$resolvedSettledStalledEvents = @(
         foreach ($accepted in $acceptedSettledStalledEvents) {
@@ -29065,7 +29450,8 @@ function Get-FileTransferRegularV4FrontierRepairLifecycleProof {
                 (Test-FileTransferRegularV4FrontierRepairLifecycleMatch -Source $stalled -Candidate $_)
             } | Sort-Object Sequence, LineNumber | Select-Object -First 1
         )
-        if ($resolution.Count -gt 0) {
+        if ($resolution.Count -gt 0 -or
+            (Test-RegularV4FutureTailCaughtUp -Stall $stalled)) {
             $recovered.Add($stalled) | Out-Null
         }
         else {
@@ -35191,12 +35577,23 @@ function Get-FileTransferRecoveryFailureClassification {
         }) `
         -DefaultReason 'regular_v4_recovery_closure_window_fresh_chain_not_created' `
         -UseDefaultReason
-    Add-FileTransferProofChainFailureCandidates `
-        -Candidates $proofChainFailureCandidates `
-        -Class 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing' `
-        -Events @($runtimeUnlockInitialOfferRetryLifecycleHandoffProof.UnresolvedCandidateEvents) `
-        -DefaultReason 'runtime_unlock_offer_send_not_observed_retry_install_state_missing' `
-        -UseDefaultReason
+    foreach ($candidateEvent in @($runtimeUnlockInitialOfferRetryLifecycleHandoffProof.UnresolvedCandidateEvents)) {
+        $candidateReason = if (
+            $candidateEvent.EventName -eq 'runtime_unlock_retry_dispatch_install_rejected' -and
+            (Get-FileTransferEventField -Event $candidateEvent -Name 'decision_reason' -Default '') -eq
+                'retry_dispatch_install_state_missing_answer_received') {
+            'initial_offer_answer_misclassified_as_retry_install'
+        }
+        else {
+            'runtime_unlock_offer_send_not_observed_retry_install_state_missing'
+        }
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing' `
+            -Events @($candidateEvent) `
+            -DefaultReason $candidateReason `
+            -UseDefaultReason
+    }
 
     $grantBypassSequences = @(
         @($runtimeUnlockRetryDispatchGrantBypassedByRetryBudgetEvents) +
