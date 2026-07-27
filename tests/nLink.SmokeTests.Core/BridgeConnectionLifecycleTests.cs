@@ -6469,6 +6469,23 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             var logBaseline = LocalOperationalLog.GetRecentLogText().Length;
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             await adapter.ConnectAsync(cts.Token);
+            var bridgeSupervisor = Assert.IsType<BridgeSupervisor>(
+                GetPrivateField(adapter, "bridgeSupervisor"));
+            var initialProcessIdentity =
+                bridgeSupervisor.CurrentProcessIdentity;
+            Assert.False(initialProcessIdentity.IsDefault);
+            Assert.Null(
+                await bridgeSupervisor.CleanupProcessEpochAsync(
+                    initialProcessIdentity with
+                    {
+                        ProcessEpoch =
+                            initialProcessIdentity.ProcessEpoch + 1,
+                    },
+                    waitForReaders: true,
+                    "test_mismatched_source_process_epoch"));
+            Assert.Equal(
+                initialProcessIdentity,
+                bridgeSupervisor.CurrentProcessIdentity);
 
             var command = CreateBridgeRecoveryExecutionCommand(
                 "transfer-core-filetransfer-recovery",
@@ -6516,8 +6533,14 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                         "bridgeRecoverySubmissionBarrierActive")),
                 TimeSpan.FromSeconds(2));
             Assert.False(admittedOldSubmission.IsCompleted);
+            await WaitUntilAsync(
+                () => bridgeSupervisor.CurrentProcessIdentity.IsDefault,
+                TimeSpan.FromSeconds(5));
+            Assert.False(admittedOldSubmission.IsCompleted);
             releaseOldSubmission.Set();
-            await admittedOldSubmission.WaitAsync(TimeSpan.FromSeconds(2));
+            await Assert.ThrowsAnyAsync<InvalidOperationException>(
+                async () => await admittedOldSubmission.WaitAsync(
+                    TimeSpan.FromSeconds(2)));
             Assert.True(
                 freshProcessStarted.Wait(TimeSpan.FromSeconds(5)));
             await Assert.ThrowsAsync<InvalidOperationException>(
@@ -6561,6 +6584,13 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 FileTransferBridgeRecoveryExecutionOutcome.Completed,
                 receipt.Outcome);
             Assert.Equal("hard", receipt.ExecutionMode);
+            var restartedPingLoop = Assert.IsAssignableFrom<Task>(
+                GetPrivateField(adapter, "pingLoopTask"));
+            var restartedPingLoopCts =
+                Assert.IsType<CancellationTokenSource>(
+                    GetPrivateField(adapter, "pingLoopCts"));
+            Assert.False(restartedPingLoop.IsCompleted);
+            Assert.False(restartedPingLoopCts.IsCancellationRequested);
             var completedDuplicate =
                 adapter.BeginFileTransferBridgeRecoveryExecution(command);
             Assert.Equal(
@@ -6583,6 +6613,26 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 logText,
                 StringComparison.Ordinal);
             Assert.Contains(
+                "event=nkn_bridge_recovery_submission_barrier_drain_started",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=nkn_bridge_recovery_submission_barrier_drain_completed",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "gate_acquired=1",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "source_process_terminated=1",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                $"source_process_spawn_ticks={initialProcessIdentity.SpawnTicks}",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
                 "event=nkn_bridge_recovery_submission_barrier_released",
                 logText,
                 StringComparison.Ordinal);
@@ -6590,6 +6640,38 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 "reason=bridge_submission_epoch_not_ready",
                 logText,
                 StringComparison.Ordinal);
+            var barrierClosedIndex = logText.IndexOf(
+                "event=nkn_bridge_recovery_submission_barrier_closed",
+                StringComparison.Ordinal);
+            var hardRestartDecisionIndex = logText.IndexOf(
+                "event=nkn_bridge_recovery_execution_hard_restart_decided",
+                StringComparison.Ordinal);
+            var drainStartedIndex = logText.IndexOf(
+                "event=nkn_bridge_recovery_submission_barrier_drain_started",
+                StringComparison.Ordinal);
+            var drainCompletedIndex = logText.IndexOf(
+                "event=nkn_bridge_recovery_submission_barrier_drain_completed",
+                StringComparison.Ordinal);
+            var replacementProcessStartedIndex = logText.LastIndexOf(
+                "Bridge process started",
+                StringComparison.Ordinal);
+            var replacementReadyIndex = logText.LastIndexOf(
+                "event=nkn_bridge_submission_epoch_bound",
+                StringComparison.Ordinal);
+            var barrierReleasedIndex = logText.IndexOf(
+                "event=nkn_bridge_recovery_submission_barrier_released",
+                StringComparison.Ordinal);
+            var terminalReceiptIndex = logText.IndexOf(
+                "event=nkn_bridge_recovery_execution_completed",
+                StringComparison.Ordinal);
+            Assert.True(barrierClosedIndex >= 0);
+            Assert.True(hardRestartDecisionIndex > barrierClosedIndex);
+            Assert.True(drainStartedIndex > hardRestartDecisionIndex);
+            Assert.True(drainCompletedIndex > drainStartedIndex);
+            Assert.True(replacementProcessStartedIndex > drainCompletedIndex);
+            Assert.True(replacementReadyIndex > replacementProcessStartedIndex);
+            Assert.True(barrierReleasedIndex > replacementReadyIndex);
+            Assert.True(terminalReceiptIndex > barrierReleasedIndex);
             Assert.Contains(
                 "recovery_liveness_lease_authority_id=",
                 logText,
@@ -6709,13 +6791,19 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                     [13, 14, 15],
                     cts.Token));
             releaseHeldSubmission.Set();
-            await heldSubmission.WaitAsync(TimeSpan.FromSeconds(2));
+            await Assert.ThrowsAnyAsync<InvalidOperationException>(
+                async () => await heldSubmission.WaitAsync(
+                    TimeSpan.FromSeconds(2)));
             await WaitUntilAsync(
                 () => Assert.IsType<int>(
                     GetPrivateField(
                         adapter,
                         "receiveStallRecoveryInProgress")) == 0,
                 TimeSpan.FromSeconds(2));
+            Assert.Contains(
+                "event=nkn_bridge_recovery_submission_barrier_drain_invalidated",
+                GetRecentLogTextSince(logBaseline),
+                StringComparison.Ordinal);
             var invalidatedReadySnapshot =
                 GetPrivateField(adapter, "bridgeSubmissionReadySnapshot");
             Assert.NotNull(invalidatedReadySnapshot);
