@@ -6764,10 +6764,46 @@ public sealed partial class SessionFileTransferService :
     {
         var previous = context.CoordinatorPersistentState.FileTransferReceiveRecovery;
         context.CoordinatorPersistentState = state.PersistentState;
+        var current = state.PersistentState.FileTransferReceiveRecovery;
         LogReceiveRecoveryOperationTransitions(
             previous,
-            state.PersistentState.FileTransferReceiveRecovery,
+            current,
             "coordinator_receive_recovery_transition");
+        var heldPayloadWakePrefix =
+            previous.CurrentOperation is { } previousOperation
+                ? $"receive_recovery_execution_payload_hold:{previousOperation.Authority.OperationGeneration}:"
+                : string.Empty;
+        if (previous.CurrentOperation is
+                {
+                    ExecutionState:
+                        FileTransferReceiveRecoveryExecutionState.Issued or
+                        FileTransferReceiveRecoveryExecutionState.Running,
+                } held &&
+            current.CurrentOperation is
+                {
+                    ExecutionState:
+                        FileTransferReceiveRecoveryExecutionState.Completed,
+                    ExecutionReceipt:
+                    {
+                        Outcome:
+                            FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                    },
+                } completed &&
+            completed.Authority == held.Authority &&
+            !string.IsNullOrEmpty(heldPayloadWakePrefix) &&
+            context.SparseSenderPumpLastWakeReason.StartsWith(
+                heldPayloadWakePrefix,
+                StringComparison.Ordinal))
+        {
+            context.SparseSenderPumpLastWakeReason =
+                "receive_recovery_execution_payload_resumed";
+            context.SignalSparseSenderPump();
+            var authority = completed.Authority;
+            var observation = authority.Observation;
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_bridge_recovery_payload_submission_resumed; session_id={FormatProtocolLogValue(observation.SessionId)}; transfer_id={FormatProtocolLogValue(observation.TransferId)}; direction=outbound; recovery_operation_generation={authority.OperationGeneration}; recovery_operation_authority_id={FormatProtocolLogValue(authority.AuthorityId.ToString())}; recovery_execution_state={completed.ExecutionState}; bridge_decision_generation={authority.BridgeRecoveryDecision.BridgeDecisionGeneration}; recovery_liveness_lease_generation={authority.RecoveryLivenessLease?.LeaseGeneration ?? 0}; route={FormatProtocolLogValue(observation.RouteToken)}; protocol_version={observation.ProtocolVersion}; live_route_epoch={observation.LiveRouteEpoch}; runtime_generation={observation.RuntimeOwner.RuntimeGeneration}; terminal_generation={observation.TerminalGeneration}; leg_generation={observation.LegGeneration}; transport_epoch={observation.TransportEpoch}; bridge_recovery_generation={observation.BridgeRecoveryGeneration}; route_publication_generation={observation.RoutePublication.PublicationGeneration}; data_session_generation={observation.DataSessionGeneration}; decision_reason=receive_recovery_execution_completed");
+        }
     }
 
     private static void ApplyReceiveRecoveryStateLocked(

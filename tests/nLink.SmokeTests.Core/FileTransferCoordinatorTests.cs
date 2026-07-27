@@ -6663,6 +6663,149 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void BridgeRecoveryExecutionPayloadHold_CoordinatorReleasesOnlyOnCompleted()
+    {
+        var runningFixture = CreateReceiveRecoveryOperationFixture();
+        var runningAuthority =
+            Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+                runningFixture.Decision.Authority);
+        Assert.True(
+            FileTransferCoordinator
+                .TryGetCurrentReceiveRecoveryPayloadSubmissionHold(
+                    runningFixture.Decision.State,
+                    out var issued,
+                    out _));
+        Assert.Equal(
+            FileTransferReceiveRecoveryExecutionState.Issued,
+            issued.ExecutionState);
+
+        var completedReceipt =
+            new FileTransferBridgeRecoveryExecutionReceipt(
+                runningAuthority.ExecutionCommand,
+                FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                "hard",
+                "bridge_recovery_completed");
+        var running =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(
+                runningFixture.Decision.State,
+                new FileTransferBridgeRecoveryExecutionStartResult(
+                    runningAuthority.ExecutionCommand,
+                    FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                    "bridge_recovery_execution_started",
+                    Task.FromResult(completedReceipt)));
+        Assert.True(
+            FileTransferCoordinator
+                .TryGetReceiveRecoveryPayloadSubmissionHold(
+                    running.State,
+                    out var runningOperation,
+                    out _));
+        Assert.Equal(
+            FileTransferReceiveRecoveryExecutionState.Running,
+            runningOperation.ExecutionState);
+
+        var completed =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionReceipt(
+                running.State,
+                completedReceipt);
+        Assert.False(
+            FileTransferCoordinator
+                .TryGetReceiveRecoveryPayloadSubmissionHold(
+                    completed.State,
+                    out _,
+                    out _));
+
+        foreach (var outcome in new[]
+                 {
+                     FileTransferBridgeRecoveryExecutionOutcome.Exhausted,
+                     FileTransferBridgeRecoveryExecutionOutcome.Discarded,
+                 })
+        {
+            var terminalFixture = CreateReceiveRecoveryOperationFixture();
+            var terminalAuthority =
+                Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+                    terminalFixture.Decision.Authority);
+            var terminalReceipt =
+                new FileTransferBridgeRecoveryExecutionReceipt(
+                    terminalAuthority.ExecutionCommand,
+                    outcome,
+                    "hard",
+                    $"bridge_recovery_{outcome.ToString().ToLowerInvariant()}");
+            var terminalRunning =
+                FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(
+                    terminalFixture.Decision.State,
+                    new FileTransferBridgeRecoveryExecutionStartResult(
+                        terminalAuthority.ExecutionCommand,
+                        FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                        "bridge_recovery_execution_started",
+                        Task.FromResult(terminalReceipt)));
+            var terminal =
+                FileTransferCoordinator.ObserveReceiveRecoveryExecutionReceipt(
+                    terminalRunning.State,
+                    terminalReceipt);
+
+            Assert.False(
+                FileTransferCoordinator
+                    .TryGetCurrentReceiveRecoveryPayloadSubmissionHold(
+                        terminal.State,
+                        out _,
+                        out _));
+            Assert.True(
+                FileTransferCoordinator
+                    .TryGetReceiveRecoveryPayloadSubmissionHold(
+                        terminal.State,
+                        out var heldTerminal,
+                        out var holdReason));
+            Assert.Equal(
+                outcome ==
+                    FileTransferBridgeRecoveryExecutionOutcome.Exhausted
+                    ? FileTransferReceiveRecoveryExecutionState.Exhausted
+                    : FileTransferReceiveRecoveryExecutionState.Discarded,
+                heldTerminal.ExecutionState);
+            Assert.Equal(
+                "filetransfer_receive_recovery_execution_terminal_without_completion",
+                holdReason);
+
+            var staleState = terminal.State with
+            {
+                TerminalGeneration =
+                    terminal.State.TerminalGeneration + 1,
+            };
+            Assert.False(
+                FileTransferCoordinator
+                    .TryGetReceiveRecoveryPayloadSubmissionHold(
+                        staleState,
+                        out _,
+                        out var staleReason));
+            Assert.Equal(
+                "filetransfer_receive_recovery_execution_scope_not_current",
+                staleReason);
+        }
+
+        var invalidatedFixture =
+            CreateReceiveRecoveryOperationFixture();
+        var invalidatedAuthority =
+            Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+                invalidatedFixture.Decision.Authority);
+        var invalidated =
+            FileTransferCoordinator.InvalidateReceiveRecoveryOperation(
+                invalidatedFixture.Decision.State,
+                invalidatedAuthority,
+                "bridge_recovery_execution_begin_failed");
+        Assert.True(
+            FileTransferCoordinator
+                .TryGetReceiveRecoveryPayloadSubmissionHold(
+                    invalidated.State,
+                    out var invalidatedHold,
+                    out var invalidatedReason));
+        Assert.Equal(
+            FileTransferReceiveRecoveryExecutionState.Invalidated,
+            invalidatedHold.ExecutionState);
+        Assert.Equal(
+            "filetransfer_receive_recovery_execution_terminal_without_completion",
+            invalidatedReason);
+    }
+
+    [Fact]
     public void FileTransferReceiveRecoveryOperation_RetainedClosureKeepsBoundedLivenessDeferral()
     {
         var fixture = CreateReceiveRecoveryOperationFixture();

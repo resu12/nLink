@@ -841,6 +841,7 @@ public sealed partial class SessionFileTransferV4SenderTests
                         null,
                         null,
                         null,
+                        null,
                         CancellationToken.None,
                     ])!);
 
@@ -917,6 +918,7 @@ public sealed partial class SessionFileTransferV4SenderTests
                                 null,
                                 FileTransferV4RepairDeliveryMode.BulkOnly,
                                 "normal",
+                                null,
                                 null,
                                 null,
                                 null,
@@ -2385,6 +2387,7 @@ public sealed partial class SessionFileTransferV4SenderTests
                         null,
                         FileTransferV4RepairDeliveryMode.BulkOnly,
                         "normal",
+                        null,
                         null,
                         null,
                         null,

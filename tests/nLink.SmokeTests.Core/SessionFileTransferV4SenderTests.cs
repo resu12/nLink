@@ -896,6 +896,564 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
+    public async Task BridgeRecoveryExecutionPayloadHold_StartAtPreReservationRestoresExactPeerSilenceAuthority()
+    {
+        const string transferId =
+            "transfer_bridge_recovery_pre_reservation_payload_hold";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport =
+            new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc:
+                DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        SetPrivateProperty(context, "PullSourceCanSeek", true);
+        SetPrivateProperty(context, "ChunkCount", 1200);
+        SetPrivateProperty(
+            context,
+            "PullV4LastPeerFrameReceivedUtc",
+            DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        typeof(SessionFileTransferService)
+            .GetField(
+                "outboundTransfer",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        var dataSession = Assert.IsType<RecordingDataSession>(
+            GetPrivatePropertyValue(context, "DataSession"));
+        object? pumpInstall = null;
+
+        Assert.True((bool)typeof(SessionFileTransferService)
+            .GetMethod(
+                "TryRequestFileTransferReceiveRecovery",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    new FileTransferReceiveRecoveryRequest(
+                        $"session_{transferId}",
+                        transferId,
+                        FileTransferDirection.Outbound,
+                        "session_liveness_timeout_pending"),
+                ])!);
+        var command = Assert.Single(
+            transport.BridgeRecoveryExecutionCommands);
+        var runningPersistent =
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                context,
+                "CoordinatorPersistentState");
+        var runningOperation =
+            Assert.IsType<FileTransferReceiveRecoveryOperation>(
+                runningPersistent.FileTransferReceiveRecovery
+                    .CurrentOperation);
+        Assert.Equal(
+            FileTransferReceiveRecoveryExecutionState.Running,
+            runningOperation.ExecutionState);
+        var queuedBeforeHold =
+            Assert.Single(GetQueuedV4RepairSends(context));
+        var contractBeforeHold =
+            GetPrivatePropertyValue(
+                queuedBeforeHold,
+                "RegularV4RepairContract");
+        Assert.NotNull(contractBeforeHold);
+        var authorityBeforeHold = GetPrivatePropertyValue(
+            contractBeforeHold!,
+            "Authority");
+        var installGenerationBeforeHold =
+            GetPrivateProperty<long>(
+                GetPrivatePropertyValue(
+                    context,
+                    "InstalledRegularV4FrontierRepairPressureBinding")!,
+                "InstallGeneration");
+
+        lock (GetServiceGate(service))
+        {
+            SetPrivateProperty(
+                context,
+                "CoordinatorPersistentState",
+                runningPersistent with
+                {
+                    FileTransferReceiveRecovery =
+                        runningPersistent.FileTransferReceiveRecovery with
+                        {
+                            CurrentOperation = runningOperation with
+                            {
+                                ExecutionState =
+                                    FileTransferReceiveRecoveryExecutionState
+                                        .Completed,
+                            },
+                        },
+                });
+        }
+
+        var barrierEntered =
+            new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseBarrier =
+            new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+        var previousBarrier =
+            SessionFileTransferService
+                .OutboundRegularV4PhysicalSendPreReservationBarrierForTests;
+        var previousCompletion =
+            SessionFileTransferService
+                .OutboundSparseSenderPumpNormalCompletionForTests;
+        var pumpLoopCount = 0;
+        SessionFileTransferService
+            .OutboundRegularV4PhysicalSendPreReservationBarrierForTests =
+            async (observedTransferId, _) =>
+            {
+                if (!string.Equals(
+                        observedTransferId,
+                        transferId,
+                        StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                barrierEntered.TrySetResult();
+                await releaseBarrier.Task;
+            };
+        SessionFileTransferService
+            .OutboundSparseSenderPumpNormalCompletionForTests =
+            (observedTransferId, _) =>
+                string.Equals(
+                    observedTransferId,
+                    transferId,
+                    StringComparison.Ordinal) &&
+                Interlocked.Increment(ref pumpLoopCount) > 1;
+        try
+        {
+            using var source =
+                new MemoryStream(
+                    new byte[512 * 21 * 1024],
+                    writable: false);
+            var pumpTask = Assert.IsAssignableFrom<Task>(
+                typeof(SessionFileTransferService)
+                    .GetMethod(
+                        "RunOutboundV4SenderPumpAsync",
+                        BindingFlags.Instance |
+                        BindingFlags.NonPublic)!
+                    .Invoke(
+                        service,
+                        [
+                            context,
+                            source,
+                            dataSession,
+                            CancellationToken.None,
+                            pumpInstall,
+                        ]));
+            var barrierOrPump = await Task.WhenAny(
+                barrierEntered.Task,
+                pumpTask,
+                Task.Delay(TimeSpan.FromSeconds(10)));
+            Assert.True(
+                ReferenceEquals(
+                    barrierEntered.Task,
+                    barrierOrPump),
+                ReadOperationalLogTail(logStart));
+            lock (GetServiceGate(service))
+            {
+                var currentPersistent =
+                    GetPrivateProperty<
+                        FileTransferCoordinatorPersistentState>(
+                        context,
+                        "CoordinatorPersistentState");
+                SetPrivateProperty(
+                    context,
+                    "CoordinatorPersistentState",
+                    currentPersistent with
+                    {
+                        FileTransferReceiveRecovery =
+                            runningPersistent
+                                .FileTransferReceiveRecovery,
+                    });
+            }
+
+            releaseBarrier.TrySetResult();
+            await pumpTask.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            releaseBarrier.TrySetResult();
+            SessionFileTransferService
+                .OutboundRegularV4PhysicalSendPreReservationBarrierForTests =
+                previousBarrier;
+            SessionFileTransferService
+                .OutboundSparseSenderPumpNormalCompletionForTests =
+                previousCompletion;
+        }
+
+        Assert.Empty(dataSession.SentFrames);
+        var queuedDuringHold =
+            Assert.Single(GetQueuedV4RepairSends(context));
+        Assert.Equal(
+            GetStringProperty(
+                queuedBeforeHold,
+                "RepairRequestKey"),
+            GetStringProperty(
+                queuedDuringHold,
+                "RepairRequestKey"));
+        Assert.Equal(
+            Assert.IsAssignableFrom<IReadOnlyList<int>>(
+                GetPrivatePropertyValue(
+                    queuedBeforeHold,
+                    "ChunkIndices")),
+            Assert.IsAssignableFrom<IReadOnlyList<int>>(
+                GetPrivatePropertyValue(
+                    queuedDuringHold,
+                    "ChunkIndices")));
+        var contractDuringHold = GetPrivatePropertyValue(
+            queuedDuringHold,
+            "RegularV4RepairContract");
+        Assert.Same(contractBeforeHold, contractDuringHold);
+        Assert.Equal(
+            authorityBeforeHold,
+            GetPrivatePropertyValue(contractDuringHold!, "Authority"));
+        Assert.Equal(
+            installGenerationBeforeHold,
+            GetPrivateProperty<long>(
+                GetPrivatePropertyValue(
+                    context,
+                    "InstalledRegularV4FrontierRepairPressureBinding")!,
+                "InstallGeneration"));
+        Assert.False(GetPrivateProperty<bool>(
+            GetPrivatePropertyValue(
+                contractDuringHold,
+                "Lifecycle")!,
+            "IsSettled"));
+
+        transport.CompleteBridgeRecoveryExecution(
+            command,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            "loopback_bridge_recovery_completed");
+        await WaitUntilAsync(
+            () =>
+                GetPrivateProperty<
+                    FileTransferCoordinatorPersistentState>(
+                        context,
+                        "CoordinatorPersistentState")
+                    .FileTransferReceiveRecovery
+                    .CurrentOperation?
+                    .ExecutionState ==
+                FileTransferReceiveRecoveryExecutionState.Completed);
+
+        pumpLoopCount = 0;
+        SessionFileTransferService
+            .OutboundSparseSenderPumpNormalCompletionForTests =
+            (observedTransferId, _) =>
+                string.Equals(
+                    observedTransferId,
+                    transferId,
+                    StringComparison.Ordinal) &&
+                Interlocked.Increment(ref pumpLoopCount) > 1;
+        try
+        {
+            using var source =
+                new MemoryStream(
+                    new byte[512 * 21 * 1024],
+                    writable: false);
+            var pumpTask = Assert.IsAssignableFrom<Task>(
+                typeof(SessionFileTransferService)
+                    .GetMethod(
+                        "RunOutboundV4SenderPumpAsync",
+                        BindingFlags.Instance |
+                        BindingFlags.NonPublic)!
+                    .Invoke(
+                        service,
+                        [
+                            context,
+                            source,
+                            dataSession,
+                            CancellationToken.None,
+                            pumpInstall,
+                        ]));
+            await pumpTask.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            SessionFileTransferService
+                .OutboundSparseSenderPumpNormalCompletionForTests =
+                previousCompletion;
+        }
+
+        Assert.NotEmpty(dataSession.SentFrames);
+        Assert.Empty(GetQueuedV4RepairSends(context));
+        var lifecycle = GetPrivatePropertyValue(
+            contractDuringHold,
+            "Lifecycle");
+        Assert.NotNull(lifecycle);
+        Assert.True(GetPrivateProperty<bool>(
+            lifecycle!,
+            "DispatchObserved"));
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains(
+            "event=filetransfer_bridge_recovery_payload_submission_held;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "stage=pre_reservation",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "event=filetransfer_bridge_recovery_payload_submission_resumed;",
+            log,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=filetransfer_recovery_authority_rejected;",
+            log,
+            StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Exhausted")]
+    [InlineData("Discarded")]
+    [InlineData("Invalidated")]
+    [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
+    public async Task BridgeRecoveryExecutionPayloadHold_TerminalWithoutCompletionKeepsPeerSilenceAuthorityHeld(
+        string terminalState)
+    {
+        var transferId =
+            $"transfer_bridge_recovery_terminal_payload_hold_{terminalState.ToLowerInvariant()}";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport =
+            new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc:
+                DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        SetPrivateProperty(context, "PullSourceCanSeek", true);
+        SetPrivateProperty(context, "ChunkCount", 1200);
+        SetPrivateProperty(
+            context,
+            "PullV4LastPeerFrameReceivedUtc",
+            DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        typeof(SessionFileTransferService)
+            .GetField(
+                "outboundTransfer",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        var dataSession = Assert.IsType<RecordingDataSession>(
+            GetPrivatePropertyValue(context, "DataSession"));
+
+        Assert.True((bool)typeof(SessionFileTransferService)
+            .GetMethod(
+                "TryRequestFileTransferReceiveRecovery",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    new FileTransferReceiveRecoveryRequest(
+                        $"session_{transferId}",
+                        transferId,
+                        FileTransferDirection.Outbound,
+                        "session_liveness_timeout_pending"),
+                ])!);
+        var command = Assert.Single(
+            transport.BridgeRecoveryExecutionCommands);
+        var queuedBeforePoll =
+            Assert.Single(GetQueuedV4RepairSends(context));
+        var contractBeforePoll =
+            GetPrivatePropertyValue(
+                queuedBeforePoll,
+                "RegularV4RepairContract");
+        Assert.NotNull(contractBeforePoll);
+        var authorityBeforePoll = GetPrivatePropertyValue(
+            contractBeforePoll!,
+            "Authority");
+        var installGenerationBeforePoll =
+            GetPrivateProperty<long>(
+                GetPrivatePropertyValue(
+                    context,
+                    "InstalledRegularV4FrontierRepairPressureBinding")!,
+                "InstallGeneration");
+
+        if (string.Equals(
+                terminalState,
+                "Invalidated",
+                StringComparison.Ordinal))
+        {
+            lock (GetServiceGate(service))
+            {
+                Assert.True((bool)typeof(SessionFileTransferService)
+                    .GetMethod(
+                        "TryInvalidateReceiveRecoveryOperationForScopeReplacementLocked",
+                        BindingFlags.Static |
+                        BindingFlags.NonPublic,
+                        binder: null,
+                        types: [context.GetType(), typeof(string)],
+                        modifiers: null)!
+                    .Invoke(
+                        null,
+                        [
+                            context,
+                            "bridge_recovery_execution_begin_failed",
+                        ])!);
+            }
+        }
+        else
+        {
+            transport.CompleteBridgeRecoveryExecution(
+                command,
+                Enum.Parse<FileTransferBridgeRecoveryExecutionOutcome>(
+                    terminalState),
+                $"loopback_bridge_recovery_{terminalState.ToLowerInvariant()}");
+            await WaitUntilAsync(
+                () =>
+                    GetPrivateProperty<
+                        FileTransferCoordinatorPersistentState>(
+                            context,
+                            "CoordinatorPersistentState")
+                        .FileTransferReceiveRecovery
+                        .LastTerminalOperation?
+                        .ExecutionState
+                        .ToString() ==
+                    terminalState);
+        }
+
+        object pumpInstall;
+        lock (GetServiceGate(service))
+        {
+            var stagedInstall = StageSparsePumpInstall(
+                service,
+                context,
+                predecessor: null,
+                "unit_test_terminal_receive_recovery_payload_hold");
+            Assert.True(stagedInstall.Accepted, stagedInstall.Reason);
+            Assert.NotNull(stagedInstall.Install);
+            var committedInstall = CommitSparsePumpInstall(
+                service,
+                context,
+                stagedInstall.Install!,
+                dataSession);
+            Assert.True(committedInstall.Accepted, committedInstall.Reason);
+            Assert.NotNull(committedInstall.Install);
+            pumpInstall = committedInstall.Install!;
+        }
+
+        var idleObserved =
+            new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+        var previousContinuation =
+            SessionFileTransferService
+                .OutboundSparseRepairContinuationBarrierForTests;
+        var previousCompletion =
+            SessionFileTransferService
+                .OutboundSparseSenderPumpNormalCompletionForTests;
+        var pumpLoopCount = 0;
+        SessionFileTransferService
+            .OutboundSparseRepairContinuationBarrierForTests =
+            (observedTransferId, _, stage) =>
+            {
+                if (string.Equals(
+                        observedTransferId,
+                        transferId,
+                        StringComparison.Ordinal) &&
+                    string.Equals(
+                        stage,
+                        "idle_delay",
+                        StringComparison.Ordinal))
+                {
+                    idleObserved.TrySetResult();
+                }
+
+                return Task.CompletedTask;
+            };
+        SessionFileTransferService
+            .OutboundSparseSenderPumpNormalCompletionForTests =
+            (observedTransferId, _) =>
+                string.Equals(
+                    observedTransferId,
+                    transferId,
+                    StringComparison.Ordinal) &&
+                Interlocked.Increment(ref pumpLoopCount) > 1;
+        try
+        {
+            using var source =
+                new MemoryStream(
+                    new byte[512 * 21 * 1024],
+                    writable: false);
+            var pumpTask = Assert.IsAssignableFrom<Task>(
+                typeof(SessionFileTransferService)
+                    .GetMethod(
+                        "RunOutboundV4SenderPumpAsync",
+                        BindingFlags.Instance |
+                        BindingFlags.NonPublic)!
+                    .Invoke(
+                        service,
+                        [
+                            context,
+                            source,
+                            dataSession,
+                            CancellationToken.None,
+                            pumpInstall,
+                        ]));
+            await idleObserved.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await pumpTask.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            SessionFileTransferService
+                .OutboundSparseRepairContinuationBarrierForTests =
+                previousContinuation;
+            SessionFileTransferService
+                .OutboundSparseSenderPumpNormalCompletionForTests =
+                previousCompletion;
+        }
+
+        Assert.Empty(dataSession.SentFrames);
+        var queuedAfterPoll =
+            Assert.Single(GetQueuedV4RepairSends(context));
+        Assert.Same(queuedBeforePoll, queuedAfterPoll);
+        var contractAfterPoll = GetPrivatePropertyValue(
+            queuedAfterPoll,
+            "RegularV4RepairContract");
+        Assert.Same(contractBeforePoll, contractAfterPoll);
+        Assert.Equal(
+            authorityBeforePoll,
+            GetPrivatePropertyValue(contractAfterPoll!, "Authority"));
+        Assert.Equal(
+            installGenerationBeforePoll,
+            GetPrivateProperty<long>(
+                GetPrivatePropertyValue(
+                    context,
+                    "InstalledRegularV4FrontierRepairPressureBinding")!,
+                "InstallGeneration"));
+        Assert.False(GetPrivateProperty<bool>(
+            GetPrivatePropertyValue(
+                contractAfterPoll,
+                "Lifecycle")!,
+            "IsSettled"));
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains(
+            "event=filetransfer_bridge_recovery_payload_submission_held;",
+            log,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=filetransfer_regular_v4_frontier_repair_contract_settled;",
+            log,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=filetransfer_recovery_authority_rejected;",
+            log,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=filetransfer_regular_v4_frontier_repair_dispatched;",
+            log,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
     public void RegularNknV4ReceiveRecoveryRequest_ControllerThrowRetiresLeaseWithoutArmingReplay()
     {
         const string transferId = "transfer_regular_v4_receive_recovery_dispatch_throw";
@@ -13551,6 +14109,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                     null,
                     null,
                     null,
+                    null,
                     CancellationToken.None,
                 ])!);
 
@@ -24250,6 +24809,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                     null,
                     FileTransferV4RepairDeliveryMode.BulkOnly,
                     "test_repair_obsolete_frontier",
+                    null,
                     null,
                     null,
                     null,

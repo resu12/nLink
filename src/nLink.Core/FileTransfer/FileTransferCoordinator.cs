@@ -13849,6 +13849,82 @@ internal static class FileTransferCoordinator
                authority.ExecutionCommand.CheckpointRequestId,
                out _);
 
+    internal static bool TryGetCurrentReceiveRecoveryPayloadSubmissionHold(
+        FileTransferCoordinatorState state,
+        out FileTransferReceiveRecoveryOperation operation,
+        out string reason)
+    {
+        operation = default;
+        reason = "filetransfer_receive_recovery_execution_not_active";
+        if (state.PersistentState.FileTransferReceiveRecovery
+                .CurrentOperation is not { } current ||
+            current.ExecutionState is not
+                (FileTransferReceiveRecoveryExecutionState.Issued or
+                 FileTransferReceiveRecoveryExecutionState.Running))
+        {
+            return false;
+        }
+
+        operation = current;
+        if (!IsReceiveRecoveryOperationCurrent(
+                state,
+                current.Authority))
+        {
+            reason =
+                "filetransfer_receive_recovery_execution_scope_not_current";
+            operation = default;
+            return false;
+        }
+
+        reason = "filetransfer_receive_recovery_execution_current";
+        return true;
+    }
+
+    internal static bool TryGetReceiveRecoveryPayloadSubmissionHold(
+        FileTransferCoordinatorState state,
+        out FileTransferReceiveRecoveryOperation operation,
+        out string reason)
+    {
+        if (TryGetCurrentReceiveRecoveryPayloadSubmissionHold(
+                state,
+                out operation,
+                out reason))
+        {
+            return true;
+        }
+
+        operation = default;
+        reason = "filetransfer_receive_recovery_execution_not_active";
+        var recovery = state.PersistentState.FileTransferReceiveRecovery;
+        if (recovery.CurrentOperation is not null ||
+            recovery.LastTerminalOperation is not
+            {
+                ExecutionState:
+                    FileTransferReceiveRecoveryExecutionState.Exhausted or
+                    FileTransferReceiveRecoveryExecutionState.Discarded or
+                    FileTransferReceiveRecoveryExecutionState.Invalidated,
+            } terminal)
+        {
+            return false;
+        }
+
+        if (!TryValidateReceiveRecoveryObservationCurrent(
+                state,
+                terminal.Authority.Observation,
+                terminal.Authority.ExecutionCommand.CheckpointRequestId,
+                out _))
+        {
+            reason =
+                "filetransfer_receive_recovery_execution_scope_not_current";
+            return false;
+        }
+
+        operation = terminal;
+        reason =
+            "filetransfer_receive_recovery_execution_terminal_without_completion";
+        return true;
+    }
+
     internal static bool TryGetReceiveRecoveryLivenessDeferral(
         FileTransferCoordinatorState state,
         out FileTransferReceiveRecoveryOperation operation,
