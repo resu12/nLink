@@ -1866,6 +1866,123 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task ReceiveRecoveryCompletedUnprovenSuccessorRequiresExactUnresolvedWindow()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = Regex.Replace(guiText, @"(?m)^ {4}", string.Empty);
+        var fieldValueBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Test-TunaGuiLogLineHasEvent");
+        var hasEventBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineHasEvent",
+            "Test-TunaGuiLogLineFieldMatch");
+        var completedUnprovenBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiReceiveRecoveryCompletedUnprovenSuccessorMissing",
+            "Test-TunaGuiBridgeRecoveryExecutionPayloadHoldFailure");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
+            function Test-TunaGuiLogLineHasEvent { {{hasEventBody}} }
+            function Test-TunaGuiReceiveRecoveryCompletedUnprovenSuccessorMissing {
+                {{completedUnprovenBody}}
+            }
+
+            $writer = 'writer-completed-unproven'
+            $scope = 'session_id=session-a; transfer_id=transfer-a; direction=outbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; route_publication_generation=1; route_commit_generation=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; checkpoint_request_id=(none); data_session_identity=data-session-a; data_session_generation=1'
+            $operationOne = 'receive_recovery_operation_generation=1; receive_recovery_operation_authority_id=operation-a; bridge_decision_generation=1; recovery_liveness_lease_authority_id=lease-a; recovery_liveness_lease_generation=1'
+            $rejectionScope = 'session_id=session-a; transfer_id=transfer-a; direction=outbound; current_route=regular_nkn_v4_fast; current_protocol_version=4; current_live_route_epoch=0; current_runtime_generation=1; current_terminal_generation=0; attempted_route=regular_nkn_v4_fast; attempted_protocol_version=4; attempted_live_route_epoch=0; attempted_runtime_generation=1; attempted_terminal_generation=0; attempted_leg_generation=1; attempted_transport_epoch=0; attempted_bridge_recovery_generation=0'
+            $lines = @(
+                "event=filetransfer_receive_recovery_operation_issued; $scope; $operationOne; execution_state=Issued; closure_state=None; log_writer_id=$writer",
+                "event=filetransfer_receive_recovery_operation_execution_start_decided; $scope; $operationOne; execution_state=Running; execution_start_status=Started; closure_state=None; log_writer_id=$writer",
+                "event=filetransfer_receive_recovery_operation_execution_receipt_applied; $scope; $operationOne; execution_state=Completed; execution_start_status=Started; execution_outcome=Completed; proof_identity=(none); proof_observed_utc_ms=0; closure_generation=1; closure_state=Retained; log_writer_id=$writer",
+                "event=filetransfer_receive_recovery_operation_closure_retained; $scope; $operationOne; execution_state=Completed; execution_start_status=Started; execution_outcome=Completed; proof_identity=(none); proof_observed_utc_ms=0; closure_generation=1; closure_state=Retained; log_writer_id=$writer",
+                "event=nkn_bridge_recovery_evaluation_requested; observation_kind=ping_timeout; observation_generation=2; transfer_id=transfer-a; log_writer_id=$writer",
+                "event=filetransfer_recovery_authority_rejected; $rejectionScope; action_kind=ReceiveRecoveryOperation; attempted_action=bridge_ping_timeout; rejection_reason=filetransfer_receive_recovery_operation_conflict; log_writer_id=$writer",
+                "event=filetransfer_receive_recovery_evaluation_requested; session_id=session-a; transfer_id=transfer-a; direction=outbound; observation_kind=ping_timeout; observation_generation=2; receive_recovery_operation_issued=0; log_writer_id=$writer"
+            )
+            if (-not (Test-TunaGuiReceiveRecoveryCompletedUnprovenSuccessorMissing -Lines $lines)) {
+                throw 'exact completed-unproven successor gap was not classified'
+            }
+
+            $proofBeforeEvaluation = @(
+                $lines[0..3]
+                "event=filetransfer_receive_recovery_operation_proof_observed; $scope; $operationOne; execution_state=Completed; execution_outcome=Completed; proof_identity=proof-a; proof_observed_utc_ms=123; closure_generation=1; closure_state=Adopted; log_writer_id=$writer"
+                "event=filetransfer_receive_recovery_operation_closure_adopted; $scope; $operationOne; execution_state=Completed; execution_outcome=Completed; proof_identity=proof-a; proof_observed_utc_ms=123; closure_generation=1; closure_state=Adopted; log_writer_id=$writer"
+                $lines[4..6]
+            )
+            if (Test-TunaGuiReceiveRecoveryCompletedUnprovenSuccessorMissing -Lines $proofBeforeEvaluation) {
+                throw 'proof-adopted closure was classified as completed-unproven'
+            }
+
+            $commandIssued = @($lines)
+            $commandIssued[6] = $commandIssued[6].Replace(
+                'receive_recovery_operation_issued=0',
+                'receive_recovery_operation_issued=1')
+            if (Test-TunaGuiReceiveRecoveryCompletedUnprovenSuccessorMissing -Lines $commandIssued) {
+                throw 'evaluation that issued a command was classified as blocked'
+            }
+
+            $operationTwo = 'receive_recovery_operation_generation=2; receive_recovery_operation_authority_id=operation-b; bridge_decision_generation=2; recovery_liveness_lease_authority_id=lease-b; recovery_liveness_lease_generation=2'
+            $ambiguousLegacy = @(
+                $lines[0..3]
+                "event=filetransfer_receive_recovery_operation_issued; $scope; $operationTwo; execution_state=Issued; closure_state=None; log_writer_id=$writer"
+                "event=filetransfer_receive_recovery_operation_execution_start_decided; $scope; $operationTwo; execution_state=Running; execution_start_status=Started; closure_state=None; log_writer_id=$writer"
+                "event=filetransfer_receive_recovery_operation_execution_receipt_applied; $scope; $operationTwo; execution_state=Completed; execution_start_status=Started; execution_outcome=Completed; proof_identity=(none); proof_observed_utc_ms=0; closure_generation=2; closure_state=Retained; log_writer_id=$writer"
+                "event=filetransfer_receive_recovery_operation_closure_retained; $scope; $operationTwo; execution_state=Completed; execution_start_status=Started; execution_outcome=Completed; proof_identity=(none); proof_observed_utc_ms=0; closure_generation=2; closure_state=Retained; log_writer_id=$writer"
+                $lines[4..6]
+            )
+            if (Test-TunaGuiReceiveRecoveryCompletedUnprovenSuccessorMissing -Lines $ambiguousLegacy) {
+                throw 'ambiguous legacy same-writer windows were classified'
+            }
+
+            $superseded = @(
+                $lines
+                "event=filetransfer_receive_recovery_operation_superseded; session_id=session-a; transfer_id=transfer-a; direction=outbound; predecessor_receive_recovery_operation_authority_id=operation-a; predecessor_receive_recovery_operation_generation=1; predecessor_closure_generation=1; successor_receive_recovery_operation_authority_id=operation-b; successor_receive_recovery_operation_generation=2; log_writer_id=$writer"
+                "event=filetransfer_receive_recovery_operation_issued; $scope; $operationTwo; predecessor_receive_recovery_operation_authority_id=operation-a; predecessor_receive_recovery_operation_generation=1; execution_state=Issued; closure_state=None; log_writer_id=$writer"
+                "event=filetransfer_receive_recovery_operation_execution_start_decided; $scope; $operationTwo; execution_state=Running; execution_start_status=Started; closure_state=None; log_writer_id=$writer"
+                "event=filetransfer_receive_recovery_operation_execution_receipt_applied; $scope; $operationTwo; execution_state=Completed; execution_start_status=Started; execution_outcome=Completed; proof_identity=(none); proof_observed_utc_ms=0; closure_generation=2; closure_state=Retained; log_writer_id=$writer"
+            )
+            if (Test-TunaGuiReceiveRecoveryCompletedUnprovenSuccessorMissing -Lines $superseded) {
+                throw 'completed successor did not recover predecessor classification'
+            }
+
+            Write-Output 'gui-completed-unproven-successor-correlation-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Completed-unproven successor GUI classification test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "gui-completed-unproven-successor-correlation-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "completed_unproven_receive_recovery_operation_blocked_fresh_recovery",
+            guiText,
+            StringComparison.Ordinal);
+
+        var drainBranch = guiText.IndexOf(
+            "elseif ($bridgeRecoveryExecutionSubmissionBarrierDrainMissing)",
+            StringComparison.Ordinal);
+        var completedUnprovenBranch = guiText.IndexOf(
+            "elseif ($receiveRecoveryCompletedUnprovenSuccessorMissing)",
+            StringComparison.Ordinal);
+        var genericOwnerBranch = guiText.IndexOf(
+            "elseif ($runtimeUnlockFileTransferOwnerMissingBeforePathLease)",
+            StringComparison.Ordinal);
+        Assert.True(
+            drainBranch >= 0 &&
+            completedUnprovenBranch > drainBranch &&
+            genericOwnerBranch > completedUnprovenBranch,
+            "Completed-unproven successor classification must follow earlier bridge barriers and precede generic runtime symptoms.");
+    }
+
+    [Fact]
     public async Task FallbackAuthorityMatcher_CurrentSchemaRequiresCompleteIdentityAndIsolatesLegacy()
     {
         var matcherPath = Path.Combine(FindRepoRoot(), "tools", "FileTransferAuthorityMatching.ps1")

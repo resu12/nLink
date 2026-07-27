@@ -1254,6 +1254,11 @@ function New-RouteAcceptanceRunResult {
         fileTransferReceiveRecoveryOperationDistinctCount = 0
         fileTransferReceiveRecoveryOperationRecoveredCount = 0
         fileTransferReceiveRecoveryOperationUnresolvedCount = 0
+        fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRawCount = 0
+        fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingDistinctCount = 0
+        fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount = 0
+        fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount = 0
+        fileTransferReceiveRecoveryCompletedUnprovenSuccessorVerdict = 'none'
         sessionLivenessTimeoutCount = 0
         bridgeLivenessStaleDeferralCount = 0
         bridgeLivenessTimeoutDuringValidRecoveryCount = 0
@@ -2438,6 +2443,11 @@ function Assert-Phase4RouteSummary {
     $Result.fileTransferReceiveRecoveryOperationDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'filetransfer_receive_recovery_operation_distinct_count' -DefaultValue '0')
     $Result.fileTransferReceiveRecoveryOperationRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'filetransfer_receive_recovery_operation_recovered_count' -DefaultValue '0')
     $Result.fileTransferReceiveRecoveryOperationUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'filetransfer_receive_recovery_operation_unresolved_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'filetransfer_receive_recovery_completed_unproven_successor_missing_raw_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'filetransfer_receive_recovery_completed_unproven_successor_missing_distinct_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'filetransfer_receive_recovery_completed_unproven_successor_missing_recovered_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'filetransfer_receive_recovery_completed_unproven_successor_missing_unresolved_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'filetransfer_receive_recovery_completed_unproven_successor_verdict' -DefaultValue 'none'
     $Result.bridgeLivenessStaleDeferralCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'bridge_liveness_stale_deferral_count' -DefaultValue '0')
     $Result.bridgeLivenessTimeoutDuringValidRecoveryCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'session_liveness_timeout_during_valid_recovery_count' -DefaultValue '0')
 
@@ -2651,6 +2661,11 @@ function Assert-Phase4OperatorVerdict {
     $Result.fileTransferReceiveRecoveryOperationDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_operation_distinct_count' -DefaultValue ([string]$Result.fileTransferReceiveRecoveryOperationDistinctCount))
     $Result.fileTransferReceiveRecoveryOperationRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_operation_recovered_count' -DefaultValue ([string]$Result.fileTransferReceiveRecoveryOperationRecoveredCount))
     $Result.fileTransferReceiveRecoveryOperationUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_operation_unresolved_count' -DefaultValue ([string]$Result.fileTransferReceiveRecoveryOperationUnresolvedCount))
+    $Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_completed_unproven_successor_missing_raw_count' -DefaultValue ([string]$Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRawCount))
+    $Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_completed_unproven_successor_missing_distinct_count' -DefaultValue ([string]$Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingDistinctCount))
+    $Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_completed_unproven_successor_missing_recovered_count' -DefaultValue ([string]$Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount))
+    $Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_completed_unproven_successor_missing_unresolved_count' -DefaultValue ([string]$Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount))
+    $Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_completed_unproven_successor_verdict' -DefaultValue ([string]$Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorVerdict)
     $Result.fallbackReceiverStateDeferredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'fallback_v6_receiver_state_deferred_count' -DefaultValue '0')
     $Result.fallbackReceiverStateCoalescedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'fallback_v6_receiver_state_coalesced_count' -DefaultValue '0')
     $firstProofClass = Get-RouteAcceptanceReportValue -Report $operator -Name 'first_proof_chain_failure_class' -DefaultValue '(none)'
@@ -6732,6 +6747,11 @@ function Write-Phase5PreflightFailureSummaryFiles {
         fileTransferReceiveRecoveryOperationDistinctCount = 0
         fileTransferReceiveRecoveryOperationRecoveredCount = 0
         fileTransferReceiveRecoveryOperationUnresolvedCount = 0
+        fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRawCount = 0
+        fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingDistinctCount = 0
+        fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount = 0
+        fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount = 0
+        fileTransferReceiveRecoveryCompletedUnprovenSuccessorVerdict = 'none'
         baselineManifest = $BaselinePath
         generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
         preflightVerdict = 'FAIL'
@@ -8269,6 +8289,11 @@ function New-RouteAcceptanceSummaryRunDto {
         fileTransferReceiveRecoveryOperationDistinctCount = [int]$Result.fileTransferReceiveRecoveryOperationDistinctCount
         fileTransferReceiveRecoveryOperationRecoveredCount = [int]$Result.fileTransferReceiveRecoveryOperationRecoveredCount
         fileTransferReceiveRecoveryOperationUnresolvedCount = [int]$Result.fileTransferReceiveRecoveryOperationUnresolvedCount
+        fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRawCount = [int]$Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRawCount
+        fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingDistinctCount = [int]$Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingDistinctCount
+        fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount = [int]$Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount
+        fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount = [int]$Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount
+        fileTransferReceiveRecoveryCompletedUnprovenSuccessorVerdict = [string]$Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorVerdict
         operatorVerdict = [string]$Result.operatorVerdict
         hardFailureCount = [int]$Result.hardFailureCount
         warningCount = [int]$Result.warningCount
@@ -8595,6 +8620,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $fileTransferReceiveRecoveryOperationDistinctCount = 0
     $fileTransferReceiveRecoveryOperationRecoveredCount = 0
     $fileTransferReceiveRecoveryOperationUnresolvedCount = 0
+    $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRawCount = 0
+    $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingDistinctCount = 0
+    $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount = 0
+    $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount = 0
     $regularV4FrontierRepairMissingRangeNotPreservedRawCount = 0
     $regularV4FrontierRepairMissingRangeNotPreservedDistinctCount = 0
     $regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount = 0
@@ -8741,6 +8770,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $fileTransferReceiveRecoveryOperationDistinctCount += [int]$runDto.fileTransferReceiveRecoveryOperationDistinctCount
         $fileTransferReceiveRecoveryOperationRecoveredCount += [int]$runDto.fileTransferReceiveRecoveryOperationRecoveredCount
         $fileTransferReceiveRecoveryOperationUnresolvedCount += [int]$runDto.fileTransferReceiveRecoveryOperationUnresolvedCount
+        $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRawCount += [int]$runDto.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRawCount
+        $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingDistinctCount += [int]$runDto.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingDistinctCount
+        $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount += [int]$runDto.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount
+        $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount += [int]$runDto.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount
         $regularV4FrontierRepairMissingRangeNotPreservedRawCount += [int]$runDto.regularV4FrontierRepairMissingRangeNotPreservedRawCount
         $regularV4FrontierRepairMissingRangeNotPreservedDistinctCount += [int]$runDto.regularV4FrontierRepairMissingRangeNotPreservedDistinctCount
         $regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount += [int]$runDto.regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount
@@ -9324,6 +9357,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("filetransfer_receive_recovery_operation_distinct_count={0}" -f $fileTransferReceiveRecoveryOperationDistinctCount),
         ("filetransfer_receive_recovery_operation_recovered_count={0}" -f $fileTransferReceiveRecoveryOperationRecoveredCount),
         ("filetransfer_receive_recovery_operation_unresolved_count={0}" -f $fileTransferReceiveRecoveryOperationUnresolvedCount),
+        ("filetransfer_receive_recovery_completed_unproven_successor_missing_raw_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRawCount),
+        ("filetransfer_receive_recovery_completed_unproven_successor_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingDistinctCount),
+        ("filetransfer_receive_recovery_completed_unproven_successor_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount),
+        ("filetransfer_receive_recovery_completed_unproven_successor_missing_unresolved_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount),
+        ("filetransfer_receive_recovery_completed_unproven_successor_verdict={0}" -f ($(if ($fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount -gt 0) { 'fail' } elseif ($fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingDistinctCount -gt 0) { 'pass' } else { 'none' }))),
         ("filetransfer_receive_recovery_operation_verdict={0}" -f $(if ($fileTransferReceiveRecoveryOperationUnresolvedCount -gt 0) { 'fail' } elseif ($fileTransferReceiveRecoveryOperationDistinctCount -gt 0) { 'pass' } else { 'none' })),
         ("baseline_manifest={0}" -f $BaselinePath),
         ("goodput_regression_tolerance_percent={0:F1}" -f [double]$GoodputRegressionTolerancePercent),
@@ -9376,6 +9414,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.filetransfer_receive_recovery_operation_distinct_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryOperationDistinctCount)
         $textLines += ("{0}.filetransfer_receive_recovery_operation_recovered_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryOperationRecoveredCount)
         $textLines += ("{0}.filetransfer_receive_recovery_operation_unresolved_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryOperationUnresolvedCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_completed_unproven_successor_missing_raw_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRawCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_completed_unproven_successor_missing_distinct_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingDistinctCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_completed_unproven_successor_missing_recovered_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_completed_unproven_successor_missing_unresolved_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_completed_unproven_successor_verdict={1}" -f $prefix, $result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorVerdict)
         $textLines += ("{0}.filetransfer_receive_recovery_operation_verdict={1}" -f $prefix, $result.fileTransferReceiveRecoveryOperationVerdict)
         $textLines += ("{0}.operator_verdict={1}" -f $prefix, $result.operatorVerdict)
         $textLines += ("{0}.hard_failure_count={1}" -f $prefix, $result.hardFailureCount)
@@ -9843,6 +9886,19 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         fileTransferReceiveRecoveryOperationDistinctCount = $fileTransferReceiveRecoveryOperationDistinctCount
         fileTransferReceiveRecoveryOperationRecoveredCount = $fileTransferReceiveRecoveryOperationRecoveredCount
         fileTransferReceiveRecoveryOperationUnresolvedCount = $fileTransferReceiveRecoveryOperationUnresolvedCount
+        fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRawCount = $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRawCount
+        fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingDistinctCount = $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingDistinctCount
+        fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount = $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount
+        fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount = $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount
+        fileTransferReceiveRecoveryCompletedUnprovenSuccessorVerdict = if ($fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount -gt 0) {
+            'fail'
+        }
+        elseif ($fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingDistinctCount -gt 0) {
+            'pass'
+        }
+        else {
+            'none'
+        }
         fileTransferReceiveRecoveryOperationVerdict = if ($fileTransferReceiveRecoveryOperationUnresolvedCount -gt 0) { 'fail' } elseif ($fileTransferReceiveRecoveryOperationDistinctCount -gt 0) { 'pass' } else { 'none' }
         baselineManifest = $BaselinePath
         generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')

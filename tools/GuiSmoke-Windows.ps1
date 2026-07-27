@@ -4593,6 +4593,523 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         return $true
     }
 
+    function Test-TunaGuiReceiveRecoveryCompletedUnprovenSuccessorMissing {
+        param(
+            [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+        )
+
+        $indexedLines = @(
+            for ($index = 0; $index -lt $Lines.Count; $index++) {
+                [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
+            }
+        )
+
+        function Test-TunaGuiReceiveRecoveryMeaningful {
+            param([AllowNull()][AllowEmptyString()][string]$Value)
+
+            return -not [string]::IsNullOrWhiteSpace($Value) -and
+                $Value -notin @('(none)', 'none', '(missing)', '__missing__', '0')
+        }
+
+        function Get-TunaGuiReceiveRecoveryOperationGeneration {
+            param([Parameter(Mandatory = $true)][string]$Line)
+
+            foreach ($name in @(
+                    'receive_recovery_operation_generation',
+                    'recovery_operation_generation',
+                    'operation_generation')) {
+                $value = Get-TunaGuiLogLineFieldValue -Line $Line -Name $name
+                if (-not [string]::IsNullOrWhiteSpace($value)) {
+                    return $value
+                }
+            }
+            return ''
+        }
+
+        function Get-TunaGuiReceiveRecoveryOperationAuthority {
+            param([Parameter(Mandatory = $true)][string]$Line)
+
+            foreach ($name in @(
+                    'receive_recovery_operation_authority_id',
+                    'recovery_operation_authority_id')) {
+                $value = Get-TunaGuiLogLineFieldValue -Line $Line -Name $name
+                if (-not [string]::IsNullOrWhiteSpace($value)) {
+                    return $value
+                }
+            }
+            return ''
+        }
+
+        function Test-TunaGuiReceiveRecoveryOperationMatch {
+            param(
+                [Parameter(Mandatory = $true)][string]$AnchorLine,
+                [Parameter(Mandatory = $true)][string]$CandidateLine
+            )
+
+            $anchorAuthority =
+                Get-TunaGuiReceiveRecoveryOperationAuthority -Line $AnchorLine
+            $candidateAuthority =
+                Get-TunaGuiReceiveRecoveryOperationAuthority -Line $CandidateLine
+            $anchorGeneration =
+                Get-TunaGuiReceiveRecoveryOperationGeneration -Line $AnchorLine
+            $candidateGeneration =
+                Get-TunaGuiReceiveRecoveryOperationGeneration -Line $CandidateLine
+            if (-not (Test-TunaGuiReceiveRecoveryMeaningful $anchorAuthority) -or
+                -not (Test-TunaGuiReceiveRecoveryMeaningful $candidateAuthority) -or
+                -not (Test-TunaGuiReceiveRecoveryMeaningful $anchorGeneration) -or
+                -not (Test-TunaGuiReceiveRecoveryMeaningful $candidateGeneration) -or
+                $anchorAuthority -ne $candidateAuthority -or
+                $anchorGeneration -ne $candidateGeneration) {
+                return $false
+            }
+
+            foreach ($field in @(
+                    'session_id',
+                    'transfer_id',
+                    'direction',
+                    'route',
+                    'protocol_version',
+                    'live_route_epoch',
+                    'route_publication_generation',
+                    'route_commit_generation',
+                    'runtime_generation',
+                    'terminal_generation',
+                    'leg_generation',
+                    'transport_epoch',
+                    'bridge_recovery_generation',
+                    'bridge_decision_generation',
+                    'checkpoint_request_id',
+                    'data_session_identity',
+                    'data_session_generation',
+                    'recovery_liveness_lease_authority_id',
+                    'recovery_liveness_lease_generation')) {
+                $expected =
+                    Get-TunaGuiLogLineFieldValue -Line $AnchorLine -Name $field
+                $actual =
+                    Get-TunaGuiLogLineFieldValue -Line $CandidateLine -Name $field
+                if ([string]::IsNullOrWhiteSpace($expected) -or
+                    [string]::IsNullOrWhiteSpace($actual) -or
+                    -not [string]::Equals(
+                        $expected,
+                        $actual,
+                        [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        function Test-TunaGuiReceiveRecoveryRejectionScope {
+            param(
+                [Parameter(Mandatory = $true)][string]$OperationLine,
+                [Parameter(Mandatory = $true)][string]$RejectionLine
+            )
+
+            foreach ($field in @('session_id', 'transfer_id', 'direction')) {
+                $expected =
+                    Get-TunaGuiLogLineFieldValue -Line $OperationLine -Name $field
+                $actual =
+                    Get-TunaGuiLogLineFieldValue -Line $RejectionLine -Name $field
+                if ([string]::IsNullOrWhiteSpace($expected) -or
+                    [string]::IsNullOrWhiteSpace($actual) -or
+                    -not [string]::Equals(
+                        $expected,
+                        $actual,
+                        [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $false
+                }
+            }
+
+            foreach ($mapping in @(
+                    [pscustomobject]@{
+                        Operation = 'route'
+                        Rejection = @('current_route', 'attempted_route')
+                    },
+                    [pscustomobject]@{
+                        Operation = 'protocol_version'
+                        Rejection = @('current_protocol_version', 'attempted_protocol_version')
+                    },
+                    [pscustomobject]@{
+                        Operation = 'live_route_epoch'
+                        Rejection = @('current_live_route_epoch', 'attempted_live_route_epoch')
+                    },
+                    [pscustomobject]@{
+                        Operation = 'runtime_generation'
+                        Rejection = @('current_runtime_generation', 'attempted_runtime_generation')
+                    },
+                    [pscustomobject]@{
+                        Operation = 'terminal_generation'
+                        Rejection = @('current_terminal_generation', 'attempted_terminal_generation')
+                    },
+                    [pscustomobject]@{
+                        Operation = 'leg_generation'
+                        Rejection = @('attempted_leg_generation')
+                    },
+                    [pscustomobject]@{
+                        Operation = 'transport_epoch'
+                        Rejection = @('attempted_transport_epoch')
+                    },
+                    [pscustomobject]@{
+                        Operation = 'bridge_recovery_generation'
+                        Rejection = @('attempted_bridge_recovery_generation')
+                    })) {
+                $expected = Get-TunaGuiLogLineFieldValue `
+                    -Line $OperationLine `
+                    -Name $mapping.Operation
+                $actual = ''
+                foreach ($candidateName in $mapping.Rejection) {
+                    $actual = Get-TunaGuiLogLineFieldValue `
+                        -Line $RejectionLine `
+                        -Name $candidateName
+                    if (-not [string]::IsNullOrWhiteSpace($actual)) {
+                        break
+                    }
+                }
+                if (-not [string]::IsNullOrWhiteSpace($actual) -and
+                    ([string]::IsNullOrWhiteSpace($expected) -or
+                     -not [string]::Equals(
+                        $expected,
+                        $actual,
+                        [System.StringComparison]::OrdinalIgnoreCase))) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        function Test-TunaGuiReceiveRecoverySupersessionCompleted {
+            param(
+                [Parameter(Mandatory = $true)]$Rejection,
+                [Parameter(Mandatory = $true)]$Issued,
+                [Parameter(Mandatory = $true)][string]$ClosureGeneration
+            )
+
+            $operationAuthority =
+                Get-TunaGuiReceiveRecoveryOperationAuthority -Line $Issued.Line
+            $operationGeneration =
+                Get-TunaGuiReceiveRecoveryOperationGeneration -Line $Issued.Line
+            $supersession = @($indexedLines | Where-Object {
+                $_.Index -gt $Rejection.Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @('filetransfer_receive_recovery_operation_superseded')) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'predecessor_receive_recovery_operation_authority_id') -eq
+                        $operationAuthority -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'predecessor_receive_recovery_operation_generation') -eq
+                        $operationGeneration -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'predecessor_closure_generation') -eq
+                        $ClosureGeneration -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $Issued.Line -Name 'session_id') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $Issued.Line -Name 'transfer_id') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $Issued.Line -Name 'direction')
+            } | Select-Object -First 1)
+            if ($supersession.Count -eq 0) {
+                return $false
+            }
+
+            $successorAuthority = Get-TunaGuiLogLineFieldValue `
+                -Line $supersession[0].Line `
+                -Name 'successor_receive_recovery_operation_authority_id'
+            $successorGeneration = Get-TunaGuiLogLineFieldValue `
+                -Line $supersession[0].Line `
+                -Name 'successor_receive_recovery_operation_generation'
+            if (-not (Test-TunaGuiReceiveRecoveryMeaningful $successorAuthority) -or
+                -not (Test-TunaGuiReceiveRecoveryMeaningful $successorGeneration)) {
+                return $false
+            }
+
+            $successor = @($indexedLines | Where-Object {
+                $_.Index -gt $supersession[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @('filetransfer_receive_recovery_operation_issued')) -and
+                (Get-TunaGuiReceiveRecoveryOperationAuthority -Line $_.Line) -eq
+                    $successorAuthority -and
+                (Get-TunaGuiReceiveRecoveryOperationGeneration -Line $_.Line) -eq
+                    $successorGeneration -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $Issued.Line -Name 'session_id') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $Issued.Line -Name 'transfer_id') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $Issued.Line -Name 'direction')
+            } | Select-Object -First 1)
+            if ($successor.Count -eq 0) {
+                return $false
+            }
+
+            $successorStart = @($indexedLines | Where-Object {
+                $_.Index -gt $successor[0].Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                    'filetransfer_receive_recovery_operation_execution_start_decided',
+                    'filetransfer_receive_recovery_operation_execution_started')) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'execution_start_status') -in @(
+                        'Started',
+                        'Idempotent',
+                        'Accepted') -and
+                (Test-TunaGuiReceiveRecoveryOperationMatch `
+                    -AnchorLine $successor[0].Line `
+                    -CandidateLine $_.Line)
+            } | Select-Object -First 1)
+            if ($successorStart.Count -eq 0) {
+                return $false
+            }
+
+            $successorReceipt = @($indexedLines | Where-Object {
+                $_.Index -gt $successorStart[0].Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                    'filetransfer_receive_recovery_operation_execution_receipt_applied',
+                    'filetransfer_receive_recovery_operation_receipt_applied')) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'execution_outcome') -in @(
+                        'Completed',
+                        'Exhausted',
+                        'Discarded') -and
+                (Test-TunaGuiReceiveRecoveryOperationMatch `
+                    -AnchorLine $successor[0].Line `
+                    -CandidateLine $_.Line)
+            } | Select-Object -First 1)
+            return $successorReceipt.Count -gt 0
+        }
+
+        $issuedEvents = @($indexedLines | Where-Object {
+            (Test-TunaGuiLogLineHasEvent `
+                -Line $_.Line `
+                -Events @('filetransfer_receive_recovery_operation_issued')) -and
+            (Test-TunaGuiReceiveRecoveryMeaningful (
+                Get-TunaGuiReceiveRecoveryOperationAuthority -Line $_.Line)) -and
+            (Test-TunaGuiReceiveRecoveryMeaningful (
+                Get-TunaGuiReceiveRecoveryOperationGeneration -Line $_.Line))
+        })
+        $rejections = @($indexedLines | Where-Object {
+            (Test-TunaGuiLogLineHasEvent `
+                -Line $_.Line `
+                -Events @('filetransfer_recovery_authority_rejected')) -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'action_kind') -eq
+                'ReceiveRecoveryOperation' -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'rejection_reason') -eq
+                'filetransfer_receive_recovery_operation_conflict' -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'attempted_action') -in @(
+                'bridge_ping_timeout',
+                'bridge_receive_stall',
+                'receive_stall',
+                'ping_timeout')
+        })
+
+        foreach ($rejection in $rejections) {
+            $writer =
+                Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'log_writer_id'
+            $transfer =
+                Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'transfer_id'
+            $direction =
+                Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'direction'
+            if ([string]::IsNullOrWhiteSpace($writer) -or
+                [string]::IsNullOrWhiteSpace($transfer) -or
+                [string]::IsNullOrWhiteSpace($direction)) {
+                continue
+            }
+
+            $health = @($indexedLines | Where-Object {
+                $_.Index -lt $rejection.Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @('nkn_bridge_recovery_evaluation_requested')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq
+                    $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq
+                    $transfer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'observation_kind') -in @(
+                    'ping_timeout',
+                    'receive_stall') -and
+                (Test-TunaGuiReceiveRecoveryMeaningful (
+                    Get-TunaGuiLogLineFieldValue `
+                        -Line $_.Line `
+                        -Name 'observation_generation'))
+            } | Select-Object -Last 1)
+            if ($health.Count -eq 0) {
+                continue
+            }
+            $observationGeneration = Get-TunaGuiLogLineFieldValue `
+                -Line $health[0].Line `
+                -Name 'observation_generation'
+            $evaluationDecision = @($indexedLines | Where-Object {
+                $_.Index -gt $rejection.Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @('filetransfer_receive_recovery_evaluation_requested')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq
+                    $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq
+                    $transfer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -eq
+                    $direction -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'observation_generation') -eq $observationGeneration -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'receive_recovery_operation_issued') -eq '0'
+            } | Select-Object -First 1)
+            if ($evaluationDecision.Count -eq 0) {
+                continue
+            }
+
+            $eligibleOperations = New-Object System.Collections.Generic.List[object]
+            foreach ($issued in @($issuedEvents | Where-Object {
+                    $_.Index -lt $health[0].Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq
+                        $writer -and
+                    (Test-TunaGuiReceiveRecoveryRejectionScope `
+                        -OperationLine $_.Line `
+                        -RejectionLine $rejection.Line)
+                })) {
+                $operationEvents = @($indexedLines | Where-Object {
+                    $_.Index -gt $issued.Index -and
+                    $_.Index -lt $rejection.Index -and
+                    (Test-TunaGuiReceiveRecoveryOperationMatch `
+                        -AnchorLine $issued.Line `
+                        -CandidateLine $_.Line)
+                })
+                $start = @($operationEvents | Where-Object {
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_receive_recovery_operation_execution_start_decided',
+                        'filetransfer_receive_recovery_operation_execution_started')) -and
+                    (Get-TunaGuiLogLineFieldValue `
+                        -Line $_.Line `
+                        -Name 'execution_start_status') -in @(
+                            'Started',
+                            'Idempotent',
+                            'Accepted')
+                } | Select-Object -First 1)
+                if ($start.Count -eq 0) {
+                    continue
+                }
+                $receipt = @($operationEvents | Where-Object {
+                    $_.Index -gt $start[0].Index -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_receive_recovery_operation_execution_receipt_applied',
+                        'filetransfer_receive_recovery_operation_receipt_applied')) -and
+                    (Get-TunaGuiLogLineFieldValue `
+                        -Line $_.Line `
+                        -Name 'execution_outcome') -eq 'Completed' -and
+                    (Get-TunaGuiLogLineFieldValue `
+                        -Line $_.Line `
+                        -Name 'execution_state') -eq 'Completed' -and
+                    (Get-TunaGuiLogLineFieldValue `
+                        -Line $_.Line `
+                        -Name 'proof_identity') -in @('', '(none)', 'none') -and
+                    (Get-TunaGuiLogLineFieldValue `
+                        -Line $_.Line `
+                        -Name 'proof_observed_utc_ms') -in @('', '0')
+                } | Select-Object -First 1)
+                if ($receipt.Count -eq 0) {
+                    continue
+                }
+                $retained = @($operationEvents | Where-Object {
+                    $_.Index -gt $receipt[0].Index -and
+                    (Test-TunaGuiLogLineHasEvent `
+                        -Line $_.Line `
+                        -Events @('filetransfer_receive_recovery_operation_closure_retained')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'closure_state') -eq
+                        'Retained' -and
+                    (Test-TunaGuiReceiveRecoveryMeaningful (
+                        Get-TunaGuiLogLineFieldValue `
+                            -Line $_.Line `
+                            -Name 'closure_generation'))
+                } | Select-Object -First 1)
+                if ($retained.Count -eq 0 -or $retained[0].Index -ge $health[0].Index) {
+                    continue
+                }
+
+                $disqualifying = @($operationEvents | Where-Object {
+                    $_.Index -gt $retained[0].Index -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_receive_recovery_operation_proof_observed',
+                        'filetransfer_receive_recovery_operation_receive_proof_observed',
+                        'filetransfer_receive_recovery_operation_closure_adopted',
+                        'filetransfer_receive_recovery_operation_closure_reserved',
+                        'filetransfer_receive_recovery_operation_closure_consumed',
+                        'filetransfer_receive_recovery_operation_invalidated'))
+                })
+                if ($disqualifying.Count -gt 0) {
+                    continue
+                }
+
+                $eligibleOperations.Add([pscustomobject]@{
+                    Issued = $issued
+                    Retained = $retained[0]
+                }) | Out-Null
+            }
+
+            # Legacy rejection events carry no operation identity. They may attach
+            # only when one complete same-writer operation window is available.
+            if ($eligibleOperations.Count -ne 1) {
+                continue
+            }
+
+            $operation = $eligibleOperations[0]
+            $proof = @($indexedLines | Where-Object {
+                $_.Index -gt $rejection.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                    'filetransfer_receive_recovery_operation_proof_observed',
+                    'filetransfer_receive_recovery_operation_receive_proof_observed')) -and
+                (Test-TunaGuiReceiveRecoveryMeaningful (
+                    Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'proof_identity')) -and
+                (Test-TunaGuiReceiveRecoveryOperationMatch `
+                    -AnchorLine $operation.Issued.Line `
+                    -CandidateLine $_.Line)
+            } | Select-Object -First 1)
+            if ($proof.Count -gt 0) {
+                $adoption = @($indexedLines | Where-Object {
+                    $_.Index -gt $proof[0].Index -and
+                    (Test-TunaGuiLogLineHasEvent `
+                        -Line $_.Line `
+                        -Events @('filetransfer_receive_recovery_operation_closure_adopted')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'closure_state') -eq
+                        'Adopted' -and
+                    (Get-TunaGuiLogLineFieldValue `
+                        -Line $_.Line `
+                        -Name 'closure_generation') -eq
+                            (Get-TunaGuiLogLineFieldValue `
+                                -Line $operation.Retained.Line `
+                                -Name 'closure_generation') -and
+                    (Test-TunaGuiReceiveRecoveryOperationMatch `
+                        -AnchorLine $operation.Issued.Line `
+                        -CandidateLine $_.Line)
+                } | Select-Object -First 1)
+                if ($adoption.Count -gt 0) {
+                    continue
+                }
+            }
+
+            if (Test-TunaGuiReceiveRecoverySupersessionCompleted `
+                    -Rejection $rejection `
+                    -Issued $operation.Issued `
+                    -ClosureGeneration (
+                        Get-TunaGuiLogLineFieldValue `
+                            -Line $operation.Retained.Line `
+                            -Name 'closure_generation')) {
+                continue
+            }
+
+            return $true
+        }
+
+        return $false
+    }
+
     function Test-TunaGuiBridgeRecoveryExecutionPayloadHoldFailure {
         param(
             [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
@@ -5817,6 +6334,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $bridgeRecoveryExecutionSubmissionBarrierDrainMissing =
         Test-TunaGuiBridgeRecoveryExecutionSubmissionBarrierDrainFailure `
             -Lines $regularV4EvidenceLineText
+    $receiveRecoveryCompletedUnprovenSuccessorMissing =
+        Test-TunaGuiReceiveRecoveryCompletedUnprovenSuccessorMissing `
+            -Lines $regularV4EvidenceLineText
     $regularV4RecoveryPredecessorSettlementClosedSuccessor =
         Test-TunaGuiRegularV4PredecessorSettlementClosedSuccessor -Lines $regularV4EvidenceLineText
     $regularV4FrontierRepairSettlementClosed = Test-TunaGuiRegularV4FrontierRepairSettlementClosed -Lines $regularV4EvidenceLineText
@@ -5880,6 +6400,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $runtimeUnlockRetryRegularV4RecoverySettlementMissing -or
         $bridgeRecoveryExecutionPayloadHoldMissing -or
         $bridgeRecoveryExecutionSubmissionBarrierDrainMissing -or
+        $receiveRecoveryCompletedUnprovenSuccessorMissing -or
         $regularV4FrontierRepairSettledStalledUnclosed -or
         $regularV4FrontierRepairSendDeferred -or
         $regularV4FrontierRepairStalled -or
@@ -5933,6 +6454,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     elseif ($bridgeRecoveryExecutionPayloadHoldMissing) {
         $phase = 'bridge_recovery_execution'
         $reason = 'bridge_recovery_submission_hold_rejection_escalated_to_terminal'
+    }
+    elseif ($receiveRecoveryCompletedUnprovenSuccessorMissing) {
+        $phase = 'receive_recovery'
+        $reason = 'completed_unproven_receive_recovery_operation_blocked_fresh_recovery'
     }
     elseif ($runtimeUnlockFileTransferOwnerMissingBeforePathLease) {
         $phase = 'runtime_unlock_owner'
