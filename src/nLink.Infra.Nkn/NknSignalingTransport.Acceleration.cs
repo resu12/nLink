@@ -12992,10 +12992,10 @@ public sealed partial class NknSignalingTransport
         var expected = request.ExpectedScope;
         var authority = operation.Authority;
         var observation = authority.Observation;
-        var publication =
-            FileTransferCoordinator.CreateRoutePublicationAuthority(
-                observation.RoutePublication);
-        return string.Equals(
+        var publication = observation.RoutePublication;
+        var expectedPublication = expected.SourcePublicationAuthority;
+        return expectedPublication is not null &&
+               string.Equals(
                    request.SessionId,
                    observation.SessionId,
                    StringComparison.Ordinal) &&
@@ -13004,7 +13004,46 @@ public sealed partial class NknSignalingTransport
                    observation.TransferId,
                    StringComparison.Ordinal) &&
                request.Direction == observation.Direction &&
-               publication == expected.SourcePublicationAuthority &&
+               string.Equals(
+                   publication.SessionId,
+                   expectedPublication.SessionId,
+                   StringComparison.Ordinal) &&
+               string.Equals(
+                   publication.TransferId,
+                   expectedPublication.TransferId,
+                   StringComparison.Ordinal) &&
+               publication.Direction == expectedPublication.Direction &&
+               string.Equals(
+                   publication.RouteToken,
+                   expectedPublication.RouteToken,
+                   StringComparison.Ordinal) &&
+               publication.ProtocolVersion ==
+                   expectedPublication.ProtocolVersion &&
+               publication.LiveRouteEpoch ==
+                   expectedPublication.LiveRouteEpoch &&
+               publication.RuntimeGeneration ==
+                   expectedPublication.RuntimeGeneration &&
+               publication.TerminalGeneration ==
+                   expectedPublication.TerminalGeneration &&
+               publication.LegGeneration ==
+                   expectedPublication.LegGeneration &&
+               publication.PublicationGeneration ==
+                   expectedPublication.RoutePublicationGeneration &&
+               publication.RouteCommitGeneration ==
+                   expectedPublication.RouteCommitGeneration &&
+               string.Equals(
+                   FileTransferRouteResolver.Resolve(
+                       publication.TargetRoute).TelemetryToken,
+                   expectedPublication.TargetRouteToken,
+                   StringComparison.Ordinal) &&
+               publication.TargetProtocolVersion ==
+                   expectedPublication.TargetProtocolVersion &&
+               publication.TargetTransport ==
+                   expectedPublication.TargetTransport &&
+               string.Equals(
+                   publication.ActionKind.ToString(),
+                   expectedPublication.RoutePublicationActionKind,
+                   StringComparison.Ordinal) &&
                observation.TransportEpoch == expected.TransportEpoch &&
                observation.BridgeRecoveryGeneration ==
                    expected.BridgeRecoveryGeneration &&

@@ -15379,9 +15379,60 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             var offerSubmissionAttemptsBeforeRelease =
                 sentOfferFingerprints.Count;
             Volatile.Write(ref allowOfferSubmission, 1);
+            var retainedPredecessor = failedSendHeld.Operation with
+            {
+                ExecutionState =
+                    FileTransferReceiveRecoveryExecutionState.Completed,
+                ClosureState =
+                    FileTransferReceiveRecoveryClosureState.Retained,
+                ClosureGeneration = 1,
+            };
+            Assert.True(
+                bridge
+                    .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                            failedSendHeld.Request,
+                            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                                .Held,
+                            "test_receive_recovery_closure_retained",
+                            HoldGeneration:
+                                failedSendHeld.Operation.Authority
+                                    .OperationGeneration,
+                            retainedPredecessor)));
+            var successor =
+                CreateInitialActivationReceiveRecoveryHoldOperationForTests(
+                    failedSendHeld.Request,
+                    operationGeneration: 2,
+                    predecessorOperation: retainedPredecessor);
+            var successorDecision =
+                new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                    failedSendHeld.Request,
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                        .Held,
+                    "test_receive_recovery_hold_rebound",
+                    HoldGeneration:
+                        failedSendHeld.Operation.Authority.OperationGeneration,
+                    successor,
+                    retainedPredecessor.Authority);
+            Assert.True(
+                bridge
+                    .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                        successorDecision));
+            var adoptedSuccessor = successor with
+            {
+                ExecutionState =
+                    FileTransferReceiveRecoveryExecutionState.Completed,
+                ClosureState =
+                    FileTransferReceiveRecoveryClosureState.Adopted,
+                ClosureGeneration = 2,
+            };
             ReleaseHold(
-                failedSendHeld,
-                "test_receive_recovery_operation_completed_after_send_failure");
+                (
+                    failedSendHeld.Request,
+                    adoptedSuccessor),
+                "test_receive_recovery_operation_completed_after_send_failure",
+                holdGeneration:
+                    failedSendHeld.Operation.Authority.OperationGeneration);
 
             await negotiation.WaitAsync(TimeSpan.FromSeconds(5));
             await WaitUntilAsync(
@@ -26297,7 +26348,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 StringComparison.Ordinal)
                 ? FileTransferCoordinatorActionKind.RouteCommitPublication
                 : FileTransferCoordinatorActionKind.RoutePublication,
-            sourcePublication.CoordinatorDecisionReason);
+            "test_coordinator_operation_publication_reason");
         var observation = new FileTransferReceiveRecoveryObservation(
             request.SessionId,
             request.TransferId,
@@ -26352,11 +26403,13 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             nameof(BridgeRecoveryKind.BridgeReceiveStallRecovery),
             observation.Reason);
         var command =
-            expected.ExpectedExecutionCommand ??
-            new FileTransferBridgeRecoveryExecutionCommand(
-                bridgeDecision,
-                RecoveryLivenessLease: null,
-                expected.CheckpointRequestId);
+            predecessorOperation is null &&
+            expected.ExpectedExecutionCommand is { } expectedCommand
+                ? expectedCommand
+                : new FileTransferBridgeRecoveryExecutionCommand(
+                    bridgeDecision,
+                    RecoveryLivenessLease: null,
+                    expected.CheckpointRequestId);
         bridgeDecision = command.Decision;
         var authority = new FileTransferReceiveRecoveryOperationAuthority(
             observation,
