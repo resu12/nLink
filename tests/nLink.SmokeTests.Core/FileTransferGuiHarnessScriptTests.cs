@@ -1396,6 +1396,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             if ($budgetBypass.Phase -ne 'runtime_unlock_retry' -or $budgetBypass.Reason -ne 'runtime_unlock_retry_dispatch_grant_bypassed_by_retry_budget') { throw 'runtime unlock budget bypass lost precedence' }
             $unsettled = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_retry_dispatch_contract_unsettled; retained_event=filetransfer_regular_v4_frontier_repair_stalled' -HistoricalPhase 'regular_v4_frontier_repair' -HistoricalReason 'regular_v4_frontier_repair_stalled'
             if ($unsettled.Phase -ne 'runtime_unlock_retry' -or $unsettled.Reason -ne 'runtime_unlock_retry_dispatch_contract_unsettled') { throw 'runtime unlock unsettled contract lost precedence' }
+            $initialRecoveryHold = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_offer_receive_recovery_hold_not_preserved; retained_event=tuna_acceleration_activation_offer_not_observed' -HistoricalPhase 'setup' -HistoricalReason 'offer_not_observed'
+            if ($initialRecoveryHold.Phase -ne 'runtime_unlock_initial_activation' -or $initialRecoveryHold.Reason -ne 'initial_activation_retry_exhausted_while_receive_recovery_awaiting_proof') { throw 'initial activation recovery hold lost precedence' }
             $workerHandoff = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=post_tuna_fallback_outbound_receive_worker_handoff_missing; retained_event=filetransfer_fallback_frontier_repair_stalled' -HistoricalPhase 'fallback_frontier_repair' -HistoricalReason 'fallback_frontier_repair_stalled'
             if ($workerHandoff.Phase -ne 'outbound_sparse_worker_handoff' -or $workerHandoff.Reason -ne 'post_tuna_fallback_outbound_receive_worker_handoff_missing') { throw 'outbound sparse worker handoff lost precedence' }
             $yieldAuthority = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=fallback_tail_yield_authority_invalid; retained_event=filetransfer_fallback_frontier_repair_stalled' -HistoricalPhase 'fallback_frontier_repair' -HistoricalReason 'fallback_frontier_repair_stalled'
@@ -1433,6 +1435,113 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.True(result.ExitCode == 0, $"Failure classification test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("gui-failure-classification-precedence-ok", result.Stdout, StringComparison.Ordinal);
         Assert.Contains("Resolve-TunaGuiFailureClassification", guiText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeFailureClassification_CorrelatesInitialActivationReceiveRecoveryHoldExhaustion()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        static string ExtractNestedFunction(
+            string scriptText,
+            string functionName,
+            string nextFunctionName)
+        {
+            var pattern =
+                @"(?s)function\s+" +
+                Regex.Escape(functionName) +
+                @"\s*\{(?<body>.*?)\r?\n\s*\}\s*\r?\n\s*function\s+" +
+                Regex.Escape(nextFunctionName) +
+                @"\b";
+            var match = Regex.Match(scriptText, pattern);
+            Assert.True(
+                match.Success,
+                $"Could not find nested PowerShell function body for {functionName}.");
+            return match.Groups["body"].Value;
+        }
+
+        var fieldBody = ExtractNestedFunction(
+            guiText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Test-TunaGuiLogLineHasEvent");
+        var eventBody = ExtractNestedFunction(
+            guiText,
+            "Test-TunaGuiLogLineHasEvent",
+            "Test-TunaGuiLogLineFieldMatch");
+        var correlationBody = ExtractNestedFunction(
+            guiText,
+            "Test-TunaGuiInitialActivationReceiveRecoveryHoldNotPreserved",
+            "Test-TunaGuiReceiveRecoveryCompletedUnprovenSuccessorMissing");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldBody}} }
+            function Test-TunaGuiLogLineHasEvent { {{eventBody}} }
+            function Test-TunaGuiInitialActivationReceiveRecoveryHoldNotPreserved { {{correlationBody}} }
+
+            $scope = 'log_writer_id=writer-a; session_id=session-a; transfer_id=transfer-a'
+            $operation = 'direction=outbound; receive_recovery_operation_authority_id=operation-a; receive_recovery_operation_generation=1; recovery_liveness_lease_authority_id=lease-a; recovery_liveness_lease_generation=1; closure_generation=1'
+            $closure = "event=filetransfer_receive_recovery_operation_closure_retained; $scope; $operation; execution_state=Completed; execution_outcome=Completed; closure_state=Retained; proof_identity=(none)"
+            $boundary2 = "event=runtime_unlock_offer_authority_boundary_decided; $scope; authority_mode=InitialActivation; decision_status=accepted; payer_decision_id=9; offer_generation=2; transaction_generation=1; tuna_path_lease_generation=2"
+            $boundary3 = "event=runtime_unlock_offer_authority_boundary_decided; $scope; authority_mode=InitialActivation; decision_status=accepted; payer_decision_id=10; offer_generation=3; transaction_generation=1; tuna_path_lease_generation=3"
+            $deferred = 'event=tuna_activation_control_send_deferred_for_regular_v4_recovery; log_writer_id=writer-a; session_id=session-a; purpose=offer; blocker_reason=receive_stall_recovery_awaiting_receive_proof'
+            $exhausted = 'event=tuna_acceleration_retry_exhausted; log_writer_id=writer-a; reason=runtime_unlock_offer_send_not_observed'
+            $failed = 'event=tuna_acceleration_activation_offer_not_observed; log_writer_id=writer-a; session_id=session-a; authority_mode=InitialActivation; payer_decision_id=10; generation=3; trigger=runtime_unlock_offer_send_not_observed; retry_scheduled=0; retry_after_recovery_armed=0; pause_deferred=1'
+            $request = "$scope; direction=outbound; offer_nonce=offer-3; payer_decision_id=10; offer_generation=3; transaction_generation=1; tuna_path_lease_generation=3; tuna_path_lease_listener_run_id=listener-3; control_envelope_fingerprint=fingerprint-3"
+            $held = "event=runtime_unlock_initial_activation_receive_recovery_hold_decided; $request; $operation; decision_status=Held"
+            $adopted = "event=filetransfer_receive_recovery_operation_closure_adopted; $scope; $operation; closure_state=Adopted; proof_identity=proof-a"
+            $released = "event=runtime_unlock_initial_activation_receive_recovery_hold_resumed; $request; $operation; decision_status=Released"
+            $lines = @($closure, $boundary2, $deferred, $boundary3, $deferred, $exhausted, $failed)
+            if (-not (Test-TunaGuiInitialActivationReceiveRecoveryHoldNotPreserved -Lines $lines)) {
+                throw 'exact initial-activation recovery hold exhaustion was not classified'
+            }
+
+            $onTime = @($closure, $boundary2, $deferred, $boundary3, $deferred, $exhausted, $held, $adopted, $released, $failed)
+            if (Test-TunaGuiInitialActivationReceiveRecoveryHoldNotPreserved -Lines $onTime) {
+                throw 'on-time Held/adoption/release did not resolve GUI classification'
+            }
+
+            $releaseOnly = @($closure, $boundary2, $deferred, $boundary3, $deferred, $exhausted, $released, $failed)
+            if (-not (Test-TunaGuiInitialActivationReceiveRecoveryHoldNotPreserved -Lines $releaseOnly)) {
+                throw 'release without Held and proof adoption incorrectly resolved GUI classification'
+            }
+
+            $late = @($closure, $boundary2, $deferred, $boundary3, $deferred, $exhausted, $failed, $held, $adopted, $released)
+            if (-not (Test-TunaGuiInitialActivationReceiveRecoveryHoldNotPreserved -Lines $late)) {
+                throw 'late callbacks incorrectly recovered GUI classification'
+            }
+
+            $mismatchedRelease = $released.Replace('receive_recovery_operation_authority_id=operation-a', 'receive_recovery_operation_authority_id=operation-b')
+            $mismatch = @($closure, $boundary2, $deferred, $boundary3, $deferred, $exhausted, $held, $adopted, $mismatchedRelease, $failed)
+            if (-not (Test-TunaGuiInitialActivationReceiveRecoveryHoldNotPreserved -Lines $mismatch)) {
+                throw 'mismatched release incorrectly recovered GUI classification'
+            }
+
+            $operationB = 'direction=outbound; receive_recovery_operation_authority_id=operation-b; receive_recovery_operation_generation=2; recovery_liveness_lease_authority_id=lease-b; recovery_liveness_lease_generation=2; closure_generation=2'
+            $rebound = "event=runtime_unlock_initial_activation_receive_recovery_hold_rebound; $request; $operationB; previous_receive_recovery_operation_authority_id=operation-a; previous_receive_recovery_operation_generation=1; decision_status=Held"
+            $adoptedB = "event=filetransfer_receive_recovery_operation_closure_adopted; $scope; $operationB; closure_state=Adopted; proof_identity=proof-b"
+            $releasedB = "event=runtime_unlock_initial_activation_receive_recovery_hold_resumed; $request; $operationB; decision_status=Released"
+            $reboundResolved = @($closure, $boundary2, $deferred, $boundary3, $deferred, $exhausted, $held, $rebound, $adoptedB, $releasedB, $failed)
+            if (Test-TunaGuiInitialActivationReceiveRecoveryHoldNotPreserved -Lines $reboundResolved) {
+                throw 'exact recovery-operation rebound did not resolve GUI classification'
+            }
+
+            $otherClosure = "event=filetransfer_receive_recovery_operation_closure_retained; log_writer_id=writer-a; session_id=session-a; transfer_id=transfer-b; direction=outbound; receive_recovery_operation_authority_id=operation-other; receive_recovery_operation_generation=7; recovery_liveness_lease_authority_id=lease-other; recovery_liveness_lease_generation=7; closure_generation=7; execution_state=Completed; execution_outcome=Completed; closure_state=Retained; proof_identity=(none)"
+            $ambiguous = @($closure, $boundary2, $deferred, $boundary3, $otherClosure, $deferred, $exhausted, $failed)
+            if (Test-TunaGuiInitialActivationReceiveRecoveryHoldNotPreserved -Lines $ambiguous) {
+                throw 'cross-transfer deferral was wildcard-matched to the wrong recovery closure'
+            }
+
+            Write-Output 'gui-initial-activation-recovery-hold-correlation-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Initial-activation recovery-hold GUI classification failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "gui-initial-activation-recovery-hold-correlation-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
     }
 
     [Fact]

@@ -10450,6 +10450,346 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(false, "unresolved")]
+    [InlineData(true, "unresolved")]
+    [InlineData(false, "on_time")]
+    [InlineData(true, "on_time")]
+    [InlineData(false, "late")]
+    [InlineData(true, "late")]
+    [InlineData(false, "rebound")]
+    [InlineData(true, "rebound")]
+    [InlineData(false, "mismatch")]
+    [InlineData(true, "mismatch")]
+    [InlineData(false, "ambiguous")]
+    [InlineData(true, "ambiguous")]
+    public async Task AnalyzeRetained_InitialActivationRetryExhaustedWhileReceiveRecoveryAwaitsProof(
+        bool compact,
+        string recoveryMode)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string sessionId = "sess_initial_activation_recovery_hold";
+        const string transferId = "transfer_initial_activation_recovery_hold";
+        const string writerId = "writer_initial_activation_recovery_hold";
+        const string operationAuthority = "fta2-receive-recovery-hold-1";
+        const string operationScope =
+            $"session_id={sessionId}; transfer_id={transferId}; direction=outbound; " +
+            "route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; " +
+            "route_publication_generation=1; route_commit_generation=0; " +
+            "route_commit_transaction_generation=0; route_commit_offer_generation=0; " +
+            "route_commit_path_lease_generation=0; route_commit_probe_ack_id=(none); " +
+            "runtime_generation=1; terminal_generation=0; leg_generation=1; " +
+            "transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; " +
+            "checkpoint_request_id=(none); data_session_identity=data-session-1; " +
+            "data_session_generation=1; recovery_liveness_lease_authority_id=lease-1; " +
+            "recovery_liveness_lease_generation=1";
+        string OperationLine(string eventName, string suffix) =>
+            $"event={eventName}; receive_recovery_operation_generation=1; " +
+            $"receive_recovery_operation_authority_id={operationAuthority}; " +
+            "observation_identity=observation-1; observation_generation=1; " +
+            "observation_source=filetransfer_snapshot; observation_reason=active_transfer_snapshot; " +
+            $"observation_utc_ms=1000; {operationScope}; {suffix}; log_writer_id={writerId}";
+        string BoundaryLine(int payerDecisionId, int offerGeneration) =>
+            "event=runtime_unlock_offer_authority_boundary_decided; boundary=control_send_entry; " +
+            "authority_mode=InitialActivation; decision_status=accepted; " +
+            $"session_id={sessionId}; transfer_id={transferId}; " +
+            $"payer_decision_id={payerDecisionId}; offer_generation={offerGeneration}; " +
+            $"transaction_generation=1; tuna_path_lease_generation={offerGeneration}; " +
+            $"tuna_path_lease_listener_run_id=listener-{offerGeneration}; " +
+            "retry_authority_id=(none); install_generation=0; " +
+            $"decision_reason=initial_activation_authority_current; log_writer_id={writerId}";
+        string DeferralLine() =>
+            "event=tuna_activation_control_send_deferred_for_regular_v4_recovery; " +
+            $"session_id={sessionId}; purpose=offer; " +
+            "blocker_reason=receive_stall_recovery_awaiting_receive_proof; " +
+            $"wait_budget_ms=5000; log_writer_id={writerId}";
+        string NotObservedLine(
+            int payerDecisionId,
+            int offerGeneration,
+            int retryScheduled) =>
+            "event=tuna_acceleration_activation_offer_not_observed; " +
+            "trigger=runtime_unlock_offer_send_not_observed; " +
+            $"session_id={sessionId}; payer_decision_id={payerDecisionId}; " +
+            $"generation={offerGeneration}; authority_mode=InitialActivation; " +
+            $"retry_scheduled={retryScheduled}; retry_after_recovery_armed=0; " +
+            "dispatch_successor_requested=0; replay_scheduled=0; answer_timeout_scheduled=0; " +
+            $"pause_deferred=1; recovery_requested=0; recovery_reason=(none); log_writer_id={writerId}";
+        string HoldDecisionLine(
+            string eventName,
+            string status,
+            string authority = operationAuthority,
+            int operationGeneration = 1,
+            string leaseAuthority = "lease-1",
+            int leaseGeneration = 1,
+            int closureGeneration = 1,
+            string extra = "") =>
+            $"event={eventName}; session_id={sessionId}; transfer_id={transferId}; direction=outbound; " +
+            "offer_authority_mode=InitialActivation; hold_boundary=UnobservedOfferSendFailure; " +
+            "payer_decision_id=10; offer_generation=3; offer_nonce=offer-nonce-3; " +
+            "transaction_generation=1; tuna_path_lease_generation=3; " +
+            "tuna_path_lease_listener_run_id=listener-3; control_envelope_fingerprint=fingerprint-3; " +
+            $"decision_status={status}; hold_generation=1; " +
+            $"receive_recovery_operation_authority_id={authority}; " +
+            $"receive_recovery_operation_generation={operationGeneration}; " +
+            $"recovery_liveness_lease_authority_id={leaseAuthority}; " +
+            $"recovery_liveness_lease_generation={leaseGeneration}; " +
+            $"receive_recovery_closure_generation={closureGeneration}; {extra}; " +
+            $"decision_reason=test_{status.ToLowerInvariant()}; log_writer_id={writerId}";
+        string OperationBLine(string eventName, string suffix) =>
+            $"event={eventName}; receive_recovery_operation_generation=2; " +
+            "receive_recovery_operation_authority_id=fta2-receive-recovery-hold-2; " +
+            "observation_identity=observation-2; observation_generation=2; " +
+            "observation_source=filetransfer_snapshot; observation_reason=active_transfer_snapshot; " +
+            $"observation_utc_ms=1300; {operationScope.Replace("lease-1", "lease-2", StringComparison.Ordinal)}; " +
+            $"recovery_liveness_lease_generation=2; {suffix}; log_writer_id={writerId}";
+
+        var lines = new List<string>
+        {
+            LogLine(
+                "event=filetransfer_route_selected; direction=outbound; " +
+                $"session_id={sessionId}; transfer_id={transferId}; " +
+                "route=regular_nkn_v4_fast; protocol_version=4; " +
+                "runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; " +
+                "bridge_recovery_policy=regular_nkn_v4_fast; " +
+                "liveness_terminal_policy=regular_nkn_v4_fast; " +
+                "selection_reason=regular_nkn_default_v4; file_tuna_active=0; " +
+                "post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; " +
+                "transport_profile=conservative_nkn_startup; live_route_epoch=0; " +
+                "route_publication_generation=1; runtime_generation=1; " +
+                "terminal_generation=0; leg_generation=1; target_transport=regular_nkn; " +
+                $"log_writer_id={writerId}",
+                secondsOffset: 0),
+            LogLine(
+                OperationLine(
+                    "filetransfer_receive_recovery_operation_issued",
+                    "execution_state=Issued; execution_start_status=(none); execution_outcome=(none); " +
+                    "proof_identity=(none); proof_observed_utc_ms=0; closure_generation=0; closure_state=None"),
+                secondsOffset: 1),
+            LogLine(
+                OperationLine(
+                    "filetransfer_receive_recovery_operation_execution_start_decided",
+                    "execution_state=Running; execution_start_status=Started; execution_outcome=(none); " +
+                    "proof_identity=(none); proof_observed_utc_ms=0; closure_generation=0; closure_state=None"),
+                secondsOffset: 2),
+            LogLine(
+                OperationLine(
+                    "filetransfer_receive_recovery_operation_execution_receipt_applied",
+                    "execution_state=Completed; execution_start_status=Started; execution_outcome=Completed; " +
+                    "execution_mode=hard; execution_receipt_observed_utc_ms=1100; " +
+                    "proof_identity=(none); proof_observed_utc_ms=0; closure_generation=1; closure_state=Retained"),
+                secondsOffset: 3),
+            LogLine(
+                OperationLine(
+                    "filetransfer_receive_recovery_operation_closure_retained",
+                    "execution_state=Completed; execution_start_status=Started; execution_outcome=Completed; " +
+                    "execution_mode=hard; execution_receipt_observed_utc_ms=1100; " +
+                    "proof_identity=(none); proof_observed_utc_ms=0; closure_generation=1; closure_state=Retained"),
+                secondsOffset: 4),
+            LogLine(BoundaryLine(9, 2), secondsOffset: 5),
+            LogLine(DeferralLine(), secondsOffset: 6),
+            LogLine(NotObservedLine(9, 2, 1), secondsOffset: 7),
+            LogLine(BoundaryLine(10, 3), secondsOffset: 8)
+        };
+        if (recoveryMode == "ambiguous")
+        {
+            lines.Add(LogLine(
+                "event=filetransfer_receive_recovery_operation_closure_retained; " +
+                "receive_recovery_operation_generation=7; " +
+                "receive_recovery_operation_authority_id=fta2-other-transfer; " +
+                $"{operationScope.Replace(transferId, "transfer-other", StringComparison.Ordinal).Replace("lease-1", "lease-other", StringComparison.Ordinal)}; " +
+                "recovery_liveness_lease_generation=7; execution_state=Completed; " +
+                "execution_outcome=Completed; proof_identity=(none); closure_generation=7; " +
+                $"closure_state=Retained; log_writer_id={writerId}",
+                secondsOffset: 9));
+        }
+        lines.AddRange(
+        [
+            LogLine(DeferralLine(), secondsOffset: 9),
+            LogLine(
+                $"event=tuna_acceleration_retry_exhausted; reason=runtime_unlock_offer_send_not_observed; " +
+                $"attempts=8; log_writer_id={writerId}",
+                secondsOffset: 10)
+        ]);
+        if (recoveryMode is "on_time" or "rebound" or "mismatch")
+        {
+            lines.Add(LogLine(
+                HoldDecisionLine(
+                    "runtime_unlock_initial_activation_receive_recovery_hold_decided",
+                    "Held"),
+                secondsOffset: 11));
+            if (recoveryMode == "rebound")
+            {
+                lines.Add(LogLine(
+                    HoldDecisionLine(
+                        "runtime_unlock_initial_activation_receive_recovery_hold_rebound",
+                        "Held",
+                        authority: "fta2-receive-recovery-hold-2",
+                        operationGeneration: 2,
+                        leaseAuthority: "lease-2",
+                        leaseGeneration: 2,
+                        closureGeneration: 2,
+                        extra:
+                            $"previous_receive_recovery_operation_authority_id={operationAuthority}; " +
+                            "previous_receive_recovery_operation_generation=1"),
+                    secondsOffset: 12));
+                lines.Add(LogLine(
+                    OperationBLine(
+                        "filetransfer_receive_recovery_operation_closure_adopted",
+                        "execution_state=Completed; execution_outcome=Completed; " +
+                        "proof_identity=receive-proof-2; proof_observed_utc_ms=1300; " +
+                        "closure_generation=2; closure_state=Adopted"),
+                    secondsOffset: 13));
+                lines.Add(LogLine(
+                    HoldDecisionLine(
+                        "runtime_unlock_initial_activation_receive_recovery_hold_resumed",
+                        "Released",
+                        authority: "fta2-receive-recovery-hold-2",
+                        operationGeneration: 2,
+                        leaseAuthority: "lease-2",
+                        leaseGeneration: 2,
+                        closureGeneration: 2),
+                    secondsOffset: 14));
+            }
+            else
+            {
+                lines.Add(LogLine(
+                    OperationLine(
+                        "filetransfer_receive_recovery_operation_closure_adopted",
+                        "execution_state=Completed; execution_outcome=Completed; " +
+                        "proof_identity=receive-proof-1; proof_observed_utc_ms=1200; " +
+                        "closure_generation=1; closure_state=Adopted"),
+                    secondsOffset: 12));
+                lines.Add(LogLine(
+                    HoldDecisionLine(
+                        "runtime_unlock_initial_activation_receive_recovery_hold_resumed",
+                        "Released",
+                        authority: recoveryMode == "mismatch"
+                            ? "fta2-receive-recovery-hold-mismatch"
+                            : operationAuthority),
+                    secondsOffset: 13));
+            }
+        }
+        lines.AddRange(
+        [
+            LogLine(
+                NotObservedLine(10, 3, 0) + "; log_writer_sequence=1819",
+                secondsOffset: recoveryMode == "rebound"
+                    ? 15
+                    : recoveryMode is "on_time" or "mismatch"
+                        ? 14
+                        : 11),
+            LogLine(
+                OperationLine(
+                    "filetransfer_receive_recovery_operation_invalidated",
+                    "execution_state=Completed; execution_outcome=Completed; " +
+                    "proof_identity=(none); proof_observed_utc_ms=0; " +
+                    "closure_generation=1; closure_state=Retained; " +
+                    "decision_reason=transfer_terminal_scope_invalidated"),
+                secondsOffset: recoveryMode == "rebound"
+                    ? 16
+                    : recoveryMode is "on_time" or "mismatch"
+                        ? 15
+                        : 12),
+            LogLine(
+                $"event=file_transfer_outbound_terminal; session_id={sessionId}; transfer_id={transferId}; " +
+                "direction=outbound; state=Failed; error_code=timeout",
+                secondsOffset: recoveryMode == "rebound"
+                    ? 17
+                    : recoveryMode is "on_time" or "mismatch"
+                        ? 16
+                        : 13)
+        ]);
+        if (recoveryMode == "late")
+        {
+            lines.Add(LogLine(
+                HoldDecisionLine(
+                    "runtime_unlock_initial_activation_receive_recovery_hold_decided",
+                    "Held"),
+                secondsOffset: 14));
+            lines.Add(LogLine(
+                OperationLine(
+                    "filetransfer_receive_recovery_operation_closure_adopted",
+                    "execution_state=Completed; execution_outcome=Completed; " +
+                    "proof_identity=receive-proof-late; proof_observed_utc_ms=1400; " +
+                    "closure_generation=1; closure_state=Adopted"),
+                secondsOffset: 15));
+            lines.Add(LogLine(
+                HoldDecisionLine(
+                    "runtime_unlock_initial_activation_receive_recovery_hold_resumed",
+                    "Released"),
+                secondsOffset: 16));
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-operator-verdict.txt");
+        var expectedCandidateCount = recoveryMode == "ambiguous" ? "0" : "1";
+        Assert.Equal(
+            expectedCandidateCount,
+            verdict["runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_raw_count"]);
+        Assert.Equal(
+            expectedCandidateCount,
+            verdict["runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_distinct_count"]);
+        if (recoveryMode == "ambiguous")
+        {
+            Assert.Equal(
+                "0",
+                verdict["runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count"]);
+            Assert.Equal(
+                "0",
+                verdict["runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_unresolved_count"]);
+            Assert.Equal(
+                "none",
+                verdict["runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_verdict"]);
+            return;
+        }
+
+        var recovered = recoveryMode is "on_time" or "rebound";
+        Assert.Equal(
+            recovered ? "1" : "0",
+            verdict["runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count"]);
+        Assert.Equal(
+            recovered ? "0" : "1",
+            verdict["runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_unresolved_count"]);
+        Assert.Equal(
+            recovered ? "pass" : "fail",
+            verdict["runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_verdict"]);
+        if (recovered)
+        {
+            return;
+        }
+
+        Assert.Equal(
+            "runtime_unlock_initial_offer_receive_recovery_hold_not_preserved",
+            verdict["recovery_failure_class"]);
+        Assert.Equal(
+            "tuna_acceleration_activation_offer_not_observed",
+            verdict["first_proof_chain_failure_event"]);
+        Assert.Equal(
+            "initial_activation_retry_exhausted_while_receive_recovery_awaiting_proof",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("1819", verdict["first_proof_chain_failure_writer_sequence"]);
+        Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
+        Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task AnalyzeRetained_InitialRuntimeUnlockOfferRetryRequiresCoordinatorLifecycle(

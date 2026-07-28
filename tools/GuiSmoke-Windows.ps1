@@ -4141,6 +4141,12 @@ function Get-TunaGuiExplicitFailureClassification {
             'runtime_unlock_retry_dispatch_contract_unsettled' {
                 return [pscustomobject]@{ Phase = 'runtime_unlock_retry'; Reason = $failureClass }
             }
+            'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved' {
+                return [pscustomobject]@{
+                    Phase = 'runtime_unlock_initial_activation'
+                    Reason = 'initial_activation_retry_exhausted_while_receive_recovery_awaiting_proof'
+                }
+            }
             'post_tuna_fallback_outbound_receive_worker_handoff_missing' {
                 return [pscustomobject]@{ Phase = 'outbound_sparse_worker_handoff'; Reason = $failureClass }
             }
@@ -4591,6 +4597,468 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         }
 
         return $true
+    }
+
+    function Test-TunaGuiInitialActivationReceiveRecoveryHoldNotPreserved {
+        param(
+            [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+        )
+
+        function Get-InitialActivationField {
+            param(
+                [Parameter(Mandatory = $true)][string]$Line,
+                [Parameter(Mandatory = $true)][string[]]$Names
+            )
+
+            foreach ($name in $Names) {
+                $value = Get-TunaGuiLogLineFieldValue -Line $Line -Name $name
+                if (-not [string]::IsNullOrWhiteSpace($value) -and
+                    $value -notin @('(none)', 'none', '(missing)', '__missing__')) {
+                    return $value
+                }
+            }
+            return ''
+        }
+
+        function Test-InitialActivationWriterAndSession {
+            param(
+                [Parameter(Mandatory = $true)][string]$Left,
+                [Parameter(Mandatory = $true)][string]$Right
+            )
+
+            foreach ($field in @('log_writer_id', 'session_id')) {
+                $leftValue = Get-TunaGuiLogLineFieldValue -Line $Left -Name $field
+                $rightValue = Get-TunaGuiLogLineFieldValue -Line $Right -Name $field
+                if ([string]::IsNullOrWhiteSpace($leftValue) -or
+                    [string]::IsNullOrWhiteSpace($rightValue) -or
+                    -not [string]::Equals(
+                        $leftValue,
+                        $rightValue,
+                        [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        function Test-InitialActivationWriter {
+            param(
+                [Parameter(Mandatory = $true)][string]$Left,
+                [Parameter(Mandatory = $true)][string]$Right
+            )
+
+            $leftWriter = Get-TunaGuiLogLineFieldValue -Line $Left -Name 'log_writer_id'
+            $rightWriter = Get-TunaGuiLogLineFieldValue -Line $Right -Name 'log_writer_id'
+            return -not [string]::IsNullOrWhiteSpace($leftWriter) -and
+                -not [string]::IsNullOrWhiteSpace($rightWriter) -and
+                [string]::Equals(
+                    $leftWriter,
+                    $rightWriter,
+                    [System.StringComparison]::OrdinalIgnoreCase)
+        }
+
+        function Test-InitialActivationOfferTuple {
+            param(
+                [Parameter(Mandatory = $true)][string]$Boundary,
+                [Parameter(Mandatory = $true)][string]$Candidate,
+                [switch]$RequireTransaction
+            )
+
+            if (-not (Test-InitialActivationWriterAndSession -Left $Boundary -Right $Candidate)) {
+                return $false
+            }
+
+            foreach ($mapping in @(
+                    [pscustomobject]@{
+                        Boundary = @('payer_decision_id')
+                        Candidate = @('payer_decision_id')
+                        Required = $true
+                    },
+                    [pscustomobject]@{
+                        Boundary = @('offer_generation', 'generation')
+                        Candidate = @('offer_generation', 'generation')
+                        Required = $true
+                    },
+                    [pscustomobject]@{
+                        Boundary = @('transaction_generation')
+                        Candidate = @('transaction_generation')
+                        Required = $RequireTransaction.IsPresent
+                    },
+                    [pscustomobject]@{
+                        Boundary = @('tuna_path_lease_generation')
+                        Candidate = @('tuna_path_lease_generation')
+                        Required = $RequireTransaction.IsPresent
+                    })) {
+                $boundaryValue =
+                    Get-InitialActivationField -Line $Boundary -Names $mapping.Boundary
+                $candidateValue =
+                    Get-InitialActivationField -Line $Candidate -Names $mapping.Candidate
+                if (($mapping.Required -and
+                        ([string]::IsNullOrWhiteSpace($boundaryValue) -or
+                            [string]::IsNullOrWhiteSpace($candidateValue))) -or
+                    (-not [string]::IsNullOrWhiteSpace($candidateValue) -and
+                        -not [string]::Equals(
+                            $boundaryValue,
+                            $candidateValue,
+                            [System.StringComparison]::OrdinalIgnoreCase))) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        function Test-InitialActivationRecoveryOperationMatch {
+            param(
+                [Parameter(Mandatory = $true)][string]$Operation,
+                [Parameter(Mandatory = $true)][string]$Candidate
+            )
+
+            foreach ($mapping in @(
+                    [pscustomobject]@{
+                        Operation = @('receive_recovery_operation_authority_id')
+                        Candidate = @('receive_recovery_operation_authority_id')
+                    },
+                    [pscustomobject]@{
+                        Operation = @('receive_recovery_operation_generation')
+                        Candidate = @('receive_recovery_operation_generation')
+                    },
+                    [pscustomobject]@{
+                        Operation = @('recovery_liveness_lease_authority_id')
+                        Candidate = @('recovery_liveness_lease_authority_id')
+                    },
+                    [pscustomobject]@{
+                        Operation = @('recovery_liveness_lease_generation')
+                        Candidate = @('recovery_liveness_lease_generation')
+                    },
+                    [pscustomobject]@{
+                        Operation = @('closure_generation', 'receive_recovery_closure_generation')
+                        Candidate = @('closure_generation', 'receive_recovery_closure_generation')
+                    })) {
+                $operationValue =
+                    Get-InitialActivationField -Line $Operation -Names $mapping.Operation
+                $candidateValue =
+                    Get-InitialActivationField -Line $Candidate -Names $mapping.Candidate
+                if ([string]::IsNullOrWhiteSpace($operationValue) -or
+                    [string]::IsNullOrWhiteSpace($candidateValue) -or
+                    -not [string]::Equals(
+                        $operationValue,
+                        $candidateValue,
+                        [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        function Test-InitialActivationHoldRequestMatch {
+            param(
+                [Parameter(Mandatory = $true)][string]$Left,
+                [Parameter(Mandatory = $true)][string]$Right
+            )
+
+            foreach ($field in @(
+                    'log_writer_id',
+                    'session_id',
+                    'transfer_id',
+                    'direction',
+                    'offer_nonce',
+                    'payer_decision_id',
+                    'offer_generation',
+                    'transaction_generation',
+                    'tuna_path_lease_generation',
+                    'tuna_path_lease_listener_run_id',
+                    'control_envelope_fingerprint')) {
+                $leftValue = Get-TunaGuiLogLineFieldValue -Line $Left -Name $field
+                $rightValue = Get-TunaGuiLogLineFieldValue -Line $Right -Name $field
+                if ([string]::IsNullOrWhiteSpace($leftValue) -or
+                    [string]::IsNullOrWhiteSpace($rightValue) -or
+                    -not [string]::Equals(
+                        $leftValue,
+                        $rightValue,
+                        [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        $indexedLines = @(
+            for ($index = 0; $index -lt $Lines.Count; $index++) {
+                [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
+            }
+        )
+        $finalFailures = @($indexedLines | Where-Object {
+            (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                'tuna_acceleration_activation_offer_not_observed')) -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_mode') -eq 'InitialActivation' -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'retry_scheduled') -eq '0' -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'retry_after_recovery_armed') -eq '0' -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'pause_deferred') -eq '1' -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'trigger') -in @(
+                'runtime_unlock_offer_send_not_observed',
+                'runtime_unlock_payer_intent_send_rejected')
+        })
+
+        foreach ($failure in $finalFailures) {
+            $writerId = Get-TunaGuiLogLineFieldValue -Line $failure.Line -Name 'log_writer_id'
+            $sessionId = Get-TunaGuiLogLineFieldValue -Line $failure.Line -Name 'session_id'
+            $payerDecisionId =
+                Get-TunaGuiLogLineFieldValue -Line $failure.Line -Name 'payer_decision_id'
+            $offerGeneration =
+                Get-TunaGuiLogLineFieldValue -Line $failure.Line -Name 'generation'
+            if ([string]::IsNullOrWhiteSpace($writerId) -or
+                [string]::IsNullOrWhiteSpace($sessionId) -or
+                [string]::IsNullOrWhiteSpace($payerDecisionId) -or
+                [string]::IsNullOrWhiteSpace($offerGeneration)) {
+                continue
+            }
+
+            $boundary = @($indexedLines | Where-Object {
+                $_.Index -lt $failure.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                    'runtime_unlock_offer_authority_boundary_decided')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_mode') -eq
+                    'InitialActivation' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq
+                    'accepted' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writerId -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $sessionId -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq
+                    $payerDecisionId -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'offer_generation') -eq
+                    $offerGeneration -and
+                [int64](Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transaction_generation') -gt 0 -and
+                [int64](Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'tuna_path_lease_generation') -gt 0
+            } | Select-Object -Last 1)
+            if ($boundary.Count -eq 0) {
+                continue
+            }
+
+            $competingBoundaries = @($indexedLines | Where-Object {
+                $_.Index -gt $boundary[0].Index -and
+                $_.Index -lt $failure.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                    'runtime_unlock_offer_authority_boundary_decided')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_mode') -eq
+                    'InitialActivation' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq
+                    'accepted' -and
+                (Test-InitialActivationWriter -Left $boundary[0].Line -Right $_.Line) -and
+                -not (
+                    (Test-InitialActivationWriterAndSession `
+                        -Left $boundary[0].Line `
+                        -Right $_.Line) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq
+                        (Get-TunaGuiLogLineFieldValue `
+                            -Line $boundary[0].Line `
+                            -Name 'transfer_id') -and
+                    (Get-TunaGuiLogLineFieldValue `
+                        -Line $_.Line `
+                        -Name 'transaction_generation') -eq
+                        (Get-TunaGuiLogLineFieldValue `
+                            -Line $boundary[0].Line `
+                            -Name 'transaction_generation')
+                )
+            })
+            if ($competingBoundaries.Count -gt 0) {
+                continue
+            }
+
+            $transferId =
+                Get-TunaGuiLogLineFieldValue -Line $boundary[0].Line -Name 'transfer_id'
+            $transactionGeneration =
+                Get-TunaGuiLogLineFieldValue -Line $boundary[0].Line -Name 'transaction_generation'
+            $candidateClosures = @($indexedLines | Where-Object {
+                $_.Index -lt $failure.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                    'filetransfer_receive_recovery_operation_closure_retained')) -and
+                (Test-InitialActivationWriterAndSession `
+                    -Left $boundary[0].Line `
+                    -Right $_.Line) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transferId -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -eq 'outbound' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'execution_state') -eq 'Completed' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'execution_outcome') -eq 'Completed' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'closure_state') -eq 'Retained' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'proof_identity') -in @(
+                    '', '(none)', 'none')
+            } | Sort-Object Index -Descending)
+            $closure = @()
+            $deferrals = @()
+            foreach ($candidateClosure in $candidateClosures) {
+                $candidateDeferrals = @($indexedLines | Where-Object {
+                    $deferral = $_
+                    if ($deferral.Index -le $candidateClosure.Index -or
+                        $deferral.Index -ge $failure.Index -or
+                        -not (Test-TunaGuiLogLineHasEvent `
+                            -Line $deferral.Line `
+                            -Events @(
+                                'tuna_activation_control_send_deferred_for_regular_v4_recovery')) -or
+                        -not (Test-InitialActivationWriterAndSession `
+                            -Left $boundary[0].Line `
+                            -Right $deferral.Line) -or
+                        (Get-TunaGuiLogLineFieldValue -Line $deferral.Line -Name 'purpose') -ne
+                            'offer' -or
+                        (Get-TunaGuiLogLineFieldValue `
+                            -Line $deferral.Line `
+                            -Name 'blocker_reason') -ne
+                            'receive_stall_recovery_awaiting_receive_proof') {
+                        return $false
+                    }
+
+                    $latestClosure = @($indexedLines | Where-Object {
+                        $_.Index -lt $deferral.Index -and
+                        (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                            'filetransfer_receive_recovery_operation_closure_retained')) -and
+                        (Test-InitialActivationWriterAndSession `
+                            -Left $boundary[0].Line `
+                            -Right $_.Line)
+                    } | Select-Object -Last 1)
+                    return $latestClosure.Count -eq 1 -and
+                        (Test-InitialActivationRecoveryOperationMatch `
+                            -Operation $candidateClosure.Line `
+                            -Candidate $latestClosure[0].Line)
+                })
+                if ($candidateDeferrals.Count -ge 2) {
+                    $closure = @($candidateClosure)
+                    $deferrals = $candidateDeferrals
+                    break
+                }
+            }
+            if ($closure.Count -ne 1 -or $deferrals.Count -lt 2) {
+                continue
+            }
+
+            $sameLineageBoundaries = @($indexedLines | Where-Object {
+                $_.Index -ge $closure[0].Index -and
+                $_.Index -le $failure.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                    'runtime_unlock_offer_authority_boundary_decided')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_mode') -eq
+                    'InitialActivation' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq
+                    'accepted' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writerId -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $sessionId -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transferId -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transaction_generation') -eq
+                    $transactionGeneration
+            })
+            $exhaustion = @($indexedLines | Where-Object {
+                $_.Index -gt $boundary[0].Index -and
+                $_.Index -lt $failure.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                    'tuna_acceleration_retry_exhausted')) -and
+                (Test-InitialActivationWriter -Left $boundary[0].Line -Right $_.Line) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'reason') -eq
+                    'runtime_unlock_offer_send_not_observed'
+            })
+            if ($sameLineageBoundaries.Count -lt 2 -or $exhaustion.Count -ne 1) {
+                continue
+            }
+
+            $heldDecisions = @($indexedLines | Where-Object {
+                $_.Index -gt $closure[0].Index -and
+                $_.Index -lt $failure.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                    'runtime_unlock_initial_activation_receive_recovery_hold_decided')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq 'Held' -and
+                (Test-InitialActivationOfferTuple `
+                    -Boundary $boundary[0].Line `
+                    -Candidate $_.Line `
+                    -RequireTransaction) -and
+                (Test-InitialActivationRecoveryOperationMatch `
+                    -Operation $closure[0].Line `
+                    -Candidate $_.Line)
+            })
+            $recovered = $false
+            foreach ($held in $heldDecisions) {
+                $adoptions = @($indexedLines | Where-Object {
+                    $proof = $_
+                    if ($proof.Index -le $held.Index -or
+                        $proof.Index -ge $failure.Index -or
+                        -not (Test-TunaGuiLogLineHasEvent -Line $proof.Line -Events @(
+                            'filetransfer_receive_recovery_operation_proof_observed',
+                            'filetransfer_receive_recovery_operation_closure_adopted')) -or
+                        (Get-TunaGuiLogLineFieldValue -Line $proof.Line -Name 'closure_state') -ne
+                            'Adopted' -or
+                        -not (Test-InitialActivationWriterAndSession `
+                            -Left $boundary[0].Line `
+                            -Right $proof.Line)) {
+                        return $false
+                    }
+
+                    if (Test-InitialActivationRecoveryOperationMatch `
+                            -Operation $closure[0].Line `
+                            -Candidate $proof.Line) {
+                        return $true
+                    }
+
+                    $rebound = @($indexedLines | Where-Object {
+                        $_.Index -gt $held.Index -and
+                        $_.Index -lt $proof.Index -and
+                        (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                            'runtime_unlock_initial_activation_receive_recovery_hold_rebound')) -and
+                        (Test-InitialActivationOfferTuple `
+                            -Boundary $boundary[0].Line `
+                            -Candidate $_.Line `
+                            -RequireTransaction) -and
+                        (Get-InitialActivationField `
+                            -Line $_.Line `
+                            -Names @('previous_receive_recovery_operation_authority_id')) -eq
+                            (Get-InitialActivationField `
+                                -Line $closure[0].Line `
+                                -Names @('receive_recovery_operation_authority_id')) -and
+                        (Get-InitialActivationField `
+                            -Line $_.Line `
+                            -Names @('previous_receive_recovery_operation_generation')) -eq
+                            (Get-InitialActivationField `
+                                -Line $closure[0].Line `
+                                -Names @('receive_recovery_operation_generation')) -and
+                        (Test-InitialActivationRecoveryOperationMatch `
+                            -Operation $proof.Line `
+                            -Candidate $_.Line)
+                    })
+                    return $rebound.Count -gt 0
+                })
+
+                foreach ($adoption in $adoptions) {
+                    $release = @($indexedLines | Where-Object {
+                        $_.Index -gt $adoption.Index -and
+                        $_.Index -lt $failure.Index -and
+                        (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                            'runtime_unlock_initial_activation_receive_recovery_hold_decided',
+                            'runtime_unlock_initial_activation_receive_recovery_hold_resumed')) -and
+                        (
+                            (Get-TunaGuiLogLineFieldValue `
+                                -Line $_.Line `
+                                -Name 'decision_status') -eq 'Released' -or
+                            (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                                'runtime_unlock_initial_activation_receive_recovery_hold_resumed'))
+                        ) -and
+                        (Test-InitialActivationHoldRequestMatch `
+                            -Left $held.Line `
+                            -Right $_.Line) -and
+                        (Test-InitialActivationRecoveryOperationMatch `
+                            -Operation $adoption.Line `
+                            -Candidate $_.Line)
+                    } | Select-Object -First 1)
+                    if ($release.Count -eq 1) {
+                        $recovered = $true
+                        break
+                    }
+                }
+                if ($recovered) {
+                    break
+                }
+            }
+
+            if (-not $recovered) {
+                return $true
+            }
+        }
+
+        return $false
     }
 
     function Test-TunaGuiReceiveRecoveryCompletedUnprovenSuccessorMissing {
@@ -6410,6 +6878,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $regularV4ReceiveRecoveryClosedNoDeferral -and
         (-not $runtimeUnlockTransactionStarted)
     $regularV4EvidenceLineText = [string[]]@($evidenceLines | ForEach-Object { [string]$_ })
+    $initialActivationReceiveRecoveryHoldNotPreserved =
+        Test-TunaGuiInitialActivationReceiveRecoveryHoldNotPreserved `
+            -Lines $regularV4EvidenceLineText
     $bridgeRecoveryExecutionPayloadHoldMissing =
         Test-TunaGuiBridgeRecoveryExecutionPayloadHoldFailure -Lines $regularV4EvidenceLineText
     $bridgeRecoveryExecutionSubmissionBarrierDrainMissing =
@@ -6479,6 +6950,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $runtimeUnlockFileTransferOwnerStaleBeforeOfferDispatch -or
         $runtimeUnlockRetryRecoverySettlementMissingMarker -or
         $runtimeUnlockRetryRegularV4RecoverySettlementMissing -or
+        $initialActivationReceiveRecoveryHoldNotPreserved -or
         $bridgeRecoveryExecutionPayloadHoldMissing -or
         $bridgeRecoveryExecutionSubmissionBarrierDrainMissing -or
         $receiveRecoveryCompletedUnprovenSuccessorMissing -or
@@ -6527,6 +6999,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
 
         $phase = 'preflight_bridge_bootstrap'
         $reason = $bridgeBootstrapSubreason
+    }
+    elseif ($initialActivationReceiveRecoveryHoldNotPreserved) {
+        $phase = 'runtime_unlock_initial_activation'
+        $reason = 'initial_activation_retry_exhausted_while_receive_recovery_awaiting_proof'
     }
     elseif ($bridgeRecoveryExecutionSubmissionBarrierDrainMissing) {
         $phase = 'bridge_recovery_execution'
@@ -6793,6 +7269,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         RuntimeUnlockDispatchDeferredForRegularV4ReceiveRecovery = [bool]$runtimeUnlockDispatchDeferredForRegularV4ReceiveRecovery
         RuntimeUnlockRetryRegularV4RecoverySettlementMissing = [bool]$runtimeUnlockRetryRegularV4RecoverySettlementMissing
         RuntimeUnlockRetrySourcePublicationMismatch = [bool]$runtimeUnlockRetrySourcePublicationMismatch
+        InitialActivationReceiveRecoveryHoldNotPreserved =
+            [bool]$initialActivationReceiveRecoveryHoldNotPreserved
         BridgeBootstrapNotReady = [bool]$bridgeBootstrapNotReady
         ActivationOfferSent = [bool]$activationOfferSent
         ActivationOfferReceived = [bool]$activationOfferReceived
