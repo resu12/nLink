@@ -6663,6 +6663,1131 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void RuntimeUnlockInitialActivationReceiveRecoveryHold_ProofReleasesAfterCompletionAndProofFirstDoesNotInstallOne()
+    {
+        var heldFixture = CreateReceiveRecoveryOperationFixture();
+        var authority =
+            Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+                heldFixture.Decision.Authority);
+        var request =
+            CreateInitialActivationReceiveRecoveryHoldRequest(
+                heldFixture.Decision.State,
+                payerDecisionId: 101);
+
+        var held =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    heldFixture.Decision.State,
+                    request);
+
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held,
+            held.Decision.Status);
+        Assert.Equal(1, held.Decision.HoldGeneration);
+        Assert.Equal(
+            authority,
+            held.Decision.ReceiveRecoveryOperation?.Authority);
+        Assert.Equal(
+            request,
+            held.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentInitialActivationHold?.Request);
+
+        var proof =
+            FileTransferCoordinator.ObserveReceiveRecoveryProof(
+                held.State,
+                new FileTransferReceiveRecoveryProof(
+                    authority,
+                    "initial-activation-hold-proof",
+                    "receive_proof_observed",
+                    2));
+
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held,
+            proof.InitialActivationHoldDecision?.Status);
+        Assert.NotNull(
+            proof.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentInitialActivationHold);
+
+        var receipt =
+            new FileTransferBridgeRecoveryExecutionReceipt(
+                authority.ExecutionCommand,
+                FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                "soft",
+                "bridge_recovery_execution_completed");
+        var started =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(
+                proof.State,
+                new FileTransferBridgeRecoveryExecutionStartResult(
+                    authority.ExecutionCommand,
+                    FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                    "bridge_recovery_execution_started",
+                    Task.FromResult(receipt)));
+        var completed =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionReceipt(
+                started.State,
+                receipt,
+                observedUtcMs: 3);
+
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Released,
+            completed.InitialActivationHoldDecision?.Status);
+        Assert.Null(
+            completed.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentInitialActivationHold);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Released,
+            completed.State.PersistentState.FileTransferReceiveRecovery
+                .LastInitialActivationHold?.Status);
+        var resetAfterRelease =
+            FileTransferCoordinator
+                .InvalidateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    completed.State,
+                    new RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationRequest(
+                        request,
+                        RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationKind
+                            .GenericReset,
+                        "reset_after_receive_proof"));
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Released,
+            resetAfterRelease.Decision.Status);
+        Assert.Same(completed.State, resetAfterRelease.State);
+
+        var proofFirstFixture = CreateReceiveRecoveryOperationFixture();
+        var proofFirstAuthority =
+            Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+                proofFirstFixture.Decision.Authority);
+        var proofFirstState =
+            FileTransferCoordinator.ObserveReceiveRecoveryProof(
+                proofFirstFixture.Decision.State,
+                new FileTransferReceiveRecoveryProof(
+                    proofFirstAuthority,
+                    "initial-activation-proof-first",
+                    "receive_proof_observed",
+                    2));
+        var proofFirstRequest =
+            CreateInitialActivationReceiveRecoveryHoldRequest(
+                proofFirstState.State,
+                payerDecisionId: 102);
+
+        var proofFirst =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    proofFirstState.State,
+                    proofFirstRequest);
+
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held,
+            proofFirst.Decision.Status);
+        Assert.Equal(1, proofFirst.Decision.HoldGeneration);
+        Assert.NotNull(
+            proofFirst.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentInitialActivationHold);
+    }
+
+    [Fact]
+    public void RuntimeUnlockInitialActivationReceiveRecoveryHold_CompletedUnprovenSuccessorRebindsAndInvalidationTerminates()
+    {
+        var completed = CreateCompletedUnprovenReceiveRecoveryOperation(
+            receiptObservedUtcMs: 100);
+        var request =
+            CreateInitialActivationReceiveRecoveryHoldRequest(
+                completed.State,
+                payerDecisionId: 201);
+        var held =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    completed.State,
+                    request);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held,
+            held.Decision.Status);
+
+        var observation = CreateReceiveRecoveryHealthEvaluationObservation(
+            held.State,
+            observationGeneration: 2,
+            evidenceGeneration: 1,
+            observedUtcMs: 101);
+        var successor = FileTransferCoordinator.IssueReceiveRecoveryOperation(
+            held.State,
+            observation,
+            BridgeRecoveryKind.BridgeReceiveStallRecovery,
+            held.State.CurrentLeg?.CheckpointRequestId);
+
+        Assert.True(successor.Accepted, successor.Reason);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held,
+            successor.InitialActivationHoldDecision?.Status);
+        Assert.Equal(
+            held.Decision.HoldGeneration,
+            successor.InitialActivationHoldDecision?.HoldGeneration);
+        Assert.Equal(
+            completed.Operation.Authority,
+            successor.InitialActivationHoldDecision?
+                .PreviousReceiveRecoveryAuthority);
+        var successorOperation =
+            Assert.IsType<FileTransferReceiveRecoveryOperation>(
+                successor.State.PersistentState.FileTransferReceiveRecovery
+                    .CurrentOperation);
+        Assert.Equal(
+            successorOperation.Authority,
+            successor.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentInitialActivationHold?
+                .ReceiveRecoveryAuthority);
+
+        var invalidated =
+            FileTransferCoordinator.InvalidateReceiveRecoveryOperation(
+                successor.State,
+                successorOperation.Authority,
+                "terminal_scope_replaced");
+
+        Assert.True(invalidated.Accepted, invalidated.Reason);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Invalidated,
+            invalidated.InitialActivationHoldDecision?.Status);
+        Assert.Null(
+            invalidated.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentInitialActivationHold);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Invalidated,
+            invalidated.State.PersistentState.FileTransferReceiveRecovery
+                .LastInitialActivationHold?.Status);
+    }
+
+    [Fact]
+    public void RuntimeUnlockInitialActivationReceiveRecoveryHold_FirstEvaluationAfterExactSuccessorBindsCapturedPredecessorOnce()
+    {
+        var completed = CreateCompletedUnprovenReceiveRecoveryOperation(
+            receiptObservedUtcMs: 100);
+        var capturedRequest =
+            CreateInitialActivationReceiveRecoveryHoldRequest(
+                completed.State,
+                payerDecisionId: 202);
+        var successor = FileTransferCoordinator.IssueReceiveRecoveryOperation(
+            completed.State,
+            CreateReceiveRecoveryHealthEvaluationObservation(
+                completed.State,
+                observationGeneration: 2,
+                evidenceGeneration: 1,
+                observedUtcMs: 101),
+            BridgeRecoveryKind.BridgeReceiveStallRecovery,
+            completed.State.CurrentLeg?.CheckpointRequestId);
+        Assert.True(successor.Accepted, successor.Reason);
+        Assert.Null(
+            successor.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentInitialActivationHold);
+        var successorOperation =
+            Assert.IsType<FileTransferReceiveRecoveryOperation>(
+                successor.State.PersistentState.FileTransferReceiveRecovery
+                    .CurrentOperation);
+
+        var held =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    successor.State,
+                    capturedRequest);
+        var duplicate =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    held.State,
+                    capturedRequest);
+
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held,
+            held.Decision.Status);
+        Assert.Equal(
+            "runtime_unlock_initial_activation_receive_recovery_hold_rebound",
+            held.Decision.Reason);
+        Assert.Equal(1, held.Decision.HoldGeneration);
+        Assert.Equal(
+            successorOperation.Authority,
+            held.Decision.ReceiveRecoveryOperation?.Authority);
+        Assert.Equal(
+            completed.Operation.Authority,
+            held.Decision.PreviousReceiveRecoveryAuthority);
+        Assert.Equal(
+            successorOperation.Authority,
+            held.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentInitialActivationHold?.ReceiveRecoveryAuthority);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held,
+            duplicate.Decision.Status);
+        Assert.Equal(held.Decision.HoldGeneration, duplicate.Decision.HoldGeneration);
+        Assert.Equal(
+            successorOperation.Authority,
+            duplicate.Decision.ReceiveRecoveryOperation?.Authority);
+        Assert.Equal(
+            completed.Operation.Authority,
+            duplicate.Decision.PreviousReceiveRecoveryAuthority);
+        Assert.Equal(
+            held.State.PersistentState.FileTransferReceiveRecovery,
+            duplicate.State.PersistentState.FileTransferReceiveRecovery);
+
+        var mutatedScope = capturedRequest with
+        {
+            ExpectedScope = capturedRequest.ExpectedScope with
+            {
+                DataSessionGeneration =
+                    capturedRequest.ExpectedScope.DataSessionGeneration + 1,
+            },
+        };
+        var rejected =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    successor.State,
+                    mutatedScope);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Rejected,
+            rejected.Decision.Status);
+        Assert.Same(successor.State, rejected.State);
+    }
+
+    [Fact]
+    public void RuntimeUnlockInitialActivationReceiveRecoveryHold_CapturedPredecessorDoesNotSkipAnIntermediateSuccessor()
+    {
+        var completed = CreateCompletedUnprovenReceiveRecoveryOperation(
+            receiptObservedUtcMs: 100);
+        var capturedRequest =
+            CreateInitialActivationReceiveRecoveryHoldRequest(
+                completed.State,
+                payerDecisionId: 203);
+        var firstSuccessor =
+            FileTransferCoordinator.IssueReceiveRecoveryOperation(
+                completed.State,
+                CreateReceiveRecoveryHealthEvaluationObservation(
+                    completed.State,
+                    observationGeneration: 2,
+                    evidenceGeneration: 1,
+                    observedUtcMs: 101),
+                BridgeRecoveryKind.BridgeReceiveStallRecovery,
+                completed.State.CurrentLeg?.CheckpointRequestId);
+        Assert.True(firstSuccessor.Accepted, firstSuccessor.Reason);
+        var firstSuccessorAuthority =
+            Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+                firstSuccessor.Authority);
+        var firstSuccessorReceipt =
+            new FileTransferBridgeRecoveryExecutionReceipt(
+                firstSuccessorAuthority.ExecutionCommand,
+                FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                "hard",
+                "bridge_recovery_completed");
+        var firstSuccessorStarted =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(
+                firstSuccessor.State,
+                new FileTransferBridgeRecoveryExecutionStartResult(
+                    firstSuccessorAuthority.ExecutionCommand,
+                    FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                    "bridge_recovery_execution_started",
+                    Task.FromResult(firstSuccessorReceipt)),
+                observedUtcMs: 199);
+        Assert.True(firstSuccessorStarted.Accepted, firstSuccessorStarted.Reason);
+        var firstSuccessorCompleted =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionReceipt(
+                firstSuccessorStarted.State,
+                firstSuccessorReceipt,
+                observedUtcMs: 200);
+        Assert.True(
+            firstSuccessorCompleted.Accepted,
+            firstSuccessorCompleted.Reason);
+        var secondSuccessor =
+            FileTransferCoordinator.IssueReceiveRecoveryOperation(
+                firstSuccessorCompleted.State,
+                CreateReceiveRecoveryHealthEvaluationObservation(
+                    firstSuccessorCompleted.State,
+                    observationGeneration: 3,
+                    evidenceGeneration: 2,
+                    observedUtcMs: 201),
+                BridgeRecoveryKind.BridgeReceiveStallRecovery,
+                firstSuccessorCompleted.State.CurrentLeg
+                    ?.CheckpointRequestId);
+        Assert.True(secondSuccessor.Accepted, secondSuccessor.Reason);
+
+        var rejected =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    secondSuccessor.State,
+                    capturedRequest);
+
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Rejected,
+            rejected.Decision.Status);
+        Assert.Equal(
+            "runtime_unlock_initial_activation_receive_recovery_scope_mismatch",
+            rejected.Decision.Reason);
+        Assert.Same(secondSuccessor.State, rejected.State);
+        Assert.Null(
+            rejected.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentInitialActivationHold);
+    }
+
+    [Fact]
+    public void RuntimeUnlockInitialActivationReceiveRecoveryHold_IncompleteTupleIsRejectedWithoutMutation()
+    {
+        var fixture = CreateReceiveRecoveryOperationFixture();
+        var completeRequest =
+            CreateInitialActivationReceiveRecoveryHoldRequest(
+                fixture.Decision.State,
+                payerDecisionId: 301);
+        var incompleteRequest = completeRequest with
+        {
+            OfferNonce = string.Empty,
+            OfferGeneration = 0,
+            TransactionGeneration = 0,
+            TunaPathLeaseGeneration = 0,
+            TunaPathLeaseListenerRunId = string.Empty,
+            ControlEnvelopeFingerprint = string.Empty,
+        };
+
+        var decision =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    fixture.Decision.State,
+                    incompleteRequest);
+
+        Assert.True(incompleteRequest.IsDefault);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Rejected,
+            decision.Decision.Status);
+        Assert.Equal(
+            "runtime_unlock_initial_activation_receive_recovery_hold_request_invalid",
+            decision.Decision.Reason);
+        Assert.Equal(fixture.Decision.State, decision.State);
+        Assert.Null(
+            decision.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentInitialActivationHold);
+    }
+
+    [Theory]
+    [InlineData((int)RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationKind.UserCancellation)]
+    [InlineData((int)RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationKind.PeerCancellation)]
+    public void RuntimeUnlockInitialActivationReceiveRecoveryHold_TypedCancellationIsIdempotentAndDoesNotMutateRecovery(
+        int invalidationKindValue)
+    {
+        var invalidationKind =
+            (RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationKind)
+                invalidationKindValue;
+        var fixture = CreateReceiveRecoveryOperationFixture();
+        var request =
+            CreateInitialActivationReceiveRecoveryHoldRequest(
+                fixture.Decision.State,
+                payerDecisionId: 302);
+        var held =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    fixture.Decision.State,
+                    request);
+        var recoveryOperation =
+            Assert.IsType<FileTransferReceiveRecoveryOperation>(
+                held.State.PersistentState.FileTransferReceiveRecovery
+                    .CurrentOperation);
+        var invalidationRequest =
+            new RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationRequest(
+                request,
+                invalidationKind,
+                " initial_activation_offer_retired ");
+
+        var invalidated =
+            FileTransferCoordinator
+                .InvalidateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    held.State,
+                    invalidationRequest);
+        var duplicate =
+            FileTransferCoordinator
+                .InvalidateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    invalidated.State,
+                    invalidationRequest);
+
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Invalidated,
+            invalidated.Decision.Status);
+        Assert.Equal(
+            "initial_activation_offer_retired",
+            invalidated.Decision.Reason);
+        Assert.Null(
+            invalidated.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentInitialActivationHold);
+        Assert.Equal(
+            request,
+            invalidated.State.PersistentState.FileTransferReceiveRecovery
+                .LastInitialActivationHold?.Request);
+        Assert.Equal(
+            invalidationKind,
+            invalidated.State.PersistentState.FileTransferReceiveRecovery
+                .LastInitialActivationHold?.InvalidationKind);
+        Assert.Equal(
+            recoveryOperation,
+            invalidated.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentOperation);
+        Assert.Equal(invalidated.Decision, duplicate.Decision);
+        Assert.Equal(invalidated.State, duplicate.State);
+    }
+
+    [Fact]
+    public void RuntimeUnlockInitialActivationReceiveRecoveryHold_GenericResetCannotInvalidateCurrentRecovery()
+    {
+        var issuedFixture = CreateReceiveRecoveryOperationFixture();
+        var issuedAuthority =
+            Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+                issuedFixture.Decision.Authority);
+        var runningReceipt =
+            new FileTransferBridgeRecoveryExecutionReceipt(
+                issuedAuthority.ExecutionCommand,
+                FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                "soft",
+                "bridge_recovery_execution_completed");
+        var running =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(
+                issuedFixture.Decision.State,
+                new FileTransferBridgeRecoveryExecutionStartResult(
+                    issuedAuthority.ExecutionCommand,
+                    FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                    "bridge_recovery_execution_started",
+                    Task.FromResult(runningReceipt)));
+        var completed =
+            CreateCompletedUnprovenReceiveRecoveryOperation(
+                receiptObservedUtcMs: 100);
+        var states = new[]
+        {
+            issuedFixture.Decision.State,
+            running.State,
+            completed.State,
+        };
+
+        for (var index = 0; index < states.Length; index++)
+        {
+            var state = states[index];
+            var request =
+                CreateInitialActivationReceiveRecoveryHoldRequest(
+                    state,
+                    payerDecisionId: 303 + index);
+            var held =
+                FileTransferCoordinator
+                    .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                        state,
+                        request);
+            var persistentState = held.State.PersistentState;
+            var retryState =
+                held.State.PersistentState.RuntimeUnlockRetryLifecycle;
+
+            var rejected =
+                FileTransferCoordinator
+                    .InvalidateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                        held.State,
+                        new(
+                            request,
+                            RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationKind
+                                .GenericReset,
+                            "generic_acceleration_reset"));
+
+            Assert.Equal(
+                RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Rejected,
+                rejected.Decision.Status);
+            Assert.Equal(
+                "runtime_unlock_initial_activation_receive_recovery_hold_invalidation_not_authorized",
+                rejected.Decision.Reason);
+            Assert.Same(held.State, rejected.State);
+            Assert.Equal(persistentState, rejected.State.PersistentState);
+            Assert.Equal(
+                retryState,
+                rejected.State.PersistentState.RuntimeUnlockRetryLifecycle);
+            Assert.Equal(
+                held.State.PersistentState.FileTransferReceiveRecovery,
+                rejected.State.PersistentState.FileTransferReceiveRecovery);
+        }
+    }
+
+    [Fact]
+    public void RuntimeUnlockInitialActivationReceiveRecoveryHold_MissingAndMutatedInvalidationRejectWithoutMutation()
+    {
+        var fixture = CreateReceiveRecoveryOperationFixture();
+        var request =
+            CreateInitialActivationReceiveRecoveryHoldRequest(
+                fixture.Decision.State,
+                payerDecisionId: 303);
+        var missing =
+            FileTransferCoordinator
+                .InvalidateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    fixture.Decision.State,
+                    new(
+                        request,
+                        RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationKind
+                            .UserCancellation,
+                        "initial_activation_offer_retired"));
+        var held =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    fixture.Decision.State,
+                    request);
+        var mutated =
+            FileTransferCoordinator
+                .InvalidateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    held.State,
+                    new(
+                        request with
+                        {
+                            ControlEnvelopeFingerprint =
+                                "mutated-control-envelope",
+                        },
+                        RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationKind
+                            .UserCancellation,
+                        "initial_activation_offer_retired"));
+
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Rejected,
+            missing.Decision.Status);
+        Assert.Equal(fixture.Decision.State, missing.State);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Rejected,
+            mutated.Decision.Status);
+        Assert.Equal(
+            "runtime_unlock_initial_activation_receive_recovery_hold_tuple_mutated",
+            mutated.Decision.Reason);
+        Assert.Equal(held.State, mutated.State);
+    }
+
+    [Fact]
+    public void RuntimeUnlockInitialActivationReceiveRecoveryHold_TerminalAndScopeInvalidationRetireExactActiveGate()
+    {
+        var regular = FileTransferRouteResolver.Resolve(
+            FileTransferRoute.RegularNknV4Fast);
+
+        var terminalFixture = CreateReceiveRecoveryOperationFixture();
+        var terminalOfferRequest =
+            CreateInitialActivationReceiveRecoveryHoldRequest(
+                terminalFixture.Decision.State,
+                payerDecisionId: 351);
+        var terminalOfferHeld =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    terminalFixture.Decision.State,
+                    terminalOfferRequest);
+        var terminal = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.Terminalized,
+                regular,
+                reason: "completed"),
+            terminalOfferHeld.State);
+        var terminalRecovery =
+            terminal.State.PersistentState.FileTransferReceiveRecovery;
+
+        Assert.Null(terminalRecovery.CurrentInitialActivationHold);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Invalidated,
+            terminalRecovery.LastInitialActivationHold?.Status);
+        Assert.Equal(
+            "terminal_state",
+            terminalRecovery.LastInitialActivationHold?.Reason);
+
+        var scopeFixture = CreateReceiveRecoveryOperationFixture();
+        var offerRequest =
+            CreateInitialActivationReceiveRecoveryHoldRequest(
+                scopeFixture.Decision.State,
+                payerDecisionId: 352) with
+            {
+                OfferNonce = "initial-offer-352",
+                OfferGeneration = 1,
+                TransactionGeneration = 1,
+                TunaPathLeaseGeneration = 1,
+                TunaPathLeaseListenerRunId = "listener-352",
+                ControlEnvelopeFingerprint = "fingerprint-352",
+                Boundary =
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
+                        .OfferPreSend,
+            };
+        var offerHeld =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    scopeFixture.Decision.State,
+                    offerRequest);
+        var scopeInvalidated = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind
+                    .RuntimeUnlockAdmissionRetired,
+                regular,
+                reason: "scope_replaced"),
+            offerHeld.State);
+        var scopeRecovery =
+            scopeInvalidated.State.PersistentState.FileTransferReceiveRecovery;
+
+        Assert.Null(scopeRecovery.CurrentInitialActivationHold);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Invalidated,
+            scopeRecovery.LastInitialActivationHold?.Status);
+        Assert.Equal(
+            "runtime_scope_replaced",
+            scopeRecovery.LastInitialActivationHold?.Reason);
+    }
+
+    [Fact]
+    public void RuntimeUnlockInitialActivationReceiveRecoveryHold_UnrelatedTerminalOperationDoesNotAuthorizeReleaseTuple()
+    {
+        var fixture = CreateReceiveRecoveryOperationFixture();
+        var operation =
+            Assert.IsType<FileTransferReceiveRecoveryOperation>(
+                fixture.Decision.State.PersistentState.FileTransferReceiveRecovery
+                    .CurrentOperation);
+        var request =
+            CreateInitialActivationReceiveRecoveryHoldRequest(
+                fixture.Decision.State,
+                payerDecisionId: 353);
+        request = request with
+        {
+            ExpectedScope = request.ExpectedScope with
+            {
+                ExpectedExecutionCommand = null,
+            },
+        };
+        var unrelatedOperation = operation with
+        {
+            ExecutionState =
+                FileTransferReceiveRecoveryExecutionState.Invalidated,
+            Authority = operation.Authority with
+            {
+                Observation = operation.Authority.Observation with
+                {
+                    DataSessionIdentity = "unrelated-data-session",
+                },
+            },
+            InvalidationReason = "unrelated_operation",
+        };
+        var state = fixture.Decision.State with
+        {
+            PersistentState = fixture.Decision.State.PersistentState with
+            {
+                FileTransferReceiveRecovery =
+                    fixture.Decision.State.PersistentState
+                        .FileTransferReceiveRecovery with
+                    {
+                        CurrentOperation = null,
+                        LastTerminalOperation = unrelatedOperation,
+                    },
+            },
+        };
+
+        var decision =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    state,
+                    request);
+
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Released,
+            decision.Decision.Status);
+        Assert.Null(decision.Decision.ReceiveRecoveryOperation);
+        Assert.Equal(0, decision.Decision.HoldGeneration);
+    }
+
+    [Fact]
+    public void RuntimeUnlockInitialActivationReceiveRecoveryHold_NewOfferDoesNotInheritPriorTerminalOperation()
+    {
+        var fixture = CreateReceiveRecoveryOperationFixture();
+        var operation =
+            Assert.IsType<FileTransferReceiveRecoveryOperation>(
+                fixture.Decision.State.PersistentState.FileTransferReceiveRecovery
+                    .CurrentOperation);
+        var request =
+            CreateInitialActivationReceiveRecoveryHoldRequest(
+                fixture.Decision.State,
+                payerDecisionId: 3531);
+        request = request with
+        {
+            ExpectedScope = request.ExpectedScope with
+            {
+                ExpectedExecutionCommand = null,
+            },
+        };
+        var terminalOperation = operation with
+        {
+            ExecutionState =
+                FileTransferReceiveRecoveryExecutionState.Exhausted,
+            ExecutionReceipt = new FileTransferBridgeRecoveryExecutionReceipt(
+                operation.Authority.ExecutionCommand,
+                FileTransferBridgeRecoveryExecutionOutcome.Exhausted,
+                "hard",
+                "bridge_recovery_execution_exhausted"),
+        };
+        var state = fixture.Decision.State with
+        {
+            PersistentState = fixture.Decision.State.PersistentState with
+            {
+                FileTransferReceiveRecovery =
+                    fixture.Decision.State.PersistentState
+                        .FileTransferReceiveRecovery with
+                    {
+                        CurrentOperation = null,
+                        LastTerminalOperation = terminalOperation,
+                    },
+            },
+        };
+
+        var decision =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    state,
+                    request);
+
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Released,
+            decision.Decision.Status);
+        Assert.Equal(
+            "runtime_unlock_initial_activation_receive_recovery_not_blocked",
+            decision.Decision.Reason);
+        Assert.Null(decision.Decision.ReceiveRecoveryOperation);
+        Assert.Equal(0, decision.Decision.HoldGeneration);
+        Assert.Same(state, decision.State);
+    }
+
+    [Fact]
+    public void RuntimeUnlockInitialActivationReceiveRecoveryHold_PeerVisibleTimeoutIsHeldIdempotentlyAndMutationFailsClosed()
+    {
+        var fixture = CreateReceiveRecoveryOperationFixture();
+        var request =
+            CreateInitialActivationReceiveRecoveryHoldRequest(
+                fixture.Decision.State,
+                payerDecisionId: 354) with
+            {
+                OfferNonce = "initial-offer-354",
+                OfferGeneration = 1,
+                TransactionGeneration = 1,
+                TunaPathLeaseGeneration = 1,
+                TunaPathLeaseListenerRunId = "listener-354",
+                ControlEnvelopeFingerprint = "fingerprint-354",
+                PeerVisibleDispatchObserved = true,
+                Boundary =
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
+                        .PeerResponseTimeout,
+            };
+
+        var held =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    fixture.Decision.State,
+                    request);
+        var duplicate =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    held.State,
+                    request);
+        var mutated =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    held.State,
+                    request with
+                    {
+                        PeerVisibleDispatchObserved = false,
+                    });
+
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held,
+            held.Decision.Status);
+        Assert.Equal(held.Decision, duplicate.Decision);
+        Assert.Equal(held.State, duplicate.State);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Rejected,
+            mutated.Decision.Status);
+        Assert.Equal(
+            "runtime_unlock_initial_activation_receive_recovery_hold_tuple_mutated",
+            mutated.Decision.Reason);
+        Assert.Equal(
+            held.Decision.HoldGeneration,
+            mutated.Decision.HoldGeneration);
+    }
+
+    [Fact]
+    public void RuntimeUnlockInitialActivationReceiveRecoveryHold_LastTerminalGateDoesNotOverrideNewerCurrentOperation()
+    {
+        var completed = CreateCompletedUnprovenReceiveRecoveryOperation(
+            receiptObservedUtcMs: 100);
+        var observation = CreateReceiveRecoveryHealthEvaluationObservation(
+            completed.State,
+            observationGeneration: 2,
+            evidenceGeneration: 1,
+            observedUtcMs: 101);
+        var successor = FileTransferCoordinator.IssueReceiveRecoveryOperation(
+            completed.State,
+            observation,
+            BridgeRecoveryKind.BridgeReceiveStallRecovery,
+            completed.State.CurrentLeg?.CheckpointRequestId);
+        var successorOperation =
+            Assert.IsType<FileTransferReceiveRecoveryOperation>(
+                successor.State.PersistentState.FileTransferReceiveRecovery
+                    .CurrentOperation);
+        var request =
+            CreateInitialActivationReceiveRecoveryHoldRequest(
+                successor.State,
+                payerDecisionId: 401);
+        var staleTerminal =
+            new RuntimeUnlockInitialActivationReceiveRecoveryHold(
+                request,
+                completed.Operation.Authority,
+                HoldGeneration: 7,
+                RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                    .Invalidated,
+                "stale_predecessor_terminal");
+        var state = successor.State with
+        {
+            PersistentState = successor.State.PersistentState with
+            {
+                FileTransferReceiveRecovery =
+                    successor.State.PersistentState.FileTransferReceiveRecovery
+                        with
+                        {
+                            LastInitialActivationHold = staleTerminal,
+                            LastInitialActivationHoldGeneration = 7,
+                        },
+            },
+        };
+
+        var decision =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    state,
+                    request);
+
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held,
+            decision.Decision.Status);
+        Assert.Equal(8, decision.Decision.HoldGeneration);
+        Assert.Equal(
+            successorOperation.Authority,
+            decision.Decision.ReceiveRecoveryOperation?.Authority);
+        Assert.Equal(
+            successorOperation.Authority,
+            decision.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentInitialActivationHold?
+                .ReceiveRecoveryAuthority);
+    }
+
+    [Fact]
+    public void RuntimeUnlockInitialActivationReceiveRecoveryHold_RejectsEveryExpectedScopeMutation()
+    {
+        var fixture = CreateReceiveRecoveryOperationFixture();
+        var request =
+            CreateInitialActivationReceiveRecoveryHoldRequest(
+                fixture.Decision.State,
+                payerDecisionId: 501);
+        var expected = request.ExpectedScope;
+        var publication =
+            Assert.IsType<FileTransferRoutePublicationAuthority>(
+                expected.SourcePublicationAuthority);
+        var command =
+            Assert.IsType<FileTransferBridgeRecoveryExecutionCommand>(
+                expected.ExpectedExecutionCommand);
+        var mutations = new[]
+        {
+            request with
+            {
+                ExpectedScope = expected with
+                {
+                    SourcePublicationAuthority = publication with
+                    {
+                        RuntimeGeneration =
+                            publication.RuntimeGeneration + 1,
+                    },
+                },
+            },
+            request with
+            {
+                ExpectedScope = expected with
+                {
+                    SourcePublicationAuthority = publication with
+                    {
+                        RoutePublicationGeneration =
+                            publication.RoutePublicationGeneration + 1,
+                    },
+                },
+            },
+            request with
+            {
+                ExpectedScope = expected with
+                {
+                    TransportEpoch = expected.TransportEpoch + 1,
+                },
+            },
+            request with
+            {
+                ExpectedScope = expected with
+                {
+                    BridgeRecoveryGeneration =
+                        expected.BridgeRecoveryGeneration + 1,
+                },
+            },
+            request with
+            {
+                ExpectedScope = expected with
+                {
+                    CheckpointRequestId = "replacement-checkpoint",
+                },
+            },
+            request with
+            {
+                ExpectedScope = expected with
+                {
+                    DataSessionIdentity = "replacement-data-session",
+                },
+            },
+            request with
+            {
+                ExpectedScope = expected with
+                {
+                    DataSessionGeneration =
+                        expected.DataSessionGeneration + 1,
+                },
+            },
+            request with
+            {
+                ExpectedScope = expected with
+                {
+                    ExpectedExecutionCommand = command with
+                    {
+                        CheckpointRequestId = "mutated-command-checkpoint",
+                    },
+                },
+            },
+        };
+
+        foreach (var mutation in mutations)
+        {
+            var decision =
+                FileTransferCoordinator
+                    .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                        fixture.Decision.State,
+                        mutation);
+            Assert.Equal(
+                RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                    .Rejected,
+                decision.Decision.Status);
+            Assert.Equal(
+                "runtime_unlock_initial_activation_receive_recovery_scope_mismatch",
+                decision.Decision.Reason);
+            Assert.Null(
+                decision.State.PersistentState.FileTransferReceiveRecovery
+                    .CurrentInitialActivationHold);
+        }
+    }
+
+    [Fact]
+    public void RuntimeUnlockInitialActivationReceiveRecoveryHold_CommandlessCaptureRejectsCurrentOperationAndExactCommandIsAccepted()
+    {
+        var fixture = CreateReceiveRecoveryOperationFixture();
+        var exactRequest =
+            CreateInitialActivationReceiveRecoveryHoldRequest(
+                fixture.Decision.State,
+                payerDecisionId: 551);
+        var commandlessRequest = exactRequest with
+        {
+            ExpectedScope = exactRequest.ExpectedScope with
+            {
+                ExpectedExecutionCommand = null,
+            },
+        };
+
+        var rejected =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    fixture.Decision.State,
+                    commandlessRequest);
+        var accepted =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    fixture.Decision.State,
+                    exactRequest);
+        var noOperationState = fixture.Decision.State with
+        {
+            PersistentState = fixture.Decision.State.PersistentState with
+            {
+                FileTransferReceiveRecovery =
+                    fixture.Decision.State.PersistentState
+                        .FileTransferReceiveRecovery with
+                    {
+                        CurrentOperation = null,
+                        LastTerminalOperation = null,
+                    },
+            },
+        };
+        var commandlessWithoutOperation =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    noOperationState,
+                    commandlessRequest);
+
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Rejected,
+            rejected.Decision.Status);
+        Assert.Equal(
+            "runtime_unlock_initial_activation_receive_recovery_command_capture_race",
+            rejected.Decision.Reason);
+        Assert.Same(fixture.Decision.State, rejected.State);
+        Assert.Null(
+            rejected.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentInitialActivationHold);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held,
+            accepted.Decision.Status);
+        Assert.Equal(
+            fixture.Decision.Authority,
+            accepted.Decision.ReceiveRecoveryOperation?.Authority);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Released,
+            commandlessWithoutOperation.Decision.Status);
+        Assert.Equal(
+            "runtime_unlock_initial_activation_receive_recovery_not_blocked",
+            commandlessWithoutOperation.Decision.Reason);
+        Assert.Same(
+            noOperationState,
+            commandlessWithoutOperation.State);
+    }
+
+    [Theory]
+    [InlineData((int)FileTransferBridgeRecoveryExecutionOutcome.Exhausted)]
+    [InlineData((int)FileTransferBridgeRecoveryExecutionOutcome.Discarded)]
+    public void RuntimeUnlockInitialActivationReceiveRecoveryHold_NonCompletedReceiptInvalidatesWithoutRelease(
+        int outcomeValue)
+    {
+        var outcome =
+            (FileTransferBridgeRecoveryExecutionOutcome)outcomeValue;
+        var fixture = CreateReceiveRecoveryOperationFixture();
+        var authority =
+            Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+                fixture.Decision.Authority);
+        var request =
+            CreateInitialActivationReceiveRecoveryHoldRequest(
+                fixture.Decision.State,
+                payerDecisionId: 601 + (int)outcome);
+        var held =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    fixture.Decision.State,
+                    request);
+        var receipt = new FileTransferBridgeRecoveryExecutionReceipt(
+            authority.ExecutionCommand,
+            outcome,
+            "hard",
+            $"bridge_recovery_execution_{outcome.ToString().ToLowerInvariant()}");
+        var started =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(
+                held.State,
+                new FileTransferBridgeRecoveryExecutionStartResult(
+                    authority.ExecutionCommand,
+                    FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                    "bridge_recovery_execution_started",
+                    Task.FromResult(receipt)));
+        var terminal =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionReceipt(
+                started.State,
+                receipt);
+
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Invalidated,
+            terminal.InitialActivationHoldDecision?.Status);
+        Assert.NotEqual(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Released,
+            terminal.InitialActivationHoldDecision?.Status);
+        Assert.Null(
+            terminal.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentInitialActivationHold);
+    }
+
+    [Fact]
     public void FileTransferReceiveRecoveryOperation_CompletedUnprovenClosure_NewerHealthEvidenceIssuesExactSuccessor()
     {
         var completed = CreateCompletedUnprovenReceiveRecoveryOperation(
@@ -15523,6 +16648,49 @@ public sealed class FileTransferCoordinatorTests
                 leg.CheckpointRequestId);
         Assert.True(decision.Accepted, decision.Reason);
         return (state, decision);
+    }
+
+    private static
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest
+        CreateInitialActivationReceiveRecoveryHoldRequest(
+            FileTransferCoordinatorState state,
+            long payerDecisionId)
+    {
+        var operation =
+            Assert.IsType<FileTransferReceiveRecoveryOperation>(
+                state.PersistentState.FileTransferReceiveRecovery
+                    .CurrentOperation);
+        var observation = operation.Authority.Observation;
+        var publication =
+            Assert.IsType<FileTransferRoutePublicationAuthority>(
+                FileTransferCoordinator.CreateRoutePublicationAuthority(
+                    observation.RoutePublication));
+        return new(
+            state.SessionId,
+            state.TransferId,
+            state.Direction,
+            OfferNonce: $"initial-offer-{payerDecisionId}",
+            PayerDecisionId: payerDecisionId,
+            OfferGeneration: 1,
+            TransactionGeneration: 1,
+            TunaPathLeaseGeneration: 1,
+            TunaPathLeaseListenerRunId: $"listener-{payerDecisionId}",
+            ControlEnvelopeFingerprint: $"fingerprint-{payerDecisionId}",
+            PeerVisibleDispatchObserved: false,
+            Boundary:
+                RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
+                    .OfferPreSend)
+        {
+            ExpectedScope =
+                new RuntimeUnlockInitialActivationReceiveRecoveryExpectedScope(
+                    publication,
+                    observation.TransportEpoch,
+                    observation.BridgeRecoveryGeneration,
+                    observation.CheckpointRequestId,
+                    observation.DataSessionIdentity,
+                    observation.DataSessionGeneration,
+                    operation.Authority.ExecutionCommand),
+        };
     }
 
     private static (

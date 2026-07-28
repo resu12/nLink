@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text.Json;
 using NLink.Core;
 using NLink.Core.Configuration;
@@ -15041,6 +15042,1468 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockInitialActivationReceiveRecoveryHold_PreservesOfferUntilExactRelease()
+    {
+        FakeNknClient.ResetNetwork();
+        var previousHelpeePriorityDelay =
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
+        var previousDirectSendWait =
+            NknSignalingTransport.AccelerationControlDirectSendWaitOverrideForTests;
+        var previousBulkBypassWait =
+            NknSignalingTransport.AccelerationControlBulkBypassWaitOverrideForTests;
+        var previousOfferReplayDelay =
+            NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests;
+        var previousOfferPeerResponseTimeout =
+            NknSignalingTransport
+                .RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests;
+        var previousOfferAnswerTimeout =
+            NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests;
+        var previousExecutionCommandOverride =
+            NknSignalingTransport
+                .RuntimeUnlockInitialActivationReceiveRecoveryExecutionCommandOverrideForTests;
+        NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests =
+            TimeSpan.Zero;
+        NknSignalingTransport.AccelerationControlDirectSendWaitOverrideForTests =
+            TimeSpan.FromMilliseconds(25);
+        NknSignalingTransport.AccelerationControlBulkBypassWaitOverrideForTests =
+            TimeSpan.FromMilliseconds(25);
+        NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests =
+            TimeSpan.FromSeconds(30);
+        NknSignalingTransport
+                .RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests =
+            TimeSpan.FromSeconds(30);
+        NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests =
+            TimeSpan.FromSeconds(30);
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient(
+                "host.tuna.initial-hold.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            var helperClient = new FakeNknClient(
+                "helper.tuna.initial-hold.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            var hostLane = new RetryableTunaAccelerationSession(
+                canListen: true,
+                failedDialAttemptsBeforeSuccess: 0);
+            var helperLane = new RetryableTunaAccelerationSession(
+                canListen: false,
+                failedDialAttemptsBeforeSuccess: 0);
+            var sentOfferFingerprints = new ConcurrentQueue<string>();
+            var sentPayerIntentCount = 0;
+            var allowOfferSubmission = 0;
+            hostClient.BeforeSendCoreAsync = (_, payload, _, _) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out var envelope) &&
+                    envelope.Type == MsgType.TransportAccelerationOffer)
+                {
+                    sentOfferFingerprints.Enqueue(
+                        Convert.ToHexString(SHA256.HashData(payload))
+                            .ToLowerInvariant());
+                    if (Volatile.Read(ref allowOfferSubmission) == 0)
+                    {
+                        throw new InvalidOperationException(
+                            "test_initial_offer_submission_unobserved");
+                    }
+                }
+                else if (EnvelopeCodec.TryDeserialize(payload, out envelope) &&
+                         envelope.Type ==
+                         MsgType.TransportAccelerationPayerIntent)
+                {
+                    Interlocked.Increment(ref sentPayerIntentCount);
+                }
+
+                return Task.CompletedTask;
+            };
+            hostClient.ShouldDeliverSendAsync = (_, payload, _) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out var envelope) &&
+                    envelope.Type == MsgType.TransportAccelerationOffer)
+                {
+                    return Task.FromResult(
+                        Volatile.Read(ref allowOfferSubmission) != 0);
+                }
+
+                return Task.FromResult(true);
+            };
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-tuna-initial-hold-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                hostLane);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity(
+                    "helper-tuna-initial-hold-id",
+                    helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                helperLane);
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            const string transferId = "transfer_tuna_initial_receive_recovery_hold";
+            _ = await host.OpenFileTransferDataSessionAsync(
+                sessionId,
+                transferId,
+                cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(
+                host,
+                transferId,
+                releaseInitialActivationReceiveRecoveryHold: false);
+            var holdOperationGate = new object();
+            FileTransferReceiveRecoveryOperation?
+                exactCurrentReceiveRecoveryOperation = null;
+            NknSignalingTransport
+                    .RuntimeUnlockInitialActivationReceiveRecoveryExecutionCommandOverrideForTests =
+                (transport, expectedScope) =>
+                {
+                    if (!ReferenceEquals(transport, host))
+                    {
+                        return null;
+                    }
+
+                    var publication =
+                        Assert.IsType<FileTransferRoutePublicationAuthority>(
+                            expectedScope.SourcePublicationAuthority);
+                    var commandRequest =
+                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(
+                            publication.SessionId,
+                            publication.TransferId,
+                            publication.Direction,
+                            "test-payer-intent-command",
+                            PayerDecisionId: 1,
+                            OfferGeneration: 1,
+                            TransactionGeneration: 1,
+                            TunaPathLeaseGeneration: 1,
+                            TunaPathLeaseListenerRunId: "test-listener-run",
+                            ControlEnvelopeFingerprint: "test-envelope",
+                            PeerVisibleDispatchObserved: false,
+                            Boundary:
+                                RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
+                                    .PayerIntentPreSend)
+                        {
+                            ExpectedScope = expectedScope,
+                        };
+                    lock (holdOperationGate)
+                    {
+                        exactCurrentReceiveRecoveryOperation ??=
+                            CreateInitialActivationReceiveRecoveryHoldOperationForTests(
+                                commandRequest,
+                                operationGeneration: 1);
+                        return exactCurrentReceiveRecoveryOperation.Value.Authority
+                            .ExecutionCommand;
+                    }
+                };
+
+            var bridge =
+                Assert.IsAssignableFrom<
+                    IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge>(
+                    host);
+            var logStart = GetOperationalLogLength();
+            var holdRequests =
+                new ConcurrentQueue<(
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest Request,
+                    FileTransferReceiveRecoveryOperation Operation)>();
+            using var holdRequestSignal = new SemaphoreSlim(0);
+            var offerPreSendEvaluationCount = 0;
+            bridge.RuntimeUnlockInitialActivationReceiveRecoveryHoldRequested +=
+                (_, args) =>
+                {
+                    var operation =
+                        Assert.IsType<FileTransferReceiveRecoveryOperation>(
+                            exactCurrentReceiveRecoveryOperation);
+                    var operationGeneration =
+                        operation.Authority.OperationGeneration;
+                    if (args.Request.Boundary ==
+                        RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
+                            .OfferPreSend)
+                    {
+                        Interlocked.Increment(ref offerPreSendEvaluationCount);
+                        args.Decision =
+                            new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                                args.Request,
+                                RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                                .Released,
+                                "test_receive_recovery_operation_proof_adopted",
+                                HoldGeneration: operationGeneration,
+                                operation);
+                        return;
+                    }
+                    args.Decision =
+                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                            args.Request,
+                            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                                .Held,
+                            "test_receive_recovery_operation_current",
+                            HoldGeneration: operationGeneration,
+                            operation);
+                    holdRequests.Enqueue((args.Request, operation));
+                    holdRequestSignal.Release();
+                };
+
+            async Task<(
+                RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest Request,
+                FileTransferReceiveRecoveryOperation Operation)> TakeHoldAsync(
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
+                        expectedBoundary)
+            {
+                try
+                {
+                    await holdRequestSignal.WaitAsync(cts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    var tail = string.Join(
+                        Environment.NewLine,
+                        ReadOperationalLogTail(logStart)
+                            .Split(
+                                Environment.NewLine,
+                                StringSplitOptions.RemoveEmptyEntries)
+                            .Where(line => line.Contains(
+                                "transfer_id=transfer_tuna_initial_receive_recovery_hold;",
+                                StringComparison.Ordinal)));
+                    if (tail.Length > 12_000)
+                    {
+                        tail = tail[^12_000..];
+                    }
+
+                    throw new InvalidOperationException(
+                        $"Timed out waiting for {expectedBoundary}.{Environment.NewLine}{tail}");
+                }
+                Assert.True(holdRequests.TryDequeue(out var hold));
+                Assert.Equal(expectedBoundary, hold.Request.Boundary);
+                Assert.True(
+                    SpinWait.SpinUntil(
+                        () =>
+                        {
+                            var shadow = GetPrivateField(
+                                host,
+                                "runtimeUnlockInitialActivationReceiveRecoveryHoldShadow");
+                            return shadow is not null &&
+                                   Equals(
+                                       shadow.GetType()
+                                           .GetProperty("Request")!
+                                           .GetValue(shadow),
+                                       hold.Request) &&
+                                   shadow.GetType()
+                                       .GetProperty("Decision")!
+                                       .GetValue(shadow) is not null;
+                        },
+                        TimeSpan.FromSeconds(1)));
+                return hold;
+            }
+
+            void ReleaseHold(
+                (
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest Request,
+                    FileTransferReceiveRecoveryOperation Operation) hold,
+                string reason,
+                bool duplicate = false,
+                long? holdGeneration = null)
+            {
+                var decision =
+                    new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                        hold.Request,
+                        RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                            .Released,
+                        reason,
+                        holdGeneration ??
+                            hold.Operation.Authority.OperationGeneration,
+                        hold.Operation);
+                Assert.True(
+                    bridge
+                        .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                            decision));
+                if (duplicate)
+                {
+                    Assert.True(
+                        bridge
+                            .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                                decision));
+                }
+            }
+
+            var negotiation = ((ITransportAccelerationControl)host)
+                .RequestAccelerationNegotiationAsync("runtime_unlock", cts.Token);
+            var payerIntentHeld = await TakeHoldAsync(
+                RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
+                    .PayerIntentPreSend);
+
+            Assert.Equal(0, Volatile.Read(ref sentPayerIntentCount));
+            Assert.Empty(sentOfferFingerprints);
+            ReleaseHold(
+                payerIntentHeld,
+                "test_receive_recovery_operation_completed_before_payer_intent");
+
+            var failedSendHeld = await TakeHoldAsync(
+                RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
+                    .UnobservedOfferSendFailure);
+            Assert.Equal(
+                payerIntentHeld.Request.OfferNonce,
+                failedSendHeld.Request.OfferNonce);
+            Assert.Equal(
+                payerIntentHeld.Request.OfferGeneration,
+                failedSendHeld.Request.OfferGeneration);
+            Assert.Equal(
+                payerIntentHeld.Request.TransactionGeneration,
+                failedSendHeld.Request.TransactionGeneration);
+            Assert.Equal(
+                payerIntentHeld.Request.TunaPathLeaseGeneration,
+                failedSendHeld.Request.TunaPathLeaseGeneration);
+            Assert.Equal(
+                payerIntentHeld.Request.ControlEnvelopeFingerprint,
+                failedSendHeld.Request.ControlEnvelopeFingerprint);
+            Assert.True(Volatile.Read(ref sentPayerIntentCount) > 0);
+            Assert.True(Volatile.Read(ref offerPreSendEvaluationCount) >= 2);
+            Assert.Null(GetPrivateField(host, "retiredAccelerationOfferNonce"));
+            var failedSendTail = ReadOperationalLogTail(logStart);
+            Assert.DoesNotContain(
+                "event=tuna_acceleration_runtime_unlock_offer_retired;",
+                failedSendTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_retry_dispatch_contract_settled;",
+                failedSendTail,
+                StringComparison.Ordinal);
+
+            var retryAttemptsBeforeRelease =
+                Assert.IsType<int>(
+                    GetPrivateField(
+                        host,
+                        "accelerationNegotiationRetryAttempts"));
+            var offerSubmissionAttemptsBeforeRelease =
+                sentOfferFingerprints.Count;
+            Volatile.Write(ref allowOfferSubmission, 1);
+            ReleaseHold(
+                failedSendHeld,
+                "test_receive_recovery_operation_completed_after_send_failure");
+
+            await negotiation.WaitAsync(TimeSpan.FromSeconds(5));
+            await WaitUntilAsync(
+                () =>
+                    sentOfferFingerprints.Count >
+                    offerSubmissionAttemptsBeforeRelease,
+                TimeSpan.FromSeconds(5));
+
+            Assert.NotEmpty(sentOfferFingerprints);
+            Assert.All(
+                sentOfferFingerprints,
+                sentFingerprint =>
+                    Assert.Equal(
+                        payerIntentHeld.Request.ControlEnvelopeFingerprint,
+                        sentFingerprint));
+            Assert.Equal(
+                retryAttemptsBeforeRelease,
+                Assert.IsType<int>(
+                    GetPrivateField(
+                        host,
+                        "accelerationNegotiationRetryAttempts")));
+            var resumedTail = ReadOperationalLogTail(logStart);
+            Assert.Equal(
+                2,
+                resumedTail
+                    .Split(
+                        "event=runtime_unlock_initial_activation_receive_recovery_hold_resumed;",
+                        StringSplitOptions.None)
+                    .Length -
+                1);
+        }
+        finally
+        {
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests =
+                previousHelpeePriorityDelay;
+            NknSignalingTransport.AccelerationControlDirectSendWaitOverrideForTests =
+                previousDirectSendWait;
+            NknSignalingTransport.AccelerationControlBulkBypassWaitOverrideForTests =
+                previousBulkBypassWait;
+            NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests =
+                previousOfferReplayDelay;
+            NknSignalingTransport
+                    .RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests =
+                previousOfferPeerResponseTimeout;
+            NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests =
+                previousOfferAnswerTimeout;
+            NknSignalingTransport
+                    .RuntimeUnlockInitialActivationReceiveRecoveryExecutionCommandOverrideForTests =
+                previousExecutionCommandOverride;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockInitialActivationReceiveRecoveryHold_ExactInvalidationRetiresSameGenerationWithoutRetry()
+    {
+        FakeNknClient.ResetNetwork();
+        var previousHelpeePriorityDelay =
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
+        var previousOfferReplayDelay =
+            NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests;
+        var previousOfferPeerResponseTimeout =
+            NknSignalingTransport
+                .RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests;
+        var previousOfferAnswerTimeout =
+            NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests;
+        var previousExecutionCommandOverride =
+            NknSignalingTransport
+                .RuntimeUnlockInitialActivationReceiveRecoveryExecutionCommandOverrideForTests;
+        NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests =
+            TimeSpan.Zero;
+        NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests =
+            TimeSpan.FromSeconds(30);
+        NknSignalingTransport
+                .RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests =
+            TimeSpan.FromSeconds(30);
+        NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests =
+            TimeSpan.FromSeconds(30);
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient(
+                "host.tuna.initial-hold-invalidated.aaaaaaaaaaaaaaaaaaaa");
+            var helperClient = new FakeNknClient(
+                "helper.tuna.initial-hold-invalidated.bbbbbbbbbbbbbbbbb");
+            var physicalOfferSubmissionCount = 0;
+            hostClient.BeforeSendCoreAsync = (_, payload, _, _) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out var envelope) &&
+                    envelope.Type == MsgType.TransportAccelerationOffer)
+                {
+                    Interlocked.Increment(ref physicalOfferSubmissionCount);
+                }
+
+                return Task.CompletedTask;
+            };
+
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity(
+                    "host-tuna-initial-hold-invalidated-id",
+                    hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                new RetryableTunaAccelerationSession(
+                    canListen: true,
+                    failedDialAttemptsBeforeSuccess: 0));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity(
+                    "helper-tuna-initial-hold-invalidated-id",
+                    helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                new RetryableTunaAccelerationSession(
+                    canListen: false,
+                    failedDialAttemptsBeforeSuccess: 0));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            const string transferId =
+                "transfer_tuna_initial_receive_recovery_hold_invalidated";
+            _ = await host.OpenFileTransferDataSessionAsync(
+                sessionId,
+                transferId,
+                cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(
+                host,
+                transferId,
+                releaseInitialActivationReceiveRecoveryHold: false);
+
+            var operationGate = new object();
+            FileTransferReceiveRecoveryOperation? exactOperation = null;
+            NknSignalingTransport
+                    .RuntimeUnlockInitialActivationReceiveRecoveryExecutionCommandOverrideForTests =
+                (transport, expectedScope) =>
+                {
+                    if (!ReferenceEquals(transport, host))
+                    {
+                        return null;
+                    }
+
+                    var publication =
+                        Assert.IsType<FileTransferRoutePublicationAuthority>(
+                            expectedScope.SourcePublicationAuthority);
+                    var commandRequest =
+                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(
+                            publication.SessionId,
+                            publication.TransferId,
+                            publication.Direction,
+                            "test-invalidated-command",
+                            PayerDecisionId: 1,
+                            OfferGeneration: 1,
+                            TransactionGeneration: 1,
+                            TunaPathLeaseGeneration: 1,
+                            TunaPathLeaseListenerRunId: "test-listener-run",
+                            ControlEnvelopeFingerprint: "test-envelope",
+                            PeerVisibleDispatchObserved: false,
+                            Boundary:
+                                RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
+                                    .PayerIntentPreSend)
+                        {
+                            ExpectedScope = expectedScope,
+                        };
+                    lock (operationGate)
+                    {
+                        exactOperation ??=
+                            CreateInitialActivationReceiveRecoveryHoldOperationForTests(
+                                commandRequest,
+                                operationGeneration: 1);
+                        return exactOperation.Value.Authority.ExecutionCommand;
+                    }
+                };
+
+            var bridge =
+                Assert.IsAssignableFrom<
+                    IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge>(
+                    host);
+            var held =
+                new TaskCompletionSource<(
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest
+                        Request,
+                    FileTransferReceiveRecoveryOperation Operation)>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+            bridge.RuntimeUnlockInitialActivationReceiveRecoveryHoldRequested +=
+                (_, args) =>
+                {
+                    var operation =
+                        Assert.IsType<FileTransferReceiveRecoveryOperation>(
+                            exactOperation);
+                    args.Decision =
+                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                            args.Request,
+                            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                                .Held,
+                            "test_receive_recovery_operation_current",
+                            HoldGeneration:
+                                operation.Authority.OperationGeneration,
+                            operation);
+                    held.TrySetResult((args.Request, operation));
+                };
+
+            var logStart = GetOperationalLogLength();
+            var negotiation = ((ITransportAccelerationControl)host)
+                .RequestAccelerationNegotiationAsync("runtime_unlock", cts.Token);
+            var captured = await held.Task.WaitAsync(cts.Token);
+            Assert.Equal(
+                RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
+                    .PayerIntentPreSend,
+                captured.Request.Boundary);
+            var transactionBefore =
+                Assert.IsType<RuntimeUnlockTransactionSnapshot>(
+                    GetPrivateField(host, "runtimeUnlockTransactionState"));
+            var leaseBefore =
+                Assert.IsType<RuntimeUnlockTunaPathLeaseSnapshot>(
+                    GetPrivateField(host, "runtimeUnlockTunaPathLeaseState"));
+            var retryAttemptsBefore =
+                Assert.IsType<int>(
+                    GetPrivateField(
+                        host,
+                        "accelerationNegotiationRetryAttempts"));
+            Assert.Equal(
+                captured.Request.TransactionGeneration,
+                transactionBefore.TransactionGeneration);
+            Assert.Equal(
+                captured.Request.TunaPathLeaseGeneration,
+                leaseBefore.LeaseGeneration);
+            Assert.Equal(0, Volatile.Read(ref physicalOfferSubmissionCount));
+
+            var invalidated =
+                new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                    captured.Request,
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                        .Invalidated,
+                    "test_receive_recovery_operation_invalidated",
+                    HoldGeneration:
+                        captured.Operation.Authority.OperationGeneration,
+                    captured.Operation);
+            Assert.True(
+                bridge
+                    .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                        invalidated));
+            Assert.True(
+                bridge
+                    .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                        invalidated));
+            await negotiation.WaitAsync(cts.Token);
+
+            var transactionAfter =
+                Assert.IsType<RuntimeUnlockTransactionSnapshot>(
+                    GetPrivateField(host, "runtimeUnlockTransactionState"));
+            var leaseAfter =
+                Assert.IsType<RuntimeUnlockTunaPathLeaseSnapshot>(
+                    GetPrivateField(host, "runtimeUnlockTunaPathLeaseState"));
+            Assert.False(host.RuntimeUnlockOfferStateForTests.HasOutboundOffer);
+            Assert.Null(
+                GetPrivateField(
+                    host,
+                    "outboundRuntimeUnlockOfferAuthorityBoundary"));
+            Assert.Null(
+                GetPrivateField(
+                    host,
+                    "retiredRuntimeUnlockOfferAuthorityBoundary"));
+            Assert.Equal(
+                RuntimeUnlockTransactionState.Failed,
+                transactionAfter.State);
+            Assert.Equal(
+                captured.Request.TransactionGeneration,
+                transactionAfter.TransactionGeneration);
+            Assert.Equal(
+                RuntimeUnlockTunaPathLeaseState.Failed,
+                leaseAfter.State);
+            Assert.Equal(
+                captured.Request.TunaPathLeaseGeneration,
+                leaseAfter.LeaseGeneration);
+            Assert.Equal(
+                retryAttemptsBefore,
+                Assert.IsType<int>(
+                    GetPrivateField(
+                        host,
+                        "accelerationNegotiationRetryAttempts")));
+            Assert.Null(
+                GetPrivateField(host, "runtimeUnlockRecoveryRetryState"));
+            Assert.Equal(0, Volatile.Read(ref physicalOfferSubmissionCount));
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=runtime_unlock_initial_activation_receive_recovery_hold_invalidated;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.Contains("retry_scheduled=0", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_retry_dispatch_authority_granted;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=tuna_acceleration_negotiation_retry_scheduled;",
+                tail,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests =
+                previousHelpeePriorityDelay;
+            NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests =
+                previousOfferReplayDelay;
+            NknSignalingTransport
+                    .RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests =
+                previousOfferPeerResponseTimeout;
+            NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests =
+                previousOfferAnswerTimeout;
+            NknSignalingTransport
+                    .RuntimeUnlockInitialActivationReceiveRecoveryExecutionCommandOverrideForTests =
+                previousExecutionCommandOverride;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockInitialActivationReceiveRecoveryHold_PendingGenericResetIsDroppedAfterExactRelease()
+    {
+        FakeNknClient.ResetNetwork();
+        var previousHelpeePriorityDelay =
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
+        var previousOfferReplayDelay =
+            NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests;
+        var previousOfferPeerResponseTimeout =
+            NknSignalingTransport
+                .RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests;
+        var previousOfferAnswerTimeout =
+            NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests;
+        NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests =
+            TimeSpan.Zero;
+        NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests =
+            TimeSpan.FromSeconds(30);
+        NknSignalingTransport
+                .RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests =
+            TimeSpan.FromSeconds(30);
+        NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests =
+            TimeSpan.FromSeconds(30);
+        using var releasePendingEvaluation = new ManualResetEventSlim(false);
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient(
+                "host.tuna.initial-hold-reset.aaaaaaaaaaaaaaaaaaaaaaaa");
+            var helperClient = new FakeNknClient(
+                "helper.tuna.initial-hold-reset.bbbbbbbbbbbbbbbbbbbbbbbb");
+            var physicalOfferSubmissionCount = 0;
+            hostClient.BeforeSendCoreAsync = (_, payload, _, _) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out var envelope) &&
+                    envelope.Type == MsgType.TransportAccelerationOffer)
+                {
+                    Interlocked.Increment(ref physicalOfferSubmissionCount);
+                }
+
+                return Task.CompletedTask;
+            };
+            hostClient.ShouldDeliverSendAsync = (_, payload, _) =>
+                Task.FromResult(
+                    !EnvelopeCodec.TryDeserialize(payload, out var envelope) ||
+                    envelope.Type != MsgType.TransportAccelerationOffer);
+
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity(
+                    "host-tuna-initial-hold-reset-id",
+                    hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                new RetryableTunaAccelerationSession(
+                    canListen: true,
+                    failedDialAttemptsBeforeSuccess: 0));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity(
+                    "helper-tuna-initial-hold-reset-id",
+                    helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                new RetryableTunaAccelerationSession(
+                    canListen: false,
+                    failedDialAttemptsBeforeSuccess: 0));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            const string transferId =
+                "transfer_tuna_initial_receive_recovery_hold_pending_reset";
+            _ = await host.OpenFileTransferDataSessionAsync(
+                sessionId,
+                transferId,
+                cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(
+                host,
+                transferId,
+                releaseInitialActivationReceiveRecoveryHold: false);
+
+            var bridge =
+                Assert.IsAssignableFrom<
+                    IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge>(
+                    host);
+            var pendingEvaluation =
+                new TaskCompletionSource<
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+            var firstInvalidation =
+                new TaskCompletionSource<
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+            var offerPreSendRequestCount = 0;
+            var invalidationRequestCount = 0;
+            bridge.RuntimeUnlockInitialActivationReceiveRecoveryHoldRequested +=
+                (_, args) =>
+                {
+                    if (args.Request.Boundary !=
+                        RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
+                            .OfferPreSend)
+                    {
+                        args.Decision =
+                            new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                                args.Request,
+                                RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                                    .Released,
+                                "test_no_current_receive_recovery_operation",
+                                HoldGeneration: 0,
+                                ReceiveRecoveryOperation: null);
+                        return;
+                    }
+
+                    Interlocked.Increment(ref offerPreSendRequestCount);
+                    pendingEvaluation.TrySetResult(args.Request);
+                    if (!releasePendingEvaluation.Wait(TimeSpan.FromSeconds(8)))
+                    {
+                        throw new TimeoutException(
+                            "Timed out waiting to release the pending hold evaluation.");
+                    }
+
+                    args.Decision =
+                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                            args.Request,
+                            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                                .Released,
+                            "test_receive_recovery_not_current_after_reset",
+                            HoldGeneration: 0,
+                            ReceiveRecoveryOperation: null);
+                };
+            bridge
+                    .RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationRequested +=
+                (_, args) =>
+                {
+                    Interlocked.Increment(ref invalidationRequestCount);
+                    Assert.Equal(
+                        RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationKind
+                            .GenericReset,
+                        args.Request.Kind);
+                    Assert.Equal(
+                        "test_pending_initial_activation_hold_reset",
+                        args.Request.Reason);
+                    firstInvalidation.TrySetResult(args.Request.HoldRequest);
+                    args.Decision =
+                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                            args.Request.HoldRequest,
+                            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                                .Rejected,
+                            "test_initial_activation_hold_not_current",
+                            HoldGeneration: 0,
+                            ReceiveRecoveryOperation: null);
+                };
+
+            var logStart = GetOperationalLogLength();
+            var negotiation = ((ITransportAccelerationControl)host)
+                .RequestAccelerationNegotiationAsync(
+                    "runtime_unlock",
+                    cts.Token);
+            var exactPendingRequest =
+                await pendingEvaluation.Task.WaitAsync(cts.Token);
+
+            var reset = Task.Run(
+                () => InvokePrivateMethod(
+                    host,
+                    "ResetAccelerationNegotiation",
+                    "test_pending_initial_activation_hold_reset",
+                    false),
+                cts.Token);
+            var invalidatedRequest =
+                await firstInvalidation.Task.WaitAsync(
+                    TimeSpan.FromSeconds(2),
+                    cts.Token);
+            Assert.Equal(exactPendingRequest, invalidatedRequest);
+            Assert.Equal(1, Volatile.Read(ref invalidationRequestCount));
+            Assert.Equal(0, Volatile.Read(ref physicalOfferSubmissionCount));
+            Assert.DoesNotContain(
+                "event=tuna_acceleration_reset; reason=test_pending_initial_activation_hold_reset;",
+                ReadOperationalLogTail(logStart),
+                StringComparison.Ordinal);
+
+            releasePendingEvaluation.Set();
+            Assert.False(
+                Assert.IsType<bool>(
+                    await reset.WaitAsync(cts.Token)));
+            await negotiation.WaitAsync(cts.Token);
+            await WaitUntilAsync(
+                () =>
+                    Volatile.Read(ref physicalOfferSubmissionCount) > 0 &&
+                    ReadOperationalLogTail(logStart).Contains(
+                        "decision_reason=generic_reset_not_authorized_after_hold_release",
+                        StringComparison.Ordinal),
+                TimeSpan.FromSeconds(2));
+            await Task.Delay(TimeSpan.FromMilliseconds(250), cts.Token);
+
+            Assert.Null(
+                GetPrivateField(
+                    host,
+                    "runtimeUnlockInitialActivationReceiveRecoveryHoldShadow"));
+            Assert.Equal(2, Volatile.Read(ref offerPreSendRequestCount));
+            Assert.Equal(1, Volatile.Read(ref invalidationRequestCount));
+            Assert.True(Volatile.Read(ref physicalOfferSubmissionCount) > 0);
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.DoesNotContain(
+                "event=tuna_acceleration_reset; reason=test_pending_initial_activation_hold_reset;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "decision_reason=generic_reset_not_authorized_after_hold_release",
+                tail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=tuna_acceleration_runtime_unlock_unobserved_offer_reset_retry_scheduled;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=tuna_acceleration_runtime_unlock_interrupted_offer_reset_retry_scheduled;",
+                tail,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            releasePendingEvaluation.Set();
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests =
+                previousHelpeePriorityDelay;
+            NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests =
+                previousOfferReplayDelay;
+            NknSignalingTransport
+                    .RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests =
+                previousOfferPeerResponseTimeout;
+            NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests =
+                previousOfferAnswerTimeout;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockInitialActivationReceiveRecoveryHold_PastOriginalDeadlineRearmsSameGeneration()
+    {
+        FakeNknClient.ResetNetwork();
+        var previousHelpeePriorityDelay =
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
+        var previousDirectSendWait =
+            NknSignalingTransport.AccelerationControlDirectSendWaitOverrideForTests;
+        var previousBulkBypassWait =
+            NknSignalingTransport.AccelerationControlBulkBypassWaitOverrideForTests;
+        var previousOfferReplayDelay =
+            NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests;
+        var previousOfferPeerResponseTimeout =
+            NknSignalingTransport
+                .RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests;
+        var previousOfferAnswerTimeout =
+            NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests;
+        NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests =
+            TimeSpan.Zero;
+        NknSignalingTransport.AccelerationControlDirectSendWaitOverrideForTests =
+            TimeSpan.FromMilliseconds(25);
+        NknSignalingTransport.AccelerationControlBulkBypassWaitOverrideForTests =
+            TimeSpan.FromMilliseconds(25);
+        NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests =
+            TimeSpan.FromSeconds(30);
+        NknSignalingTransport
+                .RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests =
+            TimeSpan.FromMilliseconds(200);
+        NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests =
+            TimeSpan.FromMilliseconds(400);
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient(
+                "host.tuna.initial-hold-expired.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            var helperClient = new FakeNknClient(
+                "helper.tuna.initial-hold-expired.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            hostClient.ShouldDeliverSendAsync = (_, payload, _) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out var envelope) &&
+                    envelope.Type == MsgType.TransportAccelerationOffer)
+                {
+                    return Task.FromResult(false);
+                }
+
+                return Task.FromResult(true);
+            };
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity(
+                    "host-tuna-initial-hold-expired-id",
+                    hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                new RetryableTunaAccelerationSession(
+                    canListen: true,
+                    failedDialAttemptsBeforeSuccess: 0));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity(
+                    "helper-tuna-initial-hold-expired-id",
+                    helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                new RetryableTunaAccelerationSession(
+                    canListen: false,
+                    failedDialAttemptsBeforeSuccess: 0));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            const string transferId =
+                "transfer_tuna_initial_receive_recovery_hold_expired";
+            _ = await host.OpenFileTransferDataSessionAsync(
+                sessionId,
+                transferId,
+                cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(
+                host,
+                transferId,
+                releaseInitialActivationReceiveRecoveryHold: false);
+
+            var bridge =
+                Assert.IsAssignableFrom<
+                    IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge>(
+                    host);
+            var timeoutHold =
+                new TaskCompletionSource<(
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest
+                        Request,
+                    FileTransferReceiveRecoveryOperation Operation)>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+            bridge.RuntimeUnlockInitialActivationReceiveRecoveryHoldRequested +=
+                (_, args) =>
+                {
+                    if (args.Request.Boundary !=
+                        RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
+                            .PeerResponseTimeout)
+                    {
+                        args.Decision =
+                            new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                                args.Request,
+                                RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                                    .Released,
+                                "test_no_current_receive_recovery_operation",
+                                HoldGeneration: 0,
+                                ReceiveRecoveryOperation: null);
+                        return;
+                    }
+
+                    var operation =
+                        CreateInitialActivationReceiveRecoveryHoldOperationForTests(
+                            args.Request,
+                            operationGeneration: 1);
+                    args.Decision =
+                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                            args.Request,
+                            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                                .Held,
+                            "test_receive_recovery_operation_current",
+                            HoldGeneration: 1,
+                            operation);
+                    timeoutHold.TrySetResult((args.Request, operation));
+                };
+
+            var logStart = GetOperationalLogLength();
+            await ((ITransportAccelerationControl)host)
+                .RequestAccelerationNegotiationAsync("runtime_unlock", cts.Token)
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            var held = await timeoutHold.Task.WaitAsync(cts.Token);
+            Assert.True(held.Request.PeerVisibleDispatchObserved);
+
+            var proof =
+                GetPrivateField(host, "runtimeUnlockOfferProofState");
+            Assert.NotNull(proof);
+            var calculatedExpiry =
+                GetPrivatePropertyValue<long>(
+                    proof,
+                    "RetiredAnswerExpiresUtcMs");
+            var remainingUntilOriginalExpiry =
+                calculatedExpiry -
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            Assert.True(remainingUntilOriginalExpiry > 0);
+            var heldOfferGeneration =
+                GetPrivatePropertyValue<long>(proof, "Generation");
+            var heldOfferNonce =
+                GetPrivatePropertyValue<string>(proof, "Nonce");
+            var heldRetryAttempts =
+                Assert.IsType<int>(
+                    GetPrivateField(
+                        host,
+                        "accelerationNegotiationRetryAttempts"));
+            await Task.Delay(
+                TimeSpan.FromMilliseconds(
+                    remainingUntilOriginalExpiry + 100),
+                cts.Token);
+            Assert.True(
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >=
+                calculatedExpiry);
+            Assert.DoesNotContain(
+                "event=tuna_acceleration_runtime_unlock_offer_peer_response_timeout;",
+                ReadOperationalLogTail(logStart),
+                StringComparison.Ordinal);
+
+            Assert.True(
+                bridge
+                    .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                            held.Request,
+                            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                                .Released,
+                            "test_receive_recovery_completed_after_original_deadline",
+                            HoldGeneration: 1,
+                            held.Operation)));
+            await Task.Delay(TimeSpan.FromMilliseconds(100), cts.Token);
+
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.DoesNotContain(
+                "event=tuna_acceleration_runtime_unlock_offer_peer_response_timeout;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=tuna_acceleration_activation_offer_not_observed;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_offer_peer_response_timeout_pending_answer_preserved;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.Equal(
+                heldOfferNonce,
+                Assert.IsType<string>(
+                    GetPrivateField(host, "outboundAccelerationOfferNonce")));
+            Assert.Equal(
+                heldOfferGeneration,
+                GetPrivatePropertyValue<long>(proof, "Generation"));
+            Assert.Equal(
+                heldRetryAttempts,
+                Assert.IsType<int>(
+                    GetPrivateField(
+                        host,
+                        "accelerationNegotiationRetryAttempts")));
+            Assert.False(
+                GetPrivatePropertyValue<bool>(proof, "Retired"));
+        }
+        finally
+        {
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests =
+                previousHelpeePriorityDelay;
+            NknSignalingTransport.AccelerationControlDirectSendWaitOverrideForTests =
+                previousDirectSendWait;
+            NknSignalingTransport.AccelerationControlBulkBypassWaitOverrideForTests =
+                previousBulkBypassWait;
+            NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests =
+                previousOfferReplayDelay;
+            NknSignalingTransport
+                    .RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests =
+                previousOfferPeerResponseTimeout;
+            NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests =
+                previousOfferAnswerTimeout;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockInitialActivationReceiveRecoveryHold_ReplayOfferPreSendPastDeadlineReplaysSameGeneration()
+    {
+        FakeNknClient.ResetNetwork();
+        var previousHelpeePriorityDelay =
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
+        var previousDirectSendWait =
+            NknSignalingTransport.AccelerationControlDirectSendWaitOverrideForTests;
+        var previousBulkBypassWait =
+            NknSignalingTransport.AccelerationControlBulkBypassWaitOverrideForTests;
+        var previousOfferReplayDelay =
+            NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests;
+        var previousOfferPeerResponseTimeout =
+            NknSignalingTransport
+                .RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests;
+        var previousOfferAnswerTimeout =
+            NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests;
+        NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests =
+            TimeSpan.Zero;
+        NknSignalingTransport.AccelerationControlDirectSendWaitOverrideForTests =
+            TimeSpan.FromMilliseconds(25);
+        NknSignalingTransport.AccelerationControlBulkBypassWaitOverrideForTests =
+            TimeSpan.FromMilliseconds(25);
+        NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests =
+            TimeSpan.FromMilliseconds(30);
+        NknSignalingTransport
+                .RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests =
+            TimeSpan.FromSeconds(3);
+        NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests =
+            TimeSpan.FromMilliseconds(250);
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient(
+                "host.tuna.initial-hold-replay.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            var helperClient = new FakeNknClient(
+                "helper.tuna.initial-hold-replay.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            var sentOfferFingerprints = new ConcurrentQueue<string>();
+            var physicalOfferSubmissionCount = 0;
+            hostClient.BeforeSendCoreAsync = (_, payload, _, _) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out var envelope) &&
+                    envelope.Type == MsgType.TransportAccelerationOffer)
+                {
+                    sentOfferFingerprints.Enqueue(
+                        Convert.ToHexString(SHA256.HashData(payload))
+                            .ToLowerInvariant());
+                    Interlocked.Increment(ref physicalOfferSubmissionCount);
+                }
+
+                return Task.CompletedTask;
+            };
+            hostClient.ShouldDeliverSendAsync = (_, payload, _) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out var envelope) &&
+                    envelope.Type == MsgType.TransportAccelerationOffer)
+                {
+                    return Task.FromResult(false);
+                }
+
+                return Task.FromResult(true);
+            };
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity(
+                    "host-tuna-initial-hold-replay-id",
+                    hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                new RetryableTunaAccelerationSession(
+                    canListen: true,
+                    failedDialAttemptsBeforeSuccess: 0));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity(
+                    "helper-tuna-initial-hold-replay-id",
+                    helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                new RetryableTunaAccelerationSession(
+                    canListen: false,
+                    failedDialAttemptsBeforeSuccess: 0));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            const string transferId =
+                "transfer_tuna_initial_receive_recovery_hold_replay";
+            _ = await host.OpenFileTransferDataSessionAsync(
+                sessionId,
+                transferId,
+                cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(
+                host,
+                transferId,
+                releaseInitialActivationReceiveRecoveryHold: false);
+
+            var bridge =
+                Assert.IsAssignableFrom<
+                    IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge>(
+                    host);
+            var initialOfferRequest =
+                new TaskCompletionSource<
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+            var replayHold =
+                new TaskCompletionSource<(
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest
+                        Request,
+                    FileTransferReceiveRecoveryOperation Operation)>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+            var offerPreSendCount = 0;
+            bridge.RuntimeUnlockInitialActivationReceiveRecoveryHoldRequested +=
+                (_, args) =>
+                {
+                    if (args.Request.Boundary !=
+                        RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
+                            .OfferPreSend)
+                    {
+                        args.Decision =
+                            new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                                args.Request,
+                                RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                                    .Released,
+                                "test_no_current_receive_recovery_operation",
+                                HoldGeneration: 0,
+                                ReceiveRecoveryOperation: null);
+                        return;
+                    }
+
+                    var boundaryCount =
+                        Interlocked.Increment(ref offerPreSendCount);
+                    if (boundaryCount == 1)
+                    {
+                        initialOfferRequest.TrySetResult(args.Request);
+                    }
+                    if (boundaryCount <= 2)
+                    {
+                        args.Decision =
+                            new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                                args.Request,
+                                RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                                    .Released,
+                                "test_no_current_receive_recovery_operation",
+                                HoldGeneration: 0,
+                                ReceiveRecoveryOperation: null);
+                        return;
+                    }
+
+                    if (boundaryCount == 3)
+                    {
+                        var operation =
+                            CreateInitialActivationReceiveRecoveryHoldOperationForTests(
+                                args.Request,
+                                operationGeneration: 1);
+                        args.Decision =
+                            new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                                args.Request,
+                                RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                                    .Held,
+                                "test_receive_recovery_operation_current",
+                                HoldGeneration: 1,
+                                operation);
+                        replayHold.TrySetResult((args.Request, operation));
+                        return;
+                    }
+
+                    args.Decision =
+                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                            args.Request,
+                            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                                .Released,
+                            "test_no_current_receive_recovery_operation",
+                            HoldGeneration: 0,
+                            ReceiveRecoveryOperation: null);
+                };
+
+            var logStart = GetOperationalLogLength();
+            await ((ITransportAccelerationControl)host)
+                .RequestAccelerationNegotiationAsync("runtime_unlock", cts.Token)
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            var initialRequest =
+                await initialOfferRequest.Task.WaitAsync(cts.Token);
+            var heldReplay = await replayHold.Task.WaitAsync(cts.Token);
+            var physicalCountBeforeRelease =
+                Volatile.Read(ref physicalOfferSubmissionCount);
+            Assert.True(physicalCountBeforeRelease > 0);
+            Assert.Equal(
+                RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
+                    .OfferPreSend,
+                heldReplay.Request.Boundary);
+            Assert.Equal(
+                initialRequest.OfferNonce,
+                heldReplay.Request.OfferNonce);
+            Assert.Equal(
+                initialRequest.OfferGeneration,
+                heldReplay.Request.OfferGeneration);
+            Assert.Equal(
+                initialRequest.TransactionGeneration,
+                heldReplay.Request.TransactionGeneration);
+            Assert.Equal(
+                initialRequest.TunaPathLeaseGeneration,
+                heldReplay.Request.TunaPathLeaseGeneration);
+            Assert.Equal(
+                initialRequest.ControlEnvelopeFingerprint,
+                heldReplay.Request.ControlEnvelopeFingerprint);
+            var retryAttemptsBeforeRelease =
+                Assert.IsType<int>(
+                    GetPrivateField(
+                        host,
+                        "accelerationNegotiationRetryAttempts"));
+
+            await Task.Delay(TimeSpan.FromMilliseconds(350), cts.Token);
+
+            Assert.Equal(
+                physicalCountBeforeRelease,
+                Volatile.Read(ref physicalOfferSubmissionCount));
+            var heldTail = ReadOperationalLogTail(logStart);
+            Assert.DoesNotContain(
+                "event=tuna_acceleration_offer_replay_sent;",
+                heldTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "decision_reason=offer_answer_deadline_elapsed",
+                heldTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=tuna_acceleration_runtime_unlock_offer_retired;",
+                heldTail,
+                StringComparison.Ordinal);
+
+            var releaseDecision =
+                new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                    heldReplay.Request,
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                        .Released,
+                    "test_receive_recovery_completed_after_replay_deadline",
+                    HoldGeneration: 1,
+                    heldReplay.Operation);
+            Assert.True(
+                bridge
+                    .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                        releaseDecision));
+            Assert.True(
+                bridge
+                    .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                        releaseDecision));
+
+            await WaitUntilAsync(
+                () =>
+                    Volatile.Read(ref physicalOfferSubmissionCount) >
+                        physicalCountBeforeRelease &&
+                    ReadOperationalLogTail(logStart)
+                        .Split(
+                            "event=tuna_acceleration_offer_replay_sent;",
+                            StringSplitOptions.None)
+                        .Length - 1 >= 2 &&
+                    Volatile.Read(ref offerPreSendCount) >= 4,
+                TimeSpan.FromSeconds(2));
+
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=runtime_unlock_initial_activation_receive_recovery_hold_submission_deadline_rebased;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.Contains("purpose=offer_replay", tail, StringComparison.Ordinal);
+            Assert.Equal(
+                1,
+                tail.Split(
+                        "event=runtime_unlock_initial_activation_receive_recovery_hold_submission_deadline_rebased;",
+                        StringSplitOptions.None)
+                    .Length - 1);
+            Assert.DoesNotContain(
+                "decision_reason=offer_answer_deadline_elapsed",
+                tail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=tuna_acceleration_runtime_unlock_offer_retired;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.Equal(
+                initialRequest.OfferNonce,
+                Assert.IsType<string>(
+                    GetPrivateField(host, "outboundAccelerationOfferNonce")));
+            Assert.Equal(
+                initialRequest.OfferGeneration,
+                Assert.IsType<long>(
+                    GetPrivateField(
+                        host,
+                        "outboundAccelerationOfferGeneration")));
+            Assert.Equal(
+                retryAttemptsBeforeRelease,
+                Assert.IsType<int>(
+                    GetPrivateField(
+                        host,
+                        "accelerationNegotiationRetryAttempts")));
+            Assert.NotEmpty(sentOfferFingerprints);
+            Assert.All(
+                sentOfferFingerprints,
+                fingerprint =>
+                    Assert.Equal(
+                        initialRequest.ControlEnvelopeFingerprint,
+                        fingerprint));
+        }
+        finally
+        {
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests =
+                previousHelpeePriorityDelay;
+            NknSignalingTransport.AccelerationControlDirectSendWaitOverrideForTests =
+                previousDirectSendWait;
+            NknSignalingTransport.AccelerationControlBulkBypassWaitOverrideForTests =
+                previousBulkBypassWait;
+            NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests =
+                previousOfferReplayDelay;
+            NknSignalingTransport
+                    .RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests =
+                previousOfferPeerResponseTimeout;
+            NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests =
+                previousOfferAnswerTimeout;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task TransportAccelerationAnswer_StaleInitialAuthorityDoesNotMarkPeerReceived()
     {
         FakeNknClient.ResetNetwork();
@@ -24737,8 +26200,29 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
     private static void TrackAuthorizedRegularV4RouteForTests(
         NknSignalingTransport transport,
         string transferId,
-        int liveRouteEpoch = 0)
+        int liveRouteEpoch = 0,
+        bool releaseInitialActivationReceiveRecoveryHold = true)
     {
+        if (releaseInitialActivationReceiveRecoveryHold)
+        {
+            var bridge =
+                Assert.IsAssignableFrom<
+                    IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge>(
+                    transport);
+            bridge.RuntimeUnlockInitialActivationReceiveRecoveryHoldRequested +=
+                (_, args) =>
+                {
+                    args.Decision =
+                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                            args.Request,
+                            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                                .Released,
+                            "test_no_current_receive_recovery_operation",
+                            HoldGeneration: 0,
+                            ReceiveRecoveryOperation: null);
+                };
+        }
+
         InvokePrivateMethod(
             transport,
             "TrackAuthorizedFileTransferRouteHintForTests",
@@ -24753,6 +26237,147 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             0L,
             null,
             liveRouteEpoch);
+    }
+
+    private static FileTransferReceiveRecoveryOperation
+        CreateInitialActivationReceiveRecoveryHoldOperationForTests(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest request,
+            long operationGeneration,
+            FileTransferReceiveRecoveryOperation? predecessorOperation = null)
+    {
+        var expected = request.ExpectedScope;
+        var sourcePublication =
+            Assert.IsType<FileTransferRoutePublicationAuthority>(
+                expected.SourcePublicationAuthority);
+        var liveRouteEpoch = sourcePublication.LiveRouteEpoch;
+        var runtimeGeneration = sourcePublication.RuntimeGeneration;
+        var terminalGeneration = sourcePublication.TerminalGeneration;
+        var legGeneration = checked((int)sourcePublication.LegGeneration);
+        var transportEpoch = expected.TransportEpoch;
+        var bridgeRecoveryGeneration =
+            expected.BridgeRecoveryGeneration;
+        var bridgeDecisionGeneration = checked((int)operationGeneration);
+        Assert.True(
+            FileTransferRouteResolver.TryParseTelemetryToken(
+                sourcePublication.RouteToken,
+                out var route));
+        var routeToken = sourcePublication.RouteToken;
+        var owner = new RuntimeOwnerToken(
+            request.SessionId,
+            request.TransferId,
+            request.Direction,
+            route,
+            routeToken,
+            sourcePublication.ProtocolVersion,
+            liveRouteEpoch,
+            runtimeGeneration,
+            terminalGeneration,
+            "test_regular_v4",
+            "test_initial_activation_receive_recovery_hold");
+        var publication = new RoutePublicationToken(
+            request.SessionId,
+            request.TransferId,
+            request.Direction,
+            owner,
+            route,
+            routeToken,
+            sourcePublication.ProtocolVersion,
+            liveRouteEpoch,
+            runtimeGeneration,
+            terminalGeneration,
+            legGeneration,
+            sourcePublication.RouteCommitGeneration,
+            route,
+            sourcePublication.TargetProtocolVersion,
+            sourcePublication.TargetTransport,
+            sourcePublication.RoutePublicationGeneration,
+            string.Equals(
+                sourcePublication.RoutePublicationActionKind,
+                nameof(FileTransferCoordinatorActionKind.RouteCommitPublication),
+                StringComparison.Ordinal)
+                ? FileTransferCoordinatorActionKind.RouteCommitPublication
+                : FileTransferCoordinatorActionKind.RoutePublication,
+            sourcePublication.CoordinatorDecisionReason);
+        var observation = new FileTransferReceiveRecoveryObservation(
+            request.SessionId,
+            request.TransferId,
+            request.Direction,
+            route,
+            routeToken,
+            sourcePublication.ProtocolVersion,
+            liveRouteEpoch,
+            owner,
+            publication,
+            RouteCommit: null,
+            terminalGeneration,
+            legGeneration,
+            transportEpoch,
+            bridgeRecoveryGeneration,
+            expected.CheckpointRequestId,
+            expected.DataSessionIdentity,
+            expected.DataSessionGeneration,
+            Source: "test",
+            Reason: "test_receive_recovery_operation_current",
+            ObservationIdentity:
+                $"test-initial-activation-hold-{operationGeneration}",
+            ObservationGeneration: operationGeneration,
+            ObservedUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        var bridgeDecision = new BridgeRecoveryDecision(
+            Accepted: true,
+            BridgeRecoveryKind.BridgeReceiveStallRecovery,
+            observation.Reason,
+            bridgeDecisionGeneration,
+            route,
+            sourcePublication.ProtocolVersion,
+            liveRouteEpoch,
+            runtimeGeneration,
+            terminalGeneration,
+            legGeneration,
+            transportEpoch,
+            bridgeRecoveryGeneration,
+            owner);
+        var compatibilityAuthority = new FileTransferBridgeRecoveryAuthority(
+            request.SessionId,
+            request.TransferId,
+            request.Direction,
+            routeToken,
+            sourcePublication.ProtocolVersion,
+            liveRouteEpoch,
+            runtimeGeneration,
+            terminalGeneration,
+            legGeneration,
+            transportEpoch,
+            bridgeRecoveryGeneration,
+            bridgeDecisionGeneration,
+            nameof(BridgeRecoveryKind.BridgeReceiveStallRecovery),
+            observation.Reason);
+        var command =
+            expected.ExpectedExecutionCommand ??
+            new FileTransferBridgeRecoveryExecutionCommand(
+                bridgeDecision,
+                RecoveryLivenessLease: null,
+                expected.CheckpointRequestId);
+        bridgeDecision = command.Decision;
+        var authority = new FileTransferReceiveRecoveryOperationAuthority(
+            observation,
+            bridgeDecision,
+            compatibilityAuthority,
+            RecoveryLivenessLease: null,
+            command,
+            operationGeneration,
+            new FileTransferAuthorityId(
+                $"test-initial-activation-hold-authority-{operationGeneration}"))
+        {
+            PredecessorAuthorityId =
+                predecessorOperation?.Authority.AuthorityId,
+            PredecessorOperationGeneration =
+                predecessorOperation?.Authority.OperationGeneration ?? 0,
+        };
+        return new FileTransferReceiveRecoveryOperation(
+            authority,
+            FileTransferReceiveRecoveryExecutionState.Running,
+            FileTransferBridgeRecoveryExecutionStartStatus.Started,
+            "bridge_recovery_execution_started");
     }
 
     private new static object? InvokePrivateMethod(
@@ -26607,6 +28232,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         NknSignalingTransport.RuntimeUnlockRegularV4RepairPressureBlockerOverrideForTests = null;
         NknSignalingTransport.RuntimeUnlockOfferDirectObservedLaneBlockerOverrideForTests = null;
         NknSignalingTransport.RuntimeUnlockOfferSendRecoveryRequestOverrideForTests = null;
+        NknSignalingTransport
+            .RuntimeUnlockInitialActivationReceiveRecoveryExecutionCommandOverrideForTests = null;
     }
 
     private sealed class RecordingTunaListenerSidecarSupervisor : INknTunaListenerSidecarSupervisor

@@ -1810,6 +1810,199 @@ internal interface IRuntimeUnlockRetryDispatchAuthorityBridge
 
 }
 
+internal enum RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
+{
+    OfferPreSend = 0,
+    UnobservedOfferSendFailure = 1,
+    PeerResponseTimeout = 2,
+    AnswerTimeout = 3,
+    PayerIntentPreSend = 4,
+    UnobservedPayerIntentSendFailure = 5,
+}
+
+internal readonly record struct
+    RuntimeUnlockInitialActivationReceiveRecoveryExpectedScope(
+        FileTransferRoutePublicationAuthority? SourcePublicationAuthority,
+        long TransportEpoch,
+        int BridgeRecoveryGeneration,
+        string? CheckpointRequestId,
+        string DataSessionIdentity,
+        long DataSessionGeneration,
+        FileTransferBridgeRecoveryExecutionCommand? ExpectedExecutionCommand)
+{
+    public bool IsDefault =>
+        SourcePublicationAuthority is null ||
+        string.IsNullOrWhiteSpace(SourcePublicationAuthority.SessionId) ||
+        string.IsNullOrWhiteSpace(SourcePublicationAuthority.TransferId) ||
+        string.IsNullOrWhiteSpace(SourcePublicationAuthority.RouteToken) ||
+        SourcePublicationAuthority.ProtocolVersion <= 0 ||
+        SourcePublicationAuthority.RuntimeGeneration <= 0 ||
+        SourcePublicationAuthority.LegGeneration <= 0 ||
+        SourcePublicationAuthority.RoutePublicationGeneration <= 0 ||
+        TransportEpoch < 0 ||
+        BridgeRecoveryGeneration < 0 ||
+        string.IsNullOrWhiteSpace(DataSessionIdentity) ||
+        DataSessionGeneration <= 0 ||
+        ExpectedExecutionCommand is { IsDefault: true };
+}
+
+internal readonly record struct
+    RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(
+        string SessionId,
+        string TransferId,
+        FileTransferDirection Direction,
+        string OfferNonce,
+        long PayerDecisionId,
+        long OfferGeneration,
+        long TransactionGeneration,
+        long TunaPathLeaseGeneration,
+        string TunaPathLeaseListenerRunId,
+        string ControlEnvelopeFingerprint,
+        bool PeerVisibleDispatchObserved,
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary Boundary)
+{
+    public RuntimeUnlockInitialActivationReceiveRecoveryExpectedScope
+        ExpectedScope
+    {
+        get;
+        init;
+    }
+
+    public bool IsDefault
+    {
+        get
+        {
+            if (string.IsNullOrWhiteSpace(SessionId) ||
+                string.IsNullOrWhiteSpace(TransferId) ||
+                PayerDecisionId <= 0 ||
+                ExpectedScope.IsDefault ||
+                !string.Equals(
+                    SessionId,
+                    ExpectedScope.SourcePublicationAuthority?.SessionId,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    TransferId,
+                    ExpectedScope.SourcePublicationAuthority?.TransferId,
+                    StringComparison.Ordinal) ||
+                Direction !=
+                    ExpectedScope.SourcePublicationAuthority?.Direction)
+            {
+                return true;
+            }
+
+            return string.IsNullOrWhiteSpace(OfferNonce) ||
+                OfferGeneration <= 0 ||
+                TransactionGeneration <= 0 ||
+                TunaPathLeaseGeneration <= 0 ||
+                string.IsNullOrWhiteSpace(TunaPathLeaseListenerRunId) ||
+                string.IsNullOrWhiteSpace(ControlEnvelopeFingerprint);
+        }
+    }
+}
+
+internal enum RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+{
+    Held = 0,
+    Released = 1,
+    Rejected = 2,
+    Invalidated = 3,
+}
+
+internal readonly record struct
+    RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest Request,
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus Status,
+        string Reason,
+        long HoldGeneration,
+        FileTransferReceiveRecoveryOperation? ReceiveRecoveryOperation,
+        FileTransferReceiveRecoveryOperationAuthority?
+            PreviousReceiveRecoveryAuthority = null)
+{
+    public bool IsDefault =>
+        Request.IsDefault ||
+        string.IsNullOrWhiteSpace(Reason) ||
+        HoldGeneration < 0 ||
+        Status == RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held &&
+        (HoldGeneration <= 0 ||
+         ReceiveRecoveryOperation is not { IsDefault: false });
+}
+
+internal sealed class
+    RuntimeUnlockInitialActivationReceiveRecoveryHoldRequestedEventArgs(
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest request)
+    : EventArgs
+{
+    public RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest Request
+    {
+        get;
+    } = request;
+
+    public RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision? Decision
+    {
+        get;
+        set;
+    }
+}
+
+internal enum RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationKind
+{
+    Unspecified = 0,
+    GenericReset = 1,
+    UserCancellation = 2,
+    PeerCancellation = 3,
+}
+
+internal readonly record struct
+    RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationRequest(
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest HoldRequest,
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationKind Kind,
+        string Reason)
+{
+    public bool IsDefault =>
+        HoldRequest.IsDefault ||
+        Kind is not (
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationKind
+                .GenericReset or
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationKind
+                .UserCancellation or
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationKind
+                .PeerCancellation) ||
+        string.IsNullOrWhiteSpace(Reason);
+}
+
+internal sealed class
+    RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationRequestedEventArgs(
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationRequest
+            request)
+    : EventArgs
+{
+    public RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationRequest
+        Request
+    {
+        get;
+    } = request;
+
+    public RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision? Decision
+    {
+        get;
+        set;
+    }
+}
+
+internal interface IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge
+{
+    event EventHandler<
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldRequestedEventArgs>?
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldRequested;
+
+    event EventHandler<
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationRequestedEventArgs>?
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationRequested;
+
+    bool ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision);
+}
+
 public interface IFileTransferSessionContextProvider
 {
     string? CurrentFileTransferSessionId { get; }

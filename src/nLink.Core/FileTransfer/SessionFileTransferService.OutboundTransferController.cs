@@ -1306,6 +1306,25 @@ public sealed partial class SessionFileTransferService
             previousLifecycle = transportLifecycle;
             outbound = markActiveTransfersFailed && outboundTransfer is { IsTerminal: false } ? outboundTransfer : null;
             inbound = markActiveTransfersFailed && inboundTransfer is { IsTerminal: false } ? inboundTransfer : null;
+            var recoveryInvalidationReason = markActiveTransfersFailed
+                ? "transport_detached"
+                : "service_disposed";
+            if (outboundTransfer is { IsTerminal: false } activeOutbound)
+            {
+                _ =
+                    TryInvalidateReceiveRecoveryOperationForScopeReplacementLocked(
+                        activeOutbound,
+                        recoveryInvalidationReason);
+            }
+
+            if (inboundTransfer is { IsTerminal: false } activeInbound)
+            {
+                _ =
+                    TryInvalidateReceiveRecoveryOperationForScopeReplacementLocked(
+                        activeInbound,
+                        recoveryInvalidationReason);
+            }
+
             transport = null;
             transportLifecycle = null;
         }
@@ -1339,6 +1358,18 @@ public sealed partial class SessionFileTransferService
                     OnRuntimeUnlockRetryDispatchExecutionObserved;
                 retryDispatchBridge.RuntimeUnlockRetryDispatchSuccessorEvaluationRequested -=
                     OnRuntimeUnlockRetryDispatchSuccessorEvaluationRequested;
+            }
+
+            if (previousTransport is
+                IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge
+                    initialActivationHoldBridge)
+            {
+                initialActivationHoldBridge
+                        .RuntimeUnlockInitialActivationReceiveRecoveryHoldRequested -=
+                    OnRuntimeUnlockInitialActivationReceiveRecoveryHoldRequested;
+                initialActivationHoldBridge
+                        .RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationRequested -=
+                    OnRuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationRequested;
             }
 
             if (previousTransport is IFileTransferBridgeRecoveryExecutionBridge bridgeRecoveryExecutionBridge)
