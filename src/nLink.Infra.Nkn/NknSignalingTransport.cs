@@ -3132,14 +3132,10 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             Volatile.Write(ref bridgeReceiveStallRecoveryActive, 1);
             var recoveryReason = string.IsNullOrWhiteSpace(e.ExitReasonText) ? "receive_stall_recovery" : e.ExitReasonText;
             var sessionId = currentSessionSecurityState.SessionId?.Value;
-            var interruptedRuntimeUnlockOffer = InterruptRuntimeUnlockOfferForBridgeRecovery(
+            _ = InterruptRuntimeUnlockOfferForBridgeRecovery(
                 "offer_interrupted_by_bridge_recovery",
                 recoveryReason,
                 "receive_stall_recovery_started");
-            if (interruptedRuntimeUnlockOffer || IsFileTransferTunaActivationBridgeRecoveryActive())
-            {
-                MarkFileTransferTunaActivationBridgeRecoveryStarted(recoveryReason);
-            }
             var sessionLivenessReceiveRecovery = IsSessionLivenessReceiveRecoveryReason(recoveryReason);
             if (ShouldSuppressFileTransferTransportRecoveredForTunaActivationPause(
                     "receive_stall_recovery_started",
@@ -3234,7 +3230,6 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             // The exact execution receipt is the coordinator lifecycle boundary.
             // Command-tagged compatibility lifecycle telemetry must not retire the
             // lease before Core has accepted that receipt.
-            MarkFileTransferTunaActivationBridgeRecoverySettled("receive_stall_recovery_completed");
             Volatile.Write(ref bridgeReceiveStallRecoveryActive, 0);
             HandleFileTransferBridgeRecovered(
                 runtimeUnlockTrigger: "receive_stall_recovery_completed",
@@ -3247,7 +3242,6 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryReceiveResumed)
         {
             RaiseBridgeReceiveStallSessionLivenessProof(e);
-            MarkFileTransferTunaActivationBridgeRecoverySettled("receive_resumed");
             Volatile.Write(ref bridgeReceiveStallRecoveryActive, 0);
             ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed("receive_resumed");
             HandleFileTransferBridgeRecovered(
@@ -3261,7 +3255,6 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted)
         {
             Volatile.Write(ref bridgeReceiveStallRecoveryActive, 0);
-            MarkFileTransferTunaActivationBridgeRecoverySettled("receive_stall_recovery_exhausted");
             var sessionId = SanitizeLogToken(currentSessionSecurityState.SessionId?.Value ?? "none");
             var reason = string.IsNullOrWhiteSpace(e.ExitReasonText)
                 ? "control_receive_stalled_max_restarts"
