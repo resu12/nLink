@@ -10792,6 +10792,126 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task
+        AnalyzeRetained_InitialActivationHoldReleaseRoutedThroughInvalidation(
+            bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string sessionId = "sess_hold_release_delivery";
+        const string transferId = "transfer_hold_release_delivery";
+        const string writerId = "writer_hold_release_delivery";
+        const string offerTuple =
+            "offer_nonce=offer-hold-release; payer_decision_id=4; offer_generation=1; " +
+            "transaction_generation=1; tuna_path_lease_generation=1; " +
+            "tuna_path_lease_listener_run_id=listener-1; control_envelope_fingerprint=fingerprint-1";
+        const string operationTuple =
+            "receive_recovery_operation_authority_id=operation-2; " +
+            "receive_recovery_operation_generation=2; " +
+            "recovery_liveness_lease_authority_id=lease-2; " +
+            "recovery_liveness_lease_generation=2; closure_generation=2";
+        var scope =
+            $"session_id={sessionId}; transfer_id={transferId}; direction=outbound; " +
+            $"log_writer_id={writerId}";
+
+        var lines = new List<string>
+        {
+            LogLine(
+                "event=filetransfer_route_selected; direction=outbound; " +
+                $"session_id={sessionId}; transfer_id={transferId}; " +
+                "route=regular_nkn_v4_fast; protocol_version=4; " +
+                "runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; " +
+                "bridge_recovery_policy=regular_nkn_v4_fast; " +
+                "liveness_terminal_policy=regular_nkn_v4_fast; " +
+                "selection_reason=regular_nkn_default_v4; file_tuna_active=0; " +
+                "post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; " +
+                "transport_profile=conservative_nkn_startup; live_route_epoch=0; " +
+                "route_publication_generation=1; runtime_generation=1; " +
+                "terminal_generation=0; leg_generation=1; target_transport=regular_nkn; " +
+                $"log_writer_id={writerId}",
+                secondsOffset: 0),
+            LogLine(
+                "event=runtime_unlock_initial_activation_receive_recovery_hold_decided; " +
+                $"{scope}; {offerTuple}; hold_generation=1; decision_status=Held; " +
+                "receive_recovery_operation_authority_id=operation-1; " +
+                "receive_recovery_operation_generation=1; " +
+                "recovery_liveness_lease_authority_id=lease-1; " +
+                "recovery_liveness_lease_generation=1; closure_generation=0; " +
+                "decision_reason=runtime_unlock_initial_activation_receive_recovery_operation_current",
+                secondsOffset: 1),
+            LogLine(
+                "event=filetransfer_receive_recovery_operation_closure_adopted; " +
+                $"{scope}; {operationTuple}; closure_state=Adopted; " +
+                "execution_state=Completed; execution_outcome=Completed; " +
+                "proof_identity=receive-proof-2; proof_observed_utc_ms=2200",
+                secondsOffset: 2),
+            LogLine(
+                "event=runtime_unlock_initial_activation_receive_recovery_hold_invalidated; " +
+                $"{scope}; {offerTuple}; hold_generation=1; decision_status=Released; " +
+                $"{operationTuple}; closure_state=Adopted; " +
+                "decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current",
+                secondsOffset: 3),
+            LogLine(
+                "event=runtime_unlock_initial_activation_receive_recovery_hold_invalidation_rejected; " +
+                $"{scope}; {offerTuple}; decision_status=Released; " +
+                "decision_reason=exact_coordinator_invalidation_required; " +
+                "log_writer_sequence=25923",
+                secondsOffset: 4),
+            LogLine(
+                "event=runtime_unlock_initial_activation_receive_recovery_hold_invalidation_rejected; " +
+                $"{scope}; {offerTuple}; decision_status=Released; " +
+                "decision_reason=exact_coordinator_invalidation_required; " +
+                "log_writer_sequence=25925",
+                secondsOffset: 5),
+            LogLine(
+                $"event=file_transfer_outbound_terminal; {scope}; state=Failed; error_code=timeout",
+                secondsOffset: 6)
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-operator-verdict.txt");
+        Assert.Equal(
+            "runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing",
+            verdict["first_proof_chain_failure_class"]);
+        Assert.Equal(
+            "2",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_raw_count"]);
+        Assert.Equal(
+            "1",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_distinct_count"]);
+        Assert.Equal(
+            "0",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_recovered_count"]);
+        Assert.Equal(
+            "1",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_unresolved_count"]);
+        Assert.Equal(
+            "fail",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_verdict"]);
+        Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+        Assert.Equal("fail", verdict["runtime_correctness_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task AnalyzeRetained_InitialRuntimeUnlockOfferRetryRequiresCoordinatorLifecycle(
         bool compact)
     {

@@ -4147,6 +4147,12 @@ function Get-TunaGuiExplicitFailureClassification {
                     Reason = 'initial_activation_retry_exhausted_while_receive_recovery_awaiting_proof'
                 }
             }
+            'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing' {
+                return [pscustomobject]@{
+                    Phase = 'runtime_unlock_initial_activation'
+                    Reason = 'released_hold_routed_through_exact_invalidation_boundary'
+                }
+            }
             'post_tuna_fallback_outbound_receive_worker_handoff_missing' {
                 return [pscustomobject]@{ Phase = 'outbound_sparse_worker_handoff'; Reason = $failureClass }
             }

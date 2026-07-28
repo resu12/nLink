@@ -1160,7 +1160,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_receive_recovery_hold_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_receive_recovery_hold_rebound') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_receive_recovery_hold_invalidated') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_receive_recovery_hold_invalidation_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_receive_recovery_hold_resumed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_transaction_answer_received') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_answer_ack_sent') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_launch_requested') +
@@ -1245,6 +1247,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents
     $runtimeUnlockInitialOfferReceiveRecoveryHoldProof =
         Get-FileTransferRuntimeUnlockInitialOfferReceiveRecoveryHoldCorrelation `
+            -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
+    $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof =
+        Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryCorrelation `
             -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
     [object[]]$runtimeUnlockRetryDispatchAuthorityTupleMismatchEvents = @(
         $runtimeUnlockRetryDispatchInstallEvents +
@@ -1972,6 +1977,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Reason = 'initial_activation_retry_exhausted_while_receive_recovery_awaiting_proof'
         }) | Out-Null
     }
+    foreach ($candidateEvent in @($runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.UnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing'
+            Event = $candidateEvent
+            Reason = 'released_hold_routed_through_exact_invalidation_boundary'
+        }) | Out-Null
+    }
     foreach ($candidateEvent in @($regularV4FrontierRepairMissingRangePreservationProof.UnresolvedCandidateEvents)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'regular_v4_frontier_repair_missing_range_not_preserved'
@@ -2146,6 +2158,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.UnresolvedCount -gt 0 -or
+        $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRetryFallbackTailUnblockRecheckProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RecoverySettlementProof.HandoffBypassCount -gt 0 -or
         $runtimeUnlockUncommittedTunaFallbackPrecommitAuthorityProof.UnresolvedCount -gt 0 -or
@@ -2202,6 +2215,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing',
                 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing',
                 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved',
+                'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing',
                 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
                 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected',
                 'runtime_unlock_retry_dispatch_authority_tuple_mismatch',
@@ -2280,6 +2294,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing',
             'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing',
             'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved',
+            'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing',
             'runtime_unlock_precommit_probe_start_handoff_missing',
             'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing',
             'runtime_unlock_precommit_fallback_recovery_handoff_suppressed',
@@ -2515,6 +2530,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.RecoveredCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_unresolved_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.UnresolvedCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_verdict={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.Verdict),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_raw_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.RawCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_distinct_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.DistinctCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_recovered_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.RecoveredCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_unresolved_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.UnresolvedCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_verdict={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.Verdict),
        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.RequestedCount),
        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DecidedCount),
        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DiscardedCount),
@@ -2789,6 +2809,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.RecoveredCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_unresolved_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.UnresolvedCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_verdict={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.Verdict),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_raw_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.RawCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_distinct_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.DistinctCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_recovered_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.RecoveredCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_unresolved_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.UnresolvedCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_verdict={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.Verdict),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.RequestedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DecidedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DiscardedCount),
@@ -3059,6 +3084,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.RecoveredCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_unresolved_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.UnresolvedCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_verdict={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.Verdict),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_raw_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.RawCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_distinct_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.DistinctCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_recovered_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.RecoveredCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_unresolved_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.UnresolvedCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_verdict={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.Verdict),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.RequestedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DecidedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DiscardedCount),
@@ -3311,6 +3341,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.RecoveredCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_unresolved_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.UnresolvedCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_verdict={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.Verdict),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_raw_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.RawCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_distinct_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.DistinctCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_recovered_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.RecoveredCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_unresolved_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.UnresolvedCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_verdict={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.Verdict),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.RequestedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DecidedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DiscardedCount),
@@ -3591,6 +3626,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count = $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.RecoveredCount
         runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_unresolved_count = $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.UnresolvedCount
         runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_verdict = $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.Verdict
+        runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_raw_count = $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.RawCount
+        runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_distinct_count = $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.DistinctCount
+        runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_recovered_count = $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.RecoveredCount
+        runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_unresolved_count = $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.UnresolvedCount
+        runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_verdict = $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.Verdict
         runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.RequestedCount
         runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DecidedCount
         runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DiscardedCount

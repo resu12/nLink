@@ -12047,6 +12047,11 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_unresolved_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedUnresolvedCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_verdict={0}" -f $RecoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedVerdict)) | Out-Null
+    $lines.Add(("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_raw_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingRawCount)) | Out-Null
+    $lines.Add(("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_distinct_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingDistinctCount)) | Out-Null
+    $lines.Add(("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_recovered_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingRecoveredCount)) | Out-Null
+    $lines.Add(("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_unresolved_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingUnresolvedCount)) | Out-Null
+    $lines.Add(("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_verdict={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryVerdict)) | Out-Null
     $lines.Add(("runtime_unlock_retry_dispatch_authority_granted_raw_count={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedRawCount)) | Out-Null
     $lines.Add(("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedCount)) | Out-Null
     $lines.Add(("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount)) | Out-Null
@@ -14049,6 +14054,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedUnresolvedCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_verdict={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedVerdict),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingRawCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingDistinctCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingRecoveredCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingUnresolvedCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_verdict={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryVerdict),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount),
@@ -20319,6 +20329,321 @@ function Get-FileTransferRuntimeUnlockInitialOfferReceiveRecoveryHoldCorrelation
     }
 }
 
+function Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryCorrelation {
+    param(
+        [AllowEmptyCollection()][object[]]$Events = @()
+    )
+
+    [object[]]$events = @(
+        $Events |
+            Where-Object { $null -ne $_ } |
+            Sort-Object Sequence, LineNumber
+    )
+
+    function Get-HoldReleaseField {
+        param(
+            [Parameter(Mandatory = $true)]$Event,
+            [Parameter(Mandatory = $true)][string[]]$Names,
+            [string]$Default = ''
+        )
+
+        foreach ($name in $Names) {
+            $value =
+                Get-FileTransferEventField `
+                    -Event $Event `
+                    -Name $name `
+                    -Default ''
+            if (-not [string]::IsNullOrWhiteSpace($value) -and
+                $value -notin @('(none)', 'none', '(missing)', '__missing__')) {
+                return $value
+            }
+        }
+        return $Default
+    }
+
+    function Test-HoldReleaseTuple {
+        param(
+            [Parameter(Mandatory = $true)]$Left,
+            [Parameter(Mandatory = $true)]$Right,
+            [switch]$RequireOperation,
+            [switch]$AllowMissingRightFields
+        )
+
+        [object[]]$mappings = @(
+            [pscustomobject]@{ Left = @('log_writer_id'); Right = @('log_writer_id') },
+            [pscustomobject]@{ Left = @('session_id'); Right = @('session_id') },
+            [pscustomobject]@{ Left = @('transfer_id'); Right = @('transfer_id') },
+            [pscustomobject]@{ Left = @('direction'); Right = @('direction') },
+            [pscustomobject]@{ Left = @('offer_nonce'); Right = @('offer_nonce') },
+            [pscustomobject]@{ Left = @('payer_decision_id'); Right = @('payer_decision_id') },
+            [pscustomobject]@{ Left = @('offer_generation', 'generation'); Right = @('offer_generation', 'generation') },
+            [pscustomobject]@{ Left = @('transaction_generation'); Right = @('transaction_generation') },
+            [pscustomobject]@{ Left = @('tuna_path_lease_generation'); Right = @('tuna_path_lease_generation') },
+            [pscustomobject]@{ Left = @('tuna_path_lease_listener_run_id'); Right = @('tuna_path_lease_listener_run_id') },
+            [pscustomobject]@{ Left = @('control_envelope_fingerprint'); Right = @('control_envelope_fingerprint') },
+            [pscustomobject]@{ Left = @('hold_generation'); Right = @('hold_generation') }
+        )
+        if ($RequireOperation) {
+            $mappings += @(
+                [pscustomobject]@{
+                    Left = @(
+                        'receive_recovery_operation_generation',
+                        'recovery_operation_generation')
+                    Right = @(
+                        'receive_recovery_operation_generation',
+                        'recovery_operation_generation')
+                },
+                [pscustomobject]@{
+                    Left = @(
+                        'receive_recovery_closure_generation',
+                        'closure_generation')
+                    Right = @(
+                        'receive_recovery_closure_generation',
+                        'closure_generation')
+                })
+        }
+
+        foreach ($mapping in $mappings) {
+            $leftValue =
+                Get-HoldReleaseField -Event $Left -Names $mapping.Left
+            $rightValue =
+                Get-HoldReleaseField -Event $Right -Names $mapping.Right
+            if ($AllowMissingRightFields -and
+                [string]::IsNullOrWhiteSpace($rightValue)) {
+                continue
+            }
+            if ([string]::IsNullOrWhiteSpace($leftValue) -or
+                [string]::IsNullOrWhiteSpace($rightValue) -or
+                -not [string]::Equals(
+                    $leftValue,
+                    $rightValue,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    function Test-HoldReleaseOperationMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Operation,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        foreach ($mapping in @(
+                [pscustomobject]@{
+                    Operation = @(
+                        'receive_recovery_operation_generation',
+                        'recovery_operation_generation')
+                    Candidate = @(
+                        'receive_recovery_operation_generation',
+                        'recovery_operation_generation')
+                },
+                [pscustomobject]@{
+                    Operation = @('closure_generation')
+                    Candidate = @(
+                        'receive_recovery_closure_generation',
+                        'closure_generation')
+                },
+                [pscustomobject]@{
+                    Operation = @('recovery_liveness_lease_generation')
+                    Candidate = @('recovery_liveness_lease_generation')
+                })) {
+            $operationValue =
+                Get-HoldReleaseField `
+                    -Event $Operation `
+                    -Names $mapping.Operation
+            $candidateValue =
+                Get-HoldReleaseField `
+                    -Event $Candidate `
+                    -Names $mapping.Candidate
+            if ([string]::IsNullOrWhiteSpace($operationValue) -or
+                [string]::IsNullOrWhiteSpace($candidateValue) -or
+                $operationValue -ne $candidateValue) {
+                return $false
+            }
+        }
+
+        $operationAuthority =
+            Get-HoldReleaseField `
+                -Event $Operation `
+                -Names @(
+                    'receive_recovery_operation_authority_id',
+                    'recovery_operation_authority_id')
+        $candidateAuthority =
+            Get-HoldReleaseField `
+                -Event $Candidate `
+                -Names @(
+                    'receive_recovery_operation_authority_id',
+                    'recovery_operation_authority_id')
+        $operationAuthorityVisible =
+            -not [string]::IsNullOrWhiteSpace($operationAuthority) -and
+            $operationAuthority -notmatch 'redacted|missing|none'
+        $candidateAuthorityVisible =
+            -not [string]::IsNullOrWhiteSpace($candidateAuthority) -and
+            $candidateAuthority -notmatch 'redacted|missing|none'
+        return -not ($operationAuthorityVisible -and
+                $candidateAuthorityVisible) -or
+            [string]::Equals(
+                $operationAuthority,
+                $candidateAuthority,
+                [System.StringComparison]::OrdinalIgnoreCase)
+    }
+
+    [object[]]$rejections = @($events | Where-Object {
+        $_.EventName -eq
+            'runtime_unlock_initial_activation_receive_recovery_hold_invalidation_rejected' -and
+        (Get-HoldReleaseField -Event $_ -Names @('decision_status')) -eq
+            'Released' -and
+        (Get-HoldReleaseField -Event $_ -Names @('decision_reason')) -eq
+            'exact_coordinator_invalidation_required'
+    })
+    [object[]]$misroutedReleases = @($events | Where-Object {
+        $_.EventName -eq
+            'runtime_unlock_initial_activation_receive_recovery_hold_invalidated' -and
+        (Get-HoldReleaseField -Event $_ -Names @('decision_status')) -eq
+            'Released'
+    })
+    [object[]]$heldDecisions = @($events | Where-Object {
+        $_.EventName -eq
+            'runtime_unlock_initial_activation_receive_recovery_hold_decided' -and
+        (Get-HoldReleaseField -Event $_ -Names @('decision_status')) -eq
+            'Held'
+    })
+    [object[]]$adoptions = @($events | Where-Object {
+        $_.EventName -eq
+            'filetransfer_receive_recovery_operation_closure_adopted' -and
+        (Get-HoldReleaseField -Event $_ -Names @('closure_state')) -eq
+            'Adopted'
+    })
+    [object[]]$normalReleaseEvents = @($events | Where-Object {
+        $_.EventName -in @(
+            'runtime_unlock_initial_activation_receive_recovery_hold_decided',
+            'runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided') -and
+        (Get-HoldReleaseField -Event $_ -Names @('decision_status')) -eq
+            'Released'
+    })
+    [object[]]$resumeEvents = @($events | Where-Object {
+        $_.EventName -eq
+            'runtime_unlock_initial_activation_receive_recovery_hold_resumed'
+    })
+
+    $raw = New-Object System.Collections.Generic.List[object]
+    $distinct = [ordered]@{}
+    foreach ($rejection in $rejections) {
+        [object[]]$misrouted = @($misroutedReleases | Where-Object {
+            [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
+            (Test-HoldReleaseTuple `
+                -Left $_ `
+                -Right $rejection `
+                -AllowMissingRightFields)
+        } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        if ($misrouted.Count -ne 1) {
+            continue
+        }
+
+        [object[]]$matchingAdoptions = @($adoptions | Where-Object {
+            [int64]$_.Sequence -lt [int64]$misrouted[0].Sequence -and
+            (Get-HoldReleaseField -Event $_ -Names @('log_writer_id')) -eq
+                (Get-HoldReleaseField -Event $rejection -Names @('log_writer_id')) -and
+            (Get-HoldReleaseField -Event $_ -Names @('session_id')) -eq
+                (Get-HoldReleaseField -Event $rejection -Names @('session_id')) -and
+            (Get-HoldReleaseField -Event $_ -Names @('transfer_id')) -eq
+                (Get-HoldReleaseField -Event $rejection -Names @('transfer_id')) -and
+            (Get-HoldReleaseField -Event $_ -Names @('direction')) -eq
+                (Get-HoldReleaseField -Event $rejection -Names @('direction')) -and
+            (Test-HoldReleaseOperationMatch `
+                -Operation $_ `
+                -Candidate $misrouted[0])
+        } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        if ($matchingAdoptions.Count -ne 1) {
+            continue
+        }
+
+        [object[]]$matchingHolds = @($heldDecisions | Where-Object {
+            [int64]$_.Sequence -lt [int64]$matchingAdoptions[0].Sequence -and
+            (Test-HoldReleaseTuple `
+                -Left $_ `
+                -Right $rejection `
+                -AllowMissingRightFields)
+        } | Sort-Object Sequence, LineNumber)
+        if ($matchingHolds.Count -eq 0) {
+            continue
+        }
+
+        $raw.Add($rejection) | Out-Null
+        $key = (@(
+            Get-HoldReleaseField -Event $rejection -Names @('log_writer_id')
+            Get-HoldReleaseField -Event $rejection -Names @('session_id')
+            Get-HoldReleaseField -Event $rejection -Names @('transfer_id')
+            Get-HoldReleaseField -Event $rejection -Names @('direction')
+            Get-HoldReleaseField -Event $rejection -Names @('offer_nonce')
+            Get-HoldReleaseField -Event $rejection -Names @('payer_decision_id')
+            Get-HoldReleaseField -Event $rejection -Names @('offer_generation')
+            Get-HoldReleaseField -Event $rejection -Names @('transaction_generation')
+            Get-HoldReleaseField -Event $rejection -Names @('tuna_path_lease_generation')
+            Get-HoldReleaseField -Event $misrouted[0] -Names @('hold_generation')
+            Get-HoldReleaseField -Event $misrouted[0] -Names @('receive_recovery_operation_generation')
+            Get-HoldReleaseField -Event $misrouted[0] -Names @('closure_generation')
+        ) | ForEach-Object { ([string]$_).ToLowerInvariant() }) -join '|'
+        if (-not $distinct.Contains($key)) {
+            $distinct[$key] = [pscustomobject]@{
+                Event = $rejection
+                Misrouted = $misrouted[0]
+                Adoption = $matchingAdoptions[0]
+            }
+        }
+    }
+
+    $recovered = New-Object System.Collections.Generic.List[object]
+    $unresolved = New-Object System.Collections.Generic.List[object]
+    foreach ($record in @($distinct.Values)) {
+        [object[]]$normalRelease = @($normalReleaseEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$record.Event.Sequence -and
+            (Test-HoldReleaseTuple `
+                -Left $record.Misrouted `
+                -Right $_ `
+                -RequireOperation)
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        $resumed = $false
+        if ($normalRelease.Count -eq 1) {
+            $resumed = @($resumeEvents | Where-Object {
+                [int64]$_.Sequence -ge [int64]$normalRelease[0].Sequence -and
+                (Test-HoldReleaseTuple `
+                    -Left $record.Misrouted `
+                    -Right $_ `
+                    -RequireOperation)
+            }).Count -gt 0
+        }
+
+        if ($resumed) {
+            $recovered.Add($record.Event) | Out-Null
+        }
+        else {
+            $unresolved.Add($record.Event) | Out-Null
+        }
+    }
+
+    return [pscustomobject]@{
+        RawCount = $raw.Count
+        DistinctCount = $distinct.Count
+        RecoveredCount = $recovered.Count
+        UnresolvedCount = $unresolved.Count
+        Verdict = if ($unresolved.Count -gt 0) {
+            'fail'
+        }
+        elseif ($distinct.Count -gt 0) {
+            'pass'
+        }
+        else {
+            'none'
+        }
+        RawCandidateEvents = @($raw.ToArray())
+        RecoveredCandidateEvents = @($recovered.ToArray())
+        UnresolvedCandidateEvents = @($unresolved.ToArray())
+    }
+}
+
 function Get-FileTransferRuntimeUnlockRetryZeroOfferSuccessorCorrelation {
     param(
         [AllowEmptyCollection()][object[]]$Events = @(),
@@ -24128,6 +24453,7 @@ function Get-FileTransferReceiveRecoveryOperationCorrelation {
             'filetransfer_receive_recovery_operation_terminal_decided',
             'filetransfer_receive_recovery_operation_completed')
         Invalidated = @('filetransfer_receive_recovery_operation_invalidated')
+        Superseded = @('filetransfer_receive_recovery_operation_superseded')
         ClosureRetained = @('filetransfer_receive_recovery_operation_closure_retained')
         ClosureAdopted = @('filetransfer_receive_recovery_operation_closure_adopted')
         ClosureReserved = @('filetransfer_receive_recovery_operation_closure_reserved')
@@ -24853,6 +25179,227 @@ function Get-FileTransferReceiveRecoveryOperationCorrelation {
                         $consumed |
                             Sort-Object Sequence, LineNumber |
                             Select-Object -First 1)[0]
+                }
+
+                if (-not $resolved -and
+                    $proofEvent.Count -eq 0 -and
+                    $retained.Count -gt 0 -and
+                    $reserved.Count -eq 0 -and
+                    $consumed.Count -eq 0) {
+                    $retainedEvent = @(
+                        $retained |
+                            Where-Object {
+                                [int64]$_.Sequence -gt
+                                    [int64]$receiptEvent.Sequence
+                            } |
+                            Sort-Object Sequence, LineNumber |
+                            Select-Object -First 1)
+                    if ($retainedEvent.Count -eq 1) {
+                        $issuedGeneration =
+                            Get-ReceiveRecoveryOperationGeneration `
+                                -Event $issued
+                        $issuedAuthority =
+                            Get-ReceiveRecoveryOperationField `
+                                -Event $issued `
+                                -Names @(
+                                    'receive_recovery_operation_authority_id',
+                                    'recovery_operation_authority_id')
+                        $closureGeneration =
+                            Get-ReceiveRecoveryOperationField `
+                                -Event $retainedEvent[0] `
+                                -Names @('closure_generation')
+                        $receiptObservedUtcMs =
+                            Get-ReceiveRecoveryOperationField `
+                                -Event $receiptEvent `
+                                -Names @(
+                                    'execution_receipt_observed_utc_ms',
+                                    'terminal_receipt_observed_utc_ms')
+                        [object[]]$supersessions = @($events | Where-Object {
+                            if ($_.EventName -notin $eventNames.Superseded -or
+                                [int64]$_.Sequence -le
+                                    [int64]$retainedEvent[0].Sequence) {
+                                return $false
+                            }
+
+                            $predecessorGeneration =
+                                Get-ReceiveRecoveryOperationField `
+                                    -Event $_ `
+                                    -Names @(
+                                        'predecessor_receive_recovery_operation_generation',
+                                        'predecessor_operation_generation')
+                            $predecessorClosureGeneration =
+                                Get-ReceiveRecoveryOperationField `
+                                    -Event $_ `
+                                    -Names @('predecessor_closure_generation')
+                            $predecessorReceiptObservedUtcMs =
+                                Get-ReceiveRecoveryOperationField `
+                                    -Event $_ `
+                                    -Names @(
+                                        'predecessor_execution_receipt_observed_utc_ms',
+                                        'predecessor_terminal_receipt_observed_utc_ms')
+                            if ($predecessorGeneration -ne
+                                    $issuedGeneration -or
+                                $predecessorClosureGeneration -ne
+                                    $closureGeneration -or
+                                $predecessorReceiptObservedUtcMs -ne
+                                    $receiptObservedUtcMs) {
+                                return $false
+                            }
+
+                            foreach ($field in @(
+                                    'log_writer_id',
+                                    'session_id',
+                                    'transfer_id',
+                                    'direction',
+                                    'route',
+                                    'protocol_version',
+                                    'live_route_epoch',
+                                    'route_publication_generation',
+                                    'runtime_generation',
+                                    'terminal_generation',
+                                    'leg_generation',
+                                    'transport_epoch',
+                                    'bridge_recovery_generation',
+                                    'checkpoint_request_id',
+                                    'data_session_identity',
+                                    'data_session_generation')) {
+                                $left = Get-ReceiveRecoveryIdentityValue `
+                                    -Event $issued `
+                                    -Name $field
+                                $right = Get-ReceiveRecoveryOperationField `
+                                    -Event $_ `
+                                    -Names @($field) `
+                                    -AllowNone
+                                if ([string]::IsNullOrWhiteSpace($left) -or
+                                    [string]::IsNullOrWhiteSpace($right) -or
+                                    -not [string]::Equals(
+                                        $left,
+                                        $right,
+                                        [System.StringComparison]::OrdinalIgnoreCase)) {
+                                    return $false
+                                }
+                            }
+
+                            $predecessorAuthority =
+                                Get-ReceiveRecoveryOperationField `
+                                    -Event $_ `
+                                    -Names @(
+                                        'predecessor_receive_recovery_operation_authority_id',
+                                        'predecessor_operation_authority_id')
+                            $authorityVisible =
+                                -not [string]::IsNullOrWhiteSpace(
+                                    $predecessorAuthority) -and
+                                $predecessorAuthority -notmatch
+                                    'redacted|missing|none'
+                            return -not $authorityVisible -or
+                                [string]::Equals(
+                                    $issuedAuthority,
+                                    $predecessorAuthority,
+                                    [System.StringComparison]::OrdinalIgnoreCase)
+                        } | Sort-Object Sequence, LineNumber)
+
+                        if ($supersessions.Count -eq 1) {
+                            $supersession = $supersessions[0]
+                            $successorGeneration =
+                                Get-ReceiveRecoveryOperationField `
+                                    -Event $supersession `
+                                    -Names @(
+                                        'successor_receive_recovery_operation_generation',
+                                        'successor_operation_generation')
+                            $successorAuthority =
+                                Get-ReceiveRecoveryOperationField `
+                                    -Event $supersession `
+                                    -Names @(
+                                        'successor_receive_recovery_operation_authority_id',
+                                        'successor_operation_authority_id')
+                            [object[]]$successorIssued = @(
+                                $issuedEvents |
+                                    Where-Object {
+                                        [int64]$_.Sequence -gt
+                                            [int64]$supersession.Sequence -and
+                                        (Get-ReceiveRecoveryOperationGeneration `
+                                            -Event $_) -eq
+                                            $successorGeneration -and
+                                        (Get-ReceiveRecoveryIdentityValue `
+                                            -Event $_ `
+                                            -Name 'session_id') -eq
+                                            (Get-ReceiveRecoveryIdentityValue `
+                                                -Event $issued `
+                                                -Name 'session_id') -and
+                                        (Get-ReceiveRecoveryIdentityValue `
+                                            -Event $_ `
+                                            -Name 'transfer_id') -eq
+                                            (Get-ReceiveRecoveryIdentityValue `
+                                                -Event $issued `
+                                                -Name 'transfer_id') -and
+                                        (Get-ReceiveRecoveryIdentityValue `
+                                            -Event $_ `
+                                            -Name 'direction') -eq
+                                            (Get-ReceiveRecoveryIdentityValue `
+                                                -Event $issued `
+                                                -Name 'direction') -and
+                                        (
+                                            $successorAuthority -match
+                                                'redacted|missing|none' -or
+                                            (Get-ReceiveRecoveryIdentityValue `
+                                                -Event $_ `
+                                                -Name 'receive_recovery_operation_authority_id') -eq
+                                                $successorAuthority
+                                        )
+                                    } |
+                                    Sort-Object Sequence, LineNumber)
+                            if ($successorIssued.Count -eq 1) {
+                                $successor = $successorIssued[0]
+                                [object[]]$successorEvents = @(
+                                    $events |
+                                        Where-Object {
+                                            [int64]$_.Sequence -gt
+                                                [int64]$successor.Sequence -and
+                                            (Test-ReceiveRecoveryOperationMatch `
+                                                -Anchor $successor `
+                                                -Candidate $_)
+                                        })
+                                $successorStart = @(
+                                    $successorEvents |
+                                        Where-Object {
+                                            $_.EventName -in
+                                                $eventNames.Started -and
+                                            (Get-ReceiveRecoveryOperationField `
+                                                -Event $_ `
+                                                -Names @(
+                                                    'execution_start_status',
+                                                    'decision_status',
+                                                    'start_status',
+                                                    'status')) -in @(
+                                                        'Started',
+                                                        'Idempotent',
+                                                        'Accepted')
+                                        } |
+                                        Sort-Object Sequence, LineNumber |
+                                        Select-Object -First 1)
+                                $successorReceipt = @(
+                                    $successorEvents |
+                                        Where-Object {
+                                            $successorStart.Count -eq 1 -and
+                                            [int64]$_.Sequence -gt
+                                                [int64]$successorStart[0].Sequence -and
+                                            $_.EventName -in
+                                                $eventNames.Receipt -and
+                                            (Get-ReceiveRecoveryOperationOutcome `
+                                                -Event $_) -in @(
+                                                    'completed',
+                                                    'exhausted',
+                                                    'discarded')
+                                        } |
+                                        Sort-Object Sequence, LineNumber |
+                                        Select-Object -First 1)
+                                if ($successorReceipt.Count -eq 1) {
+                                    $resolved = $true
+                                    $unresolvedEvent = $supersession
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -32968,6 +33515,9 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockInitialOfferReceiveRecoveryHoldProof =
         Get-FileTransferRuntimeUnlockInitialOfferReceiveRecoveryHoldCorrelation `
             -Events $events
+    $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof =
+        Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryCorrelation `
+            -Events $events
     $runtimeUnlockRetryDispatchAuthorityTupleMismatchProof =
         Get-FileTransferRuntimeUnlockRetryDispatchAuthorityTupleMismatchCorrelation `
             -Events $events `
@@ -36219,6 +36769,12 @@ function Get-FileTransferRecoveryFailureClassification {
         -Events @($runtimeUnlockInitialOfferReceiveRecoveryHoldProof.UnresolvedCandidateEvents) `
         -DefaultReason 'initial_activation_retry_exhausted_while_receive_recovery_awaiting_proof' `
         -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing' `
+        -Events @($runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.UnresolvedCandidateEvents) `
+        -DefaultReason 'released_hold_routed_through_exact_invalidation_boundary' `
+        -UseDefaultReason
 
     $grantBypassSequences = @(
         @($runtimeUnlockRetryDispatchGrantBypassedByRetryBudgetEvents) +
@@ -36567,6 +37123,9 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($runtimeUnlockInitialOfferReceiveRecoveryHoldProof.UnresolvedCount -gt 0) {
         $class = 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved'
+    }
+    elseif ($runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.UnresolvedCount -gt 0) {
+        $class = 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing'
     }
     elseif ($regularV4PeerSilenceReplayMissingDispatchRangeProof.UnresolvedCount -gt 0) {
         $class = 'regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved'
@@ -37008,6 +37567,7 @@ function Get-FileTransferRecoveryFailureClassification {
                 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing',
                 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing',
                 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved',
+                'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing',
                 'runtime_unlock_precommit_probe_start_handoff_missing',
                 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing',
                 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed',
@@ -37210,6 +37770,11 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount = $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.RecoveredCount
         RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedUnresolvedCount = $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.UnresolvedCount
         RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedVerdict = $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.Verdict
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingRawCount = $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.RawCount
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingDistinctCount = $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.DistinctCount
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingRecoveredCount = $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.RecoveredCount
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingUnresolvedCount = $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.UnresolvedCount
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryVerdict = $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.Verdict
         RuntimeUnlockProbeRecoveryTriggerCount = $runtimeUnlockTransactionPathProbeSidecarClosedEvents.Count
         RuntimeUnlockProbeRecoveryAuthorityLostRawCount = $runtimeUnlockProbeRecoveryAuthorityLostRawEvents.Count
         RuntimeUnlockProbeRecoveryAuthorityLostDistinctCount = $runtimeUnlockProbeRecoveryAuthorityLostDistinctEvents.Count
@@ -37908,6 +38473,11 @@ function New-FileTransferInvariantLedgerObject {
         runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count = [string]$recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount
         runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_unresolved_count = [string]$recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedUnresolvedCount
         runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_verdict = $recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedVerdict
+        runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_raw_count = [string]$recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingRawCount
+        runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_distinct_count = [string]$recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingDistinctCount
+        runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_recovered_count = [string]$recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingRecoveredCount
+        runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_unresolved_count = [string]$recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingUnresolvedCount
+        runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_verdict = $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryVerdict
         runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount
         runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount
         runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount
@@ -38139,6 +38709,7 @@ function Write-FileTransferDiagnosticsArtifacts {
             'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing',
             'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing',
             'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved',
+            'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing',
             'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
             'regular_v4_frontier_tail_repair_state_publication_missing',
             'regular_v4_frontier_repair_missing_range_not_preserved',
@@ -38244,6 +38815,10 @@ function Write-FileTransferDiagnosticsArtifacts {
                 'recovery: initial runtime-unlock activation exhausted its retry budget while receive recovery awaited proof'
                 break
             }
+            'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing' {
+                'recovery: coordinator released the held initial activation through the invalidation boundary'
+                break
+            }
             'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing' {
                 'recovery: coordinator-held runtime unlock retry was not rechecked after fallback-tail recovery'
                 break
@@ -38303,7 +38878,7 @@ function Write-FileTransferDiagnosticsArtifacts {
     $operatorAcceptanceFailureClass = if ($recoveryClassification.Class -in @('runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'runtime_unlock_precommit_probe_start_handoff_missing', 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing', 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_initial_pressure_install_missing', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery', 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
         'incomplete_proof'
     }
-    elseif ($recoveryClassification.Class -in @('filetransfer_receive_recovery_operation_incomplete', 'filetransfer_receive_recovery_completed_unproven_successor_missing', 'runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'filetransfer_bridge_recovery_execution_payload_hold_missing', 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing', 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing', 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing', 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'fallback_tail_yield_authority_invalid', 'filetransfer_route_transition_incomplete', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
+    elseif ($recoveryClassification.Class -in @('filetransfer_receive_recovery_operation_incomplete', 'filetransfer_receive_recovery_completed_unproven_successor_missing', 'runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'filetransfer_bridge_recovery_execution_payload_hold_missing', 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing', 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing', 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing', 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved', 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'fallback_tail_yield_authority_invalid', 'filetransfer_route_transition_incomplete', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
         'route_runtime'
     }
     elseif ($invariantMayOwnAcceptanceFailure) {
@@ -38411,6 +38986,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedUnresolvedCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_verdict={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedVerdict),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingRawCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingDistinctCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingRecoveredCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingUnresolvedCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_verdict={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryVerdict),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount),
