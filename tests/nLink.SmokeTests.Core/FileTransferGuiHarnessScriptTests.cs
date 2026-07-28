@@ -2094,6 +2094,120 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task CompletedProvenSuccessorAndAtomicStallRequireExactScope()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = Regex.Replace(guiText, @"(?m)^ {4}", string.Empty);
+        var fieldValueBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Test-TunaGuiLogLineHasEvent");
+        var hasEventBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineHasEvent",
+            "Test-TunaGuiLogLineFieldMatch");
+        var fieldMatchBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineFieldMatch",
+            "Test-TunaGuiRuntimeUnlockFileTransferOwnerRejectionUnresolved");
+        var completedProvenBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiReceiveRecoveryCompletedProvenSuccessorMissing",
+            "Test-TunaGuiReceiveRecoveryCompletedUnprovenSuccessorMissing");
+        var settlementBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiRegularV4FrontierRepairSettlementClosed",
+            "Test-TunaGuiRegularV4FrontierRepairStallUnresolved");
+        var stallBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiRegularV4FrontierRepairStallUnresolved",
+            "Test-TunaGuiRegularV4PredecessorSettlementClosedSuccessor");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
+            function Test-TunaGuiLogLineHasEvent { {{hasEventBody}} }
+            function Test-TunaGuiLogLineFieldMatch { {{fieldMatchBody}} }
+            function Test-TunaGuiReceiveRecoveryCompletedProvenSuccessorMissing {
+                {{completedProvenBody}}
+            }
+            function Test-TunaGuiRegularV4FrontierRepairSettlementClosed {
+                {{settlementBody}}
+            }
+            function Test-TunaGuiRegularV4FrontierRepairStallUnresolved {
+                {{stallBody}}
+            }
+
+            $writer = 'writer-proven'
+            $scope = 'session_id=session-a; transfer_id=transfer-a; direction=outbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; route_publication_generation=1; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; data_session_generation=1; recovery_liveness_lease_authority_id=lease-a; recovery_liveness_lease_generation=1'
+            $operation = 'receive_recovery_operation_generation=1; receive_recovery_operation_authority_id=operation-a'
+            $rejection = 'session_id=session-a; transfer_id=transfer-a; direction=outbound; current_route=regular_nkn_v4_fast; current_protocol_version=4; current_live_route_epoch=0; current_runtime_generation=1; current_terminal_generation=0; attempted_leg_generation=1; attempted_transport_epoch=0; attempted_bridge_recovery_generation=0'
+            $proven = @(
+                "event=filetransfer_receive_recovery_operation_issued; $scope; $operation; execution_state=Issued; log_writer_id=$writer",
+                "event=filetransfer_receive_recovery_operation_execution_start_decided; $scope; $operation; execution_state=Running; execution_start_status=Started; log_writer_id=$writer",
+                "event=filetransfer_receive_recovery_operation_execution_receipt_applied; $scope; $operation; execution_state=Completed; execution_outcome=Completed; closure_generation=1; closure_state=Retained; log_writer_id=$writer",
+                "event=filetransfer_receive_recovery_operation_proof_observed; $scope; $operation; execution_state=Completed; execution_outcome=Completed; proof_identity=proof-a; closure_generation=1; closure_state=Adopted; log_writer_id=$writer",
+                "event=filetransfer_receive_recovery_operation_closure_adopted; $scope; $operation; execution_state=Completed; execution_outcome=Completed; proof_identity=proof-a; closure_generation=1; closure_state=Adopted; log_writer_id=$writer",
+                "event=nkn_bridge_recovery_evaluation_requested; observation_kind=ping_timeout; observation_generation=2; transfer_id=transfer-a; log_writer_id=$writer",
+                "event=filetransfer_recovery_authority_rejected; $rejection; action_kind=ReceiveRecoveryOperation; attempted_action=ping_timeout; rejection_reason=filetransfer_receive_recovery_operation_conflict; log_writer_id=$writer",
+                "event=filetransfer_receive_recovery_evaluation_requested; session_id=session-a; transfer_id=transfer-a; direction=outbound; observation_kind=ping_timeout; observation_generation=2; receive_recovery_operation_issued=0; log_writer_id=$writer"
+            )
+            if (-not (Test-TunaGuiReceiveRecoveryCompletedProvenSuccessorMissing -Lines $proven)) {
+                throw 'exact completed-proven successor gap was not classified'
+            }
+            $reserved = @(
+                $proven[0..4]
+                "event=filetransfer_receive_recovery_operation_closure_reserved; $scope; $operation; closure_generation=1; closure_state=Reserved; retry_authority_id=retry-a; retry_install_generation=1; log_writer_id=$writer"
+                $proven[5..7]
+            )
+            if (Test-TunaGuiReceiveRecoveryCompletedProvenSuccessorMissing -Lines $reserved) {
+                throw 'reserved adopted closure was classified as supersedable'
+            }
+
+            $stallScope = 'session_id=session-stall-a; transfer_id=transfer-stall-a; direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn'
+            $stallOperation = 'receive_recovery_operation_generation=1; receive_recovery_operation_authority_id=operation-stall; recovery_liveness_lease_authority_id=lease-stall; recovery_liveness_lease_generation=1'
+            $stallLines = @(
+                "event=filetransfer_regular_v4_frontier_repair_stalled; $stallScope; repair_request_key=10:2:10:2",
+                "event=filetransfer_regular_v4_frontier_repair_pressure_binding_committed; $stallScope; authority_id=repair-a; install_generation=1; repair_request_key=10:2:10:2",
+                "event=filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_prepared; $stallScope; authority_id=repair-a; install_generation=1; repair_request_key=10:2:10:2; source_bridge_decision_generation=1",
+                "event=filetransfer_regular_v4_frontier_repair_settlement_accepted; $stallScope; authority_id=repair-a; successor_install_generation=1; repair_request_key=10:2:10:2; outcome=StaleRejected",
+                "event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided; $stallScope; authority_id=[redacted]; install_generation=1; repair_request_key=10:2:10:2; settlement_outcome=StaleRejected; apply_status=Applied; current_authority_cleared=1; retained_predecessor_cleared=0",
+                "event=filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_committed; $stallScope; authority_id=repair-a; install_generation=1; repair_request_key=10:2:10:2; settlement_outcome=StaleRejected; apply_status=Applied; current_authority_cleared=1; retained_predecessor_cleared=0; source_bridge_decision_generation=1; recovery_operation_generation=1; $stallOperation",
+                "event=filetransfer_receive_recovery_operation_issued; $stallScope; $stallOperation; execution_state=Issued",
+                "event=filetransfer_regular_v4_frontier_repair_contract_settled; authority_id=repair-a; repair_request_key=10:2:10:2; settlement_outcome=StaleRejected",
+                "event=filetransfer_receive_recovery_operation_execution_receipt_applied; $stallScope; $stallOperation; execution_state=Completed; execution_outcome=Completed; closure_generation=1; closure_state=Retained",
+                "event=filetransfer_receive_recovery_operation_proof_observed; $stallScope; $stallOperation; execution_state=Completed; execution_outcome=Completed; proof_identity=proof-stall; closure_generation=1; closure_state=Adopted",
+                "event=filetransfer_receive_recovery_operation_closure_adopted; $stallScope; $stallOperation; execution_state=Completed; execution_outcome=Completed; proof_identity=proof-stall; closure_generation=1; closure_state=Adopted"
+            )
+            if (Test-TunaGuiRegularV4FrontierRepairStallUnresolved -Lines $stallLines) {
+                throw 'exact atomic StaleRejected recovery did not resolve its stall'
+            }
+            $crossScope = @(
+                $stallLines
+                "event=filetransfer_regular_v4_frontier_repair_stalled; session_id=session-stall-b; transfer_id=transfer-stall-b; direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; repair_request_key=10:2:10:2"
+            )
+            if (-not (Test-TunaGuiRegularV4FrontierRepairStallUnresolved -Lines $crossScope)) {
+                throw 'cross-scope atomic recovery masked an unrelated stall'
+            }
+
+            Write-Output 'gui-completed-proven-and-atomic-stall-correlation-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Completed-proven/atomic-stall GUI classification test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "gui-completed-proven-and-atomic-stall-correlation-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "completed_proven_unreserved_receive_recovery_operation_blocked_fresh_recovery",
+            guiText,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task FallbackAuthorityMatcher_CurrentSchemaRequiresCompleteIdentityAndIsolatesLegacy()
     {
         var matcherPath = Path.Combine(FindRepoRoot(), "tools", "FileTransferAuthorityMatching.ps1")

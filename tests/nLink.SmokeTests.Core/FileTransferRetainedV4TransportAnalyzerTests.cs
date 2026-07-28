@@ -503,6 +503,83 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    [Trait("RetainedV4Suite", "SettlementDisposition")]
+    public async Task AnalyzeRetained_AtomicStaleRejectedRecoveryResolvesStallOnlyForExactAdoptedOperation(
+        bool compact,
+        bool mutateProofAuthority)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_atomic_stale_rejected_stall";
+        const string authorityId = "fta2-repair_replay-atomic-stall";
+        const string repairKey = "453:12:453:12";
+        const string operationAuthority = "fta2-filetransfer_receive_recovery_operation-atomic-stall";
+        const string leaseAuthority = "fta2-recovery_liveness_lease-atomic-stall";
+        const string scope =
+            $"session_id=sess_a; transfer_id={transferId}; direction=inbound; " +
+            "route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; " +
+            "runtime_generation=1; terminal_generation=0; leg_generation=1; " +
+            "transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=0; " +
+            "route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn";
+        const string handoffScope =
+            $"session_id=sess_a; transfer_id={transferId}; direction=inbound; " +
+            $"repair_request_key={repairKey}; route=regular_nkn_v4_fast; protocol_version=4; " +
+            "live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; " +
+            "transport_epoch=0; bridge_recovery_generation=0; source_bridge_decision_generation=0; " +
+            "route_publication_generation=1";
+        const string operationScope =
+            $"session_id=sess_a; transfer_id={transferId}; direction=inbound; " +
+            "route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; " +
+            "route_publication_generation=1; runtime_generation=1; terminal_generation=0; " +
+            "leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; " +
+            "bridge_decision_generation=1; data_session_identity=sess_a:1; data_session_generation=1; " +
+            $"recovery_liveness_lease_authority_id={leaseAuthority}; recovery_liveness_lease_generation=1";
+        var proofAuthority = mutateProofAuthority
+            ? "fta2-filetransfer_receive_recovery_operation-other"
+            : operationAuthority;
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; {scope}; runtime_profile=regular_nkn_v4_fast; frame_family=v4"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_stalled; {scope}; repair_request_key={repairKey}; frontier_chunk_index=453; durable_received_highest_chunk_index=452; requested_chunk_count=12; reason=repeated_frontier_repair_without_progress"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_binding_committed; {scope}; authority_id={authorityId}; predecessor_authority_id=(none); repair_request_key={repairKey}; frontier_chunk_index=453; pending_repair_count=12; install_generation=11; binding_state=Installed"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_prepared; authority_id={authorityId}; {handoffScope}; install_generation=11; settlement_outcome=StaleRejected; recovery_operation_generation=1; recovery_liveness_lease_authority_id={leaseAuthority}; recovery_liveness_lease_generation=1"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_settlement_accepted; {scope}; authority_id={authorityId}; successor_authority_id=(none); successor_install_generation=11; repair_request_key={repairKey}; frontier_chunk_index=453; requested_chunk_count=12; decision_generation=11; outcome=StaleRejected; settlement_reason=bridge_receive_stall_recovery_pressure_handoff"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided; session_id=sess_a; transfer_id={transferId}; direction=inbound; authority_id=[redacted]; install_generation=11; settlement_outcome=StaleRejected; apply_status=Applied; current_authority_cleared=1; retained_predecessor_cleared=0"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_binding_retired; {scope}; authority_id={authorityId}; predecessor_authority_id=(none); repair_request_key={repairKey}; frontier_chunk_index=453; pending_repair_count=12; install_generation=11; binding_state=Installed; install_boundary=settlement"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_committed; authority_id={authorityId}; {handoffScope}; install_generation=11; settlement_outcome=StaleRejected; apply_status=Applied; current_authority_cleared=1; retained_predecessor_cleared=0; recovery_operation_generation=1; recovery_liveness_lease_authority_id={leaseAuthority}; recovery_liveness_lease_generation=1"),
+            LogLine($"event=filetransfer_receive_recovery_operation_issued; receive_recovery_operation_authority_id={operationAuthority}; receive_recovery_operation_generation=1; {operationScope}"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_contract_settled; authority_id={authorityId}; successor_authority_id=(none); repair_request_key={repairKey}; settlement_outcome=StaleRejected; dispatch_observed=0"),
+            LogLine($"event=filetransfer_receive_recovery_operation_execution_receipt_applied; receive_recovery_operation_authority_id={operationAuthority}; receive_recovery_operation_generation=1; {operationScope}; execution_outcome=Completed; closure_generation=1; closure_state=Retained"),
+            LogLine($"event=filetransfer_receive_recovery_operation_proof_observed; receive_recovery_operation_authority_id={proofAuthority}; receive_recovery_operation_generation=1; {operationScope}; execution_outcome=Completed; proof_identity=file_transfer_data_frame:bulk:1; closure_generation=1; closure_state=Adopted"),
+            LogLine($"event=filetransfer_receive_recovery_operation_closure_adopted; receive_recovery_operation_authority_id={proofAuthority}; receive_recovery_operation_generation=1; {operationScope}; execution_outcome=Completed; proof_identity=file_transfer_data_frame:bulk:1; closure_generation=1; closure_state=Adopted")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_stalled_raw_count"]);
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_stalled_distinct_count"]);
+        Assert.Equal(mutateProofAuthority ? "0" : "1", verdict["regular_v4_frontier_repair_stalled_recovered_count"]);
+        Assert.Equal(mutateProofAuthority ? "1" : "0", verdict["regular_v4_frontier_repair_stalled_unresolved_count"]);
+        Assert.Equal(mutateProofAuthority ? "fail" : "pass", verdict["regular_v4_frontier_repair_stalled_verdict"]);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     [Trait("Category", "Smoke")]

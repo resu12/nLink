@@ -1259,6 +1259,16 @@ function New-RouteAcceptanceRunResult {
         fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount = 0
         fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount = 0
         fileTransferReceiveRecoveryCompletedUnprovenSuccessorVerdict = 'none'
+        fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRawCount = 0
+        fileTransferReceiveRecoveryCompletedProvenSuccessorMissingDistinctCount = 0
+        fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRecoveredCount = 0
+        fileTransferReceiveRecoveryCompletedProvenSuccessorMissingUnresolvedCount = 0
+        fileTransferReceiveRecoveryCompletedProvenSuccessorVerdict = 'none'
+        regularV4FrontierRepairStalledRawCount = 0
+        regularV4FrontierRepairStalledDistinctCount = 0
+        regularV4FrontierRepairStalledRecoveredCount = 0
+        regularV4FrontierRepairStalledUnresolvedCount = 0
+        regularV4FrontierRepairStalledVerdict = 'none'
         runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRawCount = 0
         runtimeUnlockInitialOfferRetryLifecycleHandoffMissingDistinctCount = 0
         runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount = 0
@@ -2463,6 +2473,16 @@ function Assert-Phase4RouteSummary {
     $Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'filetransfer_receive_recovery_completed_unproven_successor_missing_recovered_count' -DefaultValue '0')
     $Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'filetransfer_receive_recovery_completed_unproven_successor_missing_unresolved_count' -DefaultValue '0')
     $Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'filetransfer_receive_recovery_completed_unproven_successor_verdict' -DefaultValue 'none'
+    $Result.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'filetransfer_receive_recovery_completed_proven_successor_missing_raw_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'filetransfer_receive_recovery_completed_proven_successor_missing_distinct_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'filetransfer_receive_recovery_completed_proven_successor_missing_recovered_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'filetransfer_receive_recovery_completed_proven_successor_missing_unresolved_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryCompletedProvenSuccessorVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'filetransfer_receive_recovery_completed_proven_successor_verdict' -DefaultValue 'none'
+    $Result.regularV4FrontierRepairStalledRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'regular_v4_frontier_repair_stalled_raw_count' -DefaultValue '0')
+    $Result.regularV4FrontierRepairStalledDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'regular_v4_frontier_repair_stalled_distinct_count' -DefaultValue '0')
+    $Result.regularV4FrontierRepairStalledRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'regular_v4_frontier_repair_stalled_recovered_count' -DefaultValue '0')
+    $Result.regularV4FrontierRepairStalledUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'regular_v4_frontier_repair_stalled_unresolved_count' -DefaultValue '0')
+    $Result.regularV4FrontierRepairStalledVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'regular_v4_frontier_repair_stalled_verdict' -DefaultValue 'none'
     $Result.bridgeLivenessStaleDeferralCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'bridge_liveness_stale_deferral_count' -DefaultValue '0')
     $Result.bridgeLivenessTimeoutDuringValidRecoveryCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'session_liveness_timeout_during_valid_recovery_count' -DefaultValue '0')
 
@@ -2681,6 +2701,16 @@ function Assert-Phase4OperatorVerdict {
     $Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_completed_unproven_successor_missing_recovered_count' -DefaultValue ([string]$Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount))
     $Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_completed_unproven_successor_missing_unresolved_count' -DefaultValue ([string]$Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount))
     $Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_completed_unproven_successor_verdict' -DefaultValue ([string]$Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorVerdict)
+    $Result.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_completed_proven_successor_missing_raw_count' -DefaultValue ([string]$Result.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRawCount))
+    $Result.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_completed_proven_successor_missing_distinct_count' -DefaultValue ([string]$Result.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingDistinctCount))
+    $Result.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_completed_proven_successor_missing_recovered_count' -DefaultValue ([string]$Result.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRecoveredCount))
+    $Result.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_completed_proven_successor_missing_unresolved_count' -DefaultValue ([string]$Result.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingUnresolvedCount))
+    $Result.fileTransferReceiveRecoveryCompletedProvenSuccessorVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_completed_proven_successor_verdict' -DefaultValue ([string]$Result.fileTransferReceiveRecoveryCompletedProvenSuccessorVerdict)
+    $Result.regularV4FrontierRepairStalledRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_stalled_raw_count' -DefaultValue ([string]$Result.regularV4FrontierRepairStalledRawCount))
+    $Result.regularV4FrontierRepairStalledDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_stalled_distinct_count' -DefaultValue ([string]$Result.regularV4FrontierRepairStalledDistinctCount))
+    $Result.regularV4FrontierRepairStalledRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_stalled_recovered_count' -DefaultValue ([string]$Result.regularV4FrontierRepairStalledRecoveredCount))
+    $Result.regularV4FrontierRepairStalledUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_stalled_unresolved_count' -DefaultValue ([string]$Result.regularV4FrontierRepairStalledUnresolvedCount))
+    $Result.regularV4FrontierRepairStalledVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_stalled_verdict' -DefaultValue ([string]$Result.regularV4FrontierRepairStalledVerdict)
     $Result.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_raw_count' -DefaultValue '0')
     $Result.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_distinct_count' -DefaultValue '0')
     $Result.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_recovered_count' -DefaultValue '0')
@@ -6782,6 +6812,16 @@ function Write-Phase5PreflightFailureSummaryFiles {
         fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount = 0
         fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount = 0
         fileTransferReceiveRecoveryCompletedUnprovenSuccessorVerdict = 'none'
+        fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRawCount = 0
+        fileTransferReceiveRecoveryCompletedProvenSuccessorMissingDistinctCount = 0
+        fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRecoveredCount = 0
+        fileTransferReceiveRecoveryCompletedProvenSuccessorMissingUnresolvedCount = 0
+        fileTransferReceiveRecoveryCompletedProvenSuccessorVerdict = 'none'
+        regularV4FrontierRepairStalledRawCount = 0
+        regularV4FrontierRepairStalledDistinctCount = 0
+        regularV4FrontierRepairStalledRecoveredCount = 0
+        regularV4FrontierRepairStalledUnresolvedCount = 0
+        regularV4FrontierRepairStalledVerdict = 'none'
         runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRawCount = 0
         runtimeUnlockInitialOfferRetryLifecycleHandoffMissingDistinctCount = 0
         runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount = 0
@@ -8339,6 +8379,16 @@ function New-RouteAcceptanceSummaryRunDto {
         fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount = [int]$Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount
         fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount = [int]$Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount
         fileTransferReceiveRecoveryCompletedUnprovenSuccessorVerdict = [string]$Result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorVerdict
+        fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRawCount = [int]$Result.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRawCount
+        fileTransferReceiveRecoveryCompletedProvenSuccessorMissingDistinctCount = [int]$Result.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingDistinctCount
+        fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRecoveredCount = [int]$Result.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRecoveredCount
+        fileTransferReceiveRecoveryCompletedProvenSuccessorMissingUnresolvedCount = [int]$Result.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingUnresolvedCount
+        fileTransferReceiveRecoveryCompletedProvenSuccessorVerdict = [string]$Result.fileTransferReceiveRecoveryCompletedProvenSuccessorVerdict
+        regularV4FrontierRepairStalledRawCount = [int]$Result.regularV4FrontierRepairStalledRawCount
+        regularV4FrontierRepairStalledDistinctCount = [int]$Result.regularV4FrontierRepairStalledDistinctCount
+        regularV4FrontierRepairStalledRecoveredCount = [int]$Result.regularV4FrontierRepairStalledRecoveredCount
+        regularV4FrontierRepairStalledUnresolvedCount = [int]$Result.regularV4FrontierRepairStalledUnresolvedCount
+        regularV4FrontierRepairStalledVerdict = [string]$Result.regularV4FrontierRepairStalledVerdict
         runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRawCount = [int]$Result.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRawCount
         runtimeUnlockInitialOfferRetryLifecycleHandoffMissingDistinctCount = [int]$Result.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingDistinctCount
         runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount = [int]$Result.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount
@@ -8684,6 +8734,14 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingDistinctCount = 0
     $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount = 0
     $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount = 0
+    $fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRawCount = 0
+    $fileTransferReceiveRecoveryCompletedProvenSuccessorMissingDistinctCount = 0
+    $fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRecoveredCount = 0
+    $fileTransferReceiveRecoveryCompletedProvenSuccessorMissingUnresolvedCount = 0
+    $regularV4FrontierRepairStalledRawCount = 0
+    $regularV4FrontierRepairStalledDistinctCount = 0
+    $regularV4FrontierRepairStalledRecoveredCount = 0
+    $regularV4FrontierRepairStalledUnresolvedCount = 0
     $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRawCount = 0
     $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingDistinctCount = 0
     $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount = 0
@@ -8846,6 +8904,14 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingDistinctCount += [int]$runDto.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingDistinctCount
         $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount += [int]$runDto.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount
         $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount += [int]$runDto.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount
+        $fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRawCount += [int]$runDto.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRawCount
+        $fileTransferReceiveRecoveryCompletedProvenSuccessorMissingDistinctCount += [int]$runDto.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingDistinctCount
+        $fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRecoveredCount += [int]$runDto.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRecoveredCount
+        $fileTransferReceiveRecoveryCompletedProvenSuccessorMissingUnresolvedCount += [int]$runDto.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingUnresolvedCount
+        $regularV4FrontierRepairStalledRawCount += [int]$runDto.regularV4FrontierRepairStalledRawCount
+        $regularV4FrontierRepairStalledDistinctCount += [int]$runDto.regularV4FrontierRepairStalledDistinctCount
+        $regularV4FrontierRepairStalledRecoveredCount += [int]$runDto.regularV4FrontierRepairStalledRecoveredCount
+        $regularV4FrontierRepairStalledUnresolvedCount += [int]$runDto.regularV4FrontierRepairStalledUnresolvedCount
         $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRawCount += [int]$runDto.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRawCount
         $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingDistinctCount += [int]$runDto.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingDistinctCount
         $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount += [int]$runDto.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount
@@ -9446,6 +9512,16 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("filetransfer_receive_recovery_completed_unproven_successor_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount),
         ("filetransfer_receive_recovery_completed_unproven_successor_missing_unresolved_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount),
         ("filetransfer_receive_recovery_completed_unproven_successor_verdict={0}" -f ($(if ($fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount -gt 0) { 'fail' } elseif ($fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingDistinctCount -gt 0) { 'pass' } else { 'none' }))),
+        ("filetransfer_receive_recovery_completed_proven_successor_missing_raw_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRawCount),
+        ("filetransfer_receive_recovery_completed_proven_successor_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorMissingDistinctCount),
+        ("filetransfer_receive_recovery_completed_proven_successor_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRecoveredCount),
+        ("filetransfer_receive_recovery_completed_proven_successor_missing_unresolved_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorMissingUnresolvedCount),
+        ("filetransfer_receive_recovery_completed_proven_successor_verdict={0}" -f ($(if ($fileTransferReceiveRecoveryCompletedProvenSuccessorMissingUnresolvedCount -gt 0) { 'fail' } elseif ($fileTransferReceiveRecoveryCompletedProvenSuccessorMissingDistinctCount -gt 0) { 'pass' } else { 'none' }))),
+        ("regular_v4_frontier_repair_stalled_raw_count={0}" -f $regularV4FrontierRepairStalledRawCount),
+        ("regular_v4_frontier_repair_stalled_distinct_count={0}" -f $regularV4FrontierRepairStalledDistinctCount),
+        ("regular_v4_frontier_repair_stalled_recovered_count={0}" -f $regularV4FrontierRepairStalledRecoveredCount),
+        ("regular_v4_frontier_repair_stalled_unresolved_count={0}" -f $regularV4FrontierRepairStalledUnresolvedCount),
+        ("regular_v4_frontier_repair_stalled_verdict={0}" -f ($(if ($regularV4FrontierRepairStalledUnresolvedCount -gt 0) { 'fail' } elseif ($regularV4FrontierRepairStalledDistinctCount -gt 0) { 'pass' } else { 'none' }))),
         ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_raw_count={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRawCount),
         ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_distinct_count={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingDistinctCount),
         ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_recovered_count={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount),
@@ -9518,6 +9594,16 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.filetransfer_receive_recovery_completed_unproven_successor_missing_recovered_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingRecoveredCount)
         $textLines += ("{0}.filetransfer_receive_recovery_completed_unproven_successor_missing_unresolved_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingUnresolvedCount)
         $textLines += ("{0}.filetransfer_receive_recovery_completed_unproven_successor_verdict={1}" -f $prefix, $result.fileTransferReceiveRecoveryCompletedUnprovenSuccessorVerdict)
+        $textLines += ("{0}.filetransfer_receive_recovery_completed_proven_successor_missing_raw_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRawCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_completed_proven_successor_missing_distinct_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingDistinctCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_completed_proven_successor_missing_recovered_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRecoveredCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_completed_proven_successor_missing_unresolved_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingUnresolvedCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_completed_proven_successor_verdict={1}" -f $prefix, $result.fileTransferReceiveRecoveryCompletedProvenSuccessorVerdict)
+        $textLines += ("{0}.regular_v4_frontier_repair_stalled_raw_count={1}" -f $prefix, $result.regularV4FrontierRepairStalledRawCount)
+        $textLines += ("{0}.regular_v4_frontier_repair_stalled_distinct_count={1}" -f $prefix, $result.regularV4FrontierRepairStalledDistinctCount)
+        $textLines += ("{0}.regular_v4_frontier_repair_stalled_recovered_count={1}" -f $prefix, $result.regularV4FrontierRepairStalledRecoveredCount)
+        $textLines += ("{0}.regular_v4_frontier_repair_stalled_unresolved_count={1}" -f $prefix, $result.regularV4FrontierRepairStalledUnresolvedCount)
+        $textLines += ("{0}.regular_v4_frontier_repair_stalled_verdict={1}" -f $prefix, $result.regularV4FrontierRepairStalledVerdict)
         $textLines += ("{0}.runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_raw_count={1}" -f $prefix, $result.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRawCount)
         $textLines += ("{0}.runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_distinct_count={1}" -f $prefix, $result.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingDistinctCount)
         $textLines += ("{0}.runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount)
@@ -10008,6 +10094,32 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
             'fail'
         }
         elseif ($fileTransferReceiveRecoveryCompletedUnprovenSuccessorMissingDistinctCount -gt 0) {
+            'pass'
+        }
+        else {
+            'none'
+        }
+        fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRawCount = $fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRawCount
+        fileTransferReceiveRecoveryCompletedProvenSuccessorMissingDistinctCount = $fileTransferReceiveRecoveryCompletedProvenSuccessorMissingDistinctCount
+        fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRecoveredCount = $fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRecoveredCount
+        fileTransferReceiveRecoveryCompletedProvenSuccessorMissingUnresolvedCount = $fileTransferReceiveRecoveryCompletedProvenSuccessorMissingUnresolvedCount
+        fileTransferReceiveRecoveryCompletedProvenSuccessorVerdict = if ($fileTransferReceiveRecoveryCompletedProvenSuccessorMissingUnresolvedCount -gt 0) {
+            'fail'
+        }
+        elseif ($fileTransferReceiveRecoveryCompletedProvenSuccessorMissingDistinctCount -gt 0) {
+            'pass'
+        }
+        else {
+            'none'
+        }
+        regularV4FrontierRepairStalledRawCount = $regularV4FrontierRepairStalledRawCount
+        regularV4FrontierRepairStalledDistinctCount = $regularV4FrontierRepairStalledDistinctCount
+        regularV4FrontierRepairStalledRecoveredCount = $regularV4FrontierRepairStalledRecoveredCount
+        regularV4FrontierRepairStalledUnresolvedCount = $regularV4FrontierRepairStalledUnresolvedCount
+        regularV4FrontierRepairStalledVerdict = if ($regularV4FrontierRepairStalledUnresolvedCount -gt 0) {
+            'fail'
+        }
+        elseif ($regularV4FrontierRepairStalledDistinctCount -gt 0) {
             'pass'
         }
         else {

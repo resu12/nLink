@@ -74,6 +74,55 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
     }
 
     [Fact]
+    public async Task RunFileTransferRouteAcceptance_CompletedProvenSuccessorCountersReachScenarioAndRootSummaries()
+    {
+        var repoRoot = FindRepoRoot();
+        var script = await File.ReadAllTextAsync(
+            Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"));
+
+        Assert.Contains(
+            "$Result.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRawCount = ConvertTo-RouteAcceptanceInt",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRawCount = [int]$Result.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRawCount",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRawCount += [int]$runDto.fileTransferReceiveRecoveryCompletedProvenSuccessorMissingRawCount",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "{0}.filetransfer_receive_recovery_completed_proven_successor_missing_unresolved_count={1}",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "fileTransferReceiveRecoveryCompletedProvenSuccessorVerdict = if ($fileTransferReceiveRecoveryCompletedProvenSuccessorMissingUnresolvedCount -gt 0)",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$Result.regularV4FrontierRepairStalledRawCount = ConvertTo-RouteAcceptanceInt",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "regularV4FrontierRepairStalledRawCount = [int]$Result.regularV4FrontierRepairStalledRawCount",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$regularV4FrontierRepairStalledRawCount += [int]$runDto.regularV4FrontierRepairStalledRawCount",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "{0}.regular_v4_frontier_repair_stalled_unresolved_count={1}",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "regularV4FrontierRepairStalledVerdict = if ($regularV4FrontierRepairStalledUnresolvedCount -gt 0)",
+            script,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RunFileTransferRouteAcceptance_ReceiveRecoveryOperationCountersReachScenarioAndRootSummaries()
     {
         var repoRoot = FindRepoRoot();
@@ -163,9 +212,44 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                 summary["filetransfer_receive_recovery_completed_unproven_successor_verdict"]);
             Assert.Equal(
                 "0",
+                summary["filetransfer_receive_recovery_completed_proven_successor_missing_raw_count"]);
+            Assert.Equal(
+                "0",
+                summary["filetransfer_receive_recovery_completed_proven_successor_missing_distinct_count"]);
+            Assert.Equal(
+                "0",
+                summary["filetransfer_receive_recovery_completed_proven_successor_missing_recovered_count"]);
+            Assert.Equal(
+                "0",
+                summary["filetransfer_receive_recovery_completed_proven_successor_missing_unresolved_count"]);
+            Assert.Equal(
+                "none",
+                summary["filetransfer_receive_recovery_completed_proven_successor_verdict"]);
+            Assert.Equal(
+                "0",
                 summary[
                     "regular-v4-live-activation-off-on-off-256mb." +
                     "filetransfer_receive_recovery_completed_unproven_successor_missing_unresolved_count"]);
+            Assert.Equal(
+                "0",
+                summary[
+                    "regular-v4-live-activation-off-on-off-256mb." +
+                    "filetransfer_receive_recovery_completed_proven_successor_missing_unresolved_count"]);
+            Assert.Equal("0", summary["regular_v4_frontier_repair_stalled_raw_count"]);
+            Assert.Equal("0", summary["regular_v4_frontier_repair_stalled_distinct_count"]);
+            Assert.Equal("0", summary["regular_v4_frontier_repair_stalled_recovered_count"]);
+            Assert.Equal("0", summary["regular_v4_frontier_repair_stalled_unresolved_count"]);
+            Assert.Equal("none", summary["regular_v4_frontier_repair_stalled_verdict"]);
+            Assert.Equal(
+                "0",
+                summary[
+                    "regular-v4-live-activation-off-on-off-256mb." +
+                    "regular_v4_frontier_repair_stalled_unresolved_count"]);
+            Assert.Equal(
+                "none",
+                summary[
+                    "regular-v4-live-activation-off-on-off-256mb." +
+                    "regular_v4_frontier_repair_stalled_verdict"]);
             Assert.Equal("0", summary["regular_v4_frontier_repair_missing_range_not_preserved_raw_count"]);
             Assert.Equal("0", summary["regular_v4_frontier_repair_missing_range_not_preserved_distinct_count"]);
             Assert.Equal("0", summary["regular_v4_frontier_repair_missing_range_not_preserved_recovered_count"]);
