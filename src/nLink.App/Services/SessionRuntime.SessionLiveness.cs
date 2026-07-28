@@ -33,6 +33,7 @@ public sealed partial class SessionRuntime
     private int sessionLivenessConsecutiveSendFailures;
     private int sessionLivenessFileTransferRecoveryDeferralCount;
     private int sessionLivenessFileTransferFinalRecoveryDeferralCount;
+    private long sessionLivenessFileTransferRecoveryEvaluationGeneration;
     private DateTimeOffset sessionLivenessFileTransferFinalRecoveryDeferralUntilUtc;
     private long sessionLivenessRuntimeUnlockAnswerWaitDeferralContractGeneration;
     private long sessionLivenessRuntimeUnlockRouteCommitDeferralContractGeneration;
@@ -507,6 +508,8 @@ public sealed partial class SessionRuntime
         }
 
         int nextDeferralCount;
+        long healthEvaluationGeneration;
+        long healthEvaluationObservedUtcMs;
         lock (sessionLivenessGate)
         {
             if (generation != sessionLivenessGeneration ||
@@ -520,8 +523,25 @@ public sealed partial class SessionRuntime
             }
 
             nextDeferralCount = sessionLivenessFileTransferRecoveryDeferralCount + 1;
+            if (sessionLivenessFileTransferRecoveryEvaluationGeneration ==
+                long.MaxValue)
+            {
+                return false;
+            }
+
+            healthEvaluationGeneration =
+                ++sessionLivenessFileTransferRecoveryEvaluationGeneration;
+            healthEvaluationObservedUtcMs =
+                nowProvider().ToUnixTimeMilliseconds();
         }
 
+        recoveryRequest =
+            AttachSessionLivenessReceiveRecoveryHealthEvaluation(
+                recoveryRequest,
+                healthEvaluationGeneration,
+                healthEvaluationObservedUtcMs,
+                nextDeferralCount,
+                silence);
         try
         {
             if (!fileTransferService.RequestFileTransferReceiveRecovery(recoveryRequest))
@@ -610,6 +630,8 @@ public sealed partial class SessionRuntime
             return false;
         }
 
+        long healthEvaluationGeneration;
+        long healthEvaluationObservedUtcMs;
         lock (sessionLivenessGate)
         {
             if (generation != sessionLivenessGeneration ||
@@ -622,9 +644,26 @@ public sealed partial class SessionRuntime
                 return false;
             }
 
+            if (sessionLivenessFileTransferRecoveryEvaluationGeneration ==
+                long.MaxValue)
+            {
+                return false;
+            }
+
             sessionLivenessFileTransferFinalRecoveryDeferralCount = 1;
+            healthEvaluationGeneration =
+                ++sessionLivenessFileTransferRecoveryEvaluationGeneration;
+            healthEvaluationObservedUtcMs =
+                nowProvider().ToUnixTimeMilliseconds();
         }
 
+        recoveryRequest =
+            AttachSessionLivenessReceiveRecoveryHealthEvaluation(
+                recoveryRequest,
+                healthEvaluationGeneration,
+                healthEvaluationObservedUtcMs,
+                consecutiveObservations: 1,
+                silence);
         try
         {
             if (!fileTransferService.RequestFileTransferReceiveRecovery(recoveryRequest))
@@ -1997,6 +2036,37 @@ public sealed partial class SessionRuntime
     private static bool RequiresPeerVisibleProgressForSessionLivenessRecovery(FileTransferTransferSnapshot transfer)
         => transfer.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
            string.Equals(transfer.RouteToken, FileTransferRouteResolver.RegularNknV4FastToken, StringComparison.Ordinal);
+
+    private static FileTransferReceiveRecoveryRequest
+        AttachSessionLivenessReceiveRecoveryHealthEvaluation(
+            FileTransferReceiveRecoveryRequest request,
+            long sourceGeneration,
+            long observedUtcMs,
+            int consecutiveObservations,
+            TimeSpan silence)
+    {
+        var silenceMs = Math.Max(0, (long)silence.TotalMilliseconds);
+        return request with
+        {
+            Observation = null,
+            HealthEvaluationRequest =
+                new FileTransferBridgeRecoveryEvaluationRequest(
+                    request.SessionId,
+                    request.TransferId,
+                    request.Direction,
+                    FileTransferBridgeRecoveryEvaluationKind
+                        .SessionLivenessTimeout,
+                    "session_liveness_timeout",
+                    request.Reason,
+                    sourceGeneration,
+                    observedUtcMs,
+                    consecutiveObservations,
+                    FramesSentSinceLast: 0,
+                    MessagesReceivedSinceLast: 0,
+                    ControlLastReceivedAgeMs: silenceMs,
+                    BulkLastReceivedAgeMs: silenceMs),
+        };
+    }
 
     private static bool IsRegularV4LocalOnlyStartupRecoveryCandidate(FileTransferTransferSnapshot transfer)
         => transfer.Direction == FileTransferDirection.Outbound &&

@@ -6853,22 +6853,38 @@ public sealed class FileTransferCoordinatorTests
                 .LastInitialActivationHold?.Status);
     }
 
-    [Fact]
-    public void RuntimeUnlockInitialActivationReceiveRecoveryHold_FirstEvaluationAfterExactSuccessorBindsCapturedPredecessorOnce()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RuntimeUnlockInitialActivationReceiveRecoveryHold_FirstEvaluationAfterExactSuccessorBindsCapturedPredecessorOnce(
+        bool receiveProofObserved)
     {
         var completed = CreateCompletedUnprovenReceiveRecoveryOperation(
             receiptObservedUtcMs: 100);
+        var predecessorState = completed.State;
+        if (receiveProofObserved)
+        {
+            predecessorState =
+                FileTransferCoordinator.ObserveReceiveRecoveryProof(
+                    predecessorState,
+                    new FileTransferReceiveRecoveryProof(
+                        completed.Operation.Authority,
+                        "initial-activation-captured-predecessor-proof",
+                        "receive_proof_observed",
+                        101)).State;
+        }
+
         var capturedRequest =
             CreateInitialActivationReceiveRecoveryHoldRequest(
-                completed.State,
+                predecessorState,
                 payerDecisionId: 202);
         var successor = FileTransferCoordinator.IssueReceiveRecoveryOperation(
-            completed.State,
+            predecessorState,
             CreateReceiveRecoveryHealthEvaluationObservation(
-                completed.State,
+                predecessorState,
                 observationGeneration: 2,
                 evidenceGeneration: 1,
-                observedUtcMs: 101),
+                observedUtcMs: receiveProofObserved ? 102 : 101),
             BridgeRecoveryKind.BridgeReceiveStallRecovery,
             completed.State.CurrentLeg?.CheckpointRequestId);
         Assert.True(successor.Accepted, successor.Reason);
@@ -6939,6 +6955,91 @@ public sealed class FileTransferCoordinatorTests
             RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Rejected,
             rejected.Decision.Status);
         Assert.Same(successor.State, rejected.State);
+    }
+
+    [Fact]
+    public void RuntimeUnlockInitialActivationReceiveRecoveryHold_FirstEvaluationAfterCompletedProvenSuccessorCarriesCapturedPredecessor()
+    {
+        var completed = CreateCompletedUnprovenReceiveRecoveryOperation(
+            receiptObservedUtcMs: 100);
+        var predecessorProof =
+            FileTransferCoordinator.ObserveReceiveRecoveryProof(
+                completed.State,
+                new FileTransferReceiveRecoveryProof(
+                    completed.Operation.Authority,
+                    "initial-activation-completed-predecessor-proof",
+                    "receive_proof_observed",
+                    101));
+        Assert.True(predecessorProof.Accepted, predecessorProof.Reason);
+        var capturedRequest =
+            CreateInitialActivationReceiveRecoveryHoldRequest(
+                predecessorProof.State,
+                payerDecisionId: 204);
+        var successor =
+            FileTransferCoordinator.IssueReceiveRecoveryOperation(
+                predecessorProof.State,
+                CreateReceiveRecoveryHealthEvaluationObservation(
+                    predecessorProof.State,
+                    observationGeneration: 2,
+                    evidenceGeneration: 1,
+                    observedUtcMs: 102),
+                BridgeRecoveryKind.BridgeReceiveStallRecovery,
+                completed.State.CurrentLeg?.CheckpointRequestId);
+        Assert.True(successor.Accepted, successor.Reason);
+        var successorOperation =
+            Assert.IsType<FileTransferReceiveRecoveryOperation>(
+                successor.State.PersistentState.FileTransferReceiveRecovery
+                    .CurrentOperation);
+        var successorReceipt =
+            new FileTransferBridgeRecoveryExecutionReceipt(
+                successorOperation.Authority.ExecutionCommand,
+                FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                "hard",
+                "bridge_recovery_completed");
+        var started =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(
+                successor.State,
+                new FileTransferBridgeRecoveryExecutionStartResult(
+                    successorOperation.Authority.ExecutionCommand,
+                    FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                    "bridge_recovery_execution_started",
+                    Task.FromResult(successorReceipt)),
+                observedUtcMs: 103);
+        Assert.True(started.Accepted, started.Reason);
+        var successorCompleted =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionReceipt(
+                started.State,
+                successorReceipt,
+                observedUtcMs: 104);
+        Assert.True(successorCompleted.Accepted, successorCompleted.Reason);
+        var successorProof =
+            FileTransferCoordinator.ObserveReceiveRecoveryProof(
+                successorCompleted.State,
+                new FileTransferReceiveRecoveryProof(
+                    successorOperation.Authority,
+                    "initial-activation-completed-successor-proof",
+                    "receive_proof_observed",
+                    105));
+        Assert.True(successorProof.Accepted, successorProof.Reason);
+
+        var released =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    successorProof.State,
+                    capturedRequest);
+
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Released,
+            released.Decision.Status);
+        Assert.Equal(
+            successorOperation.Authority,
+            released.Decision.ReceiveRecoveryOperation?.Authority);
+        Assert.Equal(
+            completed.Operation.Authority,
+            released.Decision.PreviousReceiveRecoveryAuthority);
+        Assert.Equal(
+            successorProof.State.PersistentState.FileTransferReceiveRecovery,
+            released.State.PersistentState.FileTransferReceiveRecovery);
     }
 
     [Fact]
@@ -7898,7 +7999,7 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
-    public void FileTransferReceiveRecoveryOperation_ReceiveProofBeforeHealthEvaluationBlocksSupersession()
+    public void FileTransferReceiveRecoveryOperation_CompletedProvenUnreservedClosure_NewerHealthEvidenceIssuesExactSuccessor()
     {
         var completed = CreateCompletedUnprovenReceiveRecoveryOperation(
             receiptObservedUtcMs: 100);
@@ -7920,6 +8021,61 @@ public sealed class FileTransferCoordinatorTests
             evidenceGeneration: 1,
             observedUtcMs: 102);
 
+        var successor = FileTransferCoordinator.IssueReceiveRecoveryOperation(
+            proof.State,
+            observation,
+            BridgeRecoveryKind.BridgeReceiveStallRecovery,
+            proof.State.CurrentLeg?.CheckpointRequestId);
+
+        Assert.True(successor.Accepted, successor.Reason);
+        Assert.Equal(
+            "filetransfer_receive_recovery_operation_successor_issued",
+            successor.Reason);
+        var current = Assert.IsType<FileTransferReceiveRecoveryOperation>(
+            successor.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentOperation);
+        Assert.Equal(
+            completed.Operation.Authority.AuthorityId,
+            current.Authority.PredecessorAuthorityId);
+        Assert.Equal(
+            completed.Operation.Authority.OperationGeneration,
+            current.Authority.PredecessorOperationGeneration);
+        var terminal = Assert.IsType<FileTransferReceiveRecoveryOperation>(
+            successor.State.PersistentState.FileTransferReceiveRecovery
+                .LastTerminalOperation);
+        Assert.Equal(
+            FileTransferReceiveRecoveryExecutionState.Invalidated,
+            terminal.ExecutionState);
+        Assert.Equal(
+            FileTransferReceiveRecoveryClosureState.None,
+            terminal.ClosureState);
+        Assert.Equal(
+            proof.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentOperation?.ReceiveProof,
+            terminal.ReceiveProof);
+        Assert.Equal(
+            "completed_proven_unreserved_receive_recovery_superseded_by_newer_health_observation",
+            terminal.InvalidationReason);
+    }
+
+    [Fact]
+    public void FileTransferReceiveRecoveryOperation_CompletedProvenClosure_HealthEvidenceMustPostdateProof()
+    {
+        var completed = CreateCompletedUnprovenReceiveRecoveryOperation(
+            receiptObservedUtcMs: 100);
+        var proof = FileTransferCoordinator.ObserveReceiveRecoveryProof(
+            completed.State,
+            new FileTransferReceiveRecoveryProof(
+                completed.Operation.Authority,
+                "receive-proof-before-successor",
+                "receive_proof_observed",
+                102));
+        var observation = CreateReceiveRecoveryHealthEvaluationObservation(
+            proof.State,
+            observationGeneration: 2,
+            evidenceGeneration: 1,
+            observedUtcMs: 102);
+
         var rejected = FileTransferCoordinator.IssueReceiveRecoveryOperation(
             proof.State,
             observation,
@@ -7935,6 +8091,90 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(
             proof.State.PersistentState.FileTransferReceiveRecovery,
             rejected.State.PersistentState.FileTransferReceiveRecovery);
+    }
+
+    [Fact]
+    public void FileTransferReceiveRecoveryOperation_CompletedProvenReservedClosure_DoesNotSupersede()
+    {
+        var completed = CreateCompletedUnprovenReceiveRecoveryOperation(
+            receiptObservedUtcMs: 100);
+        var proof = FileTransferCoordinator.ObserveReceiveRecoveryProof(
+            completed.State,
+            new FileTransferReceiveRecoveryProof(
+                completed.Operation.Authority,
+                "receive-proof-before-reservation",
+                "receive_proof_observed",
+                101));
+        var adopted = Assert.IsType<FileTransferReceiveRecoveryOperation>(
+            proof.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentOperation);
+        var reservedState = proof.State with
+        {
+            PersistentState = proof.State.PersistentState with
+            {
+                FileTransferReceiveRecovery =
+                    proof.State.PersistentState.FileTransferReceiveRecovery with
+                    {
+                        CurrentOperation = adopted with
+                        {
+                            ClosureState =
+                                FileTransferReceiveRecoveryClosureState.Reserved,
+                        },
+                    },
+            },
+        };
+        var observation = CreateReceiveRecoveryHealthEvaluationObservation(
+            reservedState,
+            observationGeneration: 2,
+            evidenceGeneration: 1,
+            observedUtcMs: 102);
+
+        var rejected = FileTransferCoordinator.IssueReceiveRecoveryOperation(
+            reservedState,
+            observation,
+            BridgeRecoveryKind.BridgeReceiveStallRecovery,
+            reservedState.CurrentLeg?.CheckpointRequestId);
+
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Rejected,
+            rejected.Status);
+        Assert.Equal(
+            "filetransfer_receive_recovery_operation_conflict",
+            rejected.Reason);
+        Assert.Equal(
+            reservedState.PersistentState.FileTransferReceiveRecovery,
+            rejected.State.PersistentState.FileTransferReceiveRecovery);
+    }
+
+    [Fact]
+    public void FileTransferReceiveRecoveryOperation_CompletedProvenClosure_SessionLivenessEvidenceIssuesSuccessor()
+    {
+        var completed = CreateCompletedUnprovenReceiveRecoveryOperation(
+            receiptObservedUtcMs: 100);
+        var proof = FileTransferCoordinator.ObserveReceiveRecoveryProof(
+            completed.State,
+            new FileTransferReceiveRecoveryProof(
+                completed.Operation.Authority,
+                "receive-proof-before-session-liveness",
+                "receive_proof_observed",
+                101));
+        var observation = CreateReceiveRecoveryHealthEvaluationObservation(
+            proof.State,
+            observationGeneration: 2,
+            evidenceGeneration: 1,
+            observedUtcMs: 102,
+            FileTransferBridgeRecoveryEvaluationKind.SessionLivenessTimeout);
+
+        var successor = FileTransferCoordinator.IssueReceiveRecoveryOperation(
+            proof.State,
+            observation,
+            BridgeRecoveryKind.BridgeReceiveStallRecovery,
+            proof.State.CurrentLeg?.CheckpointRequestId);
+
+        Assert.True(successor.Accepted, successor.Reason);
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Accepted,
+            successor.Status);
     }
 
     [Fact]
@@ -8015,23 +8255,41 @@ public sealed class FileTransferCoordinatorTests
             late.State.PersistentState.FileTransferReceiveRecovery);
     }
 
-    [Fact]
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     [Trait(
         "FileTransferCoordinatorSuite",
         "RegularV4FrontierRepairPressure")]
-    public void FileTransferReceiveRecoveryOperation_CompletedUnprovenSuccessor_PressureHandoffCommitsAtomically()
+    public void FileTransferReceiveRecoveryOperation_CompletedSuccessor_PressureHandoffCommitsAtomically(
+        bool receiveProofObserved)
     {
         var completed = CreateCompletedUnprovenReceiveRecoveryOperation(
             receiptObservedUtcMs: 100);
-        var predecessor = completed.Operation;
+        var predecessorState = completed.State;
+        if (receiveProofObserved)
+        {
+            predecessorState =
+                FileTransferCoordinator.ObserveReceiveRecoveryProof(
+                    predecessorState,
+                    new FileTransferReceiveRecoveryProof(
+                        completed.Operation.Authority,
+                        "pressure-successor-proof",
+                        "receive_proof_observed",
+                        101)).State;
+        }
+
+        var predecessor = Assert.IsType<FileTransferReceiveRecoveryOperation>(
+            predecessorState.PersistentState.FileTransferReceiveRecovery
+                .CurrentOperation);
         var (repairState, repairDecision) =
-            AuthorizeRegularV4FrontierRepair(completed.State);
+            AuthorizeRegularV4FrontierRepair(predecessorState);
         var staged =
             FileTransferCoordinator.StageRegularV4FrontierRepairPressureBinding(
                 repairState,
                 repairDecision,
                 RegularV4PressureAuthorityRequest(
-                    "regular-v4-pressure:completed-unproven-successor"),
+                    "regular-v4-pressure:completed-successor"),
                 "regular_v4_receiver_frontier_repair_due");
         var binding =
             Assert.IsType<RegularV4FrontierRepairPressureBinding>(
@@ -8060,7 +8318,7 @@ public sealed class FileTransferCoordinatorTests
             installed.State,
             observationGeneration: 2,
             evidenceGeneration: 1,
-            observedUtcMs: 101);
+            observedUtcMs: receiveProofObserved ? 102 : 101);
 
         var prepared =
             FileTransferCoordinator
@@ -8183,8 +8441,16 @@ public sealed class FileTransferCoordinatorTests
             predecessor.ExecutionReceipt,
             superseded.ExecutionReceipt);
         Assert.Equal(
+            predecessor.ReceiveProof,
+            superseded.ReceiveProof);
+        Assert.Equal(
             predecessor.RetiredRecoveryLivenessLease,
             superseded.RetiredRecoveryLivenessLease);
+        Assert.Equal(
+            receiveProofObserved
+                ? "completed_proven_unreserved_receive_recovery_superseded_by_newer_health_observation"
+                : "completed_unproven_receive_recovery_superseded_by_newer_health_observation",
+            superseded.InvalidationReason);
     }
 
     [Fact]
@@ -16573,10 +16839,16 @@ public sealed class FileTransferCoordinatorTests
             FileTransferCoordinatorState state,
             long observationGeneration,
             long evidenceGeneration,
-            long observedUtcMs)
+            long observedUtcMs,
+            FileTransferBridgeRecoveryEvaluationKind evaluationKind =
+                FileTransferBridgeRecoveryEvaluationKind.PingTimeout)
     {
-        const string observationKind = "bridge_ping_timeout";
-        const string reason = "bridge_ping_timeout";
+        var observationKind = evaluationKind ==
+                FileTransferBridgeRecoveryEvaluationKind
+                    .SessionLivenessTimeout
+            ? "session_liveness_timeout"
+            : "bridge_ping_timeout";
+        var reason = observationKind;
         return CreateReceiveRecoveryObservationForTest(
                 state,
                 reason,
@@ -16588,7 +16860,7 @@ public sealed class FileTransferCoordinatorTests
                 ObservedUtcMs = observedUtcMs,
                 HealthEvaluationEvidence =
                     new FileTransferReceiveRecoveryHealthEvaluationEvidence(
-                        FileTransferBridgeRecoveryEvaluationKind.PingTimeout,
+                        evaluationKind,
                         observationKind,
                         reason,
                         evidenceGeneration,

@@ -943,11 +943,14 @@ public sealed partial class SessionFileTransferV4SenderTests
     }
 
     [Theory]
-    [InlineData(FileTransferDirection.Inbound)]
-    [InlineData(FileTransferDirection.Outbound)]
+    [InlineData(FileTransferDirection.Inbound, false)]
+    [InlineData(FileTransferDirection.Outbound, false)]
+    [InlineData(FileTransferDirection.Inbound, true)]
+    [InlineData(FileTransferDirection.Outbound, true)]
     [Trait("FileTransferRuntimeSuite", "ReceiveRecoveryOperation")]
-    public void FileTransferReceiveRecoveryOperation_CompletedUnprovenHealthEvaluationDispatchesOneExactSuccessor(
-        FileTransferDirection direction)
+    public void FileTransferReceiveRecoveryOperation_CompletedHealthEvaluationDispatchesOneExactSuccessor(
+        FileTransferDirection direction,
+        bool receiveProofObserved)
     {
         var transferId =
             $"transfer_completed_unproven_successor_{direction.ToString().ToLowerInvariant()}";
@@ -1011,25 +1014,64 @@ public sealed partial class SessionFileTransferV4SenderTests
         var predecessor = Assert.IsType<FileTransferReceiveRecoveryOperation>(
             GetReceiveRecoverySubstate(context).CurrentOperation);
         Assert.Equal(predecessorReceipt, predecessor.ExecutionReceipt);
+        if (receiveProofObserved)
+        {
+            transport.RaiseReceiveRecoveryProof(
+                predecessorCommand,
+                "completed-proven-successor-proof");
+            Assert.True(
+                SpinWait.SpinUntil(
+                    () => GetReceiveRecoverySubstate(context)
+                        .CurrentOperation?.ClosureState ==
+                        FileTransferReceiveRecoveryClosureState.Adopted,
+                    TimeSpan.FromSeconds(2)));
+            predecessor = Assert.IsType<FileTransferReceiveRecoveryOperation>(
+                GetReceiveRecoverySubstate(context).CurrentOperation);
+        }
 
         var successorBeginCount = 0;
         transport.BridgeRecoveryExecutionBeginObserverForTests =
             _ => Interlocked.Increment(ref successorBeginCount);
         var observedUtcMs = Math.Max(
             DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-            predecessor.ExecutionReceiptObservedUtcMs + 1);
+            Math.Max(
+                predecessor.ExecutionReceiptObservedUtcMs,
+                predecessor.ReceiveProof?.ObservedUtcMs ?? 0) + 1);
         var evaluation = new FileTransferBridgeRecoveryEvaluationRequest(
             $"session_{transferId}",
             transferId,
             direction,
-            FileTransferBridgeRecoveryEvaluationKind.PingTimeout,
-            "bridge_ping_timeout",
-            "bridge_ping_timeout",
+            receiveProofObserved
+                ? FileTransferBridgeRecoveryEvaluationKind
+                    .SessionLivenessTimeout
+                : FileTransferBridgeRecoveryEvaluationKind.PingTimeout,
+            receiveProofObserved
+                ? "session_liveness_timeout"
+                : "bridge_ping_timeout",
+            receiveProofObserved
+                ? "session_liveness_timeout_pending"
+                : "bridge_ping_timeout",
             ObservationGeneration: 1,
             ObservedUtcMs: observedUtcMs,
             ConsecutiveObservations: 1);
 
-        transport.RaiseBridgeRecoveryEvaluation(evaluation);
+        if (receiveProofObserved)
+        {
+            Assert.True(
+                service.RequestFileTransferReceiveRecovery(
+                    new FileTransferReceiveRecoveryRequest(
+                        $"session_{transferId}",
+                        transferId,
+                        direction,
+                        "session_liveness_timeout_pending")
+                    {
+                        HealthEvaluationRequest = evaluation,
+                    }));
+        }
+        else
+        {
+            transport.RaiseBridgeRecoveryEvaluation(evaluation);
+        }
 
         Assert.True(
             SpinWait.SpinUntil(
@@ -1059,7 +1101,23 @@ public sealed partial class SessionFileTransferV4SenderTests
             superseded.ClosureState);
         Assert.Equal(predecessorReceipt, superseded.ExecutionReceipt);
 
-        transport.RaiseBridgeRecoveryEvaluation(evaluation);
+        if (receiveProofObserved)
+        {
+            Assert.False(
+                service.RequestFileTransferReceiveRecovery(
+                    new FileTransferReceiveRecoveryRequest(
+                        $"session_{transferId}",
+                        transferId,
+                        direction,
+                        "session_liveness_timeout_pending")
+                    {
+                        HealthEvaluationRequest = evaluation,
+                    }));
+        }
+        else
+        {
+            transport.RaiseBridgeRecoveryEvaluation(evaluation);
+        }
 
         Assert.False(
             SpinWait.SpinUntil(

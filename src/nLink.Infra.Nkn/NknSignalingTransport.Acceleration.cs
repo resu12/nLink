@@ -304,6 +304,28 @@ public sealed partial class NknSignalingTransport
         Invalidated = 4,
     }
 
+    private readonly record struct
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldPrevalidation(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest Request,
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision Decision,
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldAwaitResult Result)
+    {
+        public bool IsReleased =>
+            !Request.IsDefault &&
+            !Decision.IsDefault &&
+            Decision.Request == Request &&
+            Decision.Status ==
+                RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                    .Released &&
+            IsRuntimeUnlockInitialActivationReceiveRecoveryHoldReleased(Result);
+    }
+
+    private readonly record struct
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldEvaluation(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest Request,
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision Decision,
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldAwaitResult Result);
+
     private sealed record RuntimeUnlockOfferAuthorityBoundary(
         RuntimeUnlockOfferAuthorityMode Mode,
         string SessionId,
@@ -11613,6 +11635,8 @@ public sealed partial class NknSignalingTransport
             }
         }
 
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldPrevalidation
+            initialOfferPrevalidation = default;
         if (runtimeUnlockOfferAuthorityBoundary is
                 {
                     Mode: RuntimeUnlockOfferAuthorityMode.InitialActivation,
@@ -11628,13 +11652,12 @@ public sealed partial class NknSignalingTransport
                 return;
             }
 
-            var offerPreSendHold =
-                await RequestRuntimeUnlockInitialActivationReceiveRecoveryHoldAsync(
+            initialOfferPrevalidation =
+                await PrevalidateRuntimeUnlockInitialActivationReceiveRecoveryHoldAsync(
                         offerPreSendHoldRequest,
                         ct)
                     .ConfigureAwait(false);
-            if (!IsRuntimeUnlockInitialActivationReceiveRecoveryHoldReleased(
-                    offerPreSendHold) ||
+            if (!initialOfferPrevalidation.IsReleased ||
                 !ValidateRuntimeUnlockOfferAuthorityBoundary(
                     initialOfferBoundary,
                     "initial_activation_hold_offer_pre_send_released",
@@ -11644,7 +11667,9 @@ public sealed partial class NknSignalingTransport
             }
         }
 
-        Task<AccelerationControlSendResult> SendCurrentOfferEnvelopeAsync()
+        Task<AccelerationControlSendResult> SendCurrentOfferEnvelopeAsync(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldPrevalidation?
+                holdPrevalidation = null)
             => SendAccelerationControlEnvelopeWithBulkBypassAsync(
                     remoteEndpoint,
                     envelope,
@@ -11684,12 +11709,19 @@ public sealed partial class NknSignalingTransport
                         ? expectedInstallReceipt
                         : null,
                     expectedOfferAuthorityBoundary:
-                        runtimeUnlockOfferAuthorityBoundary);
+                        runtimeUnlockOfferAuthorityBoundary,
+                    initialActivationHoldPrevalidation:
+                        holdPrevalidation);
 
         AccelerationControlSendResult offerSend;
         try
         {
-            offerSend = await SendCurrentOfferEnvelopeAsync().ConfigureAwait(false);
+            offerSend =
+                await SendCurrentOfferEnvelopeAsync(
+                        initialOfferPrevalidation.IsReleased
+                            ? initialOfferPrevalidation
+                            : null)
+                    .ConfigureAwait(false);
         }
         catch
         {
@@ -11716,12 +11748,12 @@ public sealed partial class NknSignalingTransport
             }
 
             var failureHold =
-                await RequestRuntimeUnlockInitialActivationReceiveRecoveryHoldAsync(
+                await PrevalidateRuntimeUnlockInitialActivationReceiveRecoveryHoldAsync(
                         failureHoldRequest,
                         ct)
                     .ConfigureAwait(false);
             if (ShouldResumeRuntimeUnlockInitialActivationSameGeneration(
-                    failureHold))
+                    failureHold.Result))
             {
                 if (!ValidateRuntimeUnlockOfferAuthorityBoundary(
                         failedInitialOfferBoundary,
@@ -11732,15 +11764,12 @@ public sealed partial class NknSignalingTransport
                 }
 
                 offerSend =
-                    await SendCurrentOfferEnvelopeAsync().ConfigureAwait(false);
+                    await SendCurrentOfferEnvelopeAsync(failureHold)
+                        .ConfigureAwait(false);
                 continue;
             }
 
-            if (failureHold is
-                RuntimeUnlockInitialActivationReceiveRecoveryHoldAwaitResult
-                    .Rejected or
-                RuntimeUnlockInitialActivationReceiveRecoveryHoldAwaitResult
-                    .Invalidated)
+            if (!failureHold.IsReleased)
             {
                 return;
             }
@@ -12117,7 +12146,9 @@ public sealed partial class NknSignalingTransport
                             trigger);
                     }
 
-                    Task<AccelerationControlSendResult> SendReplayEnvelopeAsync()
+                    Task<AccelerationControlSendResult> SendReplayEnvelopeAsync(
+                        RuntimeUnlockInitialActivationReceiveRecoveryHoldPrevalidation?
+                            holdPrevalidation = null)
                         => SendAccelerationControlEnvelopeWithBulkBypassAsync(
                             target,
                             envelope,
@@ -12161,7 +12192,9 @@ public sealed partial class NknSignalingTransport
                                                         false))
                                             .ToUnixTimeMilliseconds();
                                     return replaySubmissionDeadlineUtcMs;
-                                });
+                                },
+                            initialActivationHoldPrevalidation:
+                                holdPrevalidation);
 
                     var queued =
                         await SendReplayEnvelopeAsync().ConfigureAwait(false);
@@ -12208,12 +12241,12 @@ public sealed partial class NknSignalingTransport
                         }
 
                         var replayFailureHold =
-                            await RequestRuntimeUnlockInitialActivationReceiveRecoveryHoldAsync(
+                            await PrevalidateRuntimeUnlockInitialActivationReceiveRecoveryHoldAsync(
                                     replayFailureHoldRequest,
                                     CancellationToken.None)
                                 .ConfigureAwait(false);
                         if (ShouldResumeRuntimeUnlockInitialActivationSameGeneration(
-                                replayFailureHold))
+                                replayFailureHold.Result))
                         {
                             if (!ValidateRuntimeUnlockOfferAuthorityBoundary(
                                     initialReplayBoundary,
@@ -12232,16 +12265,12 @@ public sealed partial class NknSignalingTransport
                                                 false))
                                     .ToUnixTimeMilliseconds();
                             queued =
-                                await SendReplayEnvelopeAsync()
+                                await SendReplayEnvelopeAsync(replayFailureHold)
                                     .ConfigureAwait(false);
                             continue;
                         }
 
-                        if (replayFailureHold is
-                            RuntimeUnlockInitialActivationReceiveRecoveryHoldAwaitResult
-                                .Rejected or
-                            RuntimeUnlockInitialActivationReceiveRecoveryHoldAwaitResult
-                                .Invalidated)
+                        if (!replayFailureHold.IsReleased)
                         {
                             return;
                         }
@@ -12463,7 +12492,7 @@ public sealed partial class NknSignalingTransport
     }
 
     private async Task<
-        RuntimeUnlockInitialActivationReceiveRecoveryHoldAwaitResult>
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldEvaluation>
         RequestRuntimeUnlockInitialActivationReceiveRecoveryHoldAsync(
             RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest request,
             CancellationToken ct,
@@ -12471,8 +12500,11 @@ public sealed partial class NknSignalingTransport
     {
         if (request.IsDefault)
         {
-            return RuntimeUnlockInitialActivationReceiveRecoveryHoldAwaitResult
-                .Rejected;
+            return new(
+                request,
+                default,
+                RuntimeUnlockInitialActivationReceiveRecoveryHoldAwaitResult
+                    .Rejected);
         }
 
         TaskCompletionSource<
@@ -12485,8 +12517,11 @@ public sealed partial class NknSignalingTransport
             {
                 if (current.Request != request)
                 {
-                    return RuntimeUnlockInitialActivationReceiveRecoveryHoldAwaitResult
-                        .Rejected;
+                    return new(
+                        request,
+                        default,
+                        RuntimeUnlockInitialActivationReceiveRecoveryHoldAwaitResult
+                            .Rejected);
                 }
 
                 completion = current.Completion;
@@ -12568,7 +12603,18 @@ public sealed partial class NknSignalingTransport
                 RuntimeUnlockInitialActivationReceiveRecoveryHoldAwaitResult
                     .Rejected)
         {
-            return result;
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision;
+            lock (accelerationGate)
+            {
+                decision =
+                    lastRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision
+                        is { } exactDecision &&
+                    exactDecision.Request == request
+                        ? exactDecision
+                        : default;
+            }
+
+            return new(request, decision, result);
         }
 
         var commandCaptureRace = false;
@@ -12588,7 +12634,18 @@ public sealed partial class NknSignalingTransport
         }
         if (!commandCaptureRace)
         {
-            return result;
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision;
+            lock (accelerationGate)
+            {
+                decision =
+                    lastRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision
+                        is { } exactDecision &&
+                    exactDecision.Request == request
+                        ? exactDecision
+                        : default;
+            }
+
+            return new(request, decision, result);
         }
 
         var currentBoundary =
@@ -12608,7 +12665,7 @@ public sealed partial class NknSignalingTransport
             reboundRequest == request ||
             reboundRequest.ExpectedScope.ExpectedExecutionCommand is null)
         {
-            return result;
+            return new(request, default, result);
         }
 
         LocalOperationalLog.Info(
@@ -12619,6 +12676,91 @@ public sealed partial class NknSignalingTransport
                 ct,
                 allowCommandCaptureRetry: false)
             .ConfigureAwait(false);
+    }
+
+    private async Task<
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldPrevalidation>
+        PrevalidateRuntimeUnlockInitialActivationReceiveRecoveryHoldAsync(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest request,
+            CancellationToken ct)
+    {
+        var evaluation =
+            await RequestRuntimeUnlockInitialActivationReceiveRecoveryHoldAsync(
+                    request,
+                    ct)
+                .ConfigureAwait(false);
+        if (evaluation.Decision.IsDefault)
+        {
+            return default;
+        }
+
+        var prevalidation =
+            new RuntimeUnlockInitialActivationReceiveRecoveryHoldPrevalidation(
+                evaluation.Request,
+                evaluation.Decision,
+                evaluation.Result);
+        return prevalidation.IsReleased ? prevalidation : default;
+    }
+
+    private bool
+        ValidateRuntimeUnlockInitialActivationReceiveRecoveryHoldPrevalidation(
+            RuntimeUnlockOfferAuthorityBoundary boundary,
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldPrevalidation
+                prevalidation,
+            string purpose,
+            out string? legacyBlockerReason,
+            bool emitTelemetry = true)
+    {
+        legacyBlockerReason =
+            CaptureRuntimeUnlockInitialActivationLegacyReceiveStallBlocker();
+        var accepted =
+            prevalidation.IsReleased &&
+            RuntimeUnlockInitialActivationHoldRequestMatchesOfferBoundary(
+                prevalidation.Request,
+                boundary) &&
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldDecisionMatchesRequest(
+                prevalidation.Decision) &&
+            ValidateRuntimeUnlockOfferAuthorityBoundary(
+                boundary,
+                "initial_activation_hold_send_prevalidation",
+                allowDispatchObservedSettlement: true);
+        lock (accelerationGate)
+        {
+            accepted =
+                accepted &&
+                runtimeUnlockInitialActivationReceiveRecoveryHoldShadow is
+                    null &&
+                lastRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision ==
+                    prevalidation.Decision;
+        }
+
+        if (emitTelemetry)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=runtime_unlock_initial_activation_receive_recovery_hold_send_prevalidated; {FormatRuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(prevalidation.Request)}; send_path={SanitizeLogToken(purpose)}; one_call_prevalidated=1; prevalidation_status={(accepted ? "accepted" : "rejected")}; decision_status={SanitizeLogToken(prevalidation.Decision.Status.ToString())}; same_generation_resume={(ShouldResumeRuntimeUnlockInitialActivationSameGeneration(prevalidation.Result) ? 1 : 0)}; legacy_receive_stall_blocker_observed={(IsReceiveStallActivationSendBlocker(legacyBlockerReason) ? 1 : 0)}; legacy_receive_stall_blocker={SanitizeLogToken(legacyBlockerReason ?? "(none)")}; decision_reason={SanitizeLogToken(prevalidation.Decision.Reason)}");
+        }
+        return accepted;
+    }
+
+    private string?
+        CaptureRuntimeUnlockInitialActivationLegacyReceiveStallBlocker()
+    {
+        var testBlocker =
+            RuntimeUnlockRegularV4ReceiveRecoveryBlockerOverrideForTests?.Invoke(
+                this);
+        if (!string.IsNullOrWhiteSpace(testBlocker))
+        {
+            return testBlocker;
+        }
+
+        return client is RealNknClientAdapter realClient &&
+               realClient.TryGetFileTransferRegularV4ActivationSendBlocker(
+                   out var blockerReason,
+                   out _,
+                   includeRegularV4Pressure: false)
+            ? blockerReason
+            : null;
     }
 
     private bool ApplyRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
@@ -13249,13 +13391,13 @@ public sealed partial class NknSignalingTransport
                     .Rejected;
             }
 
-            var result =
+            var evaluation =
                 await RequestRuntimeUnlockInitialActivationReceiveRecoveryHoldAsync(
                         request,
                         CancellationToken.None)
                     .ConfigureAwait(false);
             if (!IsRuntimeUnlockInitialActivationReceiveRecoveryHoldReleased(
-                    result))
+                    evaluation.Result))
             {
                 lock (accelerationGate)
                 {
@@ -13269,14 +13411,14 @@ public sealed partial class NknSignalingTransport
                     }
                 }
 
-                return result;
+                return evaluation.Result;
             }
 
             return ValidateRuntimeUnlockOfferAuthorityBoundary(
                     boundary,
                     validationBoundary,
                     allowDispatchObservedSettlement: true)
-                ? result
+                ? evaluation.Result
                 : RuntimeUnlockInitialActivationReceiveRecoveryHoldAwaitResult
                     .Rejected;
         }
@@ -21976,7 +22118,9 @@ public sealed partial class NknSignalingTransport
                 payerDecisionId);
         var envelope = submission.Envelope;
         var intent = submission.Intent;
-        Task<AccelerationControlSendResult> SendCurrentPayerIntentAsync()
+        Task<AccelerationControlSendResult> SendCurrentPayerIntentAsync(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldPrevalidation?
+                holdPrevalidation = null)
             => SendAccelerationControlEnvelopeWithBulkBypassAsync(
                 target,
                 envelope,
@@ -21994,7 +22138,9 @@ public sealed partial class NknSignalingTransport
                         RuntimeUnlockOfferAuthorityMode.InitialActivation
                         ? RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
                             .PayerIntentPreSend
-                        : null);
+                        : null,
+                initialActivationHoldPrevalidation:
+                    holdPrevalidation);
 
         var queued = await SendCurrentPayerIntentAsync().ConfigureAwait(false);
         while (!queued.Succeeded &&
@@ -22016,12 +22162,12 @@ public sealed partial class NknSignalingTransport
             }
 
             var failureHold =
-                await RequestRuntimeUnlockInitialActivationReceiveRecoveryHoldAsync(
+                await PrevalidateRuntimeUnlockInitialActivationReceiveRecoveryHoldAsync(
                         failureHoldRequest,
                         ct)
                     .ConfigureAwait(false);
             if (ShouldResumeRuntimeUnlockInitialActivationSameGeneration(
-                    failureHold))
+                    failureHold.Result))
             {
                 if (!ValidateRuntimeUnlockOfferAuthorityBoundary(
                         initialActivationBoundary,
@@ -22032,15 +22178,12 @@ public sealed partial class NknSignalingTransport
                 }
 
                 queued =
-                    await SendCurrentPayerIntentAsync().ConfigureAwait(false);
+                    await SendCurrentPayerIntentAsync(failureHold)
+                        .ConfigureAwait(false);
                 continue;
             }
 
-            if (failureHold is
-                RuntimeUnlockInitialActivationReceiveRecoveryHoldAwaitResult
-                    .Rejected or
-                RuntimeUnlockInitialActivationReceiveRecoveryHoldAwaitResult
-                    .Invalidated)
+            if (!failureHold.IsReleased)
             {
                 return AccelerationControlSendResult.StaleCallback;
             }
@@ -23459,7 +23602,9 @@ public sealed partial class NknSignalingTransport
         Func<long>?
             rebaseLatestSubmissionAfterInitialActivationHold = null,
         RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary?
-            initialActivationPhysicalHoldBoundary = null)
+            initialActivationPhysicalHoldBoundary = null,
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldPrevalidation?
+            initialActivationHoldPrevalidation = null)
     {
         bool ValidateControlSendAuthority(string boundary)
             => expectedOfferAuthorityBoundary is not null
@@ -23492,6 +23637,8 @@ public sealed partial class NknSignalingTransport
              expectedInstallReceipt is not null);
         RuntimeUnlockRecoveryRetryState? retryAuthorityStateForSend = null;
         RuntimeUnlockRetryDispatchAttempt? retryDispatchAttemptForSend = null;
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldPrevalidation
+            exactInitialActivationHoldPrevalidation = default;
 
         bool ValidateRetainedRetryAttempt(string callbackKind)
         {
@@ -23528,14 +23675,46 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
-        var initialActivationOfferHoldEvaluated =
-            string.Equals(purpose, "offer", StringComparison.OrdinalIgnoreCase) &&
-            expectedOfferAuthorityBoundary is
+        if (expectedOfferAuthorityBoundary is
             {
                 Mode: RuntimeUnlockOfferAuthorityMode.InitialActivation,
                 TransferId: { Length: > 0 },
-            };
-        if (!initialActivationOfferHoldEvaluated &&
+            } initialActivationSendBoundary)
+        {
+            exactInitialActivationHoldPrevalidation =
+                initialActivationHoldPrevalidation ?? default;
+            if (!exactInitialActivationHoldPrevalidation.IsReleased)
+            {
+                if (!TryCreateRuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(
+                        initialActivationSendBoundary,
+                        initialActivationPhysicalHoldBoundary ??
+                        RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
+                            .OfferPreSend,
+                        out var initialActivationHoldRequest))
+                {
+                    return AccelerationControlSendResult.StaleCallback;
+                }
+
+                exactInitialActivationHoldPrevalidation =
+                    await PrevalidateRuntimeUnlockInitialActivationReceiveRecoveryHoldAsync(
+                            initialActivationHoldRequest,
+                            ct)
+                        .ConfigureAwait(false);
+            }
+
+            if (!ValidateRuntimeUnlockInitialActivationReceiveRecoveryHoldPrevalidation(
+                    initialActivationSendBoundary,
+                    exactInitialActivationHoldPrevalidation,
+                    purpose,
+                    out _))
+            {
+                return AccelerationControlSendResult.StaleCallback;
+            }
+        }
+
+        var initialActivationHoldPrevalidated =
+            exactInitialActivationHoldPrevalidation.IsReleased;
+        if (!initialActivationHoldPrevalidated &&
             !await WaitForFileTransferTunaActivationBridgeRecoveryBeforeControlSendAsync(
                     purpose,
                     activationSessionId,
@@ -23773,23 +23952,13 @@ public sealed partial class NknSignalingTransport
                 TransferId: { Length: > 0 },
             } initialActivationBoundary)
         {
-            if (!TryCreateRuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(
+            if (!exactInitialActivationHoldPrevalidation.IsReleased ||
+                !ValidateRuntimeUnlockInitialActivationReceiveRecoveryHoldPrevalidation(
                     initialActivationBoundary,
-                    initialActivationPhysicalHoldBoundary ??
-                    RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
-                        .OfferPreSend,
-                    out var physicalSubmissionHoldRequest))
-            {
-                return AccelerationControlSendResult.StaleCallback;
-            }
-
-            var physicalSubmissionHold =
-                await RequestRuntimeUnlockInitialActivationReceiveRecoveryHoldAsync(
-                        physicalSubmissionHoldRequest,
-                        ct)
-                    .ConfigureAwait(false);
-            if (!IsRuntimeUnlockInitialActivationReceiveRecoveryHoldReleased(
-                    physicalSubmissionHold) ||
+                    exactInitialActivationHoldPrevalidation,
+                    $"{purpose}_before_physical_submission",
+                    out _,
+                    emitTelemetry: false) ||
                 !ValidateControlSendAuthority(
                     "control_send_initial_activation_receive_recovery_hold_released"))
             {
@@ -23798,7 +23967,7 @@ public sealed partial class NknSignalingTransport
 
             if (latestSubmissionUtcMs > 0 &&
                 ShouldResumeRuntimeUnlockInitialActivationSameGeneration(
-                    physicalSubmissionHold))
+                    exactInitialActivationHoldPrevalidation.Result))
             {
                 if (rebaseLatestSubmissionAfterInitialActivationHold is null)
                 {

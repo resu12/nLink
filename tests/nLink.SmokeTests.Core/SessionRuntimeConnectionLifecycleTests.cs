@@ -1262,6 +1262,49 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
     }
 
     [Fact]
+    public void SessionRuntime_SessionLivenessReceiveRecovery_AttachesTypedSourceEvidenceOnly()
+    {
+        var request = new FileTransferReceiveRecoveryRequest(
+            "session_typed_liveness",
+            "transfer_typed_liveness",
+            FileTransferDirection.Outbound,
+            "session_liveness_timeout_pending")
+        {
+            Observation = default,
+        };
+        var method = typeof(SessionRuntime).GetMethod(
+            "AttachSessionLivenessReceiveRecoveryHealthEvaluation",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var attached = Assert.IsType<FileTransferReceiveRecoveryRequest>(
+            method!.Invoke(
+                null,
+                [
+                    request,
+                    7L,
+                    123_456L,
+                    3,
+                    TimeSpan.FromMilliseconds(8_765),
+                ]));
+
+        Assert.Null(attached.Observation);
+        var evidence = Assert.IsType<FileTransferBridgeRecoveryEvaluationRequest>(
+            attached.HealthEvaluationRequest);
+        Assert.Equal(
+            FileTransferBridgeRecoveryEvaluationKind.SessionLivenessTimeout,
+            evidence.EvaluationKind);
+        Assert.Equal(7, evidence.ObservationGeneration);
+        Assert.Equal(123_456, evidence.ObservedUtcMs);
+        Assert.Equal(3, evidence.ConsecutiveObservations);
+        Assert.Equal(8_765, evidence.ControlLastReceivedAgeMs);
+        Assert.Equal(8_765, evidence.BulkLastReceivedAgeMs);
+        Assert.Equal(request.SessionId, evidence.SessionId);
+        Assert.Equal(request.TransferId, evidence.TransferId);
+        Assert.Equal(request.Direction, evidence.Direction);
+    }
+
+    [Fact]
     public async Task SessionRuntime_SessionLivenessWatchdog_StartsOnlyAfterApprovedConnected()
     {
         var delay = new ControlledDelayScheduler();

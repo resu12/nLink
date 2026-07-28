@@ -13849,7 +13849,7 @@ internal static class FileTransferCoordinator
             };
 
         var recoveryState = state.PersistentState.FileTransferReceiveRecovery;
-        FileTransferReceiveRecoveryOperation? completedUnprovenPredecessor =
+        FileTransferReceiveRecoveryOperation? completedPredecessor =
             null;
         if (recoveryState.CurrentOperation is { } current)
         {
@@ -13867,7 +13867,7 @@ internal static class FileTransferCoordinator
                     current.Authority);
             }
 
-            if (!CanSupersedeCompletedUnprovenReceiveRecoveryOperation(
+            if (!CanSupersedeCompletedReceiveRecoveryOperation(
                     state,
                     current,
                     observation,
@@ -13879,7 +13879,7 @@ internal static class FileTransferCoordinator
                     "filetransfer_receive_recovery_operation_conflict");
             }
 
-            completedUnprovenPredecessor = current;
+            completedPredecessor = current;
         }
 
         if (recoveryState.LastTerminalOperation is { } terminal)
@@ -14013,13 +14013,13 @@ internal static class FileTransferCoordinator
                 operationGeneration))
         {
             PredecessorAuthorityId =
-                completedUnprovenPredecessor?.Authority.AuthorityId,
+                completedPredecessor?.Authority.AuthorityId,
             PredecessorOperationGeneration =
-                completedUnprovenPredecessor?.Authority.OperationGeneration ??
+                completedPredecessor?.Authority.OperationGeneration ??
                 0,
         };
-        var issuanceState = completedUnprovenPredecessor is { } predecessor
-            ? ApplyCompletedUnprovenReceiveRecoverySupersession(
+        var issuanceState = completedPredecessor is { } predecessor
+            ? ApplyCompletedReceiveRecoverySupersession(
                 state,
                 predecessor)
             : state;
@@ -14029,13 +14029,13 @@ internal static class FileTransferCoordinator
         var holdReconciliation =
             ReconcileRuntimeUnlockInitialActivationHold(
                 issuedState,
-                completedUnprovenPredecessor?.Authority,
-                completedUnprovenPredecessor is null
+                completedPredecessor?.Authority,
+                completedPredecessor is null
                     ? "filetransfer_receive_recovery_operation_issued"
                     : "filetransfer_receive_recovery_operation_successor_issued");
         return Decision(
             FileTransferReceiveRecoveryTransitionStatus.Accepted,
-            completedUnprovenPredecessor is null
+            completedPredecessor is null
                 ? "filetransfer_receive_recovery_operation_issued"
                 : "filetransfer_receive_recovery_operation_successor_issued",
             authority,
@@ -14046,13 +14046,28 @@ internal static class FileTransferCoordinator
         };
     }
 
-    private static bool CanSupersedeCompletedUnprovenReceiveRecoveryOperation(
+    private static bool CanSupersedeCompletedReceiveRecoveryOperation(
         FileTransferCoordinatorState state,
         FileTransferReceiveRecoveryOperation predecessor,
         FileTransferReceiveRecoveryObservation observation,
         BridgeRecoveryKind recoveryKind,
         string? checkpointRequestId)
     {
+        var retainedUnproven =
+            predecessor.ClosureState ==
+                FileTransferReceiveRecoveryClosureState.Retained &&
+            predecessor.ReceiveProof is null;
+        var adoptedProven =
+            predecessor.ClosureState ==
+                FileTransferReceiveRecoveryClosureState.Adopted &&
+            predecessor.ReceiveProof is
+                {
+                    IsDefault: false,
+                } receiveProof &&
+            receiveProof.Authority == predecessor.Authority;
+        var proofObservedUtcMs = adoptedProven
+            ? predecessor.ReceiveProof!.Value.ObservedUtcMs
+            : 0;
         if (predecessor.ExecutionState !=
                 FileTransferReceiveRecoveryExecutionState.Completed ||
             predecessor.ExecutionReceipt is not
@@ -14062,10 +14077,8 @@ internal static class FileTransferCoordinator
             } receipt ||
             receipt.Command != predecessor.Authority.ExecutionCommand ||
             predecessor.ExecutionReceiptObservedUtcMs <= 0 ||
-            predecessor.ClosureState !=
-                FileTransferReceiveRecoveryClosureState.Retained ||
+            (!retainedUnproven && !adoptedProven) ||
             predecessor.ClosureGeneration <= 0 ||
-            predecessor.ReceiveProof is not null ||
             predecessor.HeldRetryRequest is not null ||
             predecessor.ReservedRetryRequest is not null ||
             predecessor.ReservedRetryAuthority is not null ||
@@ -14089,9 +14102,12 @@ internal static class FileTransferCoordinator
                 { IsDefault: false } healthEvidence ||
             healthEvidence.Kind is not (
                 FileTransferBridgeRecoveryEvaluationKind.PingTimeout or
-                FileTransferBridgeRecoveryEvaluationKind.ReceiveStall) ||
+                FileTransferBridgeRecoveryEvaluationKind.ReceiveStall or
+                FileTransferBridgeRecoveryEvaluationKind
+                    .SessionLivenessTimeout) ||
             healthEvidence.ObservedUtcMs <=
                 predecessor.ExecutionReceiptObservedUtcMs ||
+            healthEvidence.ObservedUtcMs <= proofObservedUtcMs ||
             observation.ObservedUtcMs != healthEvidence.ObservedUtcMs ||
             observation.ObservationGeneration <=
                 predecessor.Authority.Observation.ObservationGeneration ||
@@ -14149,7 +14165,7 @@ internal static class FileTransferCoordinator
            left.DataSessionGeneration == right.DataSessionGeneration;
 
     private static FileTransferCoordinatorState
-        ApplyCompletedUnprovenReceiveRecoverySupersession(
+        ApplyCompletedReceiveRecoverySupersession(
             FileTransferCoordinatorState state,
             FileTransferReceiveRecoveryOperation predecessor)
     {
@@ -14164,7 +14180,9 @@ internal static class FileTransferCoordinator
             ReservedRetryAuthority = null,
             ConsumingInstallReceipt = null,
             InvalidationReason =
-                "completed_unproven_receive_recovery_superseded_by_newer_health_observation",
+                predecessor.ReceiveProof is null
+                    ? "completed_unproven_receive_recovery_superseded_by_newer_health_observation"
+                    : "completed_proven_unreserved_receive_recovery_superseded_by_newer_health_observation",
             LivenessDeferralDeadlineUtcMs = 0,
             LivenessDeferralGrant = null,
         };
@@ -14257,7 +14275,7 @@ internal static class FileTransferCoordinator
                         "runtime_unlock_initial_activation_receive_recovery_hold_rechecked");
                 if (reconciliation.Decision is { } exactDecision)
                 {
-                    if (TryGetDirectCompletedUnprovenReceiveRecoverySuccessor(
+                    if (TryGetDirectCompletedReceiveRecoverySuccessor(
                             reconciliation.State,
                             request,
                             out _,
@@ -14296,7 +14314,7 @@ internal static class FileTransferCoordinator
 
         var currentOperation = recoveryState.CurrentOperation;
         var capturedPredecessorRebind =
-            TryGetDirectCompletedUnprovenReceiveRecoverySuccessor(
+            TryGetDirectCompletedReceiveRecoverySuccessor(
                 state,
                 request,
                 out var capturedSuccessor,
@@ -14368,7 +14386,10 @@ internal static class FileTransferCoordinator
                         .Released
                     ? "runtime_unlock_initial_activation_receive_recovery_proof_current"
                     : "runtime_unlock_initial_activation_receive_recovery_terminal",
-                operation: currentOperation);
+                operation: currentOperation,
+                previousAuthority: capturedPredecessorRebind
+                    ? capturedPredecessor.Authority
+                    : null);
         }
 
         if (recoveryState.LastInitialActivationHoldGeneration ==
@@ -14593,7 +14614,7 @@ internal static class FileTransferCoordinator
                     current.Authority.ExecutionCommand;
             if (!commandMatches)
             {
-                if (TryGetDirectCompletedUnprovenReceiveRecoverySuccessor(
+                if (TryGetDirectCompletedReceiveRecoverySuccessor(
                         state,
                         request,
                         out var capturedSuccessor,
@@ -14632,7 +14653,7 @@ internal static class FileTransferCoordinator
     }
 
     private static bool
-        TryGetDirectCompletedUnprovenReceiveRecoverySuccessor(
+        TryGetDirectCompletedReceiveRecoverySuccessor(
             FileTransferCoordinatorState state,
             RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest request,
             out FileTransferReceiveRecoveryOperation successor,
@@ -14654,7 +14675,6 @@ internal static class FileTransferCoordinator
             predecessorReceipt.Command !=
                 exactPredecessor.Authority.ExecutionCommand ||
             exactPredecessor.ExecutionReceiptObservedUtcMs <= 0 ||
-            exactPredecessor.ReceiveProof is not null ||
             exactPredecessor.Authority.RecoveryLivenessLease is not
                 { State: RecoveryLivenessLeaseState.Active }
                     predecessorActiveLease ||
@@ -14671,10 +14691,8 @@ internal static class FileTransferCoordinator
             exactPredecessor.ReservedRetryRequest is not null ||
             exactPredecessor.ReservedRetryAuthority is not null ||
             exactPredecessor.ConsumingInstallReceipt is not null ||
-            !string.Equals(
-                exactPredecessor.InvalidationReason,
-                "completed_unproven_receive_recovery_superseded_by_newer_health_observation",
-                StringComparison.Ordinal) ||
+            !IsCompletedReceiveRecoverySuccessorInvalidation(
+                exactPredecessor) ||
             request.ExpectedScope.ExpectedExecutionCommand !=
                 exactPredecessor.Authority.ExecutionCommand ||
             exactPredecessor.Authority.OperationGeneration == long.MaxValue ||
@@ -14710,6 +14728,23 @@ internal static class FileTransferCoordinator
         predecessor = exactPredecessor;
         return true;
     }
+
+    private static bool IsCompletedReceiveRecoverySuccessorInvalidation(
+        FileTransferReceiveRecoveryOperation predecessor)
+        => predecessor.ReceiveProof switch
+        {
+            null => string.Equals(
+                predecessor.InvalidationReason,
+                "completed_unproven_receive_recovery_superseded_by_newer_health_observation",
+                StringComparison.Ordinal),
+            { IsDefault: false } proof
+                when proof.Authority == predecessor.Authority =>
+                string.Equals(
+                    predecessor.InvalidationReason,
+                    "completed_proven_unreserved_receive_recovery_superseded_by_newer_health_observation",
+                    StringComparison.Ordinal),
+            _ => false,
+        };
 
     private static bool
         RuntimeUnlockInitialActivationHoldRequestHasSameIdentity(

@@ -432,9 +432,25 @@ public sealed partial class SessionFileTransferService
 
             outbound.LastBridgeRecoveryEvaluationObservationGeneration =
                 evaluation.ObservationGeneration;
+            outbound.LastReceiveRecoveryHealthEvaluationGeneration =
+                Math.Max(
+                    outbound.LastReceiveRecoveryHealthEvaluationGeneration,
+                    GetReceiveRecoveryHealthEvaluationGeneration(
+                        outbound.CoordinatorPersistentState));
+            if (outbound.LastReceiveRecoveryHealthEvaluationGeneration ==
+                long.MaxValue)
+            {
+                reason =
+                    "bridge_recovery_evaluation_health_generation_exhausted";
+                return null;
+            }
+
+            var healthEvaluationGeneration =
+                ++outbound.LastReceiveRecoveryHealthEvaluationGeneration;
             reason = "bridge_recovery_evaluation_forwarded";
             var evidence = CreateReceiveRecoveryHealthEvaluationEvidence(
-                evaluation);
+                evaluation,
+                healthEvaluationGeneration);
             return new FileTransferReceiveRecoveryRequest(
                 outbound.SessionId,
                 outbound.TransferId,
@@ -461,9 +477,25 @@ public sealed partial class SessionFileTransferService
 
         inbound.LastBridgeRecoveryEvaluationObservationGeneration =
             evaluation.ObservationGeneration;
+        inbound.LastReceiveRecoveryHealthEvaluationGeneration =
+            Math.Max(
+                inbound.LastReceiveRecoveryHealthEvaluationGeneration,
+                GetReceiveRecoveryHealthEvaluationGeneration(
+                    inbound.CoordinatorPersistentState));
+        if (inbound.LastReceiveRecoveryHealthEvaluationGeneration ==
+            long.MaxValue)
+        {
+            reason =
+                "bridge_recovery_evaluation_health_generation_exhausted";
+            return null;
+        }
+
+        var inboundHealthEvaluationGeneration =
+            ++inbound.LastReceiveRecoveryHealthEvaluationGeneration;
         reason = "bridge_recovery_evaluation_forwarded";
         var inboundEvidence = CreateReceiveRecoveryHealthEvaluationEvidence(
-            evaluation);
+            evaluation,
+            inboundHealthEvaluationGeneration);
         return new FileTransferReceiveRecoveryRequest(
             inbound.SessionId,
             inbound.TransferId,
@@ -483,18 +515,29 @@ public sealed partial class SessionFileTransferService
 
     private static FileTransferReceiveRecoveryHealthEvaluationEvidence
         CreateReceiveRecoveryHealthEvaluationEvidence(
-            FileTransferBridgeRecoveryEvaluationRequest evaluation)
+            FileTransferBridgeRecoveryEvaluationRequest evaluation,
+            long evidenceGeneration)
         => new(
             evaluation.EvaluationKind,
             evaluation.ObservationKind,
             evaluation.Reason,
-            evaluation.ObservationGeneration,
+            evidenceGeneration,
             evaluation.ObservedUtcMs,
             evaluation.ConsecutiveObservations,
             evaluation.FramesSentSinceLast,
             evaluation.MessagesReceivedSinceLast,
             evaluation.ControlLastReceivedAgeMs,
             evaluation.BulkLastReceivedAgeMs);
+
+    private static long GetReceiveRecoveryHealthEvaluationGeneration(
+        FileTransferCoordinatorPersistentState persistentState)
+        => Math.Max(
+            persistentState.FileTransferReceiveRecovery.CurrentOperation
+                ?.Authority.Observation.HealthEvaluationEvidence
+                ?.EvidenceGeneration ?? 0,
+            persistentState.FileTransferReceiveRecovery.LastTerminalOperation
+                ?.Authority.Observation.HealthEvaluationEvidence
+                ?.EvidenceGeneration ?? 0);
 
     private bool TryRequestFileTransferReceiveRecoveryIfCurrent(
         FileTransferReceiveRecoveryRequest request,
@@ -1207,6 +1250,18 @@ public sealed partial class SessionFileTransferService
             string.Equals(outbound.SessionId, request.SessionId, StringComparison.Ordinal))
         {
             var observation = request.Observation;
+            if (request.HealthEvaluationRequest is { } healthEvaluation)
+            {
+                if (!TryCreateSessionLivenessReceiveRecoveryObservationLocked(
+                        outbound,
+                        healthEvaluation,
+                        out observation,
+                        out rejectionReason))
+                {
+                    return false;
+                }
+            }
+
             if (observation is null && allowObservationCapture)
             {
                 observation = CreateReceiveRecoveryObservationSnapshotLocked(
@@ -1241,6 +1296,18 @@ public sealed partial class SessionFileTransferService
             string.Equals(inbound.SessionId, request.SessionId, StringComparison.Ordinal))
         {
             var observation = request.Observation;
+            if (request.HealthEvaluationRequest is { } healthEvaluation)
+            {
+                if (!TryCreateSessionLivenessReceiveRecoveryObservationLocked(
+                        inbound,
+                        healthEvaluation,
+                        out observation,
+                        out rejectionReason))
+                {
+                    return false;
+                }
+            }
+
             if (observation is null && allowObservationCapture)
             {
                 observation = CreateReceiveRecoveryObservationSnapshotLocked(
@@ -1271,6 +1338,144 @@ public sealed partial class SessionFileTransferService
 
         rejectionReason = "current_transfer_missing";
         return false;
+    }
+
+    private static bool
+        TryCreateSessionLivenessReceiveRecoveryObservationLocked(
+            OutboundTransferContext context,
+            FileTransferBridgeRecoveryEvaluationRequest evaluation,
+            out FileTransferReceiveRecoveryObservationSnapshot? observation,
+            out string rejectionReason)
+    {
+        observation = null;
+        context.LastReceiveRecoveryHealthEvaluationGeneration =
+            Math.Max(
+                context.LastReceiveRecoveryHealthEvaluationGeneration,
+                GetReceiveRecoveryHealthEvaluationGeneration(
+                    context.CoordinatorPersistentState));
+        if (!TryAdvanceSessionLivenessReceiveRecoveryHealthEvidence(
+                context.SessionId,
+                context.TransferId,
+                FileTransferDirection.Outbound,
+                evaluation,
+                context.LastSessionLivenessRecoveryEvaluationGeneration,
+                context.LastReceiveRecoveryHealthEvaluationGeneration,
+                out var sourceGeneration,
+                out var evidence,
+                out rejectionReason))
+        {
+            return false;
+        }
+
+        context.LastSessionLivenessRecoveryEvaluationGeneration =
+            sourceGeneration;
+        context.LastReceiveRecoveryHealthEvaluationGeneration =
+            evidence.EvidenceGeneration;
+        observation = CreateReceiveRecoveryObservationSnapshotLocked(
+            context,
+            FileTransferDirection.Outbound,
+            evaluation.ObservationKind,
+            evaluation.Reason,
+            $"{evaluation.ObservationKind}:{evidence.EvidenceGeneration}",
+            evaluation.ObservedUtcMs,
+            evidence);
+        return true;
+    }
+
+    private static bool
+        TryCreateSessionLivenessReceiveRecoveryObservationLocked(
+            InboundTransferContext context,
+            FileTransferBridgeRecoveryEvaluationRequest evaluation,
+            out FileTransferReceiveRecoveryObservationSnapshot? observation,
+            out string rejectionReason)
+    {
+        observation = null;
+        context.LastReceiveRecoveryHealthEvaluationGeneration =
+            Math.Max(
+                context.LastReceiveRecoveryHealthEvaluationGeneration,
+                GetReceiveRecoveryHealthEvaluationGeneration(
+                    context.CoordinatorPersistentState));
+        if (!TryAdvanceSessionLivenessReceiveRecoveryHealthEvidence(
+                context.SessionId,
+                context.TransferId,
+                FileTransferDirection.Inbound,
+                evaluation,
+                context.LastSessionLivenessRecoveryEvaluationGeneration,
+                context.LastReceiveRecoveryHealthEvaluationGeneration,
+                out var sourceGeneration,
+                out var evidence,
+                out rejectionReason))
+        {
+            return false;
+        }
+
+        context.LastSessionLivenessRecoveryEvaluationGeneration =
+            sourceGeneration;
+        context.LastReceiveRecoveryHealthEvaluationGeneration =
+            evidence.EvidenceGeneration;
+        observation = CreateReceiveRecoveryObservationSnapshotLocked(
+            context,
+            FileTransferDirection.Inbound,
+            evaluation.ObservationKind,
+            evaluation.Reason,
+            $"{evaluation.ObservationKind}:{evidence.EvidenceGeneration}",
+            evaluation.ObservedUtcMs,
+            evidence);
+        return true;
+    }
+
+    private static bool TryAdvanceSessionLivenessReceiveRecoveryHealthEvidence(
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction,
+        FileTransferBridgeRecoveryEvaluationRequest evaluation,
+        long lastSourceGeneration,
+        long lastHealthEvaluationGeneration,
+        out long sourceGeneration,
+        out FileTransferReceiveRecoveryHealthEvaluationEvidence evidence,
+        out string rejectionReason)
+    {
+        sourceGeneration = lastSourceGeneration;
+        evidence = default;
+        if (evaluation.IsDefault ||
+            evaluation.EvaluationKind !=
+                FileTransferBridgeRecoveryEvaluationKind.SessionLivenessTimeout ||
+            !string.Equals(
+                evaluation.SessionId,
+                sessionId,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                evaluation.TransferId,
+                transferId,
+                StringComparison.Ordinal) ||
+            evaluation.Direction != direction)
+        {
+            rejectionReason =
+                "session_liveness_receive_recovery_evidence_invalid";
+            return false;
+        }
+
+        if (evaluation.ObservationGeneration <= lastSourceGeneration)
+        {
+            rejectionReason =
+                "session_liveness_receive_recovery_evidence_duplicate";
+            return false;
+        }
+
+        if (lastHealthEvaluationGeneration == long.MaxValue)
+        {
+            rejectionReason =
+                "session_liveness_receive_recovery_health_generation_exhausted";
+            return false;
+        }
+
+        sourceGeneration = evaluation.ObservationGeneration;
+        var healthGeneration = ++lastHealthEvaluationGeneration;
+        evidence = CreateReceiveRecoveryHealthEvaluationEvidence(
+            evaluation,
+            healthGeneration);
+        rejectionReason = "accepted";
+        return true;
     }
 
     private static FileTransferReceiveRecoveryRequest ApplyReceiveRecoveryObservation(

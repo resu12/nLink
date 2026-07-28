@@ -68,6 +68,9 @@ public sealed record FileTransferReceiveRecoveryRequest(
 {
     internal FileTransferReceiveRecoveryObservationSnapshot? Observation { get; init; }
 
+    internal FileTransferBridgeRecoveryEvaluationRequest?
+        HealthEvaluationRequest { get; init; }
+
     public string? RouteToken { get; init; }
 
     public int ProtocolVersion { get; init; }
@@ -164,6 +167,7 @@ internal enum FileTransferBridgeRecoveryEvaluationKind
     ReceiveStall = 1,
     PingTimeout = 2,
     Diagnostic = 3,
+    SessionLivenessTimeout = 4,
 }
 
 internal readonly record struct FileTransferBridgeRecoveryEvaluationRequest(
