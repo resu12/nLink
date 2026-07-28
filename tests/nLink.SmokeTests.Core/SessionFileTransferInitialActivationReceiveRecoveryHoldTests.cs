@@ -193,6 +193,147 @@ public sealed class
             invalidated.ReceiveRecoveryOperation?.ExecutionState);
     }
 
+    [Fact]
+    public async Task
+        RuntimeUnlockInitialActivationReceiveRecoveryHold_ExactSuccessorRebindAndReleaseReachBridgeInCoordinatorOrder()
+    {
+        const string sessionId =
+            "session_initial_activation_hold_successor_release";
+        const string transferId =
+            "transfer_initial_activation_hold_successor_release";
+        using var bridge =
+            new InitialActivationHoldLoopbackTransport(sessionId);
+        using var peer = new LoopbackFileTransferTransport(sessionId);
+        bridge.Connect(peer);
+
+        using var service = new SessionFileTransferService();
+        service.AttachTransport(bridge);
+        var started = await service.TryStartSendAsync(
+            new FileTransferSendDescriptor(
+                "initial-activation-hold-successor-release.bin",
+                FileSizeBytes: 1,
+                transferId,
+                ChunkSizeBytes: 4096),
+            _ => Task.FromResult<Stream>(
+                new MemoryStream([0x2a], writable: false)),
+            CancellationToken.None);
+        Assert.NotNull(started);
+
+        var context = GetOutboundContext(service);
+        var predecessor = await SeedCurrentReceiveRecoveryOperationAsync(
+            service,
+            bridge,
+            context);
+        var request = CreateInitialActivationHoldRequest(predecessor);
+        var held = bridge.RaiseHoldRequest(request);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held,
+            held.Status);
+        PauseInitialActivationHoldDirectiveWorker(service);
+        _ = bridge.CompleteBridgeRecoveryExecution(
+            predecessor.Authority.ExecutionCommand,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            "test_initial_activation_hold_predecessor_completed");
+        await WaitUntilAsync(
+            () =>
+                GetReceiveRecoverySubstate(context).CurrentOperation is
+                {
+                    ExecutionState:
+                        FileTransferReceiveRecoveryExecutionState.Completed,
+                    ClosureState:
+                        FileTransferReceiveRecoveryClosureState.Retained,
+                });
+
+        var observedUtcMs = Math.Max(
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            GetReceiveRecoverySubstate(context).CurrentOperation!.Value
+                .ExecutionReceiptObservedUtcMs + 1);
+        bridge.RaiseBridgeRecoveryEvaluation(
+            new FileTransferBridgeRecoveryEvaluationRequest(
+                sessionId,
+                transferId,
+                FileTransferDirection.Outbound,
+                FileTransferBridgeRecoveryEvaluationKind.PingTimeout,
+                "bridge_ping_timeout",
+                "bridge_ping_timeout",
+                ObservationGeneration: 1,
+                ObservedUtcMs: observedUtcMs,
+                ConsecutiveObservations: 1));
+        await WaitUntilAsync(
+            () =>
+                GetReceiveRecoverySubstate(context).CurrentOperation is
+                    { } successor &&
+                successor.Authority.OperationGeneration ==
+                    predecessor.Authority.OperationGeneration + 1);
+        var reboundOperation =
+            Assert.IsType<FileTransferReceiveRecoveryOperation>(
+                GetReceiveRecoverySubstate(context).CurrentOperation);
+        Assert.Equal(
+            predecessor.Authority.AuthorityId,
+            reboundOperation.Authority.PredecessorAuthorityId);
+
+        _ = bridge.CompleteBridgeRecoveryExecution(
+            reboundOperation.Authority.ExecutionCommand,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            "test_initial_activation_hold_successor_completed");
+        await WaitUntilAsync(
+            () =>
+                GetReceiveRecoverySubstate(context).CurrentOperation is
+                {
+                    ExecutionState:
+                        FileTransferReceiveRecoveryExecutionState.Completed,
+                    ClosureState:
+                        FileTransferReceiveRecoveryClosureState.Retained,
+                } successor &&
+                successor.Authority ==
+                    reboundOperation.Authority);
+        bridge.RaiseReceiveRecoveryProof(
+            reboundOperation.Authority.ExecutionCommand,
+            "test_initial_activation_hold_successor_proof",
+            "test_initial_activation_hold_successor_proof");
+        await WaitUntilAsync(
+            () =>
+                GetReceiveRecoverySubstate(context).LastInitialActivationHold
+                    is
+                {
+                    Status:
+                        RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                            .Released,
+                });
+
+        Assert.Empty(bridge.ObservedHoldDecisions);
+        FlushInitialActivationHoldDirectiveWorker(service);
+
+        var delivered = bridge.ObservedHoldDecisions.ToArray();
+        var reboundIndex = Array.FindIndex(
+            delivered,
+            decision =>
+                decision.Status ==
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                        .Held &&
+                decision.ReceiveRecoveryOperation?.Authority ==
+                    reboundOperation.Authority &&
+                decision.PreviousReceiveRecoveryAuthority ==
+                    predecessor.Authority);
+        var releaseIndex = Array.FindIndex(
+            delivered,
+            decision =>
+                decision.Status ==
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                        .Released &&
+                decision.ReceiveRecoveryOperation?.Authority ==
+                    reboundOperation.Authority);
+        Assert.True(reboundIndex >= 0);
+        Assert.True(releaseIndex > reboundIndex);
+        Assert.All(
+            delivered,
+            decision =>
+            {
+                Assert.Equal(request, decision.Request);
+                Assert.Equal(held.HoldGeneration, decision.HoldGeneration);
+            });
+    }
+
     private static async Task<FileTransferReceiveRecoveryOperation>
         SeedCurrentReceiveRecoveryOperationAsync(
             SessionFileTransferService service,

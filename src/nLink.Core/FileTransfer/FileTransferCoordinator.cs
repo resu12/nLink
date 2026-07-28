@@ -1673,6 +1673,13 @@ internal readonly record struct RegularV4FrontierRepairPressureRecoveryHandoffDe
     RegularV4FrontierRepairPressureRecoveryHandoffTransition? Transition)
 {
     public FileTransferCoordinatorState State { get; init; } = null!;
+
+    public RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision?
+        InitialActivationHoldDecision
+    {
+        get;
+        init;
+    }
 }
 
 internal enum FallbackFrontierRepairSourceKind
@@ -2036,6 +2043,13 @@ internal readonly record struct FileTransferCoordinatorActionDecision(
     RuntimeUnlockPendingPreCommitProbeRequest? RuntimeUnlockPendingPreCommitProbeRequest = null)
 {
     public FileTransferCoordinatorState State { get; init; } = null!;
+
+    public RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision?
+        InitialActivationHoldDecision
+    {
+        get;
+        init;
+    }
 }
 
 internal enum FileTransferBridgeRecoveryExecutionDecisionStatus
@@ -12248,7 +12262,8 @@ internal static class FileTransferCoordinator
             committedState,
             RegularV4FrontierRepairPressureRecoveryHandoffStatus.Committed,
             "regular_v4_frontier_repair_pressure_recovery_handoff_committed",
-            transition);
+            transition,
+            operationCommit.InitialActivationHoldDecision);
     }
 
     private static bool TryCreateRegularV4FrontierRepairPressureRecoveryHandoffTransition(
@@ -12615,8 +12630,14 @@ internal static class FileTransferCoordinator
             FileTransferCoordinatorState state,
             RegularV4FrontierRepairPressureRecoveryHandoffStatus status,
             string reason,
-            RegularV4FrontierRepairPressureRecoveryHandoffTransition? transition = null)
-        => new(status, NormalizeReason(reason), transition) { State = state };
+            RegularV4FrontierRepairPressureRecoveryHandoffTransition? transition = null,
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision?
+                initialActivationHoldDecision = null)
+        => new(status, NormalizeReason(reason), transition)
+        {
+            State = state,
+            InitialActivationHoldDecision = initialActivationHoldDecision,
+        };
 
     private static bool RegularV4FrontierRepairPressureBindingMatchesSettlement(
         RegularV4FrontierRepairPressureBinding binding,

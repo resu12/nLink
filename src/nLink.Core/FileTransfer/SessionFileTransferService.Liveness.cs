@@ -223,7 +223,9 @@ public sealed partial class SessionFileTransferService
                             proof);
                     ApplyReceiveRecoveryStateLocked(
                         outbound,
-                        decision.Value.State);
+                        decision.Value.State,
+                        initialActivationHoldDecision:
+                            decision.Value.InitialActivationHoldDecision);
                     retryDispatchDecision =
                         decision.Value.RetryDispatchDecision;
                     if (retryDispatchDecision is
@@ -231,7 +233,8 @@ public sealed partial class SessionFileTransferService
                     {
                         ApplyReceiveRecoveryStateLocked(
                             outbound,
-                            exactRetry.State);
+                            exactRetry.State,
+                            queueInitialActivationHoldDirective: false);
                     }
                     var appliedRecovery =
                         outbound.CoordinatorPersistentState
@@ -285,7 +288,9 @@ public sealed partial class SessionFileTransferService
                             proof);
                     ApplyReceiveRecoveryStateLocked(
                         inbound,
-                        decision.Value.State);
+                        decision.Value.State,
+                        initialActivationHoldDecision:
+                            decision.Value.InitialActivationHoldDecision);
                     retryDispatchDecision =
                         decision.Value.RetryDispatchDecision;
                     if (retryDispatchDecision is
@@ -293,7 +298,8 @@ public sealed partial class SessionFileTransferService
                     {
                         ApplyReceiveRecoveryStateLocked(
                             inbound,
-                            exactRetry.State);
+                            exactRetry.State,
+                            queueInitialActivationHoldDirective: false);
                     }
                     var appliedRecovery =
                         inbound.CoordinatorPersistentState
@@ -833,10 +839,17 @@ public sealed partial class SessionFileTransferService
                 CreateCoordinatorStateLocked(outbound),
                 receipt,
                 DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-            ApplyReceiveRecoveryStateLocked(outbound, decision.State);
+            ApplyReceiveRecoveryStateLocked(
+                outbound,
+                decision.State,
+                initialActivationHoldDecision:
+                    decision.InitialActivationHoldDecision);
             if (decision.RetryDispatchDecision is { Granted: true } retry)
             {
-                ApplyReceiveRecoveryStateLocked(outbound, retry.State);
+                ApplyReceiveRecoveryStateLocked(
+                    outbound,
+                    retry.State,
+                    queueInitialActivationHoldDirective: false);
                 return decision with { State = retry.State };
             }
             return decision;
@@ -851,10 +864,17 @@ public sealed partial class SessionFileTransferService
                 CreateCoordinatorStateLocked(inbound),
                 receipt,
                 DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-            ApplyReceiveRecoveryStateLocked(inbound, decision.State);
+            ApplyReceiveRecoveryStateLocked(
+                inbound,
+                decision.State,
+                initialActivationHoldDecision:
+                    decision.InitialActivationHoldDecision);
             if (decision.RetryDispatchDecision is { Granted: true } retry)
             {
-                ApplyReceiveRecoveryStateLocked(inbound, retry.State);
+                ApplyReceiveRecoveryStateLocked(
+                    inbound,
+                    retry.State,
+                    queueInitialActivationHoldDirective: false);
                 return decision with { State = retry.State };
             }
             return decision;
@@ -969,7 +989,10 @@ public sealed partial class SessionFileTransferService
                 {
                     ApplyReceiveRecoveryStateLocked(
                         outbound,
-                        invalidationDecision.Value.State);
+                        invalidationDecision.Value.State,
+                        initialActivationHoldDecision:
+                            invalidationDecision.Value
+                                .InitialActivationHoldDecision);
                     QueueBridgeRecoveryExecutionInvalidationLocked(
                         previousCommand,
                         outbound.CurrentBridgeRecoveryExecutionCommand,
@@ -1001,7 +1024,10 @@ public sealed partial class SessionFileTransferService
                 {
                     ApplyReceiveRecoveryStateLocked(
                         inbound,
-                        invalidationDecision.Value.State);
+                        invalidationDecision.Value.State,
+                        initialActivationHoldDecision:
+                            invalidationDecision.Value
+                                .InitialActivationHoldDecision);
                     QueueBridgeRecoveryExecutionInvalidationLocked(
                         previousCommand,
                         inbound.CurrentBridgeRecoveryExecutionCommand,

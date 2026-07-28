@@ -1250,6 +1250,8 @@ public sealed partial class SessionFileTransferService :
                     publicationReason);
             context.ReceiveRecoveryTransitionObserver =
                 QueueRuntimeUnlockInitialActivationReceiveRecoveryHoldDirective;
+            context.ReceiveRecoveryHoldDirectiveObserver =
+                QueueRuntimeUnlockInitialActivationReceiveRecoveryHoldDirective;
             ApplyFileTransferRuntimeProfileSelectionLocked(
                 context,
                 FileTransferRuntimeProfileSelection.FromRouteSelection(routeSelection));
@@ -2671,6 +2673,8 @@ public sealed partial class SessionFileTransferService :
                 token,
                 publicationReason);
         incoming.ReceiveRecoveryTransitionObserver =
+            QueueRuntimeUnlockInitialActivationReceiveRecoveryHoldDirective;
+        incoming.ReceiveRecoveryHoldDirectiveObserver =
             QueueRuntimeUnlockInitialActivationReceiveRecoveryHoldDirective;
         ApplyFileTransferRuntimeProfileSelectionLocked(
             incoming,
@@ -6934,9 +6938,18 @@ public sealed partial class SessionFileTransferService :
             previousReceiveRecovery,
             decision.State.PersistentState.FileTransferReceiveRecovery,
             decision.RejectionReason);
-        context.ReceiveRecoveryTransitionObserver?.Invoke(
-            previousReceiveRecovery,
-            decision.State.PersistentState.FileTransferReceiveRecovery);
+        if (decision.InitialActivationHoldDecision is
+            { IsDefault: false } exactHoldDecision)
+        {
+            context.ReceiveRecoveryHoldDirectiveObserver?.Invoke(
+                exactHoldDecision);
+        }
+        else
+        {
+            context.ReceiveRecoveryTransitionObserver?.Invoke(
+                previousReceiveRecovery,
+                decision.State.PersistentState.FileTransferReceiveRecovery);
+        }
         context.CurrentTransportEpochDecision = decision.State.CurrentTransportEpochDecision;
         context.LastTransportEpochDecisionGeneration = decision.State.LastTransportEpochDecisionGeneration;
         context.CurrentRoutePublicationToken = decision.State.CurrentRoutePublicationToken;
@@ -6979,9 +6992,18 @@ public sealed partial class SessionFileTransferService :
             previousReceiveRecovery,
             decision.State.PersistentState.FileTransferReceiveRecovery,
             decision.RejectionReason);
-        context.ReceiveRecoveryTransitionObserver?.Invoke(
-            previousReceiveRecovery,
-            decision.State.PersistentState.FileTransferReceiveRecovery);
+        if (decision.InitialActivationHoldDecision is
+            { IsDefault: false } exactHoldDecision)
+        {
+            context.ReceiveRecoveryHoldDirectiveObserver?.Invoke(
+                exactHoldDecision);
+        }
+        else
+        {
+            context.ReceiveRecoveryTransitionObserver?.Invoke(
+                previousReceiveRecovery,
+                decision.State.PersistentState.FileTransferReceiveRecovery);
+        }
         context.CurrentTransportEpochDecision = decision.State.CurrentTransportEpochDecision;
         context.LastTransportEpochDecisionGeneration = decision.State.LastTransportEpochDecisionGeneration;
         context.CurrentRoutePublicationToken = decision.State.CurrentRoutePublicationToken;
@@ -7000,7 +7022,9 @@ public sealed partial class SessionFileTransferService :
     private void ApplyReceiveRecoveryStateLocked(
         OutboundTransferContext context,
         FileTransferCoordinatorState state,
-        bool queueInitialActivationHoldDirective = true)
+        bool queueInitialActivationHoldDirective = true,
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision?
+            initialActivationHoldDecision = null)
     {
         var previous = context.CoordinatorPersistentState.FileTransferReceiveRecovery;
         context.CoordinatorPersistentState = state.PersistentState;
@@ -7011,9 +7035,18 @@ public sealed partial class SessionFileTransferService :
             "coordinator_receive_recovery_transition");
         if (queueInitialActivationHoldDirective)
         {
-            context.ReceiveRecoveryTransitionObserver?.Invoke(
-                previous,
-                current);
+            if (initialActivationHoldDecision is
+                { IsDefault: false } exactHoldDecision)
+            {
+                QueueRuntimeUnlockInitialActivationReceiveRecoveryHoldDirective(
+                    exactHoldDecision);
+            }
+            else
+            {
+                context.ReceiveRecoveryTransitionObserver?.Invoke(
+                    previous,
+                    current);
+            }
         }
         var heldPayloadWakePrefix =
             previous.CurrentOperation is { } previousOperation
@@ -7055,7 +7088,9 @@ public sealed partial class SessionFileTransferService :
     private void ApplyReceiveRecoveryStateLocked(
         InboundTransferContext context,
         FileTransferCoordinatorState state,
-        bool queueInitialActivationHoldDirective = true)
+        bool queueInitialActivationHoldDirective = true,
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision?
+            initialActivationHoldDecision = null)
     {
         var previous = context.CoordinatorPersistentState.FileTransferReceiveRecovery;
         context.CoordinatorPersistentState = state.PersistentState;
@@ -7066,9 +7101,18 @@ public sealed partial class SessionFileTransferService :
             "coordinator_receive_recovery_transition");
         if (queueInitialActivationHoldDirective)
         {
-            context.ReceiveRecoveryTransitionObserver?.Invoke(
-                previous,
-                current);
+            if (initialActivationHoldDecision is
+                { IsDefault: false } exactHoldDecision)
+            {
+                QueueRuntimeUnlockInitialActivationReceiveRecoveryHoldDirective(
+                    exactHoldDecision);
+            }
+            else
+            {
+                context.ReceiveRecoveryTransitionObserver?.Invoke(
+                    previous,
+                    current);
+            }
         }
     }
 
@@ -7153,7 +7197,19 @@ public sealed partial class SessionFileTransferService :
                     invalidatedOperation);
         }
 
-        if (directive is not { IsDefault: false } exactDirective ||
+        if (directive is { IsDefault: false } exactDirective)
+        {
+            QueueRuntimeUnlockInitialActivationReceiveRecoveryHoldDirective(
+                exactDirective);
+        }
+    }
+
+    private void
+        QueueRuntimeUnlockInitialActivationReceiveRecoveryHoldDirective(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision
+                exactDirective)
+    {
+        if (exactDirective.IsDefault ||
             transport is not
                 IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge bridge)
         {
@@ -7264,11 +7320,18 @@ public sealed partial class SessionFileTransferService :
         }
         catch (Exception ex)
         {
+            var reason =
+                $"hold_directive_delivery_{NormalizeReason(ex.GetType().Name)}";
             LogRuntimeUnlockInitialActivationReceiveRecoveryHold(
                 "runtime_unlock_initial_activation_receive_recovery_hold_decided",
                 directive.Request,
                 directive,
-                $"hold_directive_delivery_{NormalizeReason(ex.GetType().Name)}");
+                reason);
+            LogRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                "runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided",
+                directive.Request,
+                directive,
+                reason);
             return;
         }
 
@@ -7277,6 +7340,13 @@ public sealed partial class SessionFileTransferService :
             directive.Request,
             directive,
             directive.Reason);
+        LogRuntimeUnlockInitialActivationReceiveRecoveryHold(
+            "runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided",
+            directive.Request,
+            directive,
+            accepted
+                ? "hold_directive_delivery_accepted"
+                : "hold_directive_delivery_rejected");
         if (directive.PreviousReceiveRecoveryAuthority is not null)
         {
             LogRuntimeUnlockInitialActivationReceiveRecoveryHold(
@@ -7343,10 +7413,9 @@ public sealed partial class SessionFileTransferService :
         }
 
         if (decision.ReceiveRecoveryOperation is not { } operation ||
-            !IsRuntimeUnlockInitialActivationReceiveRecoveryHoldScopeCurrent(
+            !FileTransferCoordinator.IsReceiveRecoveryOperationCurrent(
                 coordinatorState,
-                decision.Request,
-                operation))
+                operation.Authority))
         {
             return false;
         }
@@ -7392,74 +7461,6 @@ public sealed partial class SessionFileTransferService :
     }
 
     private static bool
-        IsRuntimeUnlockInitialActivationReceiveRecoveryHoldScopeCurrent(
-            FileTransferCoordinatorState state,
-            RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest request,
-            FileTransferReceiveRecoveryOperation operation)
-    {
-        var expected = request.ExpectedScope;
-        var observation = operation.Authority.Observation;
-        return !state.IsTerminal &&
-               state.CurrentRuntimeOwner is { } owner &&
-               owner == observation.RuntimeOwner &&
-               state.CurrentRoutePublicationToken is { } publication &&
-               publication == observation.RoutePublication &&
-               expected.SourcePublicationAuthority is
-                   { } sourcePublication &&
-               FileTransferCoordinator.MatchesRoutePublicationAuthority(
-                   sourcePublication,
-                   publication) &&
-               state.CurrentLeg is { } leg &&
-               state.CurrentLiveRouteEpoch is { } liveRouteEpoch &&
-               string.Equals(
-                   request.SessionId,
-                   observation.SessionId,
-                   StringComparison.Ordinal) &&
-               string.Equals(
-                   request.TransferId,
-                   observation.TransferId,
-                   StringComparison.Ordinal) &&
-               request.Direction == observation.Direction &&
-               state.RouteSelection.Route == observation.Route &&
-               string.Equals(
-                   state.RouteSelection.TelemetryToken,
-                   observation.RouteToken,
-                   StringComparison.Ordinal) &&
-               state.RouteSelection.ProtocolVersion ==
-                   observation.ProtocolVersion &&
-               liveRouteEpoch.EpochId == observation.LiveRouteEpoch &&
-               state.CurrentRouteCommit == observation.RouteCommit &&
-               state.TerminalGeneration == observation.TerminalGeneration &&
-               leg.Generation == observation.LegGeneration &&
-               leg.TransportEpochId == observation.TransportEpoch &&
-               leg.BridgeRecoveryGeneration ==
-                   observation.BridgeRecoveryGeneration &&
-               string.Equals(
-                   leg.CheckpointRequestId,
-                   observation.CheckpointRequestId,
-                   StringComparison.Ordinal) &&
-               expected.TransportEpoch == observation.TransportEpoch &&
-               expected.BridgeRecoveryGeneration ==
-                   observation.BridgeRecoveryGeneration &&
-               string.Equals(
-                   expected.CheckpointRequestId,
-                   observation.CheckpointRequestId,
-                   StringComparison.Ordinal) &&
-               string.Equals(
-                   state.CurrentDataSessionIdentity,
-                   observation.DataSessionIdentity,
-                   StringComparison.Ordinal) &&
-               state.CurrentDataSessionGeneration ==
-                   observation.DataSessionGeneration &&
-               string.Equals(
-                   expected.DataSessionIdentity,
-                   observation.DataSessionIdentity,
-                   StringComparison.Ordinal) &&
-               expected.DataSessionGeneration ==
-                   observation.DataSessionGeneration;
-    }
-
-    private static bool
         TryInvalidateReceiveRecoveryOperationForScopeReplacementLocked(
         OutboundTransferContext context,
         string reason)
@@ -7491,9 +7492,18 @@ public sealed partial class SessionFileTransferService :
             previousState,
             decision.State.PersistentState.FileTransferReceiveRecovery,
             "coordinator_receive_recovery_transition");
-        context.ReceiveRecoveryTransitionObserver?.Invoke(
-            previousState,
-            decision.State.PersistentState.FileTransferReceiveRecovery);
+        if (decision.InitialActivationHoldDecision is
+            { IsDefault: false } exactHoldDecision)
+        {
+            context.ReceiveRecoveryHoldDirectiveObserver?.Invoke(
+                exactHoldDecision);
+        }
+        else
+        {
+            context.ReceiveRecoveryTransitionObserver?.Invoke(
+                previousState,
+                decision.State.PersistentState.FileTransferReceiveRecovery);
+        }
         QueueBridgeRecoveryExecutionInvalidationLocked(
             previousCommand,
             context.CurrentBridgeRecoveryExecutionCommand,
@@ -7535,9 +7545,18 @@ public sealed partial class SessionFileTransferService :
             previousState,
             decision.State.PersistentState.FileTransferReceiveRecovery,
             "coordinator_receive_recovery_transition");
-        context.ReceiveRecoveryTransitionObserver?.Invoke(
-            previousState,
-            decision.State.PersistentState.FileTransferReceiveRecovery);
+        if (decision.InitialActivationHoldDecision is
+            { IsDefault: false } exactHoldDecision)
+        {
+            context.ReceiveRecoveryHoldDirectiveObserver?.Invoke(
+                exactHoldDecision);
+        }
+        else
+        {
+            context.ReceiveRecoveryTransitionObserver?.Invoke(
+                previousState,
+                decision.State.PersistentState.FileTransferReceiveRecovery);
+        }
         QueueBridgeRecoveryExecutionInvalidationLocked(
             previousCommand,
             context.CurrentBridgeRecoveryExecutionCommand,
@@ -10145,7 +10164,8 @@ public sealed partial class SessionFileTransferService :
             issued.Reason,
             authority.BridgeRecoveryDecision,
             authority.RecoveryLivenessLease,
-            authority.ExecutionCommand);
+            authority.ExecutionCommand,
+            issued.InitialActivationHoldDecision);
     }
 
     private FileTransferCoordinatorActionDecision AuthorizeBridgeRecoveryWithRegularV4PressureHandoffLocked(
@@ -10242,7 +10262,8 @@ public sealed partial class SessionFileTransferService :
             committed.Reason,
             transition.BridgeRecoveryDecision,
             transition.RecoveryLivenessLease,
-            transition.BridgeRecoveryExecutionCommand);
+            transition.BridgeRecoveryExecutionCommand,
+            committed.InitialActivationHoldDecision);
     }
 
     private static bool TryGetExactRegularV4PressureRecoveryHandoffContract(
@@ -10306,7 +10327,9 @@ public sealed partial class SessionFileTransferService :
         string reason,
         BridgeRecoveryDecision? bridgeRecoveryDecision,
         RecoveryLivenessLease? recoveryLivenessLease,
-        FileTransferBridgeRecoveryExecutionCommand? bridgeRecoveryExecutionCommand)
+        FileTransferBridgeRecoveryExecutionCommand? bridgeRecoveryExecutionCommand,
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision?
+            initialActivationHoldDecision = null)
     {
         var owner = state.CurrentRuntimeOwner;
         var leg = state.CurrentLeg;
@@ -10326,6 +10349,8 @@ public sealed partial class SessionFileTransferService :
             BridgeRecoveryExecutionCommand: bridgeRecoveryExecutionCommand)
         {
             State = state,
+            InitialActivationHoldDecision =
+                initialActivationHoldDecision,
         };
     }
 
@@ -21706,6 +21731,14 @@ public sealed partial class SessionFileTransferService :
             set;
         }
 
+        public Action<
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision>?
+                ReceiveRecoveryHoldDirectiveObserver
+        {
+            get;
+            set;
+        }
+
         public bool RuntimeUnlockWaitingForFallbackSurvival { get; set; }
 
         public string? RuntimeUnlockWaitingForFallbackSurvivalReason { get; set; }
@@ -22774,6 +22807,14 @@ public sealed partial class SessionFileTransferService :
             FileTransferReceiveRecoverySubstate,
             FileTransferReceiveRecoverySubstate>?
                 ReceiveRecoveryTransitionObserver
+        {
+            get;
+            set;
+        }
+
+        public Action<
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision>?
+                ReceiveRecoveryHoldDirectiveObserver
         {
             get;
             set;
