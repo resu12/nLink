@@ -2653,6 +2653,115 @@ function Append-FileTransferLiveCycleArtifact {
     ($Cycle | ConvertTo-Json -Compress -Depth 8) | Add-Content -LiteralPath $path -Encoding UTF8
 }
 
+function Update-FileTransferGuiEvidenceFinalizationStage {
+    param(
+        [Parameter(Mandatory = $true)][string]$Stage,
+        [AllowEmptyString()][string]$CapturePath = '',
+        [AllowEmptyString()][string]$CaptureSha256 = '',
+        [long]$CaptureLineCount = 0
+    )
+
+    $statePath = [string]$env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH
+    if ([string]::IsNullOrWhiteSpace($statePath)) {
+        return
+    }
+
+    $stageOrder = @{
+        gui_child_starting = 0
+        gui_child_started = 1
+        capture_persisted = 2
+        writer_validation_completed = 3
+        gui_child_exited = 4
+    }
+    if (-not $stageOrder.ContainsKey($Stage)) {
+        throw "filetransfer_gui_evidence_finalization_stage_invalid:$Stage"
+    }
+
+    $state = $null
+    if (Test-Path -LiteralPath $statePath -PathType Leaf) {
+        $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+    }
+    if ($null -eq $state) {
+        throw 'filetransfer_gui_evidence_finalization_state_missing'
+    }
+    if ($state.PSObject.Properties.Name -contains 'timedOut' -and [bool]$state.timedOut) {
+        return
+    }
+
+    $currentStage = [string]$state.lastCompletedStage
+    $currentRank = if ($stageOrder.ContainsKey($currentStage)) { [int]$stageOrder[$currentStage] } else { -1 }
+    if ($currentRank -gt [int]$stageOrder[$Stage]) {
+        return
+    }
+    if ($currentRank -eq [int]$stageOrder[$Stage]) {
+        $sameCapture = [string]::Equals(
+                [string]$state.capturePath,
+                $CapturePath,
+                [System.StringComparison]::Ordinal) -and
+            [string]::Equals(
+                [string]$state.captureSha256,
+                $CaptureSha256,
+                [System.StringComparison]::OrdinalIgnoreCase) -and
+            [long]$state.captureLineCount -eq $CaptureLineCount
+        if (-not $sameCapture) {
+            throw "filetransfer_gui_evidence_finalization_stage_conflict:$Stage"
+        }
+        return
+    }
+
+    $state.lastCompletedStage = $Stage
+    if ($state.PSObject.Properties.Name -contains 'guiChildProcessId') {
+        $state.guiChildProcessId = $PID
+    }
+    else {
+        $state | Add-Member -NotePropertyName guiChildProcessId -NotePropertyValue $PID
+    }
+    foreach ($captureField in @(
+            @{ Name = 'capturePath'; Value = $CapturePath },
+            @{ Name = 'captureSha256'; Value = $CaptureSha256 },
+            @{ Name = 'captureLineCount'; Value = $CaptureLineCount })) {
+        if ($state.PSObject.Properties.Name -contains $captureField.Name) {
+            $state.($captureField.Name) = $captureField.Value
+        }
+        else {
+            $state | Add-Member -NotePropertyName $captureField.Name -NotePropertyValue $captureField.Value
+        }
+    }
+    if ($state.PSObject.Properties.Name -contains 'updatedUtc') {
+        $state.updatedUtc = [DateTimeOffset]::UtcNow.ToString('O')
+    }
+    else {
+        $state | Add-Member -NotePropertyName updatedUtc -NotePropertyValue ([DateTimeOffset]::UtcNow.ToString('O'))
+    }
+
+    $temporaryPath = '{0}.{1}.tmp' -f $statePath, ([guid]::NewGuid().ToString('N'))
+    $backupPath = '{0}.{1}.bak' -f $statePath, ([guid]::NewGuid().ToString('N'))
+    $stream = $null
+    try {
+        $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes(($state | ConvertTo-Json -Depth 12))
+        $stream = [System.IO.FileStream]::new(
+            $temporaryPath,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None)
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+        $stream.Dispose()
+        $stream = $null
+        [System.IO.File]::Replace($temporaryPath, $statePath, $backupPath, $true)
+    }
+    finally {
+        if ($stream) {
+            $stream.Dispose()
+        }
+        foreach ($cleanupPath in @($temporaryPath, $backupPath)) {
+            if (Test-Path -LiteralPath $cleanupPath -PathType Leaf) {
+                Remove-Item -LiteralPath $cleanupPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
 function Copy-FileTransferLiveLogSlice {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
@@ -2795,14 +2904,15 @@ function Write-FileTransferGuiLogLedgerEvidence {
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
         [Parameter(Mandatory = $true)][int]$Bookmark,
         [Parameter(Mandatory = $true)]$InitialSnapshot,
-        [AllowNull()][scriptblock]$ProcessOutputDrainAction = $null
+        [AllowNull()][scriptblock]$ProcessOutputDrainAction = $null,
+        [AllowNull()]$TestMetrics = $null
     )
 
     $finalizationErrors = New-Object System.Collections.Generic.List[string]
     $retainedSlice = $null
     $analyzerInput = $null
+    $capturePersisted = $false
     $finalSnapshot = $null
-    $capturedLines = @()
     $processOutputDrainFailure = ''
     if ($null -ne $ProcessOutputDrainAction) {
         try {
@@ -2822,37 +2932,54 @@ function Write-FileTransferGuiLogLedgerEvidence {
         $finalSnapshot = Get-GuiSmokeLogLedgerSnapshot `
             -State $script:GuiSmokeAppLogLedger `
             -Bookmark $Bookmark
-        $capturedLines = @(
-            Get-GuiSmokeLogLedgerLinesAfterBookmark `
-                -State $script:GuiSmokeAppLogLedger `
-                -Bookmark $Bookmark)
     }
     catch {
         $finalizationErrors.Add("final_sync_failed:$($_.Exception.Message)") | Out-Null
     }
 
     try {
-        $retainedSlice = Copy-FileTransferLiveLogSlice `
-            -ArtifactDir $ArtifactDir `
-            -Bookmark $Bookmark `
-            -FileName 'filetransfer-gui-log-ledger-slice.log' `
-            -CapturedLines $capturedLines `
-            -WriteOnce `
-            -PassThru
+        if ($null -eq $finalSnapshot) {
+            throw 'final_snapshot_missing'
+        }
+        $retainedSlice = Write-GuiSmokeLogLedgerRangeCapture `
+            -State $script:GuiSmokeAppLogLedger `
+            -StartIndex $Bookmark `
+            -EndIndex ([int]$finalSnapshot.lineCount) `
+            -DestinationPath (Join-Path $ArtifactDir 'filetransfer-gui-log-ledger-slice.log')
     }
     catch {
         $finalizationErrors.Add("ledger_slice_failed:$($_.Exception.Message)") | Out-Null
     }
 
     try {
-        $analyzerInput = Copy-FileTransferLiveLogSlice `
-            -ArtifactDir $ArtifactDir `
-            -Bookmark $Bookmark `
-            -CapturedLines $capturedLines `
-            -PassThru
+        if ($null -eq $retainedSlice) {
+            throw 'retained_slice_missing'
+        }
+        $analyzerInput = Copy-GuiSmokeFileAtomicCreateNew `
+            -SourcePath ([string]$retainedSlice.Path) `
+            -DestinationPath (Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log')
+        if (-not [string]::Equals(
+                [string]$retainedSlice.Sha256,
+                [string]$analyzerInput.Sha256,
+                [System.StringComparison]::OrdinalIgnoreCase) -or
+            [long]$retainedSlice.ByteCount -ne [long]$analyzerInput.ByteCount -or
+            [long]$retainedSlice.LineCount -ne [long]$analyzerInput.LineCount) {
+            throw 'analyzer_input_capture_mismatch'
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH)) {
+            Update-FileTransferGuiEvidenceFinalizationStage `
+                -Stage 'capture_persisted' `
+                -CapturePath ([string]$retainedSlice.Path) `
+                -CaptureSha256 ([string]$retainedSlice.Sha256) `
+                -CaptureLineCount ([long]$retainedSlice.LineCount)
+        }
+        $capturePersisted = $true
     }
     catch {
         $finalizationErrors.Add("analyzer_input_failed:$($_.Exception.Message)") | Out-Null
+    }
+    if (-not $capturePersisted) {
+        throw 'filetransfer_gui_evidence_capture_not_persisted'
     }
 
     if ($null -eq $finalSnapshot) {
@@ -2886,27 +3013,10 @@ function Write-FileTransferGuiLogLedgerEvidence {
         $finalWriters = @($finalSnapshot.writers)
     }
     $writerEvidenceSlice = $null
-    $writerEvidenceLines = @()
-    try {
-        $currentWriterIds = @($finalWriters | ForEach-Object { [string]$_.writerId } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-        $writerEvidenceLines = @(
-            Get-GuiSmokeLogLedgerLines -State $script:GuiSmokeAppLogLedger |
-                Where-Object {
-                    $lineWriterId = Get-GuiSmokeLogLedgerStructuredField -Line ([string]$_) -Name 'log_writer_id'
-                    $currentWriterIds -contains $lineWriterId
-                })
-        $writerEvidenceSlice = Copy-FileTransferLiveLogSlice `
-            -ArtifactDir $ArtifactDir `
-            -Bookmark 0 `
-            -FileName 'filetransfer-gui-log-writer-evidence-slice.log' `
-            -CapturedLines $writerEvidenceLines `
-            -WriteOnce `
-            -PassThru
-    }
-    catch {
-        $writerEvidenceFailure = "writer_evidence_slice_failed:$($_.Exception.Message)"
-        $integrityReasons.Add($writerEvidenceFailure) | Out-Null
-        $writerIntegrityReasons.Add($writerEvidenceFailure) | Out-Null
+    $currentWriterIds = @($finalWriters | ForEach-Object { [string]$_.writerId } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $currentWriterIdSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($currentWriterId in $currentWriterIds) {
+        [void]$currentWriterIdSet.Add($currentWriterId)
     }
     foreach ($writer in $finalWriters) {
         if (-not [string]::Equals([string]$writer.acceptanceRunId, $expectedAcceptanceRunId, [System.StringComparison]::Ordinal) -or
@@ -2928,8 +3038,17 @@ function Write-FileTransferGuiLogLedgerEvidence {
     }
 
     $writerFailureMarkerFiles = New-Object System.Collections.Generic.List[object]
-    $writerMarkers = New-Object System.Collections.Generic.List[object]
+    $deferredMarkers = New-Object System.Collections.Generic.List[object]
+    $recoveredMarkers = New-Object System.Collections.Generic.List[object]
+    $terminalMarkers = New-Object System.Collections.Generic.List[object]
+    $deferredMarkersByBatch = [System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[object]]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $recoveredMarkersByBatch = [System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[object]]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $recoveredMarkerTupleCounts = [System.Collections.Generic.Dictionary[string,long]]::new([System.StringComparer]::Ordinal)
     $writerWriteFailureCount = 0L
+    $writerMarkerStructuredFieldDuplicateCount = 0L
+    $writerMarkerLineVisitCount = 0L
+    $writerDeferredLookupCount = 0L
+    $writerRecoveredLookupCount = 0L
     $currentProcessOutputRoot = [System.IO.Path]::GetFullPath((Join-Path $ArtifactDir 'process-output')).TrimEnd([char[]]@([char]'\', [char]'/')) + [System.IO.Path]::DirectorySeparatorChar
     $writerOutputSnapshotRoot = Join-Path $ArtifactDir 'filetransfer-gui-log-writer-output-snapshots'
     [void][System.IO.Directory]::CreateDirectory($writerOutputSnapshotRoot)
@@ -2949,51 +3068,35 @@ function Write-FileTransferGuiLogLedgerEvidence {
             $writerIntegrityReasons.Add($missingOutputReason) | Out-Null
             continue
         }
-        $sourceStream = $null
-        $snapshotStream = $null
+        $markerReader = $null
         try {
-            $shareMode = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
-            $sourceStream = [System.IO.FileStream]::new(
-                $fullOutputPath,
-                [System.IO.FileMode]::Open,
-                [System.IO.FileAccess]::Read,
-                $shareMode)
-            $capturedLength = [long]$sourceStream.Length
-            if ($capturedLength -gt [int]::MaxValue) {
-                throw "writer_output_snapshot_too_large:bytes=$capturedLength"
-            }
-            $capturedBytes = New-Object byte[] ([int]$capturedLength)
-            $capturedByteCount = 0
-            while ($capturedByteCount -lt $capturedBytes.Length) {
-                $read = $sourceStream.Read($capturedBytes, $capturedByteCount, $capturedBytes.Length - $capturedByteCount)
-                if ($read -le 0) {
-                    break
-                }
-                $capturedByteCount += $read
-            }
-            if ($capturedByteCount -ne $capturedBytes.Length) {
-                throw "writer_output_snapshot_short_read:expected=$capturedLength;actual=$capturedByteCount"
-            }
-
             $writerOutputSnapshotIndex++
             $snapshotName = '{0:D3}-{1}' -f $writerOutputSnapshotIndex, ([System.IO.Path]::GetFileName($fullOutputPath))
             $snapshotPath = Join-Path $writerOutputSnapshotRoot $snapshotName
-            $snapshotStream = [System.IO.FileStream]::new(
-                $snapshotPath,
-                [System.IO.FileMode]::CreateNew,
-                [System.IO.FileAccess]::Write,
-                [System.IO.FileShare]::None)
-            $snapshotStream.Write($capturedBytes, 0, $capturedBytes.Length)
-            $snapshotStream.Flush($true)
-            $snapshotStream.Dispose()
-            $snapshotStream = $null
+            $snapshotEvidence = Copy-GuiSmokeFileAtomicCreateNew `
+                -SourcePath $fullOutputPath `
+                -DestinationPath $snapshotPath `
+                -BindSourceLength `
+                -AllowSourceWrite
 
             $markerCount = 0L
             $deferredMarkerCount = 0L
             $recoveredMarkerCount = 0L
-            $capturedText = [System.Text.Encoding]::UTF8.GetString($capturedBytes)
-            foreach ($outputLine in @($capturedText -split '\r?\n')) {
-                $markerEvent = Get-GuiSmokeLogLedgerStructuredField -Line ([string]$outputLine) -Name 'event'
+            $markerReader = [System.IO.StreamReader]::new(
+                $snapshotPath,
+                [System.Text.UTF8Encoding]::new($false, $true),
+                $true,
+                65536)
+            while (-not $markerReader.EndOfStream) {
+                $outputLine = $markerReader.ReadLine()
+                $writerMarkerLineVisitCount++
+                $fields = ConvertFrom-GuiSmokeLogLedgerStructuredFields -Line ([string]$outputLine)
+                if ($fields.ContainsKey('__nlink_duplicate_structured_field') -and
+                    [string]$outputLine -match '(?i)(?:^|[;\s])event=operational_log_write_(?:deferred|recovered|failed)(?:;|$)') {
+                    $writerMarkerStructuredFieldDuplicateCount++
+                    continue
+                }
+                $markerEvent = [string]$fields['event']
                 if ($markerEvent -notin @('operational_log_write_deferred', 'operational_log_write_recovered', 'operational_log_write_failed')) {
                     continue
                 }
@@ -3006,25 +3109,65 @@ function Write-FileTransferGuiLogLedgerEvidence {
                 else {
                     $recoveredMarkerCount++
                 }
-                $writerMarkers.Add([pscustomobject]@{
+                $marker = [pscustomobject]@{
                     event = $markerEvent
-                    writerId = Get-GuiSmokeLogLedgerStructuredField -Line ([string]$outputLine) -Name 'log_writer_id'
-                    acceptanceRunId = Get-GuiSmokeLogLedgerStructuredField -Line ([string]$outputLine) -Name 'acceptance_run_id'
-                    scenarioRunId = Get-GuiSmokeLogLedgerStructuredField -Line ([string]$outputLine) -Name 'scenario_run_id'
-                    batchGeneration = [long](Get-GuiSmokeLogLedgerStructuredField -Line ([string]$outputLine) -Name 'batch_generation')
-                    firstSequence = [long](Get-GuiSmokeLogLedgerStructuredField -Line ([string]$outputLine) -Name 'first_sequence')
-                    lastSequence = [long](Get-GuiSmokeLogLedgerStructuredField -Line ([string]$outputLine) -Name 'last_sequence')
-                    lineCount = [long](Get-GuiSmokeLogLedgerStructuredField -Line ([string]$outputLine) -Name 'line_count')
-                    payloadSha256 = Get-GuiSmokeLogLedgerStructuredField -Line ([string]$outputLine) -Name 'payload_sha256'
-                    attemptUtcTicks = [long](Get-GuiSmokeLogLedgerStructuredField -Line ([string]$outputLine) -Name 'attempt_utc_ticks')
-                    attemptCount = [long](Get-GuiSmokeLogLedgerStructuredField -Line ([string]$outputLine) -Name 'attempt_count')
-                    failureCode = Get-GuiSmokeLogLedgerStructuredField -Line ([string]$outputLine) -Name 'failure_code'
-                }) | Out-Null
+                    writerId = [string]$fields['log_writer_id']
+                    acceptanceRunId = [string]$fields['acceptance_run_id']
+                    scenarioRunId = [string]$fields['scenario_run_id']
+                    batchGeneration = [long]$fields['batch_generation']
+                    firstSequence = [long]$fields['first_sequence']
+                    lastSequence = [long]$fields['last_sequence']
+                    lineCount = [long]$fields['line_count']
+                    payloadSha256 = [string]$fields['payload_sha256']
+                    attemptUtcTicks = [long]$fields['attempt_utc_ticks']
+                    attemptCount = [long]$fields['attempt_count']
+                    failureCode = [string]$fields['failure_code']
+                }
+                $markerKey = '{0}:{1}:{2}' -f ([string]$marker.writerId).Length, [string]$marker.writerId, [long]$marker.batchGeneration
+                $markerTupleKey = @(
+                    $markerKey,
+                    [long]$marker.firstSequence,
+                    [long]$marker.lastSequence,
+                    [long]$marker.lineCount,
+                    [long]$marker.attemptUtcTicks,
+                    ([string]$marker.payloadSha256).ToLowerInvariant(),
+                    ('{0}:{1}' -f ([string]$marker.acceptanceRunId).Length, [string]$marker.acceptanceRunId),
+                    ('{0}:{1}' -f ([string]$marker.scenarioRunId).Length, [string]$marker.scenarioRunId)
+                ) -join [char]31
+                $marker | Add-Member -NotePropertyName tupleKey -NotePropertyValue $markerTupleKey
+                if ([string]::Equals($markerEvent, 'operational_log_write_deferred', [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $deferredMarkers.Add($marker) | Out-Null
+                    $markerBucket = $null
+                    if (-not $deferredMarkersByBatch.TryGetValue($markerKey, [ref]$markerBucket)) {
+                        $markerBucket = New-Object System.Collections.Generic.List[object]
+                        $deferredMarkersByBatch.Add($markerKey, $markerBucket)
+                    }
+                    $markerBucket.Add($marker) | Out-Null
+                }
+                elseif ([string]::Equals($markerEvent, 'operational_log_write_recovered', [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $recoveredMarkers.Add($marker) | Out-Null
+                    $markerBucket = $null
+                    if (-not $recoveredMarkersByBatch.TryGetValue($markerKey, [ref]$markerBucket)) {
+                        $markerBucket = New-Object System.Collections.Generic.List[object]
+                        $recoveredMarkersByBatch.Add($markerKey, $markerBucket)
+                    }
+                    $markerBucket.Add($marker) | Out-Null
+                    $tupleCount = 0L
+                    if ($recoveredMarkerTupleCounts.TryGetValue($markerTupleKey, [ref]$tupleCount)) {
+                        $recoveredMarkerTupleCounts[$markerTupleKey] = $tupleCount + 1L
+                    }
+                    else {
+                        $recoveredMarkerTupleCounts.Add($markerTupleKey, 1L)
+                    }
+                }
+                else {
+                    $terminalMarkers.Add($marker) | Out-Null
+                }
             }
             $writerWriteFailureCount += $markerCount
             $writerFailureMarkerFiles.Add([ordered]@{
                 path = [System.IO.Path]::GetFullPath($snapshotPath)
-                sha256 = Get-FileSha256Hex -Path $snapshotPath
+                sha256 = [string]$snapshotEvidence.Sha256
                 markerCount = $markerCount
                 deferredMarkerCount = $deferredMarkerCount
                 recoveredMarkerCount = $recoveredMarkerCount
@@ -3038,32 +3181,180 @@ function Write-FileTransferGuiLogLedgerEvidence {
             $writerIntegrityReasons.Add($markerScanFailure) | Out-Null
         }
         finally {
-            if ($snapshotStream) {
-                $snapshotStream.Dispose()
-            }
-            if ($sourceStream) {
-                $sourceStream.Dispose()
+            if ($markerReader) {
+                $markerReader.Dispose()
             }
         }
     }
 
-    $writerLineRecords = New-Object System.Collections.Generic.List[object]
-    foreach ($writerLine in $writerEvidenceLines) {
-        $writerLineRecords.Add([pscustomobject]@{
-            rawLine = [string]$writerLine
-            event = Get-GuiSmokeLogLedgerStructuredField -Line ([string]$writerLine) -Name 'event'
-            writerId = Get-GuiSmokeLogLedgerStructuredField -Line ([string]$writerLine) -Name 'log_writer_id'
-            sequence = [long](Get-GuiSmokeLogLedgerStructuredField -Line ([string]$writerLine) -Name 'log_writer_sequence')
-            batchGeneration = [long](Get-GuiSmokeLogLedgerStructuredField -Line ([string]$writerLine) -Name 'log_writer_batch_generation')
-            batchFirstSequence = [long](Get-GuiSmokeLogLedgerStructuredField -Line ([string]$writerLine) -Name 'log_writer_batch_first_sequence')
-            batchLastSequence = [long](Get-GuiSmokeLogLedgerStructuredField -Line ([string]$writerLine) -Name 'log_writer_batch_last_sequence')
-            attemptUtcTicks = [long](Get-GuiSmokeLogLedgerStructuredField -Line ([string]$writerLine) -Name 'log_writer_attempt_utc_ticks')
-        }) | Out-Null
+    $writerBatchAccumulators = [System.Collections.Generic.Dictionary[string,object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $writerBatchSequenceKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $writerDrainSequences = [System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[long]]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $writerBatchOrdinal = 0L
+    $writerEvidencePath = Join-Path $ArtifactDir 'filetransfer-gui-log-writer-evidence-slice.log'
+    $writerEvidenceTempPath = '{0}.{1}.tmp' -f $writerEvidencePath, ([guid]::NewGuid().ToString('N'))
+    $writerEvidenceStream = $null
+    $writerEvidenceSha256 = $null
+    $writerLedgerVisitCount = 0L
+    try {
+        if (Test-Path -LiteralPath $writerEvidencePath -PathType Leaf) {
+            throw "writer_evidence_slice_already_exists:$writerEvidencePath"
+        }
+        $writerEvidenceStream = [System.IO.FileStream]::new(
+            $writerEvidenceTempPath,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None,
+            65536,
+            [System.IO.FileOptions]::SequentialScan)
+        $writerEvidenceSha256 = [System.Security.Cryptography.SHA256]::Create()
+        $writerEvidenceEncoding = [System.Text.UTF8Encoding]::new($false)
+        $writerEvidenceSeparator = $writerEvidenceEncoding.GetBytes([Environment]::NewLine)
+        $writerEvidenceLineCount = 0L
+        $writerEvidenceByteCount = 0L
+        $frozenWriterEvidenceEnd = [int]$finalSnapshot.lineCount
+        for ($ledgerIndex = 0; $ledgerIndex -lt $frozenWriterEvidenceEnd; $ledgerIndex++) {
+            $writerLedgerVisitCount++
+            $writerLine = [string]$script:GuiSmokeAppLogLedger.Lines[$ledgerIndex]
+            $fields = ConvertFrom-GuiSmokeLogLedgerStructuredFields -Line $writerLine
+            $writerId = [string]$fields['log_writer_id']
+            $writerEvidenceFieldDuplicate = $fields.ContainsKey('__nlink_duplicate_writer_evidence_field')
+            if ($writerEvidenceFieldDuplicate) {
+                foreach ($writerIdMatch in [regex]::Matches(
+                        $writerLine,
+                        '(?:^|[;\s])log_writer_id=(?<value>[^;\r\n]*)',
+                        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
+                    $candidateWriterId = [string]$writerIdMatch.Groups['value'].Value.Trim()
+                    if ($currentWriterIdSet.Contains($candidateWriterId)) {
+                        $writerId = $candidateWriterId
+                        break
+                    }
+                }
+            }
+            if ([string]::IsNullOrWhiteSpace($writerId) -or -not $currentWriterIdSet.Contains($writerId)) {
+                continue
+            }
+
+            if ($writerEvidenceLineCount -gt 0) {
+                $writerEvidenceStream.Write($writerEvidenceSeparator, 0, $writerEvidenceSeparator.Length)
+                [void]$writerEvidenceSha256.TransformBlock(
+                    $writerEvidenceSeparator,
+                    0,
+                    $writerEvidenceSeparator.Length,
+                    $writerEvidenceSeparator,
+                    0)
+                $writerEvidenceByteCount += [long]$writerEvidenceSeparator.Length
+            }
+            $writerLineBytes = $writerEvidenceEncoding.GetBytes($writerLine)
+            if ($writerLineBytes.Length -gt 0) {
+                $writerEvidenceStream.Write($writerLineBytes, 0, $writerLineBytes.Length)
+                [void]$writerEvidenceSha256.TransformBlock($writerLineBytes, 0, $writerLineBytes.Length, $writerLineBytes, 0)
+                $writerEvidenceByteCount += [long]$writerLineBytes.Length
+            }
+            $writerEvidenceLineCount++
+
+            $sequence = [long]$fields['log_writer_sequence']
+            $batchGeneration = [long]$fields['log_writer_batch_generation']
+            $batchFirstSequence = [long]$fields['log_writer_batch_first_sequence']
+            $batchLastSequence = [long]$fields['log_writer_batch_last_sequence']
+            $attemptUtcTicks = [long]$fields['log_writer_attempt_utc_ticks']
+            $batchKey = '{0}:{1}:{2}' -f $writerId.Length, $writerId, $batchGeneration
+            $batch = $null
+            if (-not $writerBatchAccumulators.TryGetValue($batchKey, [ref]$batch)) {
+                $writerBatchOrdinal++
+                $batch = [pscustomobject]@{
+                    writerId = $writerId
+                    batchGeneration = $batchGeneration
+                    batchFirstSequence = $batchFirstSequence
+                    batchLastSequence = $batchLastSequence
+                    attemptUtcTicks = $attemptUtcTicks
+                    minSequence = $sequence
+                    maxSequence = $sequence
+                    lineCount = 0L
+                    firstObservedOrdinal = $writerBatchOrdinal
+                    tupleValid = -not $writerEvidenceFieldDuplicate -and
+                        $sequence -gt 0 -and
+                        $batchGeneration -gt 0 -and
+                        $batchFirstSequence -gt 0 -and
+                        $batchLastSequence -ge $batchFirstSequence -and
+                        $attemptUtcTicks -gt 0
+                    payloadSha256 = ''
+                    payloadLines = $(if ($deferredMarkersByBatch.ContainsKey($batchKey)) {
+                            New-Object System.Collections.Generic.List[object]
+                        }
+                        else {
+                            $null
+                        })
+                }
+                $writerBatchAccumulators.Add($batchKey, $batch)
+            }
+            elseif (-not [string]::Equals([string]$batch.writerId, $writerId, [System.StringComparison]::Ordinal) -or
+                [long]$batch.batchGeneration -ne $batchGeneration -or
+                [long]$batch.batchFirstSequence -ne $batchFirstSequence -or
+                [long]$batch.batchLastSequence -ne $batchLastSequence -or
+                [long]$batch.attemptUtcTicks -ne $attemptUtcTicks) {
+                $batch.tupleValid = $false
+            }
+
+            if ($writerEvidenceFieldDuplicate) {
+                $batch.tupleValid = $false
+            }
+            $batchSequenceKey = '{0}{1}{2}' -f $batchKey, [char]31, $sequence
+            if (-not $writerBatchSequenceKeys.Add($batchSequenceKey)) {
+                $batch.tupleValid = $false
+            }
+            $batch.minSequence = [Math]::Min([long]$batch.minSequence, $sequence)
+            $batch.maxSequence = [Math]::Max([long]$batch.maxSequence, $sequence)
+            $batch.lineCount = [long]$batch.lineCount + 1L
+            if ($null -ne $batch.payloadLines) {
+                $batch.payloadLines.Add([pscustomobject]@{
+                    sequence = $sequence
+                    rawLine = $writerLine
+                }) | Out-Null
+            }
+
+            if ([string]::Equals([string]$fields['event'], 'operational_log_writer_drained', [System.StringComparison]::Ordinal)) {
+                $drains = $null
+                if (-not $writerDrainSequences.TryGetValue($writerId, [ref]$drains)) {
+                    $drains = New-Object System.Collections.Generic.List[long]
+                    $writerDrainSequences.Add($writerId, $drains)
+                }
+                $drains.Add($sequence) | Out-Null
+            }
+        }
+
+        [void]$writerEvidenceSha256.TransformFinalBlock([byte[]]::new(0), 0, 0)
+        $writerEvidenceHash = (([BitConverter]::ToString($writerEvidenceSha256.Hash)) -replace '-', '').ToLowerInvariant()
+        $writerEvidenceStream.Flush($true)
+        $writerEvidenceStream.Dispose()
+        $writerEvidenceStream = $null
+        [System.IO.File]::Move($writerEvidenceTempPath, $writerEvidencePath)
+        $writerEvidenceTempPath = ''
+        $writerEvidenceSlice = [pscustomobject]@{
+            Path = [System.IO.Path]::GetFullPath($writerEvidencePath)
+            Sha256 = $writerEvidenceHash
+            LineCount = $writerEvidenceLineCount
+            ByteCount = $writerEvidenceByteCount
+        }
+    }
+    catch {
+        $writerEvidenceFailure = "writer_evidence_slice_failed:$($_.Exception.Message)"
+        $integrityReasons.Add($writerEvidenceFailure) | Out-Null
+        $writerIntegrityReasons.Add($writerEvidenceFailure) | Out-Null
+    }
+    finally {
+        if ($writerEvidenceStream) {
+            $writerEvidenceStream.Dispose()
+        }
+        if ($writerEvidenceSha256) {
+            $writerEvidenceSha256.Dispose()
+        }
+        if (-not [string]::IsNullOrWhiteSpace($writerEvidenceTempPath) -and
+            (Test-Path -LiteralPath $writerEvidenceTempPath -PathType Leaf)) {
+            Remove-Item -LiteralPath $writerEvidenceTempPath -Force -ErrorAction SilentlyContinue
+        }
     }
 
-    $deferredMarkers = @($writerMarkers | Where-Object { $_.event -eq 'operational_log_write_deferred' })
-    $recoveredMarkers = @($writerMarkers | Where-Object { $_.event -eq 'operational_log_write_recovered' })
-    $terminalMarkers = @($writerMarkers | Where-Object { $_.event -eq 'operational_log_write_failed' })
     $writerDeferredLineCount = if ($deferredMarkers.Count -gt 0) {
         [long](($deferredMarkers | Measure-Object -Property lineCount -Sum).Sum)
     }
@@ -3083,35 +3374,49 @@ function Write-FileTransferGuiLogLedgerEvidence {
     $writerChronologyCollisionCount = 0L
     $writerDeferredBatchEvidence = New-Object System.Collections.Generic.List[object]
     foreach ($deferred in $deferredMarkers) {
-        $matchingRecoveries = @($recoveredMarkers | Where-Object {
-                $_.writerId -eq $deferred.writerId -and
-                [long]$_.batchGeneration -eq [long]$deferred.batchGeneration
-            })
-        $exactRecovery = @($matchingRecoveries | Where-Object {
-                [long]$_.firstSequence -eq [long]$deferred.firstSequence -and
-                [long]$_.lastSequence -eq [long]$deferred.lastSequence -and
-                [long]$_.lineCount -eq [long]$deferred.lineCount -and
-                [long]$_.attemptUtcTicks -eq [long]$deferred.attemptUtcTicks -and
-                [string]::Equals([string]$_.payloadSha256, [string]$deferred.payloadSha256, [System.StringComparison]::OrdinalIgnoreCase) -and
-                [string]::Equals([string]$_.acceptanceRunId, [string]$deferred.acceptanceRunId, [System.StringComparison]::Ordinal) -and
-                [string]::Equals([string]$_.scenarioRunId, [string]$deferred.scenarioRunId, [System.StringComparison]::Ordinal)
-            })
-        $persistedBatchLines = @($writerLineRecords | Where-Object {
-                $_.writerId -eq $deferred.writerId -and
-                [long]$_.batchGeneration -eq [long]$deferred.batchGeneration
-            } | Sort-Object sequence)
-        $persistedPayloadSha256 = if ($persistedBatchLines.Count -gt 0) {
-            Get-GuiSmokeLogLedgerHash -Value (($persistedBatchLines | ForEach-Object { [string]$_.rawLine }) -join "`n")
+        $writerDeferredLookupCount++
+        $batchKey = '{0}:{1}:{2}' -f ([string]$deferred.writerId).Length, [string]$deferred.writerId, [long]$deferred.batchGeneration
+        $matchingRecoveries = $null
+        if (-not $recoveredMarkersByBatch.TryGetValue($batchKey, [ref]$matchingRecoveries)) {
+            $matchingRecoveries = New-Object System.Collections.Generic.List[object]
         }
-        else { '' }
-        $persistedRangeMatches = $persistedBatchLines.Count -eq [long]$deferred.lineCount -and
-            $persistedBatchLines.Count -gt 0 -and
-            [long]$persistedBatchLines[0].sequence -eq [long]$deferred.firstSequence -and
-            [long]$persistedBatchLines[-1].sequence -eq [long]$deferred.lastSequence -and
+        $exactRecoveryCount = 0L
+        [void]$recoveredMarkerTupleCounts.TryGetValue([string]$deferred.tupleKey, [ref]$exactRecoveryCount)
+        $persistedBatch = $null
+        [void]$writerBatchAccumulators.TryGetValue($batchKey, [ref]$persistedBatch)
+        $persistedPayloadSha256 = ''
+        if ($null -ne $persistedBatch -and $null -ne $persistedBatch.payloadLines) {
+            if ([string]::IsNullOrWhiteSpace([string]$persistedBatch.payloadSha256)) {
+                if ($persistedBatch.payloadLines.Count -eq 1) {
+                    $persistedBatch.payloadSha256 =
+                        Get-GuiSmokeLogLedgerHash -Value ([string]$persistedBatch.payloadLines[0].rawLine)
+                }
+                else {
+                    $orderedPayloadLines = @($persistedBatch.payloadLines.ToArray() | Sort-Object sequence)
+                    $persistedBatch.payloadSha256 =
+                        Get-GuiSmokeLogLedgerHash -Value (($orderedPayloadLines | ForEach-Object { [string]$_.rawLine }) -join "`n")
+                }
+            }
+            $persistedPayloadSha256 = [string]$persistedBatch.payloadSha256
+        }
+        $persistedRangeMatches = $null -ne $persistedBatch -and
+            [bool]$persistedBatch.tupleValid -and
+            [string]::Equals(
+                [string]$persistedBatch.writerId,
+                [string]$deferred.writerId,
+                [System.StringComparison]::Ordinal) -and
+            [long]$persistedBatch.batchGeneration -eq [long]$deferred.batchGeneration -and
+            [long]$persistedBatch.batchFirstSequence -eq [long]$deferred.firstSequence -and
+            [long]$persistedBatch.batchLastSequence -eq [long]$deferred.lastSequence -and
+            [long]$persistedBatch.attemptUtcTicks -eq [long]$deferred.attemptUtcTicks -and
+            [long]$persistedBatch.lineCount -eq [long]$deferred.lineCount -and
+            [long]$persistedBatch.lineCount -gt 0 -and
+            [long]$persistedBatch.minSequence -eq [long]$deferred.firstSequence -and
+            [long]$persistedBatch.maxSequence -eq [long]$deferred.lastSequence -and
             [string]::Equals($persistedPayloadSha256, [string]$deferred.payloadSha256, [System.StringComparison]::OrdinalIgnoreCase)
         $markerIdentityMatches = [string]::Equals([string]$deferred.acceptanceRunId, $expectedAcceptanceRunId, [System.StringComparison]::Ordinal) -and
             [string]::Equals([string]$deferred.scenarioRunId, $expectedScenarioRunId, [System.StringComparison]::Ordinal)
-        $resolved = $exactRecovery.Count -eq 1 -and
+        $resolved = $exactRecoveryCount -eq 1 -and
             $matchingRecoveries.Count -eq 1 -and
             $persistedRangeMatches -and
             $markerIdentityMatches
@@ -3133,10 +3438,12 @@ function Write-FileTransferGuiLogLedgerEvidence {
         }) | Out-Null
     }
     foreach ($recovered in $recoveredMarkers) {
-        $matchingDeferredMarkers = @($deferredMarkers | Where-Object {
-                $_.writerId -eq $recovered.writerId -and
-                [long]$_.batchGeneration -eq [long]$recovered.batchGeneration
-            })
+        $writerRecoveredLookupCount++
+        $batchKey = '{0}:{1}:{2}' -f ([string]$recovered.writerId).Length, [string]$recovered.writerId, [long]$recovered.batchGeneration
+        $matchingDeferredMarkers = $null
+        if (-not $deferredMarkersByBatch.TryGetValue($batchKey, [ref]$matchingDeferredMarkers)) {
+            $matchingDeferredMarkers = New-Object System.Collections.Generic.List[object]
+        }
         if ($matchingDeferredMarkers.Count -ne 1) {
             $writerRecoveryMismatchCount++
         }
@@ -3145,17 +3452,17 @@ function Write-FileTransferGuiLogLedgerEvidence {
     $writerDrainEvidence = New-Object System.Collections.Generic.List[object]
     $writerDrainMissingCount = 0L
     foreach ($writer in $finalWriters) {
-        $writerDrains = @($writerLineRecords | Where-Object {
-                $_.writerId -eq [string]$writer.writerId -and
-                $_.event -eq 'operational_log_writer_drained'
-            })
-        $drainValid = $writerDrains.Count -eq 1 -and [long]$writerDrains[0].sequence -eq [long]$writer.lastSequence
+        $writerDrains = $null
+        if (-not $writerDrainSequences.TryGetValue([string]$writer.writerId, [ref]$writerDrains)) {
+            $writerDrains = New-Object System.Collections.Generic.List[long]
+        }
+        $drainValid = $writerDrains.Count -eq 1 -and [long]$writerDrains[0] -eq [long]$writer.lastSequence
         if (-not $drainValid) {
             $writerDrainMissingCount++
         }
         $writerDrainEvidence.Add([ordered]@{
             writerId = [string]$writer.writerId
-            drainSequence = $(if ($writerDrains.Count -eq 1) { [long]$writerDrains[0].sequence } else { 0L })
+            drainSequence = $(if ($writerDrains.Count -eq 1) { [long]$writerDrains[0] } else { 0L })
             finalSequence = [long]$writer.lastSequence
             valid = $drainValid
         }) | Out-Null
@@ -3164,14 +3471,49 @@ function Write-FileTransferGuiLogLedgerEvidence {
     $writerRecoveryReasons = New-Object System.Collections.Generic.List[string]
     if ($writerUnresolvedDeferredBatchCount -ne 0) { $writerRecoveryReasons.Add('writer_deferred_batch_unresolved') | Out-Null }
     if ($writerRecoveryMismatchCount -ne 0) { $writerRecoveryReasons.Add('writer_recovery_evidence_mismatch') | Out-Null }
+    if ($writerMarkerStructuredFieldDuplicateCount -ne 0) { $writerRecoveryReasons.Add('writer_marker_structured_field_duplicate') | Out-Null }
     if ($terminalMarkers.Count -ne 0) { $writerRecoveryReasons.Add('operational_log_write_failure_observed') | Out-Null }
     if ($writerDrainMissingCount -ne 0) { $writerRecoveryReasons.Add('writer_drain_missing') | Out-Null }
     $writerChronologyReasons = New-Object System.Collections.Generic.List[string]
-    $writerChronology = Get-GuiSmokeLogWriterChronology -WriterLineRecords @($writerLineRecords.ToArray())
-    $writerChronologyInversionCount = [long]$writerChronology.inversionCount
-    $writerChronologyCollisionCount = [long]$writerChronology.collisionCount
-    foreach ($chronologyReason in @($writerChronology.reasons)) {
-        $writerChronologyReasons.Add([string]$chronologyReason) | Out-Null
+    $validBatchesByWriter = [System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[object]]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($batch in $writerBatchAccumulators.Values) {
+        $batchIsValid = [bool]$batch.tupleValid -and
+            [long]$batch.batchGeneration -gt 0 -and
+            [long]$batch.attemptUtcTicks -gt 0 -and
+            [long]$batch.minSequence -gt 0 -and
+            [long]$batch.batchFirstSequence -gt 0 -and
+            [long]$batch.batchLastSequence -ge [long]$batch.batchFirstSequence -and
+            [long]$batch.batchFirstSequence -eq [long]$batch.minSequence -and
+            [long]$batch.batchLastSequence -eq [long]$batch.maxSequence -and
+            [long]$batch.lineCount -eq ([long]$batch.maxSequence - [long]$batch.minSequence + 1L)
+        if (-not $batchIsValid) {
+            $writerChronologyReasons.Add('writer_recovery_chronology_batch_invalid') | Out-Null
+            continue
+        }
+
+        $validBatches = $null
+        if (-not $validBatchesByWriter.TryGetValue([string]$batch.writerId, [ref]$validBatches)) {
+            $validBatches = New-Object System.Collections.Generic.List[object]
+            $validBatchesByWriter.Add([string]$batch.writerId, $validBatches)
+        }
+        $validBatches.Add([pscustomobject]@{
+            firstSequence = [long]$batch.minSequence
+            attemptUtcTicks = [long]$batch.attemptUtcTicks
+            firstObservedOrdinal = [long]$batch.firstObservedOrdinal
+        }) | Out-Null
+    }
+    foreach ($validBatches in $validBatchesByWriter.Values) {
+        $orderedBatches = @($validBatches.ToArray() | Sort-Object firstSequence, firstObservedOrdinal)
+        for ($batchIndex = 1; $batchIndex -lt $orderedBatches.Count; $batchIndex++) {
+            $previousTicks = [long]$orderedBatches[$batchIndex - 1].attemptUtcTicks
+            $currentTicks = [long]$orderedBatches[$batchIndex].attemptUtcTicks
+            if ($currentTicks -lt $previousTicks) {
+                $writerChronologyInversionCount++
+            }
+            elseif ($currentTicks -eq $previousTicks) {
+                $writerChronologyCollisionCount++
+            }
+        }
     }
     if ($writerChronologyInversionCount -ne 0) { $writerChronologyReasons.Add('writer_recovery_chronology_inversion') | Out-Null }
     if ($writerChronologyCollisionCount -ne 0) { $writerChronologyReasons.Add('writer_recovery_chronology_collision') | Out-Null }
@@ -3318,22 +3660,46 @@ function Write-FileTransferGuiLogLedgerEvidence {
         cursorIntegrityReasons = @($integrityReasons.ToArray() | Select-Object -Unique)
     }
 
+    if ($null -ne $TestMetrics) {
+        $TestMetrics.ledgerLineVisitCount = [long]$writerLedgerVisitCount
+        $TestMetrics.markerLineVisitCount = [long]$writerMarkerLineVisitCount
+        $TestMetrics.deferredLookupCount = [long]$writerDeferredLookupCount
+        $TestMetrics.recoveredLookupCount = [long]$writerRecoveredLookupCount
+    }
+
     $path = Join-Path $ArtifactDir 'filetransfer-gui-log-ledger.json'
+    $temporaryPath = '{0}.{1}.tmp' -f $path, ([guid]::NewGuid().ToString('N'))
     $json = $evidence | ConvertTo-Json -Depth 12
     $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($json)
     $stream = $null
     try {
         $stream = [System.IO.FileStream]::new(
-            $path,
+            $temporaryPath,
             [System.IO.FileMode]::CreateNew,
             [System.IO.FileAccess]::Write,
             [System.IO.FileShare]::None)
         $stream.Write($bytes, 0, $bytes.Length)
         $stream.Flush($true)
+        $stream.Dispose()
+        $stream = $null
+        [System.IO.File]::Move($temporaryPath, $path)
+        $temporaryPath = ''
+        if ($null -ne $retainedSlice -and
+            -not [string]::IsNullOrWhiteSpace([string]$env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH)) {
+            Update-FileTransferGuiEvidenceFinalizationStage `
+                -Stage 'writer_validation_completed' `
+                -CapturePath ([string]$retainedSlice.Path) `
+                -CaptureSha256 ([string]$retainedSlice.Sha256) `
+                -CaptureLineCount ([long]$retainedSlice.LineCount)
+        }
     }
     finally {
         if ($stream) {
             $stream.Dispose()
+        }
+        if (-not [string]::IsNullOrWhiteSpace($temporaryPath) -and
+            (Test-Path -LiteralPath $temporaryPath -PathType Leaf)) {
+            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
         }
     }
 }
@@ -11780,7 +12146,6 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                                 $terminalRouteSequence = ((Get-TunaGuiLiveRouteEpochRouteChanges -Observations $liveRouteEpochObservations) -join ',')
                                 $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_reactivation_first_transfer_terminal_before_activation; route_mode={1}; transfer_id={2}; step={3}; action=on; reason=terminal_before_same_transfer_reactivation_immediate_probe; fallback_epoch_recovered={4}; route_sequence={5}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $RouteMode, $firstTransferTerminalBeforeLiveReactivationTransferId, $stepNumber, ($(if ($fallbackEpochRecoveredObserved) { 1 } else { 0 })), $terminalRouteSequence)) | Out-Null
                                 Write-TunaGuiMilestoneEvidence -ArtifactDir $ArtifactDir -ObservedEvidenceLines $observedEvidenceLines
-                                Copy-FileTransferLiveLogSlice -ArtifactDir $ArtifactDir -Bookmark $bookmark
                                 Write-Host '[GUI Smoke][filetransfer_tuna] Transfer terminalized before the second Tuna activation proof; preserving terminal-before-second-activation evidence.' -ForegroundColor Yellow
                                 break
                             }
@@ -11885,7 +12250,6 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                                 }
                                 $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event={1}; route_mode={2}; transfer_id={3}; step={4}; action=on; reason={5}; fallback_epoch_recovered={6}; route_sequence={7}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $terminalBeforeActivationEvent, $RouteMode, $firstTransferTerminalBeforeLiveReactivationTransferId, $stepNumber, $terminalBeforeActivationReason, ($(if ($fallbackEpochRecoveredObserved) { 1 } else { 0 })), $terminalRouteSequence)) | Out-Null
                                 Write-TunaGuiMilestoneEvidence -ArtifactDir $ArtifactDir -ObservedEvidenceLines $observedEvidenceLines
-                                Copy-FileTransferLiveLogSlice -ArtifactDir $ArtifactDir -Bookmark $bookmark
                                 if ($RouteMode -eq 'live-reactivation-second-transfer') {
                                     if (-not $terminalFallbackPrefixObserved) {
                                         throw "Tuna GUI live reactivation first transfer completed on regular V4 before Tuna activation commit. failure_class=regular_v4_terminal_before_tuna_activation_commit sequence=$terminalRouteSequence Summary: $($terminalProbe | ConvertTo-Json -Compress)"
@@ -11930,7 +12294,6 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                                 }
                                 $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event={1}; route_mode={2}; transfer_id={3}; step={4}; action=on; reason={5}; fallback_epoch_recovered={6}; route_sequence={7}; terminal_probe_error={8}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $terminalBeforeActivationEvent, $RouteMode, $firstTransferTerminalBeforeLiveReactivationTransferId, $stepNumber, $terminalBeforeActivationReason, ($(if ($fallbackEpochRecoveredObserved) { 1 } else { 0 })), $terminalRouteSequence, ($_.Exception.Message -replace ';', ','))) | Out-Null
                                 Write-TunaGuiMilestoneEvidence -ArtifactDir $ArtifactDir -ObservedEvidenceLines $observedEvidenceLines
-                                Copy-FileTransferLiveLogSlice -ArtifactDir $ArtifactDir -Bookmark $bookmark
 
                                 if ($terminalFallbackPrefixObserved) {
                                     Write-Host '[GUI Smoke][filetransfer_tuna] Transfer terminalized in fallback before the second Tuna activation proof; preserving terminal-before-second-activation retained evidence.' -ForegroundColor Yellow
@@ -12257,7 +12620,6 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     }
     $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Encoding UTF8
     Write-TunaGuiMilestoneEvidence -ArtifactDir $ArtifactDir -ObservedEvidenceLines $observedEvidenceLines
-    Copy-FileTransferLiveLogSlice -ArtifactDir $ArtifactDir -Bookmark $bookmark
 
     if (-not $integrityOk) {
         throw ("Tuna GUI file-transfer cycle failed terminal/integrity check: transfer_id={0}; inbound_state={1}; outbound_state={2}; inbound_error={3}; outbound_error={4}; saved_size={5}; expected_size={6}" -f `

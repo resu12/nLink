@@ -56,6 +56,32 @@ Assert-True $liveValidation.currentRuntimeProof 'valid live manifest must prove 
 Assert-Equal $liveValidation.provenanceVerdict 'PASS' 'valid live provenance'
 Assert-Equal $liveValidation.cursorIntegrityVerdict 'PASS' 'valid live cursor'
 
+$partialAttempt = Get-RouteAcceptanceScenarioEvidence `
+    -AcceptanceRunId $fixture.RunId `
+    -ScenarioName 'regular-v4-live-activation-off-on-off-256mb' `
+    -Attempt 1 `
+    -ScenarioRunId ($fixture.RunId + ':regular-v4-live-activation-off-on-off-256mb:1') `
+    -ArtifactDir $fixture.ArtifactDir `
+    -ArtifactFinalized $false `
+    -LogLedgerPath $fixture.LedgerPath `
+    -AnalyzerDiagnosticsPath $fixture.DiagnosticsPath `
+    -AnalyzerInputPath $fixture.AnalyzerInputPath
+$partial = New-RouteAcceptanceEvidenceManifest `
+    -RunId $fixture.RunId `
+    -MatrixMode 'phase5-analyzer-gui-acceptance' `
+    -ExecutionMode live `
+    -ArtifactRoot $fixture.ArtifactDir `
+    -StartedUtc ([datetime]'2026-07-12T10:00:00Z') `
+    -FinalizedUtc ([datetime]'2026-07-12T10:05:00Z') `
+    -ScenarioNames @('regular-v4-live-activation-off-on-off-256mb') `
+    -InitialSnapshot $fixture.Initial `
+    -FinalSnapshot $final `
+    -ScenarioAttempts @($partialAttempt)
+$partialValidation = Test-RouteAcceptanceEvidenceManifest -Manifest $partial
+Assert-Equal $partialValidation.verdict 'FAIL' 'partially finalized live manifest verdict'
+Assert-False $partialValidation.currentRuntimeProof 'partially finalized live evidence must fail closed'
+Assert-Contains $partialValidation.reasons 'scenario_artifact_not_finalized' 'partial-finalization proof reason'
+
 $dryRun = New-RouteAcceptanceEvidenceManifest `
     -RunId $fixture.RunId `
     -MatrixMode 'phase5-analyzer-gui-acceptance' `

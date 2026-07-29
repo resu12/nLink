@@ -97,6 +97,62 @@ function Get-GuiSmokeLogLedgerStructuredField {
     return [string]$match.Groups['value'].Value.Trim()
 }
 
+function ConvertFrom-GuiSmokeLogLedgerStructuredFields {
+    param([AllowNull()][string]$Line)
+
+    $fields = @{}
+    $duplicateFieldObserved = $false
+    $duplicateWriterEvidenceFieldObserved = $false
+    if ([string]::IsNullOrWhiteSpace($Line)) {
+        return $fields
+    }
+
+    $payload = $Line
+    $prefixMatch = [regex]::Match($Line, '^(?:\[[^\]]+\]\s+)+(?<message>.*)$')
+    if ($prefixMatch.Success) {
+        $payload = $prefixMatch.Groups['message'].Value
+    }
+    foreach ($part in ($payload -split ';')) {
+        $segment = $part.Trim()
+        if ([string]::IsNullOrWhiteSpace($segment)) {
+            continue
+        }
+        $separator = $segment.IndexOf('=')
+        if ($separator -le 0) {
+            continue
+        }
+        $name = $segment.Substring(0, $separator).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($name)) {
+            if ($fields.ContainsKey($name)) {
+                $duplicateFieldObserved = $true
+                if (@(
+                        'event',
+                        'acceptance_run_id',
+                        'scenario_run_id',
+                        'log_writer_id',
+                        'log_writer_sequence',
+                        'log_writer_batch_generation',
+                        'log_writer_batch_first_sequence',
+                        'log_writer_batch_last_sequence',
+                        'log_writer_attempt_utc_ticks'
+                    ) -contains $name) {
+                    $duplicateWriterEvidenceFieldObserved = $true
+                }
+                continue
+            }
+            $fields[$name] = $segment.Substring($separator + 1).Trim()
+        }
+    }
+    if ($duplicateFieldObserved) {
+        $fields['__nlink_duplicate_structured_field'] = $true
+    }
+    if ($duplicateWriterEvidenceFieldObserved) {
+        $fields['__nlink_duplicate_writer_evidence_field'] = $true
+    }
+
+    return $fields
+}
+
 function Add-GuiSmokeLogLedgerWriterEvidence {
     param(
         [Parameter(Mandatory = $true)]$State,
@@ -832,6 +888,237 @@ function Invoke-GuiSmokeLogLedgerRangeVisitor {
     }
 
     return $null
+}
+
+function Write-GuiSmokeLogLedgerRangeCapture {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)][int]$StartIndex,
+        [Parameter(Mandatory = $true)][int]$EndIndex,
+        [Parameter(Mandatory = $true)][string]$DestinationPath
+    )
+
+    $resolvedDestinationPath = [IO.Path]::GetFullPath($DestinationPath)
+    if ([IO.File]::Exists($resolvedDestinationPath)) {
+        throw "Gui smoke log ledger capture already exists: $resolvedDestinationPath"
+    }
+
+    $destinationDirectory = [IO.Path]::GetDirectoryName($resolvedDestinationPath)
+    if ([string]::IsNullOrWhiteSpace($destinationDirectory)) {
+        throw "Gui smoke log ledger capture destination has no parent directory: $resolvedDestinationPath"
+    }
+    [void][IO.Directory]::CreateDirectory($destinationDirectory)
+
+    $tempPath = Join-Path `
+        $destinationDirectory `
+        (".{0}.{1}.tmp" -f [IO.Path]::GetFileName($resolvedDestinationPath), [guid]::NewGuid().ToString('N'))
+    $stream = $null
+    $sha256 = $null
+    $captureState = [pscustomobject]@{
+        LineCount = 0L
+        ByteCount = 0L
+    }
+    try {
+        $stream = [IO.FileStream]::new(
+            $tempPath,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None,
+            65536,
+            [IO.FileOptions]::SequentialScan)
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        $encoding = [Text.UTF8Encoding]::new($false)
+        $separatorBytes = $encoding.GetBytes([Environment]::NewLine)
+
+        [void](Invoke-GuiSmokeLogLedgerRangeVisitor `
+            -State $State `
+            -StartIndex $StartIndex `
+            -EndIndex $EndIndex `
+            -Visitor {
+                param([string]$line, [int]$lineIndex)
+
+                if ($lineIndex -gt $StartIndex) {
+                    $stream.Write($separatorBytes, 0, $separatorBytes.Length)
+                    [void]$sha256.TransformBlock(
+                        $separatorBytes,
+                        0,
+                        $separatorBytes.Length,
+                        $separatorBytes,
+                        0)
+                    $captureState.ByteCount += [long]$separatorBytes.Length
+                }
+
+                $lineBytes = $encoding.GetBytes($line)
+                if ($lineBytes.Length -gt 0) {
+                    $stream.Write($lineBytes, 0, $lineBytes.Length)
+                    [void]$sha256.TransformBlock($lineBytes, 0, $lineBytes.Length, $lineBytes, 0)
+                    $captureState.ByteCount += [long]$lineBytes.Length
+                }
+                [void]($captureState.LineCount++)
+                return $null
+            })
+
+        [void]$sha256.TransformFinalBlock([byte[]]::new(0), 0, 0)
+        $stream.Flush($true)
+        $stream.Dispose()
+        $stream = $null
+
+        [IO.File]::Move($tempPath, $resolvedDestinationPath)
+        $tempPath = ''
+        return [pscustomobject]@{
+            Path = $resolvedDestinationPath
+            Sha256 = (([BitConverter]::ToString($sha256.Hash)) -replace '-', '').ToLowerInvariant()
+            LineCount = [long]$captureState.LineCount
+            ByteCount = [long]$captureState.ByteCount
+        }
+    }
+    finally {
+        if ($stream) {
+            $stream.Dispose()
+        }
+        if ($sha256) {
+            $sha256.Dispose()
+        }
+        if (-not [string]::IsNullOrWhiteSpace($tempPath) -and [IO.File]::Exists($tempPath)) {
+            [IO.File]::Delete($tempPath)
+        }
+    }
+}
+
+function Copy-GuiSmokeFileAtomicCreateNew {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        [Parameter(Mandatory = $true)][string]$DestinationPath,
+        [switch]$BindSourceLength,
+        [switch]$AllowSourceWrite
+    )
+
+    $resolvedSourcePath = [IO.Path]::GetFullPath($SourcePath)
+    $resolvedDestinationPath = [IO.Path]::GetFullPath($DestinationPath)
+    if (-not [IO.File]::Exists($resolvedSourcePath)) {
+        throw "Gui smoke source file does not exist: $resolvedSourcePath"
+    }
+    if ([IO.File]::Exists($resolvedDestinationPath)) {
+        throw "Gui smoke destination file already exists: $resolvedDestinationPath"
+    }
+
+    $destinationDirectory = [IO.Path]::GetDirectoryName($resolvedDestinationPath)
+    if ([string]::IsNullOrWhiteSpace($destinationDirectory)) {
+        throw "Gui smoke destination has no parent directory: $resolvedDestinationPath"
+    }
+    [void][IO.Directory]::CreateDirectory($destinationDirectory)
+
+    $tempPath = Join-Path `
+        $destinationDirectory `
+        (".{0}.{1}.tmp" -f [IO.Path]::GetFileName($resolvedDestinationPath), [guid]::NewGuid().ToString('N'))
+    $sourceStream = $null
+    $destinationStream = $null
+    $sha256 = $null
+    $byteCount = 0L
+    $lineFeedCount = 0L
+    $lastByte = -1
+    try {
+        $sourceShare = if ($AllowSourceWrite) {
+            [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+        }
+        else {
+            [IO.FileShare]::Read
+        }
+        $sourceStream = [IO.FileStream]::new(
+            $resolvedSourcePath,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            $sourceShare,
+            65536,
+            [IO.FileOptions]::SequentialScan)
+        $capturedLength = if ($BindSourceLength) { [long]$sourceStream.Length } else { -1L }
+        $destinationStream = [IO.FileStream]::new(
+            $tempPath,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None,
+            65536,
+            [IO.FileOptions]::SequentialScan)
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        $buffer = [byte[]]::new(65536)
+        while ($true) {
+            $requested = if ($BindSourceLength) {
+                [int][Math]::Min([long]$buffer.Length, $capturedLength - $byteCount)
+            }
+            else {
+                $buffer.Length
+            }
+            if ($requested -le 0) {
+                break
+            }
+            $read = $sourceStream.Read($buffer, 0, $requested)
+            if ($read -le 0) {
+                if ($BindSourceLength -and $byteCount -ne $capturedLength) {
+                    throw "writer_output_snapshot_short_read:expected=$capturedLength;actual=$byteCount"
+                }
+                break
+            }
+            $destinationStream.Write($buffer, 0, $read)
+            [void]$sha256.TransformBlock($buffer, 0, $read, $buffer, 0)
+            $byteCount += [long]$read
+            $lastByte = [int]$buffer[$read - 1]
+            $searchIndex = 0
+            while ($searchIndex -lt $read) {
+                $lineFeedIndex = [Array]::IndexOf(
+                    $buffer,
+                    [byte]10,
+                    $searchIndex,
+                    $read - $searchIndex)
+                if ($lineFeedIndex -lt 0) {
+                    break
+                }
+
+                [void]($lineFeedCount++)
+                $searchIndex = $lineFeedIndex + 1
+            }
+        }
+        if ($BindSourceLength -and $byteCount -ne $capturedLength) {
+            throw "writer_output_snapshot_short_read:expected=$capturedLength;actual=$byteCount"
+        }
+
+        [void]$sha256.TransformFinalBlock([byte[]]::new(0), 0, 0)
+        $destinationStream.Flush($true)
+        $sourceStream.Dispose()
+        $sourceStream = $null
+        $destinationStream.Dispose()
+        $destinationStream = $null
+
+        [IO.File]::Move($tempPath, $resolvedDestinationPath)
+        $tempPath = ''
+        return [pscustomobject]@{
+            Path = $resolvedDestinationPath
+            Sha256 = (([BitConverter]::ToString($sha256.Hash)) -replace '-', '').ToLowerInvariant()
+            LineCount = $(if ($byteCount -le 0) {
+                    0L
+                }
+                elseif ($lastByte -eq 10) {
+                    $lineFeedCount
+                }
+                else {
+                    $lineFeedCount + 1L
+                })
+            ByteCount = $byteCount
+        }
+    }
+    finally {
+        if ($sourceStream) {
+            $sourceStream.Dispose()
+        }
+        if ($destinationStream) {
+            $destinationStream.Dispose()
+        }
+        if ($sha256) {
+            $sha256.Dispose()
+        }
+        if (-not [string]::IsNullOrWhiteSpace($tempPath) -and [IO.File]::Exists($tempPath)) {
+            [IO.File]::Delete($tempPath)
+        }
+    }
 }
 
 function Get-GuiSmokeLogLedgerDiagnostics {
