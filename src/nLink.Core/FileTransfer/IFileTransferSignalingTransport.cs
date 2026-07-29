@@ -1865,6 +1865,14 @@ internal readonly record struct
         bool PeerVisibleDispatchObserved,
         RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary Boundary)
 {
+    public string SemanticOfferFingerprint { get; init; } = string.Empty;
+
+    public long EnvelopeGeneration { get; init; }
+
+    public long EnvelopeSentAtUnixMs { get; init; }
+
+    public long EnvelopeExpiresAtUnixMs { get; init; }
+
     public RuntimeUnlockInitialActivationReceiveRecoveryExpectedScope
         ExpectedScope
     {
@@ -1922,6 +1930,13 @@ internal readonly record struct
         FileTransferReceiveRecoveryOperationAuthority?
             PreviousReceiveRecoveryAuthority = null)
 {
+    public RuntimeUnlockInitialActivationOfferEnvelopeRefreshCommand?
+        EnvelopeRefreshCommand
+    {
+        get;
+        init;
+    }
+
     public bool IsDefault =>
         Request.IsDefault ||
         string.IsNullOrWhiteSpace(Reason) ||
@@ -1929,6 +1944,87 @@ internal readonly record struct
         Status == RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held &&
         (HoldGeneration <= 0 ||
          ReceiveRecoveryOperation is not { IsDefault: false });
+}
+
+internal sealed record
+    RuntimeUnlockInitialActivationOfferEnvelopeRefreshCommand(
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest HoldRequest,
+        long HoldGeneration,
+        FileTransferReceiveRecoveryOperationAuthority
+            ReceiveRecoveryAuthority,
+        long ClosureGeneration,
+        long RefreshGeneration,
+        long SuccessorEnvelopeGeneration,
+        long SuccessorSentAtUnixMs,
+        long SuccessorExpiresAtUnixMs)
+{
+    public bool IsDefault =>
+        HoldRequest.IsDefault ||
+        HoldGeneration <= 0 ||
+        ReceiveRecoveryAuthority.IsDefault ||
+        ClosureGeneration <= 0 ||
+        RefreshGeneration <= 0 ||
+        SuccessorEnvelopeGeneration != HoldRequest.EnvelopeGeneration + 1 ||
+        SuccessorSentAtUnixMs <= 0 ||
+        SuccessorExpiresAtUnixMs <= SuccessorSentAtUnixMs;
+}
+
+internal sealed record
+    RuntimeUnlockInitialActivationOfferEnvelopeRefreshReceipt(
+        RuntimeUnlockInitialActivationOfferEnvelopeRefreshCommand Command,
+        string SuccessorEnvelopeFingerprint,
+        long SecureSequence,
+        string MessageId)
+{
+    public bool IsDefault =>
+        Command.IsDefault ||
+        string.IsNullOrWhiteSpace(SuccessorEnvelopeFingerprint) ||
+        string.Equals(
+            SuccessorEnvelopeFingerprint,
+            Command.HoldRequest.ControlEnvelopeFingerprint,
+            StringComparison.Ordinal) ||
+        SecureSequence <= 0 ||
+        string.IsNullOrWhiteSpace(MessageId);
+}
+
+internal enum RuntimeUnlockInitialActivationOfferEnvelopeRefreshStatus
+{
+    Accepted = 0,
+    Idempotent = 1,
+    Rejected = 2,
+    Invalidated = 3,
+}
+
+internal readonly record struct
+    RuntimeUnlockInitialActivationOfferEnvelopeRefreshDecision(
+        RuntimeUnlockInitialActivationOfferEnvelopeRefreshReceipt Receipt,
+        RuntimeUnlockInitialActivationOfferEnvelopeRefreshStatus Status,
+        string Reason)
+{
+    public bool IsDefault =>
+        Receipt.IsDefault || string.IsNullOrWhiteSpace(Reason);
+
+    public bool Accepted =>
+        Status is
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshStatus.Accepted or
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshStatus.Idempotent;
+}
+
+internal sealed class
+    RuntimeUnlockInitialActivationOfferEnvelopeRefreshPreparedEventArgs(
+        RuntimeUnlockInitialActivationOfferEnvelopeRefreshReceipt receipt)
+    : EventArgs
+{
+    public RuntimeUnlockInitialActivationOfferEnvelopeRefreshReceipt Receipt
+    {
+        get;
+    } = receipt;
+
+    public RuntimeUnlockInitialActivationOfferEnvelopeRefreshDecision? Decision
+    {
+        get;
+        set;
+    }
 }
 
 internal sealed class
@@ -2002,6 +2098,10 @@ internal interface IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge
     event EventHandler<
         RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationRequestedEventArgs>?
         RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationRequested;
+
+    event EventHandler<
+        RuntimeUnlockInitialActivationOfferEnvelopeRefreshPreparedEventArgs>?
+        RuntimeUnlockInitialActivationOfferEnvelopeRefreshPrepared;
 
     bool ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
         RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision);

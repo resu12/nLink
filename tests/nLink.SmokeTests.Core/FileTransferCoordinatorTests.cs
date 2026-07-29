@@ -6785,6 +6785,117 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void RuntimeUnlockInitialActivationOfferEnvelopeRefresh_HeldReleaseCommitsOneExactSuccessorEnvelope()
+    {
+        var fixture = CreateReceiveRecoveryOperationFixture();
+        var authority =
+            Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+                fixture.Decision.Authority);
+        var request =
+            CreateInitialActivationReceiveRecoveryHoldRequest(
+                fixture.Decision.State,
+                payerDecisionId: 103);
+        var held =
+            FileTransferCoordinator
+                .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    fixture.Decision.State,
+                    request);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held,
+            held.Decision.Status);
+
+        var receipt =
+            new FileTransferBridgeRecoveryExecutionReceipt(
+                authority.ExecutionCommand,
+                FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                "soft",
+                "bridge_recovery_execution_completed");
+        var started =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(
+                held.State,
+                new FileTransferBridgeRecoveryExecutionStartResult(
+                    authority.ExecutionCommand,
+                    FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                    "bridge_recovery_execution_started",
+                    Task.FromResult(receipt)));
+        var completed =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionReceipt(
+                started.State,
+                receipt,
+                observedUtcMs: 2);
+        var proof =
+            FileTransferCoordinator.ObserveReceiveRecoveryProof(
+                completed.State,
+                new FileTransferReceiveRecoveryProof(
+                    authority,
+                    "initial-activation-envelope-refresh-proof",
+                    "receive_proof_observed",
+                    3));
+
+        var release = Assert.IsType<
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision>(
+            proof.InitialActivationHoldDecision);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Released,
+            release.Status);
+        var command = Assert.IsType<
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshCommand>(
+            release.EnvelopeRefreshCommand);
+        Assert.Equal(request, command.HoldRequest);
+        Assert.Equal(request.EnvelopeGeneration + 1,
+            command.SuccessorEnvelopeGeneration);
+        Assert.Equal(
+            request.EnvelopeExpiresAtUnixMs - request.EnvelopeSentAtUnixMs,
+            command.SuccessorExpiresAtUnixMs - command.SuccessorSentAtUnixMs);
+
+        var refreshReceipt =
+            new RuntimeUnlockInitialActivationOfferEnvelopeRefreshReceipt(
+                command,
+                "successor-envelope-fingerprint",
+                SecureSequence: 17,
+                MessageId: "refresh-message-1");
+        var committed =
+            FileTransferCoordinator
+                .CommitRuntimeUnlockInitialActivationOfferEnvelopeRefresh(
+                    proof.State,
+                    refreshReceipt);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshStatus.Accepted,
+            committed.Decision.Status);
+        Assert.Null(
+            committed.State.PersistentState.FileTransferReceiveRecovery
+                .PendingInitialActivationEnvelopeRefresh);
+        Assert.Equal(
+            refreshReceipt,
+            committed.State.PersistentState.FileTransferReceiveRecovery
+                .LastInitialActivationEnvelopeRefreshReceipt);
+
+        var duplicate =
+            FileTransferCoordinator
+                .CommitRuntimeUnlockInitialActivationOfferEnvelopeRefresh(
+                    committed.State,
+                    refreshReceipt);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshStatus.Idempotent,
+            duplicate.Decision.Status);
+        Assert.Same(committed.State, duplicate.State);
+
+        var mutated =
+            FileTransferCoordinator
+                .CommitRuntimeUnlockInitialActivationOfferEnvelopeRefresh(
+                    committed.State,
+                    refreshReceipt with
+                    {
+                        SuccessorEnvelopeFingerprint =
+                            "mutated-successor-envelope-fingerprint",
+                    });
+        Assert.Equal(
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshStatus.Rejected,
+            mutated.Decision.Status);
+        Assert.Same(committed.State, mutated.State);
+    }
+
+    [Fact]
     public void RuntimeUnlockInitialActivationReceiveRecoveryHold_CompletedUnprovenSuccessorRebindsAndInvalidationTerminates()
     {
         var completed = CreateCompletedUnprovenReceiveRecoveryOperation(
@@ -16953,6 +17064,11 @@ public sealed class FileTransferCoordinatorTests
                 RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
                     .OfferPreSend)
         {
+            SemanticOfferFingerprint =
+                $"semantic-offer-{payerDecisionId}",
+            EnvelopeGeneration = 1,
+            EnvelopeSentAtUnixMs = 1_000,
+            EnvelopeExpiresAtUnixMs = 121_000,
             ExpectedScope =
                 new RuntimeUnlockInitialActivationReceiveRecoveryExpectedScope(
                     publication,

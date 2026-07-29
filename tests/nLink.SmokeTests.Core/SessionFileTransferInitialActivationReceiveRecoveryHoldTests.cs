@@ -515,6 +515,9 @@ public sealed class
         private event EventHandler<
             RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationRequestedEventArgs>?
             holdInvalidationRequested;
+        private event EventHandler<
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshPreparedEventArgs>?
+            envelopeRefreshPrepared;
 
         internal ConcurrentQueue<
             RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision>
@@ -539,6 +542,15 @@ public sealed class
         {
             add => holdInvalidationRequested += value;
             remove => holdInvalidationRequested -= value;
+        }
+
+        event EventHandler<
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshPreparedEventArgs>?
+            IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge
+                .RuntimeUnlockInitialActivationOfferEnvelopeRefreshPrepared
+        {
+            add => envelopeRefreshPrepared += value;
+            remove => envelopeRefreshPrepared -= value;
         }
 
         internal RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision

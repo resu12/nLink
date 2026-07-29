@@ -752,6 +752,9 @@ public sealed partial class SessionFileTransferService :
             initialActivationHoldBridge
                     .RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationRequested +=
                 OnRuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationRequested;
+            initialActivationHoldBridge
+                    .RuntimeUnlockInitialActivationOfferEnvelopeRefreshPrepared +=
+                OnRuntimeUnlockInitialActivationOfferEnvelopeRefreshPrepared;
         }
 
         if (transport is IFileTransferBridgeRecoveryExecutionBridge bridgeRecoveryExecutionBridge)
@@ -5596,7 +5599,19 @@ public sealed partial class SessionFileTransferService :
             expected.SourcePublicationAuthority;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event={eventName}; session_id={FormatProtocolLogValue(request.SessionId)}; transfer_id={FormatProtocolLogValue(request.TransferId)}; direction={request.Direction.ToString().ToLowerInvariant()}; offer_authority_mode=InitialActivation; hold_boundary={request.Boundary}; payer_decision_id={request.PayerDecisionId}; offer_generation={request.OfferGeneration}; offer_nonce={FormatProtocolLogValue(request.OfferNonce)}; transaction_generation={request.TransactionGeneration}; tuna_path_lease_generation={request.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={FormatProtocolLogValue(request.TunaPathLeaseListenerRunId)}; control_envelope_fingerprint={FormatProtocolLogValue(request.ControlEnvelopeFingerprint)}; peer_visible_dispatch_observed={(request.PeerVisibleDispatchObserved ? 1 : 0)}; expected_route={FormatProtocolLogValue(expectedPublication?.RouteToken ?? "(none)")}; expected_protocol_version={expectedPublication?.ProtocolVersion ?? 0}; expected_live_route_epoch={expectedPublication?.LiveRouteEpoch ?? 0}; expected_runtime_generation={expectedPublication?.RuntimeGeneration ?? 0}; expected_terminal_generation={expectedPublication?.TerminalGeneration ?? 0}; expected_leg_generation={expectedPublication?.LegGeneration ?? 0}; expected_route_publication_generation={expectedPublication?.RoutePublicationGeneration ?? 0}; expected_route_commit_generation={expectedPublication?.RouteCommitGeneration ?? 0}; expected_transport_epoch={expected.TransportEpoch}; expected_bridge_recovery_generation={expected.BridgeRecoveryGeneration}; expected_checkpoint_request_id={FormatProtocolLogValue(expected.CheckpointRequestId ?? "(none)")}; expected_data_session_identity={FormatProtocolLogValue(expected.DataSessionIdentity)}; expected_data_session_generation={expected.DataSessionGeneration}; expected_execution_bridge_decision_generation={expected.ExpectedExecutionCommand?.Decision.BridgeDecisionGeneration ?? 0}; hold_generation={decision?.HoldGeneration ?? 0}; decision_status={FormatProtocolLogValue(decision?.Status.ToString() ?? "(none)")}; receive_recovery_operation_authority_id={FormatProtocolLogValue(authority?.AuthorityId.ToString() ?? "(none)")}; receive_recovery_operation_generation={authority?.OperationGeneration ?? 0}; bridge_decision_generation={authority?.BridgeRecoveryDecision.BridgeDecisionGeneration ?? 0}; recovery_liveness_lease_authority_id={FormatProtocolLogValue(lease?.AuthorityId.ToString() ?? "(none)")}; recovery_liveness_lease_generation={lease?.LeaseGeneration ?? 0}; closure_generation={operation?.ClosureGeneration ?? 0}; closure_state={FormatProtocolLogValue(operation?.ClosureState.ToString() ?? "(none)")}; route={FormatProtocolLogValue(observation?.RouteToken ?? "(none)")}; protocol_version={observation?.ProtocolVersion ?? 0}; live_route_epoch={observation?.LiveRouteEpoch ?? 0}; runtime_generation={observation?.RuntimeOwner.RuntimeGeneration ?? 0}; terminal_generation={observation?.TerminalGeneration ?? 0}; leg_generation={observation?.LegGeneration ?? 0}; transport_epoch={observation?.TransportEpoch ?? 0}; bridge_recovery_generation={observation?.BridgeRecoveryGeneration ?? 0}; route_publication_generation={observation?.RoutePublication.PublicationGeneration ?? 0}; data_session_identity={FormatProtocolLogValue(observation?.DataSessionIdentity ?? "(none)")}; data_session_generation={observation?.DataSessionGeneration ?? 0}; decision_reason={FormatProtocolLogValue(reason)}");
+            $"event={eventName}; session_id={FormatProtocolLogValue(request.SessionId)}; transfer_id={FormatProtocolLogValue(request.TransferId)}; direction={request.Direction.ToString().ToLowerInvariant()}; offer_authority_mode=InitialActivation; hold_boundary={request.Boundary}; payer_decision_id={request.PayerDecisionId}; offer_generation={request.OfferGeneration}; offer_nonce={FormatProtocolLogValue(request.OfferNonce)}; transaction_generation={request.TransactionGeneration}; tuna_path_lease_generation={request.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={FormatProtocolLogValue(request.TunaPathLeaseListenerRunId)}; semantic_offer_fingerprint={FormatProtocolLogValue(request.SemanticOfferFingerprint)}; envelope_generation={request.EnvelopeGeneration}; envelope_sent_at_unix_ms={request.EnvelopeSentAtUnixMs}; envelope_expires_at_unix_ms={request.EnvelopeExpiresAtUnixMs}; control_envelope_fingerprint={FormatProtocolLogValue(request.ControlEnvelopeFingerprint)}; peer_visible_dispatch_observed={(request.PeerVisibleDispatchObserved ? 1 : 0)}; expected_route={FormatProtocolLogValue(expectedPublication?.RouteToken ?? "(none)")}; expected_protocol_version={expectedPublication?.ProtocolVersion ?? 0}; expected_live_route_epoch={expectedPublication?.LiveRouteEpoch ?? 0}; expected_runtime_generation={expectedPublication?.RuntimeGeneration ?? 0}; expected_terminal_generation={expectedPublication?.TerminalGeneration ?? 0}; expected_leg_generation={expectedPublication?.LegGeneration ?? 0}; expected_route_publication_generation={expectedPublication?.RoutePublicationGeneration ?? 0}; expected_route_commit_generation={expectedPublication?.RouteCommitGeneration ?? 0}; expected_transport_epoch={expected.TransportEpoch}; expected_bridge_recovery_generation={expected.BridgeRecoveryGeneration}; expected_checkpoint_request_id={FormatProtocolLogValue(expected.CheckpointRequestId ?? "(none)")}; expected_data_session_identity={FormatProtocolLogValue(expected.DataSessionIdentity)}; expected_data_session_generation={expected.DataSessionGeneration}; expected_execution_bridge_decision_generation={expected.ExpectedExecutionCommand?.Decision.BridgeDecisionGeneration ?? 0}; hold_generation={decision?.HoldGeneration ?? 0}; decision_status={FormatProtocolLogValue(decision?.Status.ToString() ?? "(none)")}; refresh_generation={decision?.EnvelopeRefreshCommand?.RefreshGeneration ?? 0}; successor_envelope_generation={decision?.EnvelopeRefreshCommand?.SuccessorEnvelopeGeneration ?? 0}; receive_recovery_operation_authority_id={FormatProtocolLogValue(authority?.AuthorityId.ToString() ?? "(none)")}; receive_recovery_operation_generation={authority?.OperationGeneration ?? 0}; bridge_decision_generation={authority?.BridgeRecoveryDecision.BridgeDecisionGeneration ?? 0}; recovery_liveness_lease_authority_id={FormatProtocolLogValue(lease?.AuthorityId.ToString() ?? "(none)")}; recovery_liveness_lease_generation={lease?.LeaseGeneration ?? 0}; closure_generation={operation?.ClosureGeneration ?? 0}; closure_state={FormatProtocolLogValue(operation?.ClosureState.ToString() ?? "(none)")}; route={FormatProtocolLogValue(observation?.RouteToken ?? "(none)")}; protocol_version={observation?.ProtocolVersion ?? 0}; live_route_epoch={observation?.LiveRouteEpoch ?? 0}; runtime_generation={observation?.RuntimeOwner.RuntimeGeneration ?? 0}; terminal_generation={observation?.TerminalGeneration ?? 0}; leg_generation={observation?.LegGeneration ?? 0}; transport_epoch={observation?.TransportEpoch ?? 0}; bridge_recovery_generation={observation?.BridgeRecoveryGeneration ?? 0}; route_publication_generation={observation?.RoutePublication.PublicationGeneration ?? 0}; data_session_identity={FormatProtocolLogValue(observation?.DataSessionIdentity ?? "(none)")}; data_session_generation={observation?.DataSessionGeneration ?? 0}; decision_reason={FormatProtocolLogValue(reason)}");
+    }
+
+    private static void LogRuntimeUnlockInitialActivationOfferEnvelopeRefresh(
+        string eventName,
+        RuntimeUnlockInitialActivationOfferEnvelopeRefreshDecision decision)
+    {
+        var receipt = decision.Receipt;
+        var command = receipt.Command;
+        var request = command.HoldRequest;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event={eventName}; session_id={FormatProtocolLogValue(request.SessionId)}; transfer_id={FormatProtocolLogValue(request.TransferId)}; direction={request.Direction.ToString().ToLowerInvariant()}; payer_decision_id={request.PayerDecisionId}; offer_generation={request.OfferGeneration}; transaction_generation={request.TransactionGeneration}; tuna_path_lease_generation={request.TunaPathLeaseGeneration}; semantic_offer_fingerprint={FormatProtocolLogValue(request.SemanticOfferFingerprint)}; predecessor_envelope_generation={request.EnvelopeGeneration}; predecessor_envelope_fingerprint={FormatProtocolLogValue(request.ControlEnvelopeFingerprint)}; predecessor_sent_at_unix_ms={request.EnvelopeSentAtUnixMs}; predecessor_expires_at_unix_ms={request.EnvelopeExpiresAtUnixMs}; refresh_generation={command.RefreshGeneration}; successor_envelope_generation={command.SuccessorEnvelopeGeneration}; successor_envelope_fingerprint={FormatProtocolLogValue(receipt.SuccessorEnvelopeFingerprint)}; successor_sent_at_unix_ms={command.SuccessorSentAtUnixMs}; successor_expires_at_unix_ms={command.SuccessorExpiresAtUnixMs}; secure_sequence={receipt.SecureSequence}; message_id={FormatProtocolLogValue(receipt.MessageId)}; receive_recovery_operation_generation={command.ReceiveRecoveryAuthority.OperationGeneration}; closure_generation={command.ClosureGeneration}; decision_status={decision.Status}; decision_reason={FormatProtocolLogValue(decision.Reason)}");
     }
 
     private FileTransferLeg? EnsureOutboundTransferLegLocked(
@@ -5877,6 +5892,92 @@ public sealed partial class SessionFileTransferService :
             return;
         }
 
+    }
+
+    private void
+        OnRuntimeUnlockInitialActivationOfferEnvelopeRefreshPrepared(
+            object? sender,
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshPreparedEventArgs
+                args)
+    {
+        if (sender is not
+            IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge bridge)
+        {
+            return;
+        }
+
+        var receipt = args.Receipt;
+        RuntimeUnlockInitialActivationOfferEnvelopeRefreshCoordinatorDecision
+            coordinatorDecision;
+        lock (gate)
+        {
+            var request = receipt.Command.HoldRequest;
+            var bridgeIsCurrent =
+                transport is
+                    IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge
+                        currentBridge &&
+                ReferenceEquals(currentBridge, bridge);
+            if (bridgeIsCurrent &&
+                request.Direction == FileTransferDirection.Outbound &&
+                outboundTransfer is { IsTerminal: false } outbound &&
+                string.Equals(
+                    request.SessionId,
+                    outbound.SessionId,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    request.TransferId,
+                    outbound.TransferId,
+                    StringComparison.Ordinal))
+            {
+                coordinatorDecision =
+                    FileTransferCoordinator
+                        .CommitRuntimeUnlockInitialActivationOfferEnvelopeRefresh(
+                            CreateCoordinatorStateLocked(outbound),
+                            receipt);
+                ApplyReceiveRecoveryStateLocked(
+                    outbound,
+                    coordinatorDecision.State,
+                    queueInitialActivationHoldDirective: false);
+            }
+            else if (bridgeIsCurrent &&
+                     request.Direction == FileTransferDirection.Inbound &&
+                     inboundTransfer is { IsTerminal: false } inbound &&
+                     string.Equals(
+                         request.SessionId,
+                         inbound.SessionId,
+                         StringComparison.Ordinal) &&
+                     string.Equals(
+                         request.TransferId,
+                         inbound.TransferId,
+                         StringComparison.Ordinal))
+            {
+                coordinatorDecision =
+                    FileTransferCoordinator
+                        .CommitRuntimeUnlockInitialActivationOfferEnvelopeRefresh(
+                            CreateCoordinatorStateLocked(inbound),
+                            receipt);
+                ApplyReceiveRecoveryStateLocked(
+                    inbound,
+                    coordinatorDecision.State,
+                    queueInitialActivationHoldDirective: false);
+            }
+            else
+            {
+                coordinatorDecision = new(
+                    new RuntimeUnlockInitialActivationOfferEnvelopeRefreshDecision(
+                        receipt,
+                        RuntimeUnlockInitialActivationOfferEnvelopeRefreshStatus
+                            .Invalidated,
+                        "runtime_unlock_initial_activation_offer_envelope_refresh_transfer_context_missing"));
+            }
+
+            args.Decision = coordinatorDecision.Decision;
+            LogRuntimeUnlockInitialActivationOfferEnvelopeRefresh(
+                coordinatorDecision.Decision.Accepted
+                    ? "runtime_unlock_initial_activation_offer_envelope_refresh_committed"
+                    : "runtime_unlock_initial_activation_offer_envelope_refresh_rejected",
+                coordinatorDecision.Decision);
+        }
     }
 
     private RuntimeUnlockRetryLifecycleTransitionDecision

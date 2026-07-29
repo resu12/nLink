@@ -16000,7 +16000,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task RuntimeUnlockInitialActivationReceiveRecoveryHold_PastOriginalDeadlineRearmsSameGeneration()
+    public async Task RuntimeUnlockInitialActivationOfferEnvelopeRefresh_PastOriginalDeadlineRefreshesSameSemanticOffer()
     {
         FakeNknClient.ResetNetwork();
         var previousHelpeePriorityDelay =
@@ -16095,6 +16095,19 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                         Request,
                     FileTransferReceiveRecoveryOperation Operation)>(
                     TaskCreationOptions.RunContinuationsAsynchronously);
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshReceipt?
+                preparedRefreshReceipt = null;
+            bridge.RuntimeUnlockInitialActivationOfferEnvelopeRefreshPrepared +=
+                (_, args) =>
+                {
+                    preparedRefreshReceipt = args.Receipt;
+                    args.Decision =
+                        new RuntimeUnlockInitialActivationOfferEnvelopeRefreshDecision(
+                            args.Receipt,
+                            RuntimeUnlockInitialActivationOfferEnvelopeRefreshStatus
+                                .Accepted,
+                            "test_refresh_receipt_committed");
+                };
             bridge.RuntimeUnlockInitialActivationReceiveRecoveryHoldRequested +=
                 (_, args) =>
                 {
@@ -16167,6 +16180,23 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 ReadOperationalLogTail(logStart),
                 StringComparison.Ordinal);
 
+            var refreshSentAtUnixMs =
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var envelopeLifetimeMs =
+                held.Request.EnvelopeExpiresAtUnixMs -
+                held.Request.EnvelopeSentAtUnixMs;
+            var refreshCommand =
+                new RuntimeUnlockInitialActivationOfferEnvelopeRefreshCommand(
+                    held.Request,
+                    HoldGeneration: 1,
+                    ReceiveRecoveryAuthority: held.Operation.Authority,
+                    ClosureGeneration: 1,
+                    RefreshGeneration: 1,
+                    SuccessorEnvelopeGeneration:
+                        held.Request.EnvelopeGeneration + 1,
+                    SuccessorSentAtUnixMs: refreshSentAtUnixMs,
+                    SuccessorExpiresAtUnixMs:
+                        refreshSentAtUnixMs + envelopeLifetimeMs);
             Assert.True(
                 bridge
                     .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
@@ -16176,10 +16206,33 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                                 .Released,
                             "test_receive_recovery_completed_after_original_deadline",
                             HoldGeneration: 1,
-                            held.Operation)));
-            await Task.Delay(TimeSpan.FromMilliseconds(100), cts.Token);
+                            held.Operation)
+                        {
+                            EnvelopeRefreshCommand = refreshCommand,
+                        }));
+            await WaitUntilAsync(
+                () => preparedRefreshReceipt is not null,
+                TimeSpan.FromSeconds(2));
 
             var tail = ReadOperationalLogTail(logStart);
+            var refreshReceipt = Assert.IsType<
+                RuntimeUnlockInitialActivationOfferEnvelopeRefreshReceipt>(
+                preparedRefreshReceipt);
+            Assert.Equal(refreshCommand, refreshReceipt.Command);
+            Assert.NotEqual(
+                held.Request.ControlEnvelopeFingerprint,
+                refreshReceipt.SuccessorEnvelopeFingerprint);
+            Assert.Equal(
+                held.Request.EnvelopeGeneration + 1,
+                refreshReceipt.Command.SuccessorEnvelopeGeneration);
+            Assert.Contains(
+                "event=runtime_unlock_initial_activation_offer_envelope_refresh_committed;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=runtime_unlock_initial_activation_offer_envelope_refresh_physical_resume;",
+                tail,
+                StringComparison.Ordinal);
             Assert.DoesNotContain(
                 "event=tuna_acceleration_runtime_unlock_offer_peer_response_timeout;",
                 tail,

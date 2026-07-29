@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using NLink.Core;
 using NLink.Core.FileTransfer;
@@ -136,12 +137,19 @@ public sealed partial class NknSignalingTransport
         runtimeUnlockInitialActivationReceiveRecoveryHoldShadow;
     private RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision?
         lastRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision;
+    private RuntimeUnlockInitialActivationEnvelopeState?
+        runtimeUnlockInitialActivationEnvelopeState;
+    private RuntimeUnlockInitialActivationOfferEnvelopeRefreshReceipt?
+        lastRuntimeUnlockInitialActivationEnvelopeRefreshReceipt;
     private event EventHandler<
         RuntimeUnlockInitialActivationReceiveRecoveryHoldRequestedEventArgs>?
         runtimeUnlockInitialActivationReceiveRecoveryHoldRequested;
     private event EventHandler<
         RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationRequestedEventArgs>?
         runtimeUnlockInitialActivationReceiveRecoveryHoldInvalidationRequested;
+    private event EventHandler<
+        RuntimeUnlockInitialActivationOfferEnvelopeRefreshPreparedEventArgs>?
+        runtimeUnlockInitialActivationOfferEnvelopeRefreshPrepared;
     private int accelerationEarlyDropRetryAttempts;
     private int helperPaidOfferPriorityDelayConsumed;
     private int remoteHelpeeAccelerationOfferObserved;
@@ -337,10 +345,19 @@ public sealed partial class NknSignalingTransport
         long TransactionGeneration,
         long TunaPathLeaseGeneration,
         string? TunaPathLeaseListenerRunId,
+        string SemanticOfferFingerprint,
+        long EnvelopeGeneration,
+        long EnvelopeSentAtUnixMs,
+        long EnvelopeExpiresAtUnixMs,
         string ControlEnvelopeFingerprint,
         RuntimeUnlockRetryDispatchInstallReceipt? InstallReceipt,
         RuntimeUnlockInitialActivationReceiveRecoveryExpectedScope
             InitialActivationExpectedScope = default);
+
+    private sealed record RuntimeUnlockInitialActivationEnvelopeState(
+        RuntimeUnlockOfferAuthorityBoundary Boundary,
+        TransportAccelerationOfferPayload Offer,
+        Envelope Envelope);
 
     private sealed record RuntimeUnlockInitialActivationReceiveRecoveryHoldShadow(
         RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest Request,
@@ -919,7 +936,16 @@ public sealed partial class NknSignalingTransport
                     transactionDecision.State.TransactionGeneration,
                     runtimeUnlockTunaPathLeaseState.LeaseGeneration,
                     runtimeUnlockTunaPathLeaseState.ListenerRunId,
-                    $"test-envelope-{normalizedNonce}",
+                    $"test-semantic-{normalizedNonce}",
+                    EnvelopeGeneration: 1,
+                    EnvelopeSentAtUnixMs:
+                        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    EnvelopeExpiresAtUnixMs:
+                        DateTimeOffset.UtcNow
+                            .Add(AccelerationOfferLifetime)
+                            .ToUnixTimeMilliseconds(),
+                    ControlEnvelopeFingerprint:
+                        $"test-envelope-{normalizedNonce}",
                     InstallReceipt: installReceipt);
             if ((preserveRecoveryState || installReceipt is not null) &&
                 runtimeUnlockRecoveryRetryState is { } recoveryState &&
@@ -11218,6 +11244,9 @@ public sealed partial class NknSignalingTransport
             Nonce = nonce,
             SidecarProtocolVersion = TunaSidecarProtocolVersion,
         };
+        var semanticOfferFingerprint =
+            ComputeRuntimeUnlockInitialActivationSemanticOfferFingerprint(
+                offer);
         var payload = CreateSecureControlPayload(
             MsgType.TransportAccelerationOffer,
             nonce,
@@ -11399,12 +11428,30 @@ public sealed partial class NknSignalingTransport
                         runtimeUnlockTransactionStarted.State.TransactionGeneration,
                         runtimeUnlockTunaPathLease.LeaseGeneration,
                         runtimeUnlockTunaPathLease.ListenerRunId,
-                        controlEnvelopeFingerprint,
-                        outboundAccelerationOfferInstallReceipt,
-                        runtimeUnlockInitialActivationExpectedScope
-                            .GetValueOrDefault());
+                        semanticOfferFingerprint,
+                        EnvelopeGeneration: 1,
+                        EnvelopeSentAtUnixMs: offer.SentAtUnixMs,
+                        EnvelopeExpiresAtUnixMs: offer.ExpiresAtUnixMs,
+                        ControlEnvelopeFingerprint:
+                            controlEnvelopeFingerprint,
+                        InstallReceipt:
+                            outboundAccelerationOfferInstallReceipt,
+                        InitialActivationExpectedScope:
+                            runtimeUnlockInitialActivationExpectedScope
+                                .GetValueOrDefault());
                 outboundRuntimeUnlockOfferAuthorityBoundary =
                     runtimeUnlockOfferAuthorityBoundary;
+                if (offerAuthorityMode ==
+                    RuntimeUnlockOfferAuthorityMode.InitialActivation)
+                {
+                    runtimeUnlockInitialActivationEnvelopeState =
+                        new RuntimeUnlockInitialActivationEnvelopeState(
+                            runtimeUnlockOfferAuthorityBoundary,
+                            offer,
+                            envelope);
+                    lastRuntimeUnlockInitialActivationEnvelopeRefreshReceipt =
+                        null;
+                }
 
                 if (offerAuthorityMode == RuntimeUnlockOfferAuthorityMode.InstalledRetry)
                 {
@@ -11670,9 +11717,39 @@ public sealed partial class NknSignalingTransport
         Task<AccelerationControlSendResult> SendCurrentOfferEnvelopeAsync(
             RuntimeUnlockInitialActivationReceiveRecoveryHoldPrevalidation?
                 holdPrevalidation = null)
-            => SendAccelerationControlEnvelopeWithBulkBypassAsync(
+        {
+            var currentEnvelope = envelope;
+            var currentBoundary = runtimeUnlockOfferAuthorityBoundary;
+            if (currentBoundary is
+                { Mode: RuntimeUnlockOfferAuthorityMode.InitialActivation })
+            {
+                lock (accelerationGate)
+                {
+                    if (runtimeUnlockInitialActivationEnvelopeState is
+                            { } refreshed &&
+                        refreshed.Boundary.OfferGeneration ==
+                            currentBoundary.OfferGeneration &&
+                        refreshed.Boundary.TransactionGeneration ==
+                            currentBoundary.TransactionGeneration &&
+                        refreshed.Boundary.TunaPathLeaseGeneration ==
+                            currentBoundary.TunaPathLeaseGeneration &&
+                        string.Equals(
+                            refreshed.Boundary.SemanticOfferFingerprint,
+                            currentBoundary.SemanticOfferFingerprint,
+                            StringComparison.Ordinal))
+                    {
+                        currentEnvelope = refreshed.Envelope;
+                        currentBoundary = refreshed.Boundary;
+                        envelope = refreshed.Envelope;
+                        runtimeUnlockOfferAuthorityBoundary =
+                            refreshed.Boundary;
+                    }
+                }
+            }
+
+            return SendAccelerationControlEnvelopeWithBulkBypassAsync(
                     remoteEndpoint,
-                    envelope,
+                    currentEnvelope,
                     "offer",
                     ct,
                     requireObservedSend: true,
@@ -11693,11 +11770,11 @@ public sealed partial class NknSignalingTransport
                         : null,
                     observedSendFallbackAsync:
                         usesInstalledRetryAuthority &&
-                        runtimeUnlockOfferAuthorityBoundary is
+                        currentBoundary is
                             { } peerVisibleAuthorityBoundary
                         ? () => TrySendRuntimeUnlockOfferViaPeerVisibleControlPlaneAsObservedAsync(
                             remoteEndpoint,
-                            envelope,
+                            currentEnvelope,
                             sessionId,
                             payerDecisionId,
                             nonce,
@@ -11709,9 +11786,10 @@ public sealed partial class NknSignalingTransport
                         ? expectedInstallReceipt
                         : null,
                     expectedOfferAuthorityBoundary:
-                        runtimeUnlockOfferAuthorityBoundary,
+                        currentBoundary,
                     initialActivationHoldPrevalidation:
                         holdPrevalidation);
+        }
 
         AccelerationControlSendResult offerSend;
         try
@@ -12776,6 +12854,15 @@ public sealed partial class NknSignalingTransport
         {
             return false;
         }
+        if (decision.Status ==
+                RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                    .Released &&
+            decision.EnvelopeRefreshCommand is { } refreshCommand &&
+            !TryPrepareAndCommitRuntimeUnlockInitialActivationEnvelopeRefresh(
+                refreshCommand))
+        {
+            return false;
+        }
 
         TaskCompletionSource<
             RuntimeUnlockInitialActivationReceiveRecoveryHoldAwaitResult>?
@@ -12954,6 +13041,13 @@ public sealed partial class NknSignalingTransport
                 "runtime_unlock_initial_activation_receive_recovery_hold_resumed",
                 decision,
                 source);
+            if (decision.EnvelopeRefreshCommand is
+                { } committedRefreshCommand)
+            {
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=runtime_unlock_initial_activation_offer_envelope_refresh_physical_resume; {FormatRuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(decision.Request)}; refresh_generation={committedRefreshCommand.RefreshGeneration}; successor_envelope_generation={committedRefreshCommand.SuccessorEnvelopeGeneration}; decision_reason=committed_refresh_released_same_semantic_offer");
+            }
         }
 
         var completionResult =
@@ -13063,6 +13157,158 @@ public sealed partial class NknSignalingTransport
                 },
                 CancellationToken.None);
         }
+        return true;
+    }
+
+    private bool
+        TryPrepareAndCommitRuntimeUnlockInitialActivationEnvelopeRefresh(
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshCommand command)
+    {
+        if (command.IsDefault)
+        {
+            return false;
+        }
+
+        RuntimeUnlockInitialActivationEnvelopeState predecessor;
+        lock (accelerationGate)
+        {
+            if (lastRuntimeUnlockInitialActivationEnvelopeRefreshReceipt is
+                    { } duplicate &&
+                duplicate.Command == command)
+            {
+                return true;
+            }
+
+            if (runtimeUnlockInitialActivationEnvelopeState is not
+                    { } current ||
+                current.Boundary.Mode !=
+                    RuntimeUnlockOfferAuthorityMode.InitialActivation ||
+                !RuntimeUnlockInitialActivationHoldRequestMatchesOfferBoundary(
+                    command.HoldRequest,
+                    current.Boundary) ||
+                !string.Equals(
+                    current.Offer.TunaAddress,
+                    (accelerationLane as INknTunaAccelerationSession)
+                        ?.LocalTunaAddress,
+                    StringComparison.Ordinal) ||
+                !IsRuntimeUnlockOfferAuthorityBoundaryCurrentUnsafe(
+                    current.Boundary,
+                    allowDispatchObservedSettlement: true))
+            {
+                LocalOperationalLog.Warn(
+                    "NKN.Tuna",
+                    $"event=runtime_unlock_initial_activation_offer_envelope_refresh_rejected; {FormatRuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(command.HoldRequest)}; refresh_generation={command.RefreshGeneration}; decision_reason=predecessor_boundary_not_current");
+                return false;
+            }
+
+            predecessor = current;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_initial_activation_offer_envelope_refresh_issued; {FormatRuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(command.HoldRequest)}; refresh_generation={command.RefreshGeneration}; successor_envelope_generation={command.SuccessorEnvelopeGeneration}; successor_sent_at_unix_ms={command.SuccessorSentAtUnixMs}; successor_expires_at_unix_ms={command.SuccessorExpiresAtUnixMs}; decision_reason=coordinator_refresh_command_current");
+        var refreshedOffer = new TransportAccelerationOfferPayload
+        {
+            SessionId = predecessor.Offer.SessionId,
+            SenderRole = predecessor.Offer.SenderRole,
+            TunaAddress = predecessor.Offer.TunaAddress,
+            SupportedLanes = [.. predecessor.Offer.SupportedLanes],
+            Trigger = predecessor.Offer.Trigger,
+            PayerDecisionId = predecessor.Offer.PayerDecisionId,
+            SentAtUnixMs = command.SuccessorSentAtUnixMs,
+            ExpiresAtUnixMs = command.SuccessorExpiresAtUnixMs,
+            Nonce = predecessor.Offer.Nonce,
+            SidecarProtocolVersion =
+                predecessor.Offer.SidecarProtocolVersion,
+        };
+        if (!string.Equals(
+                ComputeRuntimeUnlockInitialActivationSemanticOfferFingerprint(
+                    refreshedOffer),
+                command.HoldRequest.SemanticOfferFingerprint,
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var securePayload = CreateSecureControlPayload(
+            MsgType.TransportAccelerationOffer,
+            refreshedOffer.Nonce,
+            JsonSerializer.SerializeToUtf8Bytes(refreshedOffer));
+        var refreshedEnvelope = CreateEnvelope(
+            predecessor.Envelope.Code,
+            MsgType.TransportAccelerationOffer,
+            securePayload,
+            replyTo: null);
+        var refreshedFingerprint =
+            ComputeRuntimeUnlockControlEnvelopeFingerprint(refreshedEnvelope);
+        var receipt =
+            new RuntimeUnlockInitialActivationOfferEnvelopeRefreshReceipt(
+                command,
+                refreshedFingerprint,
+                Volatile.Read(ref nextOutboundControlSecureSequence),
+                refreshedEnvelope.MessageId);
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_initial_activation_offer_envelope_refresh_prepared; {FormatRuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(command.HoldRequest)}; refresh_generation={command.RefreshGeneration}; successor_envelope_generation={command.SuccessorEnvelopeGeneration}; successor_envelope_fingerprint={SanitizeLogToken(refreshedFingerprint)}; successor_sent_at_unix_ms={command.SuccessorSentAtUnixMs}; successor_expires_at_unix_ms={command.SuccessorExpiresAtUnixMs}; secure_sequence={receipt.SecureSequence}; message_id={SanitizeLogToken(receipt.MessageId)}; decision_reason=fresh_envelope_prepared");
+        var args =
+            new RuntimeUnlockInitialActivationOfferEnvelopeRefreshPreparedEventArgs(
+                receipt);
+        var subscriber =
+            runtimeUnlockInitialActivationOfferEnvelopeRefreshPrepared;
+        if (subscriber is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            subscriber.Invoke(this, args);
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=runtime_unlock_initial_activation_offer_envelope_refresh_rejected; refresh_generation={command.RefreshGeneration}; error={SanitizeLogToken(ex.GetType().Name)}; decision_reason=refresh_receipt_handler_failed");
+            return false;
+        }
+
+        if (args.Decision is not { Accepted: true } decision ||
+            decision.Receipt != receipt)
+        {
+            return false;
+        }
+
+        lock (accelerationGate)
+        {
+            if (runtimeUnlockInitialActivationEnvelopeState is not
+                    { } current ||
+                current != predecessor ||
+                outboundRuntimeUnlockOfferAuthorityBoundary !=
+                    predecessor.Boundary)
+            {
+                return false;
+            }
+
+            var successorBoundary = predecessor.Boundary with
+            {
+                EnvelopeGeneration = command.SuccessorEnvelopeGeneration,
+                EnvelopeSentAtUnixMs = command.SuccessorSentAtUnixMs,
+                EnvelopeExpiresAtUnixMs = command.SuccessorExpiresAtUnixMs,
+                ControlEnvelopeFingerprint = refreshedFingerprint,
+            };
+            runtimeUnlockInitialActivationEnvelopeState =
+                new RuntimeUnlockInitialActivationEnvelopeState(
+                    successorBoundary,
+                    refreshedOffer,
+                    refreshedEnvelope);
+            outboundRuntimeUnlockOfferAuthorityBoundary = successorBoundary;
+            lastRuntimeUnlockInitialActivationEnvelopeRefreshReceipt =
+                receipt;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_initial_activation_offer_envelope_refresh_committed; {FormatRuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(command.HoldRequest)}; refresh_generation={command.RefreshGeneration}; successor_envelope_generation={command.SuccessorEnvelopeGeneration}; successor_envelope_fingerprint={SanitizeLogToken(refreshedFingerprint)}; successor_sent_at_unix_ms={command.SuccessorSentAtUnixMs}; successor_expires_at_unix_ms={command.SuccessorExpiresAtUnixMs}; secure_sequence={receipt.SecureSequence}; message_id={SanitizeLogToken(receipt.MessageId)}; decision_status={decision.Status}; decision_reason={SanitizeLogToken(decision.Reason)}");
         return true;
     }
 
@@ -13289,6 +13535,10 @@ public sealed partial class NknSignalingTransport
             Boundary: holdBoundary)
         {
             ExpectedScope = currentExpectedScope,
+            SemanticOfferFingerprint = boundary.SemanticOfferFingerprint,
+            EnvelopeGeneration = boundary.EnvelopeGeneration,
+            EnvelopeSentAtUnixMs = boundary.EnvelopeSentAtUnixMs,
+            EnvelopeExpiresAtUnixMs = boundary.EnvelopeExpiresAtUnixMs,
         };
         return !request.IsDefault;
     }
@@ -13455,6 +13705,14 @@ public sealed partial class NknSignalingTransport
                request.ControlEnvelopeFingerprint,
                boundary.ControlEnvelopeFingerprint,
                StringComparison.Ordinal) &&
+           string.Equals(
+               request.SemanticOfferFingerprint,
+               boundary.SemanticOfferFingerprint,
+               StringComparison.Ordinal) &&
+           request.EnvelopeGeneration == boundary.EnvelopeGeneration &&
+           request.EnvelopeSentAtUnixMs == boundary.EnvelopeSentAtUnixMs &&
+           request.EnvelopeExpiresAtUnixMs ==
+               boundary.EnvelopeExpiresAtUnixMs &&
            RuntimeUnlockInitialActivationExpectedSourceScopeMatches(
                request.ExpectedScope,
                boundary.InitialActivationExpectedScope);
@@ -13613,7 +13871,7 @@ public sealed partial class NknSignalingTransport
         var publication = scope.SourcePublicationAuthority;
         var command = scope.ExpectedExecutionCommand;
         return
-            $"session_id={SanitizeLogToken(request.SessionId)}; transfer_id={SanitizeLogToken(request.TransferId)}; direction={request.Direction.ToString().ToLowerInvariant()}; boundary={SanitizeLogToken(request.Boundary.ToString())}; offer_nonce={SanitizeLogToken(request.OfferNonce)}; payer_decision_id={request.PayerDecisionId}; offer_generation={request.OfferGeneration}; transaction_generation={request.TransactionGeneration}; tuna_path_lease_generation={request.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={SanitizeLogToken(request.TunaPathLeaseListenerRunId)}; control_envelope_fingerprint={SanitizeLogToken(request.ControlEnvelopeFingerprint)}; peer_visible_dispatch_observed={(request.PeerVisibleDispatchObserved ? 1 : 0)}; source_route={SanitizeLogToken(publication?.RouteToken ?? "(none)")}; source_protocol_version={publication?.ProtocolVersion ?? 0}; source_live_route_epoch={publication?.LiveRouteEpoch ?? 0}; source_runtime_generation={publication?.RuntimeGeneration ?? 0}; source_terminal_generation={publication?.TerminalGeneration ?? 0}; source_leg_generation={publication?.LegGeneration ?? 0}; source_route_publication_generation={publication?.RoutePublicationGeneration ?? 0}; source_transport_epoch={scope.TransportEpoch}; source_bridge_recovery_generation={scope.BridgeRecoveryGeneration}; source_checkpoint_request_id={SanitizeLogToken(scope.CheckpointRequestId ?? "(none)")}; data_session_identity={SanitizeLogToken(scope.DataSessionIdentity)}; data_session_generation={scope.DataSessionGeneration}; expected_bridge_decision_generation={command?.Decision.BridgeDecisionGeneration ?? 0}";
+            $"session_id={SanitizeLogToken(request.SessionId)}; transfer_id={SanitizeLogToken(request.TransferId)}; direction={request.Direction.ToString().ToLowerInvariant()}; boundary={SanitizeLogToken(request.Boundary.ToString())}; offer_nonce={SanitizeLogToken(request.OfferNonce)}; payer_decision_id={request.PayerDecisionId}; offer_generation={request.OfferGeneration}; transaction_generation={request.TransactionGeneration}; tuna_path_lease_generation={request.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={SanitizeLogToken(request.TunaPathLeaseListenerRunId)}; semantic_offer_fingerprint={SanitizeLogToken(request.SemanticOfferFingerprint)}; envelope_generation={request.EnvelopeGeneration}; envelope_sent_at_unix_ms={request.EnvelopeSentAtUnixMs}; envelope_expires_at_unix_ms={request.EnvelopeExpiresAtUnixMs}; control_envelope_fingerprint={SanitizeLogToken(request.ControlEnvelopeFingerprint)}; peer_visible_dispatch_observed={(request.PeerVisibleDispatchObserved ? 1 : 0)}; source_route={SanitizeLogToken(publication?.RouteToken ?? "(none)")}; source_protocol_version={publication?.ProtocolVersion ?? 0}; source_live_route_epoch={publication?.LiveRouteEpoch ?? 0}; source_runtime_generation={publication?.RuntimeGeneration ?? 0}; source_terminal_generation={publication?.TerminalGeneration ?? 0}; source_leg_generation={publication?.LegGeneration ?? 0}; source_route_publication_generation={publication?.RoutePublicationGeneration ?? 0}; source_transport_epoch={scope.TransportEpoch}; source_bridge_recovery_generation={scope.BridgeRecoveryGeneration}; source_checkpoint_request_id={SanitizeLogToken(scope.CheckpointRequestId ?? "(none)")}; data_session_identity={SanitizeLogToken(scope.DataSessionIdentity)}; data_session_generation={scope.DataSessionGeneration}; expected_bridge_decision_generation={command?.Decision.BridgeDecisionGeneration ?? 0}";
     }
 
     private static void
@@ -13628,7 +13886,7 @@ public sealed partial class NknSignalingTransport
         var lease = authority?.RecoveryLivenessLease;
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event={eventName}; {FormatRuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(decision.Request)}; decision_status={decision.Status}; hold_generation={decision.HoldGeneration}; receive_recovery_operation_authority_id={SanitizeLogToken(authority?.AuthorityId.ToString() ?? "(none)")}; receive_recovery_operation_generation={authority?.OperationGeneration ?? 0}; previous_receive_recovery_operation_authority_id={SanitizeLogToken(decision.PreviousReceiveRecoveryAuthority?.AuthorityId.ToString() ?? "(none)")}; previous_receive_recovery_operation_generation={decision.PreviousReceiveRecoveryAuthority?.OperationGeneration ?? 0}; receive_recovery_execution_state={SanitizeLogToken(operation?.ExecutionState.ToString() ?? "(none)")}; receive_recovery_closure_state={SanitizeLogToken(operation?.ClosureState.ToString() ?? "(none)")}; receive_recovery_closure_generation={operation?.ClosureGeneration ?? 0}; bridge_decision_generation={authority?.BridgeRecoveryDecision.BridgeDecisionGeneration ?? 0}; bridge_recovery_generation={observation?.BridgeRecoveryGeneration ?? 0}; recovery_liveness_lease_authority_id={SanitizeLogToken(lease?.AuthorityId.ToString() ?? "(none)")}; recovery_liveness_lease_generation={lease?.LeaseGeneration ?? 0}; runtime_generation={observation?.RuntimeOwner.RuntimeGeneration ?? 0}; route_publication_generation={observation?.RoutePublication.PublicationGeneration ?? 0}; terminal_generation={observation?.TerminalGeneration ?? 0}; leg_generation={observation?.LegGeneration ?? 0}; transport_epoch={observation?.TransportEpoch ?? 0}; data_session_identity={SanitizeLogToken(observation?.DataSessionIdentity ?? "(none)")}; data_session_generation={observation?.DataSessionGeneration ?? 0}; decision_source={SanitizeLogToken(source)}; decision_reason={SanitizeLogToken(decision.Reason)}");
+            $"event={eventName}; {FormatRuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(decision.Request)}; decision_status={decision.Status}; hold_generation={decision.HoldGeneration}; refresh_generation={decision.EnvelopeRefreshCommand?.RefreshGeneration ?? 0}; successor_envelope_generation={decision.EnvelopeRefreshCommand?.SuccessorEnvelopeGeneration ?? 0}; receive_recovery_operation_authority_id={SanitizeLogToken(authority?.AuthorityId.ToString() ?? "(none)")}; receive_recovery_operation_generation={authority?.OperationGeneration ?? 0}; previous_receive_recovery_operation_authority_id={SanitizeLogToken(decision.PreviousReceiveRecoveryAuthority?.AuthorityId.ToString() ?? "(none)")}; previous_receive_recovery_operation_generation={decision.PreviousReceiveRecoveryAuthority?.OperationGeneration ?? 0}; receive_recovery_execution_state={SanitizeLogToken(operation?.ExecutionState.ToString() ?? "(none)")}; receive_recovery_closure_state={SanitizeLogToken(operation?.ClosureState.ToString() ?? "(none)")}; receive_recovery_closure_generation={operation?.ClosureGeneration ?? 0}; bridge_decision_generation={authority?.BridgeRecoveryDecision.BridgeDecisionGeneration ?? 0}; bridge_recovery_generation={observation?.BridgeRecoveryGeneration ?? 0}; recovery_liveness_lease_authority_id={SanitizeLogToken(lease?.AuthorityId.ToString() ?? "(none)")}; recovery_liveness_lease_generation={lease?.LeaseGeneration ?? 0}; runtime_generation={observation?.RuntimeOwner.RuntimeGeneration ?? 0}; route_publication_generation={observation?.RoutePublication.PublicationGeneration ?? 0}; terminal_generation={observation?.TerminalGeneration ?? 0}; leg_generation={observation?.LegGeneration ?? 0}; transport_epoch={observation?.TransportEpoch ?? 0}; data_session_identity={SanitizeLogToken(observation?.DataSessionIdentity ?? "(none)")}; data_session_generation={observation?.DataSessionGeneration ?? 0}; decision_source={SanitizeLogToken(source)}; decision_reason={SanitizeLogToken(decision.Reason)}");
     }
 
     event EventHandler<
@@ -13653,6 +13911,17 @@ public sealed partial class NknSignalingTransport
         remove =>
             runtimeUnlockInitialActivationReceiveRecoveryHoldInvalidationRequested -=
                 value;
+    }
+
+    event EventHandler<
+        RuntimeUnlockInitialActivationOfferEnvelopeRefreshPreparedEventArgs>?
+        IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge
+            .RuntimeUnlockInitialActivationOfferEnvelopeRefreshPrepared
+    {
+        add =>
+            runtimeUnlockInitialActivationOfferEnvelopeRefreshPrepared += value;
+        remove =>
+            runtimeUnlockInitialActivationOfferEnvelopeRefreshPrepared -= value;
     }
 
     bool IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge
@@ -14115,6 +14384,38 @@ public sealed partial class NknSignalingTransport
             retiredRuntimeUnlockOfferAuthorityBoundary == expected;
         if (!currentBoundaryMatches && !retiredBoundaryMatches)
         {
+            if (lastRuntimeUnlockInitialActivationEnvelopeRefreshReceipt is
+                    { } refreshReceipt &&
+                RuntimeUnlockInitialActivationHoldRequestMatchesOfferBoundary(
+                    refreshReceipt.Command.HoldRequest,
+                    expected) &&
+                outboundRuntimeUnlockOfferAuthorityBoundary is
+                    { } refreshedBoundary &&
+                refreshedBoundary.Mode ==
+                    RuntimeUnlockOfferAuthorityMode.InitialActivation &&
+                refreshedBoundary.OfferGeneration ==
+                    expected.OfferGeneration &&
+                refreshedBoundary.TransactionGeneration ==
+                    expected.TransactionGeneration &&
+                refreshedBoundary.TunaPathLeaseGeneration ==
+                    expected.TunaPathLeaseGeneration &&
+                refreshedBoundary.EnvelopeGeneration ==
+                    refreshReceipt.Command.SuccessorEnvelopeGeneration &&
+                string.Equals(
+                    refreshedBoundary.SemanticOfferFingerprint,
+                    expected.SemanticOfferFingerprint,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    refreshedBoundary.ControlEnvelopeFingerprint,
+                    refreshReceipt.SuccessorEnvelopeFingerprint,
+                    StringComparison.Ordinal))
+            {
+                return TryValidateRuntimeUnlockOfferAuthorityBoundaryUnsafe(
+                    refreshedBoundary,
+                    allowDispatchObservedSettlement,
+                    out rejectionReason);
+            }
+
             rejectionReason =
                 "runtime_unlock_offer_authority_boundary_replaced";
             return false;
@@ -14326,6 +14627,26 @@ public sealed partial class NknSignalingTransport
         => Convert.ToHexString(
                 SHA256.HashData(EnvelopeCodec.Serialize(envelope)))
             .ToLowerInvariant();
+
+    private static string
+        ComputeRuntimeUnlockInitialActivationSemanticOfferFingerprint(
+            TransportAccelerationOfferPayload offer)
+    {
+        var stableTuple = string.Join(
+            "\u001f",
+            offer.SessionId,
+            offer.SenderRole,
+            offer.TunaAddress,
+            string.Join(",", offer.SupportedLanes),
+            offer.Trigger,
+            offer.PayerDecisionId.ToString(CultureInfo.InvariantCulture),
+            offer.Nonce,
+            offer.SidecarProtocolVersion.ToString(
+                CultureInfo.InvariantCulture));
+        return Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(stableTuple)))
+            .ToLowerInvariant();
+    }
 
     private bool ValidatePendingRuntimeUnlockOfferAuthority(
         RuntimeUnlockOfferAuthorityMode authorityMode,
@@ -23166,6 +23487,8 @@ public sealed partial class NknSignalingTransport
         outboundAccelerationOfferInstallReceipt = null;
         outboundRuntimeUnlockOfferAuthorityBoundary = null;
         outboundAccelerationOfferPayerDecisionId = 0;
+        runtimeUnlockInitialActivationEnvelopeState = null;
+        lastRuntimeUnlockInitialActivationEnvelopeRefreshReceipt = null;
     }
 
     private void ClearRetiredOutboundAccelerationOfferLocked()

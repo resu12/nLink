@@ -1572,7 +1572,12 @@ internal readonly record struct FileTransferReceiveRecoverySubstate(
         CurrentInitialActivationHold = null,
     RuntimeUnlockInitialActivationReceiveRecoveryHold?
         LastInitialActivationHold = null,
-    long LastInitialActivationHoldGeneration = 0)
+    long LastInitialActivationHoldGeneration = 0,
+    RuntimeUnlockInitialActivationOfferEnvelopeRefreshCommand?
+        PendingInitialActivationEnvelopeRefresh = null,
+    RuntimeUnlockInitialActivationOfferEnvelopeRefreshReceipt?
+        LastInitialActivationEnvelopeRefreshReceipt = null,
+    long LastInitialActivationEnvelopeRefreshGeneration = 0)
 {
     internal static FileTransferReceiveRecoverySubstate Empty => default;
 }
@@ -1613,6 +1618,13 @@ internal readonly record struct FileTransferReceiveRecoveryDecision(
 internal readonly record struct
     RuntimeUnlockInitialActivationReceiveRecoveryHoldCoordinatorDecision(
         RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision Decision)
+{
+    public FileTransferCoordinatorState State { get; init; } = null!;
+}
+
+internal readonly record struct
+    RuntimeUnlockInitialActivationOfferEnvelopeRefreshCoordinatorDecision(
+        RuntimeUnlockInitialActivationOfferEnvelopeRefreshDecision Decision)
 {
     public FileTransferCoordinatorState State { get; init; } = null!;
 }
@@ -15108,6 +15120,21 @@ internal static class FileTransferCoordinator
             var nextState = ApplyReceiveRecoverySubstate(
                 state,
                 nextRecoveryState);
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshCommand?
+                refreshCommand = null;
+            if (status ==
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                        .Released &&
+                terminalHold.Request.EnvelopeGeneration > 0 &&
+                !string.IsNullOrWhiteSpace(
+                    terminalHold.Request.SemanticOfferFingerprint))
+            {
+                (nextState, refreshCommand) =
+                    StageRuntimeUnlockInitialActivationOfferEnvelopeRefresh(
+                        nextState,
+                        terminalHold,
+                        current);
+            }
             return (
                 nextState,
                 new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
@@ -15115,7 +15142,10 @@ internal static class FileTransferCoordinator
                     status,
                     currentTerminalReason,
                     activeHold.HoldGeneration,
-                    current));
+                    current)
+                {
+                    EnvelopeRefreshCommand = refreshCommand,
+                });
         }
 
         if (recoveryState.CurrentOperation is { } successor &&
@@ -15185,6 +15215,24 @@ internal static class FileTransferCoordinator
                 CurrentInitialActivationHold = null,
                 LastInitialActivationHold = completedHold,
             });
+        RuntimeUnlockInitialActivationOfferEnvelopeRefreshCommand?
+            retainedRefreshCommand = null;
+        if (terminalStatus ==
+                RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                    .Released &&
+            retainedTerminal is { } exactRetainedTerminal)
+        {
+            if (completedHold.Request.EnvelopeGeneration > 0 &&
+                !string.IsNullOrWhiteSpace(
+                    completedHold.Request.SemanticOfferFingerprint))
+            {
+                (invalidatedState, retainedRefreshCommand) =
+                    StageRuntimeUnlockInitialActivationOfferEnvelopeRefresh(
+                        invalidatedState,
+                        completedHold,
+                        exactRetainedTerminal);
+            }
+        }
         return (
             invalidatedState,
             new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
@@ -15192,7 +15240,167 @@ internal static class FileTransferCoordinator
                 terminalStatus,
                 terminalReason,
                 activeHold.HoldGeneration,
-                retainedTerminal));
+                retainedTerminal)
+            {
+                EnvelopeRefreshCommand = retainedRefreshCommand,
+            });
+    }
+
+    private static (
+        FileTransferCoordinatorState State,
+        RuntimeUnlockInitialActivationOfferEnvelopeRefreshCommand? Command)
+        StageRuntimeUnlockInitialActivationOfferEnvelopeRefresh(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockInitialActivationReceiveRecoveryHold releasedHold,
+            FileTransferReceiveRecoveryOperation operation)
+    {
+        var recoveryState =
+            state.PersistentState.FileTransferReceiveRecovery;
+        if (recoveryState.PendingInitialActivationEnvelopeRefresh is
+                { } pending)
+        {
+            return pending.HoldRequest == releasedHold.Request &&
+                   pending.HoldGeneration == releasedHold.HoldGeneration &&
+                   pending.ReceiveRecoveryAuthority == operation.Authority &&
+                   pending.ClosureGeneration == operation.ClosureGeneration
+                ? (state, pending)
+                : (state, null);
+        }
+
+        var request = releasedHold.Request;
+        var envelopeLifetimeMs =
+            request.EnvelopeExpiresAtUnixMs - request.EnvelopeSentAtUnixMs;
+        if (releasedHold.Status !=
+                RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                    .Released ||
+            operation.ExecutionState !=
+                FileTransferReceiveRecoveryExecutionState.Completed ||
+            operation.ReceiveProof is null ||
+            operation.ClosureState is not (
+                FileTransferReceiveRecoveryClosureState.Adopted or
+                FileTransferReceiveRecoveryClosureState.Reserved or
+                FileTransferReceiveRecoveryClosureState.Consumed) ||
+            operation.ClosureGeneration <= 0 ||
+            string.IsNullOrWhiteSpace(request.SemanticOfferFingerprint) ||
+            request.EnvelopeGeneration <= 0 ||
+            request.EnvelopeSentAtUnixMs <= 0 ||
+            envelopeLifetimeMs <= 0 ||
+            recoveryState.LastInitialActivationEnvelopeRefreshGeneration ==
+                long.MaxValue)
+        {
+            return (state, null);
+        }
+
+        var refreshGeneration =
+            recoveryState.LastInitialActivationEnvelopeRefreshGeneration + 1;
+        var sentAtUnixMs =
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var command =
+            new RuntimeUnlockInitialActivationOfferEnvelopeRefreshCommand(
+                request,
+                releasedHold.HoldGeneration,
+                operation.Authority,
+                operation.ClosureGeneration,
+                refreshGeneration,
+                request.EnvelopeGeneration + 1,
+                sentAtUnixMs,
+                sentAtUnixMs + envelopeLifetimeMs);
+        var nextState = ApplyReceiveRecoverySubstate(
+            state,
+            recoveryState with
+            {
+                PendingInitialActivationEnvelopeRefresh = command,
+                LastInitialActivationEnvelopeRefreshGeneration =
+                    refreshGeneration,
+            });
+        return (nextState, command);
+    }
+
+    internal static
+        RuntimeUnlockInitialActivationOfferEnvelopeRefreshCoordinatorDecision
+        CommitRuntimeUnlockInitialActivationOfferEnvelopeRefresh(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshReceipt receipt)
+    {
+        RuntimeUnlockInitialActivationOfferEnvelopeRefreshCoordinatorDecision
+            Decision(
+                RuntimeUnlockInitialActivationOfferEnvelopeRefreshStatus status,
+                string reason,
+                FileTransferCoordinatorState? nextState = null)
+            => new(
+                new RuntimeUnlockInitialActivationOfferEnvelopeRefreshDecision(
+                    receipt,
+                    status,
+                    NormalizeReason(reason)))
+            {
+                State = nextState ?? state,
+            };
+
+        if (receipt.IsDefault)
+        {
+            return Decision(
+                RuntimeUnlockInitialActivationOfferEnvelopeRefreshStatus
+                    .Rejected,
+                "runtime_unlock_initial_activation_offer_envelope_refresh_receipt_invalid");
+        }
+
+        var recoveryState =
+            state.PersistentState.FileTransferReceiveRecovery;
+        if (recoveryState.LastInitialActivationEnvelopeRefreshReceipt ==
+            receipt)
+        {
+            return Decision(
+                RuntimeUnlockInitialActivationOfferEnvelopeRefreshStatus
+                    .Idempotent,
+                "runtime_unlock_initial_activation_offer_envelope_refresh_receipt_idempotent");
+        }
+
+        if (recoveryState.PendingInitialActivationEnvelopeRefresh is not
+                { } pending ||
+            pending != receipt.Command)
+        {
+            return Decision(
+                RuntimeUnlockInitialActivationOfferEnvelopeRefreshStatus
+                    .Rejected,
+                "runtime_unlock_initial_activation_offer_envelope_refresh_not_pending");
+        }
+
+        if (recoveryState.LastInitialActivationHold is not
+                { Status:
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                        .Released } released ||
+            released.Request != pending.HoldRequest ||
+            released.HoldGeneration != pending.HoldGeneration ||
+            released.ReceiveRecoveryAuthority !=
+                pending.ReceiveRecoveryAuthority ||
+            !RuntimeUnlockInitialActivationHoldRequestMatchesState(
+                state,
+                pending.HoldRequest))
+        {
+            var invalidatedState = ApplyReceiveRecoverySubstate(
+                state,
+                recoveryState with
+                {
+                    PendingInitialActivationEnvelopeRefresh = null,
+                });
+            return Decision(
+                RuntimeUnlockInitialActivationOfferEnvelopeRefreshStatus
+                    .Invalidated,
+                "runtime_unlock_initial_activation_offer_envelope_refresh_scope_not_current",
+                invalidatedState);
+        }
+
+        var nextState = ApplyReceiveRecoverySubstate(
+            state,
+            recoveryState with
+            {
+                PendingInitialActivationEnvelopeRefresh = null,
+                LastInitialActivationEnvelopeRefreshReceipt = receipt,
+            });
+        return Decision(
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshStatus.Accepted,
+            "runtime_unlock_initial_activation_offer_envelope_refresh_committed",
+            nextState);
     }
 
     internal static FileTransferReceiveRecoveryOperationAuthority?
