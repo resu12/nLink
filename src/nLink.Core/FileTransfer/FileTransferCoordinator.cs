@@ -1086,6 +1086,12 @@ internal readonly record struct FileTransferRouteTransitionSubstate(
     internal static FileTransferRouteTransitionSubstate Empty => default;
 }
 
+internal readonly record struct FileTransferRouteTransitionPauseOwnership(
+    FileTransferRouteTransitionAuthority Authority,
+    FileTransferRouteTransitionState State,
+    bool RetainedFrameHandoffPending,
+    bool DispositionHandoffPending);
+
 internal enum FileTransferRouteTransitionDecisionStatus
 {
     Prepared,
@@ -4411,6 +4417,190 @@ internal static class FileTransferCoordinator
 
         authority = default;
         return false;
+    }
+
+    internal static bool TryGetFileTransferRouteTransitionPauseOwnership(
+        FileTransferCoordinatorState state,
+        FileTransferRouteTransitionAuthority authority,
+        out FileTransferRouteTransitionPauseOwnership ownership,
+        out string rejectionReason)
+    {
+        ownership = default;
+        rejectionReason =
+            "filetransfer_route_transition_pause_authority_not_current";
+        var transitionState =
+            state.PersistentState.FileTransferRouteTransition;
+
+        if (transitionState.CurrentOperation is { } current &&
+            current.Authority == authority)
+        {
+            var pauseBound =
+                current.PauseBindReceipt is { } pauseReceipt &&
+                pauseReceipt.Command.Authority == authority &&
+                pauseReceipt.Status is (
+                    FileTransferRouteTransitionPauseBindStatus.Installed or
+                    FileTransferRouteTransitionPauseBindStatus.Idempotent) &&
+                IsCanonicalFileTransferRouteTransitionPauseBindReceipt(
+                    pauseReceipt);
+            var preparedSupersession =
+                current.State == FileTransferRouteTransitionState.Prepared &&
+                pauseBound &&
+                authority.PredecessorTransitionAuthorityId is { } predecessorId &&
+                transitionState.LastTerminalOperation is
+                {
+                    State: FileTransferRouteTransitionState.Invalidated,
+                    DispositionCommand.Kind:
+                        FileTransferRouteTransitionDispositionKind.Superseded,
+                } predecessor &&
+                predecessor.Authority.AuthorityId == predecessorId;
+            if ((current.State == FileTransferRouteTransitionState.Draining ||
+                 preparedSupersession) &&
+                IsFileTransferRouteTransitionSourceScopeCurrent(
+                    state,
+                    authority,
+                    out rejectionReason))
+            {
+                ownership = new FileTransferRouteTransitionPauseOwnership(
+                    authority,
+                    current.State,
+                    RetainedFrameHandoffPending: false,
+                    DispositionHandoffPending: false);
+                rejectionReason = "accepted";
+                return true;
+            }
+
+            if (string.Equals(
+                    rejectionReason,
+                    "accepted",
+                    StringComparison.Ordinal))
+            {
+                rejectionReason =
+                    "filetransfer_route_transition_pause_state_not_owned";
+            }
+
+            return false;
+        }
+
+        if (transitionState.LastTerminalOperation is not { } terminal ||
+            terminal.Authority != authority ||
+            terminal.State is not (
+                FileTransferRouteTransitionState.Committed or
+                FileTransferRouteTransitionState.Invalidated))
+        {
+            return false;
+        }
+
+        var retainedFramePending =
+            terminal.RetainedFrameApplyCommand is not null &&
+            terminal.RetainedFrameApplyReceipt is null;
+        var dispositionPending =
+            terminal.DispositionCommand is not null &&
+            terminal.DispositionReceipt is null;
+        if (!retainedFramePending && !dispositionPending)
+        {
+            rejectionReason =
+                "filetransfer_route_transition_pause_handoff_complete";
+            return false;
+        }
+
+        if (terminal.DispositionCommand?.Kind ==
+            FileTransferRouteTransitionDispositionKind.Superseded)
+        {
+            rejectionReason =
+                "filetransfer_route_transition_pause_owned_by_successor";
+            return false;
+        }
+
+        if (terminal.State == FileTransferRouteTransitionState.Committed)
+        {
+            if (!IsFileTransferRouteTransitionTargetScopeCurrent(
+                    state,
+                    terminal,
+                    out rejectionReason))
+            {
+                return false;
+            }
+        }
+        else if (!state.IsTerminal &&
+                 !IsFileTransferRouteTransitionSourceScopeCurrent(
+                     state,
+                     authority,
+                     out rejectionReason))
+        {
+            return false;
+        }
+
+        ownership = new FileTransferRouteTransitionPauseOwnership(
+            authority,
+            terminal.State,
+            retainedFramePending,
+            dispositionPending);
+        rejectionReason = "accepted";
+        return true;
+    }
+
+    private static bool IsFileTransferRouteTransitionTargetScopeCurrent(
+        FileTransferCoordinatorState state,
+        FileTransferRouteTransitionOperation operation,
+        out string rejectionReason)
+    {
+        rejectionReason =
+            "filetransfer_route_transition_target_scope_stale";
+        var authority = operation.Authority;
+        if (operation.RoutePublicationToken is not { } publication ||
+            state.CurrentRuntimeOwner != publication.RuntimeOwner ||
+            state.CurrentRoutePublicationToken != publication ||
+            state.RouteSelection.Route != authority.TargetRoute ||
+            state.RouteSelection.ProtocolVersion !=
+                authority.TargetProtocolVersion ||
+            ExpectedRoutePublicationTransport(state.RouteSelection.Route) !=
+                authority.TargetTransport ||
+            state.CurrentLiveRouteEpoch is not { } epoch ||
+            state.CurrentLeg is not { } leg ||
+            publication.LiveRouteEpoch != epoch.EpochId ||
+            publication.LegGeneration != leg.Generation ||
+            leg.RouteSelection != state.RouteSelection ||
+            leg.ProtocolVersion != authority.TargetProtocolVersion ||
+            leg.LiveRouteEpochId != epoch.EpochId ||
+            state.CurrentDataSessionGeneration != authority.DataSessionGeneration ||
+            !IsRuntimeOwnerCurrent(
+                state,
+                publication.RuntimeOwner,
+                out rejectionReason) ||
+            !IsRoutePublicationTokenCurrent(
+                state,
+                publication,
+                out rejectionReason) ||
+            operation.RouteCommitToken is { } routeCommit &&
+                state.CurrentRouteCommit != routeCommit ||
+            operation.RouteCommitToken is null &&
+                state.CurrentRouteCommit is not null)
+        {
+            return false;
+        }
+
+        if (authority.ProofBoundary is
+            FileTransferFallbackTransitionProofBoundary fallback)
+        {
+            if (leg.TransportEpochId != fallback.TargetTransportEpoch ||
+                leg.BridgeRecoveryGeneration !=
+                    fallback.TargetBridgeRecoveryGeneration)
+            {
+                rejectionReason =
+                    "filetransfer_route_transition_target_transport_scope_stale";
+                return false;
+            }
+        }
+        else if (leg.TransportEpochId != 0 ||
+                 leg.BridgeRecoveryGeneration != 0)
+        {
+            rejectionReason =
+                "filetransfer_route_transition_target_transport_scope_stale";
+            return false;
+        }
+
+        rejectionReason = "accepted";
+        return true;
     }
 
     internal static bool TryGetPendingFileTransferRouteTransitionDisposition(

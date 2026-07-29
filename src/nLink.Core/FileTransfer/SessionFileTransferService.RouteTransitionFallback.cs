@@ -3328,6 +3328,194 @@ public sealed partial class SessionFileTransferService
                Math.Max(1, context.DataSessionGeneration))) ==
                checkpoint.CheckpointGeneration;
 
+    private bool TryGetOutboundFileTransferRouteTransitionPauseOwnershipLocked(
+        OutboundTransferContext context,
+        out FileTransferRouteTransitionPauseOwnership ownership,
+        out FileTransferRouteTransitionAuthority? authority,
+        out string rejectionReason)
+    {
+        ownership = default;
+        authority = context.FileTransferRouteTransitionExecution?.Authority;
+        rejectionReason =
+            "filetransfer_route_transition_execution_shadow_missing";
+        if (context.FileTransferRouteTransitionExecution is not { } execution ||
+            authority is not { } exactAuthority ||
+            !ReferenceEquals(context.DataSession, execution.SourceDataSession) ||
+            context.DataSessionGeneration != execution.SourceDataSessionGeneration ||
+            context.DataSessionGeneration != exactAuthority.DataSessionGeneration)
+        {
+            return false;
+        }
+
+        var state = CreateCoordinatorStateLocked(context);
+        if (!FileTransferCoordinator.TryGetFileTransferRouteTransitionPauseOwnership(
+                state,
+                exactAuthority,
+                out ownership,
+                out rejectionReason))
+        {
+            ownership = GetFileTransferRouteTransitionPauseOwnershipForEvidence(
+                state,
+                exactAuthority);
+            return false;
+        }
+
+        if (ownership.State == FileTransferRouteTransitionState.Draining &&
+            !IsOutboundFileTransferRouteTransitionExecutionCurrentLocked(
+                context,
+                execution,
+                out rejectionReason))
+        {
+            return false;
+        }
+
+        rejectionReason = "accepted";
+        return true;
+    }
+
+    private bool TryGetInboundFileTransferRouteTransitionPauseOwnershipLocked(
+        InboundTransferContext context,
+        out FileTransferRouteTransitionPauseOwnership ownership,
+        out FileTransferRouteTransitionAuthority? authority,
+        out string rejectionReason)
+    {
+        ownership = default;
+        authority = context.FileTransferRouteTransitionExecution?.Authority;
+        rejectionReason =
+            "filetransfer_route_transition_execution_shadow_missing";
+        if (context.FileTransferRouteTransitionExecution is not { } execution ||
+            authority is not { } exactAuthority ||
+            !ReferenceEquals(context.DataSession, execution.SourceDataSession) ||
+            context.DataSessionGeneration != execution.SourceDataSessionGeneration ||
+            context.DataSessionGeneration != exactAuthority.DataSessionGeneration)
+        {
+            return false;
+        }
+
+        var state = CreateCoordinatorStateLocked(context);
+        if (!FileTransferCoordinator.TryGetFileTransferRouteTransitionPauseOwnership(
+                state,
+                exactAuthority,
+                out ownership,
+                out rejectionReason))
+        {
+            ownership = GetFileTransferRouteTransitionPauseOwnershipForEvidence(
+                state,
+                exactAuthority);
+            return false;
+        }
+
+        if (ownership.State == FileTransferRouteTransitionState.Draining &&
+            !IsInboundFileTransferRouteTransitionExecutionCurrentLocked(
+                context,
+                execution,
+                out rejectionReason))
+        {
+            return false;
+        }
+
+        rejectionReason = "accepted";
+        return true;
+    }
+
+    private static FileTransferRouteTransitionPauseOwnership
+        GetFileTransferRouteTransitionPauseOwnershipForEvidence(
+            FileTransferCoordinatorState state,
+            FileTransferRouteTransitionAuthority authority)
+    {
+        var transition =
+            FileTransferCoordinator.GetFileTransferRouteTransitionSubstate(state);
+        if (transition.CurrentOperation is { } current &&
+            current.Authority == authority)
+        {
+            return new FileTransferRouteTransitionPauseOwnership(
+                authority,
+                current.State,
+                RetainedFrameHandoffPending: false,
+                DispositionHandoffPending: false);
+        }
+
+        if (transition.LastTerminalOperation is { } terminal &&
+            terminal.Authority == authority)
+        {
+            return new FileTransferRouteTransitionPauseOwnership(
+                authority,
+                terminal.State,
+                terminal.RetainedFrameApplyCommand is not null &&
+                    terminal.RetainedFrameApplyReceipt is null,
+                terminal.DispositionCommand is not null &&
+                    terminal.DispositionReceipt is null);
+        }
+
+        return default;
+    }
+
+    private static void LogOutboundFileTransferRouteTransitionTransportPauseDecisionLocked(
+        OutboundTransferContext context,
+        FileTransferRouteTransitionAuthority? authority,
+        FileTransferRouteTransitionPauseOwnership ownership,
+        string status,
+        string reason)
+    {
+        var state = ownership.Authority.IsDefault
+            ? "(none)"
+            : ownership.State.ToString();
+        var key =
+            $"{authority?.AuthorityId.ToString() ?? "(none)"}|{authority?.TransitionGeneration ?? 0}|{state}|{status}|{ownership.RetainedFrameHandoffPending}|{ownership.DispositionHandoffPending}";
+        if (string.Equals(
+                context.FileTransferRouteTransitionTransportPauseEvidenceKey,
+                key,
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        context.FileTransferRouteTransitionTransportPauseEvidenceKey = key;
+        LogFileTransferRouteTransitionTransportPauseDecision(
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            authority,
+            state,
+            ownership.RetainedFrameHandoffPending,
+            ownership.DispositionHandoffPending,
+            status,
+            reason);
+    }
+
+    private static void LogInboundFileTransferRouteTransitionTransportPauseDecisionLocked(
+        InboundTransferContext context,
+        FileTransferRouteTransitionAuthority? authority,
+        FileTransferRouteTransitionPauseOwnership ownership,
+        string status,
+        string reason)
+    {
+        var state = ownership.Authority.IsDefault
+            ? "(none)"
+            : ownership.State.ToString();
+        var key =
+            $"{authority?.AuthorityId.ToString() ?? "(none)"}|{authority?.TransitionGeneration ?? 0}|{state}|{status}|{ownership.RetainedFrameHandoffPending}|{ownership.DispositionHandoffPending}";
+        if (string.Equals(
+                context.FileTransferRouteTransitionTransportPauseEvidenceKey,
+                key,
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        context.FileTransferRouteTransitionTransportPauseEvidenceKey = key;
+        LogFileTransferRouteTransitionTransportPauseDecision(
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            authority,
+            state,
+            ownership.RetainedFrameHandoffPending,
+            ownership.DispositionHandoffPending,
+            status,
+            reason);
+    }
+
     private static void BindOutboundFileTransferRouteTransitionPauseLocked(
         OutboundTransferContext context)
     {
@@ -3534,6 +3722,25 @@ public sealed partial class SessionFileTransferService
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event={eventName}; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(value?.AuthorityId.ToString() ?? "(none)")}; predecessor_authority_id={FormatProtocolLogValue(value?.PredecessorTransitionAuthorityId?.ToString() ?? "(none)")}; transition_generation={value?.TransitionGeneration ?? 0}; transition_kind={FormatProtocolLogValue(value?.Kind.ToString() ?? "(none)")}; direction={direction.ToString().ToLowerInvariant()}; session_id={FormatProtocolLogValue(sessionId)}; transfer_id={FormatProtocolLogValue(transferId)}; source_route={FormatProtocolLogValue(value is null ? "(none)" : FileTransferRouteResolver.Resolve(value.Value.SourceRoute).TelemetryToken)}; source_protocol_version={value?.SourceProtocolVersion ?? 0}; source_transport={FormatProtocolLogValue(value is null ? "(none)" : FormatFileTransferTransportKind(value.Value.SourceTransport))}; source_live_route_epoch={value?.SourceLiveRouteEpoch ?? 0}; source_runtime_generation={value?.SourceRuntimeOwner.RuntimeGeneration ?? 0}; source_route_publication_generation={value?.SourceRoutePublication.PublicationGeneration ?? 0}; source_route_commit_generation={value?.SourceRouteCommit?.CommitGeneration ?? 0}; source_terminal_generation={value?.SourceTerminalGeneration ?? 0}; source_leg_generation={value?.SourceLegGeneration ?? 0}; source_transport_epoch={value?.SourceTransportEpoch ?? 0}; source_bridge_recovery_generation={value?.SourceBridgeRecoveryGeneration ?? 0}; source_data_session_generation={value?.DataSessionGeneration ?? 0}; target_route={FormatProtocolLogValue(value is null ? "(none)" : FileTransferRouteResolver.Resolve(value.Value.TargetRoute).TelemetryToken)}; target_protocol_version={value?.TargetProtocolVersion ?? 0}; target_transport={FormatProtocolLogValue(value is null ? "(none)" : FormatFileTransferTransportKind(value.Value.TargetTransport))}; handoff_kind={FormatProtocolLogValue(value is null ? "(none)" : FormatFileTransferTransportHandoffKind(value.Value.HandoffKind))}; proof_boundary_kind={proofBoundaryKind}; admission_generation={activation?.RuntimeUnlockAdmission.AdmissionGeneration ?? 0}; pending_precommit_generation={activation?.PendingPreCommitProbe.PendingGeneration ?? 0}; transaction_generation={activation?.PendingPreCommitProbe.TransactionGeneration ?? 0}; offer_generation={activation?.PendingPreCommitProbe.OfferGeneration ?? 0}; launch_generation={activation?.LaunchGeneration ?? 0}; tuna_path_lease_generation={activation?.PendingPreCommitProbe.TunaPathLeaseGeneration ?? 0}; retry_install_generation={activation?.EffectiveRetryInstallReceipt?.InstallGeneration ?? 0}; fallback_yield_authority_id={FormatProtocolLogValue(activation?.FallbackTailPairedReleaseReceipt?.ReleaseAuthorityId.ToString() ?? "(none)")}; fallback_yield_generation={activation?.FallbackTailPairedReleaseReceipt?.ReleaseGeneration ?? 0}; peer_proof_generation={fallback?.PeerProofEvidence.ProofGeneration ?? 0}; peer_proof_transport_epoch={fallback?.PeerProofEvidence.TransportEpoch ?? 0}; peer_proof_kind={FormatProtocolLogValue(fallback?.PeerProofEvidence.ProofKind ?? "(none)")}; retained_frame_fingerprint={FormatProtocolLogValue(fallback?.RetainedFrameIdentity.Sha256 ?? "(none)")}; target_transport_epoch={fallback?.TargetTransportEpoch ?? 0}; checkpoint_generation={checkpoint?.CheckpointGeneration ?? 0}; checkpoint_state_epoch={checkpoint?.StateEpoch ?? 0}; checkpoint_contiguous_frontier={checkpoint?.ContiguousCommittedChunkIndex ?? 0}; checkpoint_durable_highest={checkpoint?.DurableHighestChunkIndex ?? -1}; checkpoint_chunk_count={checkpoint?.ChunkCount ?? 0}; captured_through_send_lease_generation={command?.CapturedThroughPhysicalSendGeneration ?? 0}; captured_send_count={capturedCount}; captured_send_fingerprint={FormatProtocolLogValue(command?.CapturedPhysicalSendFingerprint ?? "(none)")}; completed_send_count={completedCount}; completed_send_fingerprint={FormatProtocolLogValue(drainReceipt?.CompletedPhysicalSendFingerprint ?? "(none)")}; drain_outcome={FormatProtocolLogValue(drainReceipt?.Outcome.ToString() ?? "(none)")}; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(reason)}");
+    }
+
+    private static void LogFileTransferRouteTransitionTransportPauseDecision(
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction,
+        FileTransferRouteTransitionAuthority? authority,
+        string coordinatorState,
+        bool retainedFrameHandoffPending,
+        bool dispositionHandoffPending,
+        string status,
+        string reason)
+    {
+        var authorityFields = authority is { } value
+            ? FormatFileTransferRouteTransitionAuthorityFields(value)
+            : "; authority_schema=0; authority_id=(none); predecessor_authority_id=(none); transition_generation=0; transition_kind=(none)";
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_route_transition_transport_pause_decided{authorityFields}; direction={direction.ToString().ToLowerInvariant()}; session_id={FormatProtocolLogValue(sessionId)}; transfer_id={FormatProtocolLogValue(transferId)}; coordinator_state={FormatProtocolLogValue(coordinatorState)}; retained_frame_handoff_pending={(retainedFrameHandoffPending ? 1 : 0)}; disposition_handoff_pending={(dispositionHandoffPending ? 1 : 0)}; decision_status={FormatProtocolLogValue(status)}; grace_policy=coordinator_disposition_only; decision_reason={FormatProtocolLogValue(reason)}");
     }
 
     private static void LogFileTransferRouteTransitionRetainedFrame(

@@ -21979,6 +21979,9 @@ public sealed partial class SessionFileTransferService :
         public FileTransferRouteTransitionExecutionShadow?
             FileTransferRouteTransitionExecution { get; set; }
 
+        public string?
+            FileTransferRouteTransitionTransportPauseEvidenceKey { get; set; }
+
         public RegularV4FrontierRepairPressureInstallExecutionIdentity?
             PendingRegularV4FrontierRepairPressureInstallRetry { get; set; }
 
@@ -23190,6 +23193,9 @@ public sealed partial class SessionFileTransferService :
 
         public FileTransferRouteTransitionExecutionShadow?
             FileTransferRouteTransitionExecution { get; set; }
+
+        public string?
+            FileTransferRouteTransitionTransportPauseEvidenceKey { get; set; }
 
         public FallbackFrontierRepairContract? CurrentFallbackFrontierRepairContract { get; set; }
 

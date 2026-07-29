@@ -4621,6 +4621,7 @@ public sealed partial class SessionFileTransferService
     {
         DateTimeOffset? graceDeadlineUtc;
         string reason;
+        var routeTransitionPauseRejected = false;
         lock (gate)
         {
             if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
@@ -4635,9 +4636,37 @@ public sealed partial class SessionFileTransferService
 
             graceDeadlineUtc = context.PullTransportGraceDeadlineUtc;
             reason = context.PullTransportPauseReason ?? "transport_disconnected";
+            if (string.Equals(
+                    reason,
+                    "filetransfer_route_transition_draining",
+                    StringComparison.Ordinal))
+            {
+                var held =
+                    TryGetOutboundFileTransferRouteTransitionPauseOwnershipLocked(
+                        context,
+                        out var ownership,
+                        out var authority,
+                        out var rejectionReason);
+                LogOutboundFileTransferRouteTransitionTransportPauseDecisionLocked(
+                    context,
+                    authority,
+                    ownership,
+                    held ? "Held" : "Rejected",
+                    held
+                        ? "coordinator_route_transition_pause_owned"
+                        : rejectionReason);
+                if (held)
+                {
+                    return false;
+                }
+
+                routeTransitionPauseRejected = true;
+            }
         }
 
-        if (graceDeadlineUtc is not null && DateTimeOffset.UtcNow < graceDeadlineUtc.Value)
+        if (!routeTransitionPauseRejected &&
+            graceDeadlineUtc is not null &&
+            DateTimeOffset.UtcNow < graceDeadlineUtc.Value)
         {
             return false;
         }
@@ -4682,6 +4711,7 @@ public sealed partial class SessionFileTransferService
     {
         DateTimeOffset? graceDeadlineUtc;
         string reason;
+        var routeTransitionPauseRejected = false;
         lock (gate)
         {
             if (!ReferenceEquals(inboundTransfer, context) || context.IsTerminal)
@@ -4696,9 +4726,37 @@ public sealed partial class SessionFileTransferService
 
             graceDeadlineUtc = context.PullTransportGraceDeadlineUtc;
             reason = context.PullTransportPauseReason ?? "transport_disconnected";
+            if (string.Equals(
+                    reason,
+                    "filetransfer_route_transition_draining",
+                    StringComparison.Ordinal))
+            {
+                var held =
+                    TryGetInboundFileTransferRouteTransitionPauseOwnershipLocked(
+                        context,
+                        out var ownership,
+                        out var authority,
+                        out var rejectionReason);
+                LogInboundFileTransferRouteTransitionTransportPauseDecisionLocked(
+                    context,
+                    authority,
+                    ownership,
+                    held ? "Held" : "Rejected",
+                    held
+                        ? "coordinator_route_transition_pause_owned"
+                        : rejectionReason);
+                if (held)
+                {
+                    return false;
+                }
+
+                routeTransitionPauseRejected = true;
+            }
         }
 
-        if (graceDeadlineUtc is not null && DateTimeOffset.UtcNow < graceDeadlineUtc.Value)
+        if (!routeTransitionPauseRejected &&
+            graceDeadlineUtc is not null &&
+            DateTimeOffset.UtcNow < graceDeadlineUtc.Value)
         {
             return false;
         }

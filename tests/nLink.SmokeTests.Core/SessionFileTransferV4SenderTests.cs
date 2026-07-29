@@ -20699,6 +20699,58 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             FileTransferRoute.RegularNknV4Fast,
             GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner").Route);
 
+        var graceDeadlineBeforePauseChecks =
+            (DateTimeOffset?)GetPrivatePropertyValue(
+                context,
+                "PullTransportGraceDeadlineUtc");
+        var terminalGenerationBeforePauseChecks =
+            GetPrivateProperty<int>(context, "TerminalGeneration");
+        var pausedHandler = serviceType.GetMethod(
+            "HandlePausedOutboundTransportAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        Assert.False(
+            await (Task<bool>)pausedHandler.Invoke(service, [context])!);
+        Assert.False(
+            await (Task<bool>)pausedHandler.Invoke(service, [context])!);
+        Assert.False(GetPrivateProperty<bool>(context, "IsTerminal"));
+        Assert.Equal(
+            terminalGenerationBeforePauseChecks,
+            GetPrivateProperty<int>(context, "TerminalGeneration"));
+        Assert.Equal(
+            graceDeadlineBeforePauseChecks,
+            (DateTimeOffset?)GetPrivatePropertyValue(
+                context,
+                "PullTransportGraceDeadlineUtc"));
+        Assert.Equal(
+            FileTransferRouteTransitionState.Draining,
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                    context,
+                    "CoordinatorPersistentState")
+                .FileTransferRouteTransition.CurrentOperation!.Value.State);
+        var pauseDecisionLines = ReadOperationalLogTail(logStart)
+            .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+            .Where(line =>
+                line.Contains(
+                    "event=filetransfer_route_transition_transport_pause_decided;",
+                    StringComparison.Ordinal) &&
+                line.Contains(
+                    $"transfer_id={transferId};",
+                    StringComparison.Ordinal))
+            .ToArray();
+        Assert.Single(pauseDecisionLines);
+        Assert.Contains(
+            "decision_status=Held;",
+            pauseDecisionLines[0],
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "coordinator_state=Draining;",
+            pauseDecisionLines[0],
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "grace_policy=coordinator_disposition_only;",
+            pauseDecisionLines[0],
+            StringComparison.Ordinal);
+
         var beforeAckLog = ReadOperationalLogTail(logStart);
         var stagedLine = beforeAckLog
             .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
