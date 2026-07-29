@@ -4153,6 +4153,12 @@ function Get-TunaGuiExplicitFailureClassification {
                     Reason = 'released_hold_routed_through_exact_invalidation_boundary'
                 }
             }
+            'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired' {
+                return [pscustomobject]@{
+                    Phase = 'runtime_unlock_initial_activation'
+                    Reason = 'initial_activation_offer_expired_during_receive_recovery_hold'
+                }
+            }
             'post_tuna_fallback_outbound_receive_worker_handoff_missing' {
                 return [pscustomobject]@{ Phase = 'outbound_sparse_worker_handoff'; Reason = $failureClass }
             }
@@ -5060,6 +5066,116 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             }
 
             if (-not $recovered) {
+                return $true
+            }
+        }
+
+        return $false
+    }
+
+    function Test-TunaGuiInitialActivationReceiveRecoveryHoldReleasedOfferExpired {
+        param(
+            [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+        )
+
+        $indexedLines = @(
+            for ($index = 0; $index -lt $Lines.Count; $index++) {
+                [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
+            }
+        )
+        foreach ($rejection in @($indexedLines | Where-Object {
+            (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                'tuna_acceleration_message_rejected')) -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'message_type') -eq
+                'transport_acceleration_offer' -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'reason') -eq 'expired'
+        })) {
+            $peerWriter =
+                Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'log_writer_id'
+            $peerReceipt = @($indexedLines | Where-Object {
+                $_.Index -lt $rejection.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                    'tuna_acceleration_offer_received_raw')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq
+                    $peerWriter
+            } | Select-Object -Last 1)
+            if ($peerReceipt.Count -ne 1) {
+                continue
+            }
+
+            $releases = @($indexedLines | Where-Object {
+                $_.Index -lt $peerReceipt[0].Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                    'runtime_unlock_initial_activation_receive_recovery_hold_resumed')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq
+                    'Released' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -ne
+                    $peerWriter
+            } | Select-Object -Last 1)
+            if ($releases.Count -ne 1) {
+                continue
+            }
+            $release = $releases[0]
+            $sourceWriter =
+                Get-TunaGuiLogLineFieldValue -Line $release.Line -Name 'log_writer_id'
+            $sessionId =
+                Get-TunaGuiLogLineFieldValue -Line $release.Line -Name 'session_id'
+            $transferId =
+                Get-TunaGuiLogLineFieldValue -Line $release.Line -Name 'transfer_id'
+            $offerGeneration =
+                Get-TunaGuiLogLineFieldValue -Line $release.Line -Name 'offer_generation'
+            $payerDecisionId =
+                Get-TunaGuiLogLineFieldValue -Line $release.Line -Name 'payer_decision_id'
+            $envelopeFingerprint =
+                Get-TunaGuiLogLineFieldValue `
+                    -Line $release.Line `
+                    -Name 'control_envelope_fingerprint'
+            if ([string]::IsNullOrWhiteSpace($sourceWriter) -or
+                [string]::IsNullOrWhiteSpace($sessionId) -or
+                [string]::IsNullOrWhiteSpace($transferId) -or
+                [string]::IsNullOrWhiteSpace($offerGeneration) -or
+                [string]::IsNullOrWhiteSpace($payerDecisionId) -or
+                [string]::IsNullOrWhiteSpace($envelopeFingerprint)) {
+                continue
+            }
+
+            $held = @($indexedLines | Where-Object {
+                $_.Index -lt $release.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                    'runtime_unlock_initial_activation_receive_recovery_hold_decided')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq
+                    'Held' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq
+                    $sourceWriter -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq
+                    $sessionId -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq
+                    $transferId -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'offer_generation') -eq
+                    $offerGeneration -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq
+                    $payerDecisionId -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'control_envelope_fingerprint') -eq $envelopeFingerprint
+            } | Select-Object -Last 1)
+            $prevalidated = @($indexedLines | Where-Object {
+                $_.Index -ge $release.Index -and
+                $_.Index -lt $peerReceipt[0].Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                    'runtime_unlock_initial_activation_receive_recovery_hold_send_prevalidated')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq
+                    'Released' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq
+                    $sourceWriter -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq
+                    $sessionId -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'offer_generation') -eq
+                    $offerGeneration -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq
+                    $payerDecisionId
+            } | Select-Object -First 1)
+            if ($held.Count -eq 1 -and $prevalidated.Count -eq 1) {
                 return $true
             }
         }
@@ -7678,6 +7794,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $initialActivationReceiveRecoveryHoldNotPreserved =
         Test-TunaGuiInitialActivationReceiveRecoveryHoldNotPreserved `
             -Lines $regularV4EvidenceLineText
+    $initialActivationReceiveRecoveryHoldReleasedOfferExpired =
+        Test-TunaGuiInitialActivationReceiveRecoveryHoldReleasedOfferExpired `
+            -Lines $regularV4EvidenceLineText
     $bridgeRecoveryExecutionPayloadHoldMissing =
         Test-TunaGuiBridgeRecoveryExecutionPayloadHoldFailure -Lines $regularV4EvidenceLineText
     $bridgeRecoveryExecutionSubmissionBarrierDrainMissing =
@@ -7757,6 +7876,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $runtimeUnlockRetryRecoverySettlementMissingMarker -or
         $runtimeUnlockRetryRegularV4RecoverySettlementMissing -or
         $initialActivationReceiveRecoveryHoldNotPreserved -or
+        $initialActivationReceiveRecoveryHoldReleasedOfferExpired -or
         $bridgeRecoveryExecutionPayloadHoldMissing -or
         $bridgeRecoveryExecutionSubmissionBarrierDrainMissing -or
         $receiveRecoveryCompletedUnprovenSuccessorMissing -or
@@ -7807,6 +7927,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
 
         $phase = 'preflight_bridge_bootstrap'
         $reason = $bridgeBootstrapSubreason
+    }
+    elseif ($initialActivationReceiveRecoveryHoldReleasedOfferExpired) {
+        $phase = 'runtime_unlock_initial_activation'
+        $reason = 'initial_activation_offer_expired_during_receive_recovery_hold'
     }
     elseif ($routeTransitionDrainingTransportGraceTerminalization) {
         $phase = 'route_transition'
@@ -8088,6 +8212,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         RuntimeUnlockRetrySourcePublicationMismatch = [bool]$runtimeUnlockRetrySourcePublicationMismatch
         InitialActivationReceiveRecoveryHoldNotPreserved =
             [bool]$initialActivationReceiveRecoveryHoldNotPreserved
+        InitialActivationReceiveRecoveryHoldReleasedOfferExpired =
+            [bool]$initialActivationReceiveRecoveryHoldReleasedOfferExpired
         RouteTransitionDrainingTransportGraceTerminalization =
             [bool]$routeTransitionDrainingTransportGraceTerminalization
         BridgeBootstrapNotReady = [bool]$bridgeBootstrapNotReady

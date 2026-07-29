@@ -364,6 +364,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_recovered_count"]);
             Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_unresolved_count"]);
             Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_verdict"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_raw_count"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_distinct_count"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_recovered_count"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_unresolved_count"]);
+            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_verdict"]);
             var manifestPath = Path.Combine(runRoot, "route-acceptance-run-manifest.json");
             Assert.True(File.Exists(manifestPath), "Expected immutable route-acceptance manifest.");
             await using (var manifestStream = File.OpenRead(manifestPath))
@@ -404,6 +409,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                 Assert.Equal(0, root.GetProperty("runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingRecoveredCount").GetInt32());
                 Assert.Equal(0, root.GetProperty("runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingUnresolvedCount").GetInt32());
                 Assert.Equal("none", root.GetProperty("runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryVerdict").GetString());
+                Assert.Equal(0, root.GetProperty("runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredRawCount").GetInt32());
+                Assert.Equal(0, root.GetProperty("runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredDistinctCount").GetInt32());
+                Assert.Equal(0, root.GetProperty("runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredRecoveredCount").GetInt32());
+                Assert.Equal(0, root.GetProperty("runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredUnresolvedCount").GetInt32());
+                Assert.Equal("none", root.GetProperty("runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredVerdict").GetString());
                 Assert.Equal(0, root.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedRawCount").GetInt32());
                 Assert.Equal(0, root.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedDistinctCount").GetInt32());
                 Assert.Equal(0, root.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount").GetInt32());
@@ -446,6 +456,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                 Assert.Equal(0, run.GetProperty("runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingRecoveredCount").GetInt32());
                 Assert.Equal(0, run.GetProperty("runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryMissingUnresolvedCount").GetInt32());
                 Assert.Equal("none", run.GetProperty("runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryVerdict").GetString());
+                Assert.Equal(0, run.GetProperty("runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredRawCount").GetInt32());
+                Assert.Equal(0, run.GetProperty("runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredDistinctCount").GetInt32());
+                Assert.Equal(0, run.GetProperty("runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredRecoveredCount").GetInt32());
+                Assert.Equal(0, run.GetProperty("runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredUnresolvedCount").GetInt32());
+                Assert.Equal("none", run.GetProperty("runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredVerdict").GetString());
                 Assert.Equal(0, run.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedRawCount").GetInt32());
                 Assert.Equal(0, run.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedDistinctCount").GetInt32());
                 Assert.Equal(0, run.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount").GetInt32());
