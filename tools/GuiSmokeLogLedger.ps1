@@ -805,6 +805,35 @@ function Get-GuiSmokeLogLedgerLinesAfterBookmark {
     return @($State.Lines.GetRange($Bookmark, $State.Lines.Count - $Bookmark).ToArray())
 }
 
+function Invoke-GuiSmokeLogLedgerRangeVisitor {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)][int]$StartIndex,
+        [Parameter(Mandatory = $true)][int]$EndIndex,
+        [Parameter(Mandatory = $true)][scriptblock]$Visitor
+    )
+
+    Assert-GuiSmokeLogLedgerHealthy -State $State
+    if ($StartIndex -lt 0 -or
+        $EndIndex -lt $StartIndex -or
+        $EndIndex -gt $State.Lines.Count) {
+        Set-GuiSmokeLogLedgerFailure `
+            -State $State `
+            -Code 'gui_smoke_log_cursor_invalid_range' `
+            -Detail ("start_index={0}; end_index={1}; line_count={2}" -f $StartIndex, $EndIndex, $State.Lines.Count)
+        Assert-GuiSmokeLogLedgerHealthy -State $State
+    }
+
+    for ($lineIndex = $StartIndex; $lineIndex -lt $EndIndex; $lineIndex++) {
+        $result = & $Visitor ([string]$State.Lines[$lineIndex]) $lineIndex
+        if ($null -ne $result) {
+            return $result
+        }
+    }
+
+    return $null
+}
+
 function Get-GuiSmokeLogLedgerDiagnostics {
     param([Parameter(Mandatory = $true)]$State)
 

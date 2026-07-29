@@ -10268,66 +10268,123 @@ function Wait-TunaGuiLiveRouteEpochEvidence {
     )
     $label = if ([string]::IsNullOrWhiteSpace($Description)) { $EventName } else { $Description }
     $requiresAfterLine = -not [string]::IsNullOrWhiteSpace($AfterLine)
-    $findMatchingLine = {
+    $newScanState = {
         param([int]$CandidateBookmark)
 
-        $afterLineSeen = -not $requiresAfterLine
-        foreach ($line in @(Get-AppLogLinesAfterBookmark -Bookmark $CandidateBookmark)) {
-            if (-not $afterLineSeen) {
-                if ([string]::Equals([string]$line, $AfterLine, [System.StringComparison]::Ordinal)) {
-                    $afterLineSeen = $true
-                }
-
-                continue
-            }
-
-            $matched = $true
-            foreach ($needle in $needles) {
-                if ($line.IndexOf([string]$needle, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
-                    $matched = $false
-                    break
-                }
-            }
-
-            if (-not $matched) {
-                continue
-            }
-
-            $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $line
-            $epoch = ConvertTo-GuiSmokeInt -Value (Get-GuiSmokeFieldValue -Fields $fields -Name 'live_route_epoch' -Default '0') -Default 0
-            if ($LiveRouteEpoch -gt 0 -and $epoch -ne $LiveRouteEpoch) {
-                continue
-            }
-
-            if ($AfterLiveRouteEpoch -gt 0 -and $epoch -le $AfterLiveRouteEpoch) {
-                continue
-            }
-
-            return $line
+        return [pscustomobject]@{
+            Cursor = $CandidateBookmark
+            AfterLineSeen = -not $requiresAfterLine
         }
+    }
+    $primaryScanState = & $newScanState $Bookmark
+    $fallbackEnabled = $FallbackBookmark -ge 0 -and
+        $FallbackBookmark -ne $Bookmark -and
+        $FallbackBookmark -lt $Bookmark
+    $fallbackScanState = if ($fallbackEnabled) {
+        & $newScanState $FallbackBookmark
+    }
+    else {
+        $null
+    }
+    $waitStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $pollMs = 500
+    $timeoutMessage = "Timed out waiting for app log evidence: $label"
+    $findMatchingLine = {
+        param(
+            [Parameter(Mandatory = $true)]$ScanState,
+            [Parameter(Mandatory = $true)][int]$EndIndex
+        )
 
-        return $null
+        return Invoke-GuiSmokeLogLedgerRangeVisitor `
+            -State $script:GuiSmokeAppLogLedger `
+            -StartIndex ([int]$ScanState.Cursor) `
+            -EndIndex $EndIndex `
+            -Visitor {
+                param([string]$line, [int]$lineIndex)
+
+                if ($waitStopwatch.ElapsedMilliseconds -ge $TimeoutMs) {
+                    throw [System.TimeoutException]::new($timeoutMessage)
+                }
+
+                $ScanState.Cursor = $lineIndex + 1
+                if (-not [bool]$ScanState.AfterLineSeen) {
+                    if ([string]::Equals($line, $AfterLine, [System.StringComparison]::Ordinal)) {
+                        $ScanState.AfterLineSeen = $true
+                    }
+
+                    return $null
+                }
+
+                $matched = $true
+                foreach ($needle in $needles) {
+                    if ($line.IndexOf([string]$needle, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+                        $matched = $false
+                        break
+                    }
+                }
+
+                if (-not $matched) {
+                    return $null
+                }
+
+                $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $line
+                $epoch = ConvertTo-GuiSmokeInt -Value (Get-GuiSmokeFieldValue -Fields $fields -Name 'live_route_epoch' -Default '0') -Default 0
+                if ($LiveRouteEpoch -gt 0 -and $epoch -ne $LiveRouteEpoch) {
+                    return $null
+                }
+
+                if ($AfterLiveRouteEpoch -gt 0 -and $epoch -le $AfterLiveRouteEpoch) {
+                    return $null
+                }
+
+                return $line
+            }
     }
 
-    return Wait-Until -TimeoutMs $TimeoutMs -PollMs 500 -OnTimeoutMessage "Timed out waiting for app log evidence: $label" -Condition {
-        if ($null -ne $OnPoll) {
-            [void](& $OnPoll)
-        }
+    while ($waitStopwatch.ElapsedMilliseconds -lt $TimeoutMs) {
+        try {
+            if ($null -ne $OnPoll) {
+                [void](& $OnPoll)
+            }
 
-        $line = & $findMatchingLine $Bookmark
-        if ($line) {
-            return $line
-        }
+            if ($waitStopwatch.ElapsedMilliseconds -ge $TimeoutMs) {
+                break
+            }
 
-        if ($FallbackBookmark -ge 0 -and $FallbackBookmark -ne $Bookmark -and $FallbackBookmark -lt $Bookmark) {
-            $line = & $findMatchingLine $FallbackBookmark
+            Sync-GuiSmokeAppLogLedger
+            if ($waitStopwatch.ElapsedMilliseconds -ge $TimeoutMs) {
+                break
+            }
+
+            $endIndex = Get-GuiSmokeLogLedgerBookmark -State $script:GuiSmokeAppLogLedger
+            $line = & $findMatchingLine $primaryScanState $endIndex
             if ($line) {
                 return $line
             }
+
+            if ($fallbackEnabled) {
+                $line = & $findMatchingLine $fallbackScanState $endIndex
+                if ($line) {
+                    return $line
+                }
+            }
+        }
+        catch [System.TimeoutException] {
+            throw $timeoutMessage
+        }
+        catch {
+            # Preserve the existing tolerance for transient UIA and log-read failures.
         }
 
-        return $null
+        $remainingMs = $TimeoutMs - [int]$waitStopwatch.ElapsedMilliseconds
+        if ($remainingMs -le 0) {
+            break
+        }
+
+        Start-Sleep -Milliseconds ([Math]::Min($pollMs, $remainingMs))
     }
+
+    throw $timeoutMessage
 }
 
 function Wait-TunaGuiActiveBridgeQuietWindow {

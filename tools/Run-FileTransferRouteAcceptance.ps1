@@ -41,6 +41,8 @@ $script:RouteAcceptanceEvidenceRuntimePath = ''
 $script:RouteAcceptanceEvidenceBridgeDir = ''
 $script:RouteAcceptanceEvidenceHarnessFiles = @()
 $script:RouteAcceptanceEvidenceDryRunFixtureRoot = ''
+$script:RouteAcceptanceEvidenceCompletionAttempted = $false
+$script:RouteAcceptanceEvidenceScenarioNames = @()
 
 function Resolve-RepoRoot {
     return (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -516,6 +518,11 @@ function Complete-RouteAcceptanceRunEvidence {
         [Parameter(Mandatory = $true)][string[]]$ScenarioNames
     )
 
+    if ($script:RouteAcceptanceEvidenceCompletionAttempted) {
+        return
+    }
+
+    $script:RouteAcceptanceEvidenceCompletionAttempted = $true
     $manifestPath = Join-Path $RunRoot 'route-acceptance-run-manifest.json'
     $scenarioEvidence = @()
     try {
@@ -535,9 +542,11 @@ function Complete-RouteAcceptanceRunEvidence {
                 $ledgerPath = Join-Path $artifactDir 'filetransfer-gui-log-ledger.json'
                 $diagnosticsPath = Join-Path $artifactDir 'filetransfer-retained-analysis-stage-diagnostics.json'
                 $analyzerInputPath = Join-Path $artifactDir 'filetransfer-retained-log-slice.log'
+                $evidenceFinalizationTimeoutPath = Join-Path $artifactDir 'filetransfer-gui-evidence-finalization-timeout.json'
                 $artifactFinalized = (Test-Path -LiteralPath $ledgerPath -PathType Leaf) -and
                     (Test-Path -LiteralPath $diagnosticsPath -PathType Leaf) -and
-                    (Test-Path -LiteralPath $analyzerInputPath -PathType Leaf)
+                    (Test-Path -LiteralPath $analyzerInputPath -PathType Leaf) -and
+                    -not (Test-Path -LiteralPath $evidenceFinalizationTimeoutPath -PathType Leaf)
                 Get-RouteAcceptanceScenarioEvidence `
                     -ScenarioName ([string]$attempt.ScenarioName) `
                     -Attempt ([int]$attempt.Attempt) `
@@ -586,6 +595,28 @@ function Complete-RouteAcceptanceRunEvidence {
     }
     catch {
         $failureReason = (($_ | Out-String).Trim() -replace '[\r\n]+', ' ')
+        if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf) -and
+            $null -ne $script:RouteAcceptanceInitialEvidenceSnapshot) {
+            try {
+                $failureManifest = New-RouteAcceptanceEvidenceManifest `
+                    -RunId $script:RouteAcceptanceRunId `
+                    -MatrixMode $MatrixMode `
+                    -ExecutionMode $script:RouteAcceptanceExecutionMode `
+                    -ArtifactRoot $RunRoot `
+                    -StartedUtc $script:RouteAcceptanceStartedUtc `
+                    -FinalizedUtc ([DateTime]::UtcNow) `
+                    -ScenarioNames $ScenarioNames `
+                    -InitialSnapshot $script:RouteAcceptanceInitialEvidenceSnapshot `
+                    -FinalSnapshot $script:RouteAcceptanceInitialEvidenceSnapshot `
+                    -ScenarioAttempts @($scenarioEvidence)
+                Write-RouteAcceptanceEvidenceManifest -Path $manifestPath -Manifest $failureManifest | Out-Null
+            }
+            catch {
+                $fallbackFailure = (($_ | Out-String).Trim() -replace '[\r\n]+', ' ')
+                $failureReason = "{0}; fail_closed_manifest_write_failed={1}" -f $failureReason, $fallbackFailure
+            }
+        }
+
         $manifestPresent = Test-Path -LiteralPath $manifestPath -PathType Leaf
         $manifestSha = if ($manifestPresent) { Get-RouteAcceptanceEvidenceSha256 -Path $manifestPath } else { '' }
         $script:RouteAcceptanceEvidence = [pscustomobject]@{
@@ -7090,8 +7121,19 @@ function Get-Phase5RouteAcceptanceScenarios {
     )
 }
 
+function Test-RouteAcceptanceEvidenceFinalizationTimedOut {
+    param([Parameter(Mandatory = $true)][string]$ArtifactDir)
+
+    return -not [string]::IsNullOrWhiteSpace($ArtifactDir) -and
+        (Test-Path -LiteralPath (Join-Path $ArtifactDir 'filetransfer-gui-evidence-finalization-timeout.json') -PathType Leaf)
+}
+
 function Test-Phase4RerunnableMeasurementFailure {
     param([Parameter(Mandatory = $true)]$Result)
+
+    if (Test-RouteAcceptanceEvidenceFinalizationTimedOut -ArtifactDir ([string]$Result.artifactDir)) {
+        return $false
+    }
 
     $failures = @($Result.failures | ForEach-Object { [string]$_ })
     return $failures.Count -gt 0 -and
@@ -7250,6 +7292,10 @@ function Test-Phase5RerunnableTransientSetupFailure {
         [Parameter(Mandatory = $true)]$Scenario,
         [Parameter(Mandatory = $true)]$Result
     )
+
+    if (Test-RouteAcceptanceEvidenceFinalizationTimedOut -ArtifactDir ([string]$Result.artifactDir)) {
+        return $false
+    }
 
     if ([string]$Scenario.Kind -eq 'regular') {
         $summaryPath = Join-Path $Result.artifactDir 'filetransfer-live-nkn-summary.txt'
@@ -8151,6 +8197,8 @@ function Invoke-Phase4RouteAcceptanceScenario {
     if ($AcceptancePhase -eq 'phase5') {
         $phase5RegularStartupPeerDisconnect = Test-Phase5RegularNknStartupPeerDisconnect -Scenario $Scenario -Result $result
     }
+    $evidenceFinalizationTimedOut =
+        Test-RouteAcceptanceEvidenceFinalizationTimedOut -ArtifactDir ([string]$result.artifactDir)
 
     $filteredSingleScenarioInvalidSetup =
         $AcceptancePhase -eq 'phase5' -and
@@ -8159,7 +8207,8 @@ function Invoke-Phase4RouteAcceptanceScenario {
         (Test-Phase4SetupInvalidAttempt -Result $result) -and
         -not (Test-Phase5SingleScenarioSetupRerunAllowed -Result $result)
 
-    if (-not $filteredSingleScenarioInvalidSetup -and
+    if (-not $evidenceFinalizationTimedOut -and
+        -not $filteredSingleScenarioInvalidSetup -and
         ((Test-Phase4RerunnableMeasurementFailure -Result $result) -or $phase5CanonicalReceiveRecoveryExhaustion -or $phase5TransientSetupFailure -or $phase5RegularStartupPeerDisconnect)) {
         $firstAttemptResult = $result
         $firstFailureReason = if ($phase5CanonicalReceiveRecoveryExhaustion) {
@@ -8275,6 +8324,10 @@ function Invoke-Phase4RouteAcceptanceScenario {
                 Set-Phase5CanonicalRuntimeUnlockReceiveRecoveryExhaustion -Scenario $Scenario -Result $rerunResult | Out-Null
             }
             Add-RouteAcceptanceScenarioAttemptEvidence -ScenarioName ([string]$Scenario.Name) -AttemptIndex ($rerun + 1) -ArtifactDir $rerunDir
+            if (Test-RouteAcceptanceEvidenceFinalizationTimedOut -ArtifactDir $rerunDir) {
+                $result = $rerunResult
+                break
+            }
             $rerunResult.attemptCount = $rerun + 1
             $rerunResult.retryUsed = $true
             $rerunResult.selectedAttempt = if ($rerunResult.failures.Count -eq 0) { $rerun + 1 } else { 0 }
@@ -10513,6 +10566,7 @@ try {
                 throw ("No route-acceptance scenarios matched -ScenarioName {0}." -f ($requestedScenarioNames -join ','))
             }
         }
+        $script:RouteAcceptanceEvidenceScenarioNames = @($scenarios | ForEach-Object { [string]$_.Name })
         $resolvedExePath = ''
         $resolvedWalletPath = ''
         $resolvedSidecarPath = ''
@@ -10699,5 +10753,15 @@ catch {
     exit 1
 }
 finally {
+    if ($null -ne $script:RouteAcceptanceInitialEvidenceSnapshot -and
+        -not $script:RouteAcceptanceEvidenceCompletionAttempted -and
+        $null -ne $runRoot -and
+        -not [string]::IsNullOrWhiteSpace([string]$runRoot)) {
+        Complete-RouteAcceptanceRunEvidence `
+            -RepoRoot $repoRoot `
+            -RunRoot $runRoot `
+            -ScenarioNames @($script:RouteAcceptanceEvidenceScenarioNames)
+    }
+
     Pop-Location
 }

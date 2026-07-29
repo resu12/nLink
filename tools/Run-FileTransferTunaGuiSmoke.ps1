@@ -24,6 +24,360 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function ConvertTo-TunaGuiProcessArgument {
+    param([AllowEmptyString()][string]$Value)
+
+    if ([string]::IsNullOrEmpty($Value)) {
+        return '""'
+    }
+
+    if ($Value.IndexOfAny([char[]]@(' ', "`t", '"')) -lt 0) {
+        return $Value
+    }
+
+    return '"' + ($Value -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"'
+}
+
+function Write-TunaGuiAtomicJson {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Value
+    )
+
+    $directory = Split-Path -Parent $Path
+    if (-not [string]::IsNullOrWhiteSpace($directory)) {
+        New-Item -ItemType Directory -Force -Path $directory | Out-Null
+    }
+
+    $temporaryPath = '{0}.{1}.tmp' -f $Path, ([guid]::NewGuid().ToString('N'))
+    $stream = $null
+    try {
+        $json = $Value | ConvertTo-Json -Depth 12
+        $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($json)
+        $stream = [System.IO.FileStream]::new(
+            $temporaryPath,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None)
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+        $stream.Dispose()
+        $stream = $null
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            $backupPath = '{0}.{1}.bak' -f $Path, ([guid]::NewGuid().ToString('N'))
+            try {
+                [System.IO.File]::Replace($temporaryPath, $Path, $backupPath, $true)
+            }
+            finally {
+                if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
+                    Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+        else {
+            [System.IO.File]::Move($temporaryPath, $Path)
+        }
+    }
+    finally {
+        if ($stream) {
+            $stream.Dispose()
+        }
+        if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) {
+            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Get-TunaGuiFinalizationGraceSeconds {
+    $defaultSeconds = 120
+    $overrideText = [string]$env:NLINK_FILETRANSFER_GUI_FINALIZATION_GRACE_SECONDS_TEST_ONLY
+    if ([string]::IsNullOrWhiteSpace($overrideText)) {
+        return $defaultSeconds
+    }
+
+    $overrideSeconds = 0
+    if (-not [int]::TryParse($overrideText, [ref]$overrideSeconds) -or
+        $overrideSeconds -lt 1 -or
+        $overrideSeconds -gt $defaultSeconds) {
+        throw "NLINK_FILETRANSFER_GUI_FINALIZATION_GRACE_SECONDS_TEST_ONLY must be an integer from 1 through $defaultSeconds."
+    }
+
+    return $overrideSeconds
+}
+
+function Stop-TunaGuiSmokeProcessTree {
+    param([Parameter(Mandatory = $true)]$Process)
+
+    try {
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            return
+        }
+    }
+    catch {
+        return
+    }
+
+    $taskKillPath = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+    if (Test-Path -LiteralPath $taskKillPath -PathType Leaf) {
+        try {
+            & $taskKillPath /PID ([string]$Process.Id) /T /F 2>&1 | Out-Null
+        }
+        catch {
+        }
+    }
+
+    try {
+        $Process.Refresh()
+        if (-not $Process.HasExited) {
+            Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+    catch {
+    }
+
+    try {
+        $Process.WaitForExit(5000) | Out-Null
+    }
+    catch {
+    }
+}
+
+function Invoke-TunaGuiSmokeWithHardDeadline {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)][string]$ExePath,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+
+    $finalizationGraceSeconds = Get-TunaGuiFinalizationGraceSeconds
+    $hardDeadlineSeconds = [long]$TimeoutSeconds + [long]$finalizationGraceSeconds
+    $startedUtc = [DateTimeOffset]::UtcNow
+    $deadlineUtc = $startedUtc.AddSeconds($hardDeadlineSeconds)
+    $statePath = Join-Path $ArtifactDir 'filetransfer-gui-evidence-finalization-state.json'
+    $timeoutPath = Join-Path $ArtifactDir 'filetransfer-gui-evidence-finalization-timeout.json'
+    $stdoutPath = Join-Path $ArtifactDir 'gui-smoke-stdout.log'
+    $stderrPath = Join-Path $ArtifactDir 'gui-smoke-stderr.log'
+    $arguments = @(
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', (Join-Path $RepoRoot 'tools\GuiSmoke-Windows.ps1'),
+        '-ExePath', $ExePath,
+        '-TimeoutSeconds', ([string]$TimeoutSeconds))
+    $argumentLine = ($arguments | ForEach-Object { ConvertTo-TunaGuiProcessArgument -Value ([string]$_) }) -join ' '
+
+    $oldStatePath = $env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH
+    $process = $null
+    try {
+        $env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH = $statePath
+        $state = [ordered]@{
+            schemaVersion = 1
+            event = 'filetransfer_gui_evidence_finalization_state'
+            acceptanceRunId = [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID
+            scenarioRunId = [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID
+            artifactDir = $ArtifactDir
+            guiChildProcessId = 0
+            scenarioTimeoutSeconds = $TimeoutSeconds
+            finalizationGraceSeconds = $finalizationGraceSeconds
+            hardDeadlineSeconds = $hardDeadlineSeconds
+            startedUtc = $startedUtc.ToString('O')
+            deadlineUtc = $deadlineUtc.ToString('O')
+            lastCompletedStage = 'gui_child_starting'
+            timedOut = $false
+            exitCode = $null
+            updatedUtc = [DateTimeOffset]::UtcNow.ToString('O')
+        }
+        Write-TunaGuiAtomicJson -Path $statePath -Value $state
+
+        $process = Start-Process `
+            -FilePath 'powershell' `
+            -ArgumentList $argumentLine `
+            -WorkingDirectory $RepoRoot `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath `
+            -WindowStyle Hidden `
+            -PassThru
+
+        $state.guiChildProcessId = $process.Id
+        $state.lastCompletedStage = 'gui_child_started'
+        $state.updatedUtc = [DateTimeOffset]::UtcNow.ToString('O')
+        Write-TunaGuiAtomicJson -Path $statePath -Value $state
+
+        $timedOut = $false
+        while ($true) {
+            $process.Refresh()
+            if ($process.HasExited) {
+                break
+            }
+
+            $remainingMilliseconds = [long][Math]::Ceiling(($deadlineUtc - [DateTimeOffset]::UtcNow).TotalMilliseconds)
+            if ($remainingMilliseconds -gt 0) {
+                $waitMilliseconds = [int][Math]::Min(1000L, $remainingMilliseconds)
+                if ($process.WaitForExit($waitMilliseconds)) {
+                    break
+                }
+                continue
+            }
+
+            # The exit/timeout race has one winner: refresh immediately before
+            # destructive cleanup and accept a naturally completed child.
+            $process.Refresh()
+            if ($process.HasExited) {
+                break
+            }
+
+            $timedOut = $true
+            Stop-TunaGuiSmokeProcessTree -Process $process
+            break
+        }
+
+        if ($timedOut) {
+            $lastCompletedStage = 'gui_child_started'
+            $capturePath = ''
+            $captureSha256 = ''
+            $captureLineCount = 0L
+            if (Test-Path -LiteralPath $statePath -PathType Leaf) {
+                try {
+                    $currentState = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+                    if ($currentState.PSObject.Properties.Name -contains 'lastCompletedStage' -and
+                        -not [string]::IsNullOrWhiteSpace([string]$currentState.lastCompletedStage)) {
+                        $lastCompletedStage = [string]$currentState.lastCompletedStage
+                    }
+                    if ($currentState.PSObject.Properties.Name -contains 'capturePath') {
+                        $capturePath = [string]$currentState.capturePath
+                    }
+                    if ($currentState.PSObject.Properties.Name -contains 'captureSha256') {
+                        $captureSha256 = [string]$currentState.captureSha256
+                    }
+                    if ($currentState.PSObject.Properties.Name -contains 'captureLineCount') {
+                        $captureLineCount = [long]$currentState.captureLineCount
+                    }
+                }
+                catch {
+                }
+            }
+
+            $endedUtc = [DateTimeOffset]::UtcNow
+            $timeout = [ordered]@{
+                schemaVersion = 1
+                event = 'filetransfer_gui_evidence_finalization_timeout'
+                permanentlyNonAuthoritative = $true
+                acceptanceRunId = [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID
+                scenarioRunId = [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID
+                artifactDir = $ArtifactDir
+                guiChildProcessId = $process.Id
+                scenarioTimeoutSeconds = $TimeoutSeconds
+                finalizationGraceSeconds = $finalizationGraceSeconds
+                hardDeadlineSeconds = $hardDeadlineSeconds
+                startedUtc = $startedUtc.ToString('O')
+                deadlineUtc = $deadlineUtc.ToString('O')
+                endedUtc = $endedUtc.ToString('O')
+                elapsedMilliseconds = [long][Math]::Max(0, ($endedUtc - $startedUtc).TotalMilliseconds)
+                lastCompletedStage = $lastCompletedStage
+                capturePath = $capturePath
+                captureSha256 = $captureSha256
+                captureLineCount = $captureLineCount
+                exitCode = 124
+                reason = 'gui_evidence_finalization_hard_deadline_exceeded'
+            }
+            Write-TunaGuiAtomicJson -Path $timeoutPath -Value $timeout
+
+            $state = [ordered]@{
+                schemaVersion = 1
+                event = 'filetransfer_gui_evidence_finalization_state'
+                acceptanceRunId = [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID
+                scenarioRunId = [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID
+                artifactDir = $ArtifactDir
+                guiChildProcessId = $process.Id
+                scenarioTimeoutSeconds = $TimeoutSeconds
+                finalizationGraceSeconds = $finalizationGraceSeconds
+                hardDeadlineSeconds = $hardDeadlineSeconds
+                startedUtc = $startedUtc.ToString('O')
+                deadlineUtc = $deadlineUtc.ToString('O')
+                endedUtc = $endedUtc.ToString('O')
+                lastCompletedStage = $lastCompletedStage
+                capturePath = $capturePath
+                captureSha256 = $captureSha256
+                captureLineCount = $captureLineCount
+                timedOut = $true
+                exitCode = 124
+                updatedUtc = $endedUtc.ToString('O')
+            }
+            Write-TunaGuiAtomicJson -Path $statePath -Value $state
+            return [pscustomobject]@{
+                ExitCode = 124
+                TimedOut = $true
+            }
+        }
+
+        $process.WaitForExit()
+        $endedUtc = [DateTimeOffset]::UtcNow
+        $capturePath = ''
+        $captureSha256 = ''
+        $captureLineCount = 0L
+        $childLastCompletedStage = ''
+        if (Test-Path -LiteralPath $statePath -PathType Leaf) {
+            try {
+                $currentState = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+                if ($currentState.PSObject.Properties.Name -contains 'lastCompletedStage') {
+                    $childLastCompletedStage = [string]$currentState.lastCompletedStage
+                }
+                if ($currentState.PSObject.Properties.Name -contains 'capturePath') {
+                    $capturePath = [string]$currentState.capturePath
+                }
+                if ($currentState.PSObject.Properties.Name -contains 'captureSha256') {
+                    $captureSha256 = [string]$currentState.captureSha256
+                }
+                if ($currentState.PSObject.Properties.Name -contains 'captureLineCount') {
+                    $captureLineCount = [long]$currentState.captureLineCount
+                }
+            }
+            catch {
+            }
+        }
+        $state = [ordered]@{
+            schemaVersion = 1
+            event = 'filetransfer_gui_evidence_finalization_state'
+            acceptanceRunId = [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID
+            scenarioRunId = [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID
+            artifactDir = $ArtifactDir
+            guiChildProcessId = $process.Id
+            scenarioTimeoutSeconds = $TimeoutSeconds
+            finalizationGraceSeconds = $finalizationGraceSeconds
+            hardDeadlineSeconds = $hardDeadlineSeconds
+            startedUtc = $startedUtc.ToString('O')
+            deadlineUtc = $deadlineUtc.ToString('O')
+            endedUtc = $endedUtc.ToString('O')
+            lastCompletedStage = 'gui_child_exited'
+            childLastCompletedStage = $childLastCompletedStage
+            capturePath = $capturePath
+            captureSha256 = $captureSha256
+            captureLineCount = $captureLineCount
+            timedOut = $false
+            exitCode = $process.ExitCode
+            updatedUtc = $endedUtc.ToString('O')
+        }
+        Write-TunaGuiAtomicJson -Path $statePath -Value $state
+        return [pscustomobject]@{
+            ExitCode = [int]$process.ExitCode
+            TimedOut = $false
+        }
+    }
+    finally {
+        if ($null -eq $oldStatePath) {
+            Remove-Item Env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH = $oldStatePath
+        }
+
+        if ($process -is [System.IDisposable]) {
+            $process.Dispose()
+        }
+    }
+}
+
 function Test-TunaGuiLateSetupCleanupLine {
     param([AllowEmptyString()][string]$Line)
 
@@ -1182,8 +1536,17 @@ try {
     Write-Host "[Tuna GUI] Artifacts: $resolvedArtifactDir" -ForegroundColor DarkGray
     Write-Host "[Tuna GUI] Direction=$Direction Payer=$PayerMode Fault=$Fault RouteMode=$RouteMode Payload=$PayloadSize Mixed=$($Mixed.IsPresent)" -ForegroundColor DarkGray
 
-    & ".\tools\GuiSmoke-Windows.ps1" -ExePath $resolvedExe -TimeoutSeconds $TimeoutSeconds
-    $guiSmokeExitCode = $LASTEXITCODE
+    $guiSmokeResult = Invoke-TunaGuiSmokeWithHardDeadline `
+        -RepoRoot $repoRoot `
+        -ArtifactDir $resolvedArtifactDir `
+        -ExePath $resolvedExe `
+        -TimeoutSeconds $TimeoutSeconds
+    $guiSmokeExitCode = [int]$guiSmokeResult.ExitCode
+    if ([bool]$guiSmokeResult.TimedOut) {
+        Write-Error "GUI smoke evidence finalization timed out with exit code 124. Artifacts: $resolvedArtifactDir" -ErrorAction Continue
+        exit 124
+    }
+
     if ($guiSmokeExitCode -ne 0) {
         if ($RouteMode -eq 'v4-restart-v6-fallback') {
             Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir

@@ -273,6 +273,259 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeWindows_LiveRouteWaitScansLedgerRangesIncrementally()
+    {
+        var repoRoot = FindRepoRoot();
+        var helperPath = Path.Combine(repoRoot, "tools", "GuiSmokeLogLedger.ps1")
+            .Replace("'", "''", StringComparison.Ordinal);
+        var guiText = File.ReadAllText(Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1"));
+        var waitBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Wait-TunaGuiLiveRouteEpochEvidence",
+            "Wait-TunaGuiActiveBridgeQuietWindow");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            . '{{helperPath}}'
+            function Wait-TunaGuiLiveRouteEpochEvidence { {{waitBody}} }
+            function ConvertFrom-GuiSmokeSemicolonFields {
+                param([string]$Message)
+                $fields = @{}
+                foreach ($part in @($Message -split ';')) {
+                    $pair = $part.Trim() -split '=', 2
+                    if ($pair.Count -eq 2) { $fields[$pair[0].Trim()] = $pair[1].Trim() }
+                }
+                return $fields
+            }
+            function Get-GuiSmokeFieldValue {
+                param($Fields, [string]$Name, [string]$Default)
+                if ($Fields.ContainsKey($Name)) { return [string]$Fields[$Name] }
+                return $Default
+            }
+            function ConvertTo-GuiSmokeInt {
+                param($Value, [int]$Default)
+                $parsed = 0
+                if ([int]::TryParse([string]$Value, [ref]$parsed)) { return $parsed }
+                return $Default
+            }
+
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-route-wait-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $utf8 = [Text.UTF8Encoding]::new($false)
+                $nl = [Environment]::NewLine
+                $script:testLogPath = Join-Path $tempRoot 'nlink.log'
+                [IO.File]::WriteAllText($script:testLogPath, "event=old${nl}event=after-marker${nl}", $utf8)
+                $script:GuiSmokeAppLogLedger = New-GuiSmokeLogLedgerState
+                Sync-GuiSmokeLogLedger -State $script:GuiSmokeAppLogLedger -Paths @($script:testLogPath)
+
+                $script:syncCount = 0
+                function Sync-GuiSmokeAppLogLedger {
+                    $script:syncCount++
+                    Sync-GuiSmokeLogLedger -State $script:GuiSmokeAppLogLedger -Paths @($script:testLogPath)
+                }
+
+                $script:rangeCalls = [Collections.Generic.List[string]]::new()
+                $originalRangeVisitor = (Get-Command Invoke-GuiSmokeLogLedgerRangeVisitor).ScriptBlock
+                function Invoke-GuiSmokeLogLedgerRangeVisitor {
+                    param($State, [int]$StartIndex, [int]$EndIndex, [scriptblock]$Visitor)
+                    $script:rangeCalls.Add(("$StartIndex`:$EndIndex"))
+                    return & $originalRangeVisitor -State $State -StartIndex $StartIndex -EndIndex $EndIndex -Visitor $Visitor
+                }
+
+                $script:pollCount = 0
+                $onPoll = {
+                    $script:pollCount++
+                    if ($script:pollCount -eq 1) {
+                        [IO.File]::AppendAllText($script:testLogPath, "event=noise${nl}", $utf8)
+                    }
+                    elseif ($script:pollCount -eq 2) {
+                        [IO.File]::AppendAllText(
+                            $script:testLogPath,
+                            "event=filetransfer_live_route_epoch_started; route=file_tuna_v4; protocol_version=4; handoff_kind=NormalToTunaActivation; target_transport=Tuna; live_route_epoch=2${nl}",
+                            $utf8)
+                    }
+                }
+
+                $matched = Wait-TunaGuiLiveRouteEpochEvidence `
+                    -Bookmark 2 `
+                    -FallbackBookmark 0 `
+                    -Route file_tuna_v4 `
+                    -ProtocolVersion 4 `
+                    -HandoffKind NormalToTunaActivation `
+                    -TargetTransport Tuna `
+                    -EventName filetransfer_live_route_epoch_started `
+                    -Description incremental-route-wait `
+                    -AfterLine event=after-marker `
+                    -TimeoutMs 5000 `
+                    -OnPoll $onPoll
+
+                if ($matched.IndexOf('live_route_epoch=2', [StringComparison]::Ordinal) -lt 0) { throw "unexpected match: $matched" }
+                if ($script:syncCount -ne 2) { throw "expected one sync per poll, got $($script:syncCount)" }
+                $expectedCalls = @('2:3', '0:3', '3:4', '3:4')
+                if (($script:rangeCalls -join '|') -ne ($expectedCalls -join '|')) {
+                    throw "range calls were not incremental: $($script:rangeCalls -join '|')"
+                }
+
+                $visited = [Collections.Generic.List[string]]::new()
+                $visitResult = & $originalRangeVisitor `
+                    -State $script:GuiSmokeAppLogLedger `
+                    -StartIndex 1 `
+                    -EndIndex 4 `
+                    -Visitor {
+                        param([string]$line, [int]$lineIndex)
+                        $visited.Add(("$lineIndex=$line"))
+                        return $null
+                    }
+                if (($visited -join '|') -ne '1=event=after-marker|2=event=noise|3=event=filetransfer_live_route_epoch_started; route=file_tuna_v4; protocol_version=4; handoff_kind=NormalToTunaActivation; target_transport=Tuna; live_route_epoch=2') {
+                    throw "indexed range mismatch: $($visited -join '|')"
+                }
+
+                Write-Output 'gui-live-route-incremental-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Incremental live-route wait test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-live-route-incremental-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TunaGuiWrapper_HardDeadlinePersistsFailClosedEvidenceAndCleansChild()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var wrapperText = File.ReadAllText(Path.Combine(repoRoot, "tools", "Run-FileTransferTunaGuiSmoke.ps1"));
+        var convertArgumentBody = ExtractPowerShellFunctionBody(
+            wrapperText,
+            "ConvertTo-TunaGuiProcessArgument",
+            "Write-TunaGuiAtomicJson");
+        var atomicJsonBody = ExtractPowerShellFunctionBody(
+            wrapperText,
+            "Write-TunaGuiAtomicJson",
+            "Get-TunaGuiFinalizationGraceSeconds");
+        var graceBody = ExtractPowerShellFunctionBody(
+            wrapperText,
+            "Get-TunaGuiFinalizationGraceSeconds",
+            "Stop-TunaGuiSmokeProcessTree");
+        var stopTreeBody = ExtractPowerShellFunctionBody(
+            wrapperText,
+            "Stop-TunaGuiSmokeProcessTree",
+            "Invoke-TunaGuiSmokeWithHardDeadline");
+        var watchdogBody = ExtractPowerShellFunctionBody(
+            wrapperText,
+            "Invoke-TunaGuiSmokeWithHardDeadline",
+            "Test-TunaGuiLateSetupCleanupLine");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function ConvertTo-TunaGuiProcessArgument { {{convertArgumentBody}} }
+            function Write-TunaGuiAtomicJson { {{atomicJsonBody}} }
+            function Get-TunaGuiFinalizationGraceSeconds { {{graceBody}} }
+            function Stop-TunaGuiSmokeProcessTree { {{stopTreeBody}} }
+            function Invoke-TunaGuiSmokeWithHardDeadline { {{watchdogBody}} }
+
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-tuna-gui-watchdog-' + [guid]::NewGuid().ToString('N'))
+            $toolsDir = Join-Path $tempRoot 'tools'
+            $timeoutArtifact = Join-Path $tempRoot 'timeout-artifact'
+            $successArtifact = Join-Path $tempRoot 'success-artifact'
+            [void][IO.Directory]::CreateDirectory($toolsDir)
+            [void][IO.Directory]::CreateDirectory($timeoutArtifact)
+            [void][IO.Directory]::CreateDirectory($successArtifact)
+            try {
+                $env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID = 'acceptance-run'
+                $env:NLINK_FILETRANSFER_SCENARIO_RUN_ID = 'scenario-run'
+                $env:NLINK_FILETRANSFER_GUI_FINALIZATION_GRACE_SECONDS_TEST_ONLY = '1'
+                $env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH = 'sentinel-state-path'
+                $stubPath = Join-Path $toolsDir 'GuiSmoke-Windows.ps1'
+                @'
+            param([string]$ExePath, [int]$TimeoutSeconds)
+            Start-Sleep -Milliseconds 500
+            $state = [ordered]@{
+                schemaVersion = 1
+                lastCompletedStage = 'capture_persisted'
+                capturePath = 'capture.log'
+                captureSha256 = 'abc123'
+                captureLineCount = 42
+            }
+            $state | ConvertTo-Json | Set-Content -LiteralPath $env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH -Encoding UTF8
+            Start-Sleep -Seconds 10
+            '@ | Set-Content -LiteralPath $stubPath -Encoding UTF8
+
+                $timedOut = Invoke-TunaGuiSmokeWithHardDeadline `
+                    -RepoRoot $tempRoot `
+                    -ArtifactDir $timeoutArtifact `
+                    -ExePath 'unused.exe' `
+                    -TimeoutSeconds 1
+                if (-not $timedOut.TimedOut -or [int]$timedOut.ExitCode -ne 124) {
+                    throw "watchdog did not return timeout: $($timedOut | ConvertTo-Json -Compress)"
+                }
+                if ($env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH -ne 'sentinel-state-path') {
+                    throw 'watchdog did not restore the parent state-path environment value'
+                }
+                $timeoutPath = Join-Path $timeoutArtifact 'filetransfer-gui-evidence-finalization-timeout.json'
+                $statePath = Join-Path $timeoutArtifact 'filetransfer-gui-evidence-finalization-state.json'
+                $timeout = Get-Content -LiteralPath $timeoutPath -Raw | ConvertFrom-Json
+                $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+                if (-not $timeout.permanentlyNonAuthoritative -or
+                    $timeout.lastCompletedStage -ne 'capture_persisted' -or
+                    $timeout.capturePath -ne 'capture.log' -or
+                    $timeout.captureSha256 -ne 'abc123' -or
+                    [long]$timeout.captureLineCount -ne 42 -or
+                    -not $state.timedOut -or
+                    [int]$state.exitCode -ne 124) {
+                    throw "timeout evidence was incomplete: timeout=$($timeout | ConvertTo-Json -Compress); state=$($state | ConvertTo-Json -Compress)"
+                }
+                if ($null -ne (Get-Process -Id ([int]$timeout.guiChildProcessId) -ErrorAction SilentlyContinue)) {
+                    throw 'timed-out GUI child remained alive'
+                }
+
+                @'
+            param([string]$ExePath, [int]$TimeoutSeconds)
+            exit 0
+            '@ | Set-Content -LiteralPath $stubPath -Encoding UTF8
+                $completed = Invoke-TunaGuiSmokeWithHardDeadline `
+                    -RepoRoot $tempRoot `
+                    -ArtifactDir $successArtifact `
+                    -ExePath 'unused.exe' `
+                    -TimeoutSeconds 1
+                if ($completed.TimedOut -or [int]$completed.ExitCode -ne 0) {
+                    throw "natural child exit lost the timeout race: $($completed | ConvertTo-Json -Compress)"
+                }
+                if (Test-Path -LiteralPath (Join-Path $successArtifact 'filetransfer-gui-evidence-finalization-timeout.json')) {
+                    throw 'natural child exit wrote a timeout marker'
+                }
+                $successState = Get-Content -LiteralPath (Join-Path $successArtifact 'filetransfer-gui-evidence-finalization-state.json') -Raw | ConvertFrom-Json
+                if ($successState.lastCompletedStage -ne 'gui_child_exited' -or
+                    $successState.timedOut -or
+                    [int]$successState.exitCode -ne 0) {
+                    throw "natural child state was invalid: $($successState | ConvertTo-Json -Compress)"
+                }
+
+                Write-Output 'tuna-gui-watchdog-ok'
+            }
+            finally {
+                Remove-Item Env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID -ErrorAction SilentlyContinue
+                Remove-Item Env:NLINK_FILETRANSFER_SCENARIO_RUN_ID -ErrorAction SilentlyContinue
+                Remove-Item Env:NLINK_FILETRANSFER_GUI_FINALIZATION_GRACE_SECONDS_TEST_ONLY -ErrorAction SilentlyContinue
+                Remove-Item Env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Tuna GUI watchdog test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("tuna-gui-watchdog-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GuiSmokeLogLedger_BindsReadsToHandlesAndReconcilesIntraSyncRotations()
     {
         var helperPath = Path.Combine(FindRepoRoot(), "tools", "GuiSmokeLogLedger.ps1")
@@ -608,6 +861,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
         var wrapperText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "Run-FileTransferTunaGuiSmoke.ps1"));
+        var routeAcceptanceText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "Run-FileTransferRouteAcceptance.ps1"));
         var scenarioBody = ExtractPowerShellFunctionBody(
             guiText,
             "Run-ScenarioFileTransferTunaHandoffFallback",
@@ -633,6 +887,12 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("cursorIntegrityVerdict", guiText, StringComparison.Ordinal);
         Assert.Contains("[string]$FileName = 'filetransfer-retained-log-slice.log'", wrapperText, StringComparison.Ordinal);
         Assert.DoesNotContain("filetransfer-gui-log-ledger-slice.log", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("Invoke-TunaGuiSmokeWithHardDeadline", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer-gui-evidence-finalization-timeout.json", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("RouteAcceptanceEvidenceCompletionAttempted", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("Test-RouteAcceptanceEvidenceFinalizationTimedOut", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("-not $evidenceFinalizationTimedOut", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("fail_closed_manifest_write_failed", routeAcceptanceText, StringComparison.Ordinal);
 
         var helpeeStartIndex = scenarioBody.IndexOf("Start-HelpeeFlow -Context $Context", StringComparison.Ordinal);
         var bookmarkIndex = scenarioBody.IndexOf("$runBookmark = Get-AppLogBookmark", StringComparison.Ordinal);
