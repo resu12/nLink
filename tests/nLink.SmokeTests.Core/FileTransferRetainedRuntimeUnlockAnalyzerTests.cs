@@ -399,7 +399,8 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             "route_publication_generation=1; runtime_generation=1; terminal_generation=0; " +
             "leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; " +
             "bridge_decision_generation=1; data_session_identity=data-session-1; " +
-            "data_session_generation=1; recovery_liveness_lease_authority_id=lease-1; " +
+            "data_session_generation=1; checkpoint_request_id=(none); " +
+            "recovery_liveness_lease_authority_id=lease-1; " +
             "recovery_liveness_lease_generation=1";
         string OperationLine(string eventName, string suffix) =>
             $"event={eventName}; receive_recovery_operation_generation=1; " +
@@ -446,6 +447,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
                 "filetransfer_receive_recovery_operation_execution_receipt_applied",
                 "execution_state=Completed; execution_start_status=Started; " +
                 "execution_outcome=Completed; execution_mode=hard; " +
+                "execution_receipt_observed_utc_ms=1500; " +
                 "closure_generation=1; closure_state=Retained; " +
                 "proof_identity=(none); proof_observed_utc_ms=0"),
             OperationLine(
@@ -597,6 +599,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             OperationLine(
                 "filetransfer_receive_recovery_operation_closure_adopted",
                 "execution_state=Completed; execution_outcome=Completed; " +
+                "execution_receipt_observed_utc_ms=1500; " +
                 "closure_generation=1; closure_state=Adopted; " +
                 "proof_identity=file_transfer_data_frame:control:1; proof_observed_utc_ms=2000"),
             EvaluationLine(2),
@@ -651,7 +654,8 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
                 "route_publication_generation=1; runtime_generation=1; terminal_generation=0; " +
                 "leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; " +
                 "bridge_decision_generation=2; data_session_identity=data-session-1; " +
-                "data_session_generation=1; recovery_liveness_lease_authority_id=lease-2; " +
+                "data_session_generation=1; checkpoint_request_id=(none); " +
+                "recovery_liveness_lease_authority_id=lease-2; " +
                 "recovery_liveness_lease_generation=2";
             string SuccessorLine(string eventName, string suffix) =>
                 $"event={eventName}; receive_recovery_operation_generation=2; " +
@@ -664,10 +668,22 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             messages.Add(
                 "event=filetransfer_receive_recovery_operation_superseded; " +
                 $"session_id={sessionId}; transfer_id={transferId}; direction=outbound; " +
+                "route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; " +
+                "route_publication_generation=1; runtime_generation=1; terminal_generation=0; " +
+                "leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; " +
+                "checkpoint_request_id=(none); data_session_identity=data-session-1; " +
+                "data_session_generation=1; predecessor_bridge_decision_generation=1; " +
+                "predecessor_recovery_liveness_lease_generation=1; " +
                 $"predecessor_receive_recovery_operation_authority_id={operationAuthority}; " +
-                "predecessor_receive_recovery_operation_generation=1; predecessor_closure_generation=1; " +
-                $"receive_recovery_operation_authority_id={successorAuthority}; " +
-                $"receive_recovery_operation_generation=2; log_writer_id={writerId}");
+                "predecessor_receive_recovery_operation_generation=1; " +
+                "predecessor_closure_generation=1; " +
+                "predecessor_execution_receipt_observed_utc_ms=1500; " +
+                "predecessor_receive_proof_identity=file_transfer_data_frame:control:1; " +
+                "predecessor_receive_proof_observed_utc_ms=2000; " +
+                $"successor_receive_recovery_operation_authority_id={successorAuthority}; " +
+                "successor_receive_recovery_operation_generation=2; " +
+                "decision_reason=completed_proven_unreserved_receive_recovery_" +
+                $"superseded_by_newer_health_observation; log_writer_id={writerId}");
             messages.Add(SuccessorLine(
                 "filetransfer_receive_recovery_operation_issued",
                 "execution_state=Issued; closure_state=None"));
@@ -677,8 +693,22 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             messages.Add(SuccessorLine(
                 "filetransfer_receive_recovery_operation_execution_receipt_applied",
                 "execution_state=Completed; execution_start_status=Started; " +
-                "execution_outcome=Completed; execution_mode=hard; closure_generation=2; " +
+                "execution_outcome=Completed; execution_mode=hard; " +
+                "execution_receipt_observed_utc_ms=3500; closure_generation=2; " +
                 "closure_state=Retained; proof_identity=(none); proof_observed_utc_ms=0"));
+            messages.Add(SuccessorLine(
+                "filetransfer_receive_recovery_operation_proof_observed",
+                "execution_state=Completed; execution_outcome=Completed; " +
+                "closure_generation=2; closure_state=Adopted; " +
+                "proof_identity=file_transfer_data_frame:control:2; " +
+                "proof_observed_utc_ms=3600"));
+            messages.Add(SuccessorLine(
+                "filetransfer_receive_recovery_operation_closure_adopted",
+                "execution_state=Completed; execution_outcome=Completed; " +
+                "execution_receipt_observed_utc_ms=3500; " +
+                "closure_generation=2; closure_state=Adopted; " +
+                "proof_identity=file_transfer_data_frame:control:2; " +
+                "proof_observed_utc_ms=3600"));
         }
 
         var result = await RunAnalyzeFixtureAsync(
@@ -708,6 +738,15 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             Assert.Equal(
                 "completed_proven_unreserved_receive_recovery_operation_blocked_fresh_recovery",
                 verdict["first_proof_chain_failure_reason"]);
+        }
+        if (recovered)
+        {
+            Assert.Equal(
+                "0",
+                verdict["filetransfer_receive_recovery_operation_unresolved_count"]);
+            Assert.Equal(
+                verdict["filetransfer_receive_recovery_operation_distinct_count"],
+                verdict["filetransfer_receive_recovery_operation_recovered_count"]);
         }
         Assert.Equal(
             ambiguousLegacyWindow ? "0" : "2",

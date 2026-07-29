@@ -1669,6 +1669,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_committed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_invalidated') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_disposition_applied') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_transport_grace_exhausted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_transport_pause_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_retained_frame_applied') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_retained_frame_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_physical_send_lease_registered') +
@@ -1691,6 +1693,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     )
     $fileTransferRouteTransitionProof =
         Get-FileTransferRouteTransitionCorrelation -Events $fileTunaV4DataPathEvents
+    $fileTransferRouteTransitionDrainingTransportGraceProof =
+        Get-FileTransferRouteTransitionDrainingTransportGraceCorrelation `
+            -Events $fileTunaV4DataPathEvents
     $runtimeUnlockRegularV4RouteCommitSendDrainProof =
         Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation -Events $fileTunaV4DataPathEvents
     $fileTunaV4DataPathMismatchProof =
@@ -1850,6 +1855,16 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Class = 'filetransfer_route_transition_incomplete'
             Event = $candidateRecord.Event
             Reason = $candidateRecord.Reason
+        }) | Out-Null
+    }
+    foreach ($candidateRecord in @(
+            $fileTransferRouteTransitionDrainingTransportGraceProof.UnresolvedCandidateRecords)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class =
+                'filetransfer_route_transition_draining_transport_grace_terminalization'
+            Event = $candidateRecord.Event
+            Reason =
+                'coordinator_route_transition_draining_treated_as_transport_disconnect'
         }) | Out-Null
     }
     if ($fileTunaV4DataPathMismatchProof.EffectiveCount -gt 0) {
@@ -2181,6 +2196,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $fallbackTailTransportEpochReauthorizationProof.UnresolvedCount -gt 0 -or
         $regularV4FrontierTailRepairStatePublicationProof.UnresolvedCount -gt 0 -or
         $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.UnresolvedCount -gt 0 -or
+        $fileTransferRouteTransitionDrainingTransportGraceProof.UnresolvedCount -gt 0 -or
         $fileTransferRouteTransitionProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RouteCommitSendDrainProof.UnresolvedCount -gt 0) {
         $verdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
@@ -2242,6 +2258,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing',
                 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound',
                 'fallback_tail_yield_authority_invalid',
+                'filetransfer_route_transition_draining_transport_grace_terminalization',
                 'filetransfer_route_transition_incomplete',
                 'runtime_unlock_regular_v4_route_commit_send_drain_missing')) {
             $verdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
@@ -2301,6 +2318,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'filetransfer_receive_recovery_operation_incomplete',
             'filetransfer_receive_recovery_completed_unproven_successor_missing',
             'filetransfer_receive_recovery_completed_proven_successor_missing',
+            'filetransfer_route_transition_draining_transport_grace_terminalization',
             'filetransfer_route_transition_incomplete',
             'runtime_unlock_regular_v4_route_commit_send_drain_missing',
             'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved',
@@ -2381,6 +2399,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_route_transition_incomplete_recovered_count={0}" -f $fileTransferRouteTransitionProof.RecoveredCount),
         ("filetransfer_route_transition_incomplete_unresolved_count={0}" -f $fileTransferRouteTransitionProof.UnresolvedCount),
         ("filetransfer_route_transition_verdict={0}" -f $fileTransferRouteTransitionProof.Verdict),
+        ("filetransfer_route_transition_draining_transport_grace_terminalization_raw_count={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.RawCount),
+        ("filetransfer_route_transition_draining_transport_grace_terminalization_distinct_count={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.DistinctCount),
+        ("filetransfer_route_transition_draining_transport_grace_terminalization_recovered_count={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.RecoveredCount),
+        ("filetransfer_route_transition_draining_transport_grace_terminalization_unresolved_count={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.UnresolvedCount),
+        ("filetransfer_route_transition_draining_transport_grace_terminalization_verdict={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.Verdict),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RawCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.DistinctCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RecoveredCount),
@@ -2693,6 +2716,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_route_transition_incomplete_recovered_count={0}" -f $fileTransferRouteTransitionProof.RecoveredCount),
         ("filetransfer_route_transition_incomplete_unresolved_count={0}" -f $fileTransferRouteTransitionProof.UnresolvedCount),
         ("filetransfer_route_transition_verdict={0}" -f $fileTransferRouteTransitionProof.Verdict),
+        ("filetransfer_route_transition_draining_transport_grace_terminalization_raw_count={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.RawCount),
+        ("filetransfer_route_transition_draining_transport_grace_terminalization_distinct_count={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.DistinctCount),
+        ("filetransfer_route_transition_draining_transport_grace_terminalization_recovered_count={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.RecoveredCount),
+        ("filetransfer_route_transition_draining_transport_grace_terminalization_unresolved_count={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.UnresolvedCount),
+        ("filetransfer_route_transition_draining_transport_grace_terminalization_verdict={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.Verdict),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RawCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.DistinctCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RecoveredCount),
@@ -2978,6 +3006,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_route_transition_incomplete_recovered_count={0}" -f $fileTransferRouteTransitionProof.RecoveredCount),
         ("filetransfer_route_transition_incomplete_unresolved_count={0}" -f $fileTransferRouteTransitionProof.UnresolvedCount),
         ("filetransfer_route_transition_verdict={0}" -f $fileTransferRouteTransitionProof.Verdict),
+        ("filetransfer_route_transition_draining_transport_grace_terminalization_raw_count={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.RawCount),
+        ("filetransfer_route_transition_draining_transport_grace_terminalization_distinct_count={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.DistinctCount),
+        ("filetransfer_route_transition_draining_transport_grace_terminalization_recovered_count={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.RecoveredCount),
+        ("filetransfer_route_transition_draining_transport_grace_terminalization_unresolved_count={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.UnresolvedCount),
+        ("filetransfer_route_transition_draining_transport_grace_terminalization_verdict={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.Verdict),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RawCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.DistinctCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RecoveredCount),
@@ -3242,6 +3275,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_route_transition_incomplete_recovered_count={0}" -f $fileTransferRouteTransitionProof.RecoveredCount),
         ("filetransfer_route_transition_incomplete_unresolved_count={0}" -f $fileTransferRouteTransitionProof.UnresolvedCount),
         ("filetransfer_route_transition_verdict={0}" -f $fileTransferRouteTransitionProof.Verdict),
+        ("filetransfer_route_transition_draining_transport_grace_terminalization_raw_count={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.RawCount),
+        ("filetransfer_route_transition_draining_transport_grace_terminalization_distinct_count={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.DistinctCount),
+        ("filetransfer_route_transition_draining_transport_grace_terminalization_recovered_count={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.RecoveredCount),
+        ("filetransfer_route_transition_draining_transport_grace_terminalization_unresolved_count={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.UnresolvedCount),
+        ("filetransfer_route_transition_draining_transport_grace_terminalization_verdict={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.Verdict),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RawCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.DistinctCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.RecoveredCount),
@@ -3517,6 +3555,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         filetransfer_route_transition_incomplete_recovered_count = $fileTransferRouteTransitionProof.RecoveredCount
         filetransfer_route_transition_incomplete_unresolved_count = $fileTransferRouteTransitionProof.UnresolvedCount
         filetransfer_route_transition_verdict = $fileTransferRouteTransitionProof.Verdict
+        filetransfer_route_transition_draining_transport_grace_terminalization_raw_count = $fileTransferRouteTransitionDrainingTransportGraceProof.RawCount
+        filetransfer_route_transition_draining_transport_grace_terminalization_distinct_count = $fileTransferRouteTransitionDrainingTransportGraceProof.DistinctCount
+        filetransfer_route_transition_draining_transport_grace_terminalization_recovered_count = $fileTransferRouteTransitionDrainingTransportGraceProof.RecoveredCount
+        filetransfer_route_transition_draining_transport_grace_terminalization_unresolved_count = $fileTransferRouteTransitionDrainingTransportGraceProof.UnresolvedCount
+        filetransfer_route_transition_draining_transport_grace_terminalization_verdict = $fileTransferRouteTransitionDrainingTransportGraceProof.Verdict
         runtime_unlock_regular_v4_route_commit_send_drain_missing_raw_count = $runtimeUnlockRegularV4RouteCommitSendDrainProof.RawCount
         runtime_unlock_regular_v4_route_commit_send_drain_missing_distinct_count = $runtimeUnlockRegularV4RouteCommitSendDrainProof.DistinctCount
         runtime_unlock_regular_v4_route_commit_send_drain_missing_recovered_count = $runtimeUnlockRegularV4RouteCommitSendDrainProof.RecoveredCount

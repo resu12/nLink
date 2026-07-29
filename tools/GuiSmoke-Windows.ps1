@@ -7261,6 +7261,297 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         return $false
     }
 
+    function Test-TunaGuiRouteTransitionDrainingTransportGraceFailure {
+        param([string[]]$Lines)
+
+        $indexedLines = @(
+            for ($index = 0; $index -lt $Lines.Count; $index++) {
+                [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
+            }
+        )
+        $graceEvents = @($indexedLines | Where-Object {
+            (Test-TunaGuiLogLineHasEvent `
+                -Line $_.Line `
+                -Events @('filetransfer_transport_grace_exhausted')) -and
+            (Get-TunaGuiLogLineFieldValue `
+                -Line $_.Line `
+                -Name 'reason') -eq
+                'filetransfer_route_transition_draining'
+        })
+        foreach ($grace in $graceEvents) {
+            $writer = Get-TunaGuiLogLineFieldValue `
+                -Line $grace.Line `
+                -Name 'log_writer_id'
+            $session = Get-TunaGuiLogLineFieldValue `
+                -Line $grace.Line `
+                -Name 'session_id'
+            $transfer = Get-TunaGuiLogLineFieldValue `
+                -Line $grace.Line `
+                -Name 'transfer_id'
+            $direction = Get-TunaGuiLogLineFieldValue `
+                -Line $grace.Line `
+                -Name 'direction'
+            if ([string]::IsNullOrWhiteSpace($writer) -or
+                [string]::IsNullOrWhiteSpace($session) -or
+                [string]::IsNullOrWhiteSpace($transfer) -or
+                [string]::IsNullOrWhiteSpace($direction)) {
+                continue
+            }
+
+            $preparedEvents = @($indexedLines | Where-Object {
+                $_.Index -lt $grace.Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @('filetransfer_route_transition_prepared')) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'decision_status') -in @(
+                        'Prepared',
+                        'Idempotent') -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'transfer_id') -eq $transfer -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'direction') -eq $direction
+            })
+            $preparedEvents = @($preparedEvents | Where-Object {
+                $candidate = $_
+                $candidateAuthority = Get-TunaGuiLogLineFieldValue `
+                    -Line $candidate.Line `
+                    -Name 'authority_id'
+                $candidateGeneration = Get-TunaGuiLogLineFieldValue `
+                    -Line $candidate.Line `
+                    -Name 'transition_generation'
+                if ([string]::IsNullOrWhiteSpace($candidateAuthority) -or
+                    [string]::IsNullOrWhiteSpace($candidateGeneration)) {
+                    return $false
+                }
+                $candidateOperationEvents = @($indexedLines | Where-Object {
+                    $_.Index -gt $candidate.Index -and
+                    $_.Index -lt $grace.Index -and
+                    (Get-TunaGuiLogLineFieldValue `
+                        -Line $_.Line `
+                        -Name 'authority_id') -eq $candidateAuthority -and
+                    (Get-TunaGuiLogLineFieldValue `
+                        -Line $_.Line `
+                        -Name 'transition_generation') -eq
+                        $candidateGeneration
+                })
+                $candidatePause = @($candidateOperationEvents | Where-Object {
+                    Test-TunaGuiLogLineHasEvent `
+                        -Line $_.Line `
+                        -Events @('filetransfer_route_transition_pause_bound')
+                })
+                $candidateDraining = @($candidateOperationEvents | Where-Object {
+                    Test-TunaGuiLogLineHasEvent `
+                        -Line $_.Line `
+                        -Events @('filetransfer_route_transition_draining')
+                })
+                $candidateTerminal = @($candidateOperationEvents | Where-Object {
+                    Test-TunaGuiLogLineHasEvent `
+                        -Line $_.Line `
+                        -Events @(
+                            'filetransfer_route_transition_committed',
+                            'filetransfer_route_transition_invalidated')
+                })
+                return $candidatePause.Count -gt 0 -and
+                    $candidateDraining.Count -gt 0 -and
+                    $candidateTerminal.Count -eq 0
+            })
+            if ($preparedEvents.Count -ne 1) {
+                continue
+            }
+
+            $prepared = $preparedEvents[0]
+            $authority = Get-TunaGuiLogLineFieldValue `
+                -Line $prepared.Line `
+                -Name 'authority_id'
+            $generation = Get-TunaGuiLogLineFieldValue `
+                -Line $prepared.Line `
+                -Name 'transition_generation'
+            if ([string]::IsNullOrWhiteSpace($authority) -or
+                [string]::IsNullOrWhiteSpace($generation)) {
+                continue
+            }
+
+            $sameOperation = {
+                param($Candidate)
+                if ((Get-TunaGuiLogLineFieldValue `
+                        -Line $Candidate.Line `
+                        -Name 'authority_id') -eq $authority -and
+                    (Get-TunaGuiLogLineFieldValue `
+                        -Line $Candidate.Line `
+                        -Name 'transition_generation') -eq $generation -and
+                    (Get-TunaGuiLogLineFieldValue `
+                        -Line $Candidate.Line `
+                        -Name 'session_id') -eq $session -and
+                    (Get-TunaGuiLogLineFieldValue `
+                        -Line $Candidate.Line `
+                        -Name 'transfer_id') -eq $transfer -and
+                    (Get-TunaGuiLogLineFieldValue `
+                        -Line $Candidate.Line `
+                        -Name 'direction') -eq $direction
+                ) {
+                    foreach ($field in @(
+                            'transition_kind',
+                            'source_route',
+                            'source_protocol_version',
+                            'source_transport',
+                            'source_live_route_epoch',
+                            'source_runtime_generation',
+                            'source_route_publication_generation',
+                            'source_route_commit_generation',
+                            'source_terminal_generation',
+                            'source_leg_generation',
+                            'source_transport_epoch',
+                            'source_bridge_recovery_generation',
+                            'target_route',
+                            'target_protocol_version',
+                            'target_transport')) {
+                        if (-not (Test-TunaGuiLogLineFieldMatch `
+                                -SourceLine $prepared.Line `
+                                -CandidateLine $Candidate.Line `
+                                -FieldName $field)) {
+                            return $false
+                        }
+                    }
+                    $preparedDataSession =
+                        Get-TunaGuiLogLineFieldValue `
+                            -Line $prepared.Line `
+                            -Name 'source_data_session_generation'
+                    $candidateDataSession =
+                        Get-TunaGuiLogLineFieldValue `
+                            -Line $Candidate.Line `
+                            -Name 'source_data_session_generation'
+                    if ([string]::IsNullOrWhiteSpace($candidateDataSession)) {
+                        $candidateDataSession =
+                            Get-TunaGuiLogLineFieldValue `
+                                -Line $Candidate.Line `
+                                -Name 'data_session_generation'
+                    }
+                    return -not [string]::IsNullOrWhiteSpace(
+                            $preparedDataSession) -and
+                        -not [string]::IsNullOrWhiteSpace(
+                            $candidateDataSession) -and
+                        $preparedDataSession -eq $candidateDataSession
+                }
+                return $false
+            }
+            $pause = @($indexedLines | Where-Object {
+                $_.Index -gt $prepared.Index -and
+                $_.Index -lt $grace.Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @('filetransfer_route_transition_pause_bound')) -and
+                (& $sameOperation $_) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'decision_status') -in @(
+                        'Installed',
+                        'Applied',
+                        'Idempotent')
+            })
+            $draining = @($indexedLines | Where-Object {
+                $_.Index -gt $prepared.Index -and
+                $_.Index -lt $grace.Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @('filetransfer_route_transition_draining')) -and
+                (& $sameOperation $_) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'decision_status') -eq 'Draining'
+            })
+            if ($pause.Count -eq 0 -or $draining.Count -eq 0) {
+                continue
+            }
+
+            $invalidations = @($indexedLines | Where-Object {
+                $_.Index -gt $grace.Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @('filetransfer_route_transition_invalidated')) -and
+                (& $sameOperation $_) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'decision_status') -eq 'Invalidated' -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'decision_reason') -in @(
+                        'outbound_transfer_terminal',
+                        'inbound_transfer_terminal',
+                        'terminal_state')
+            })
+            if ($invalidations.Count -ne 1) {
+                continue
+            }
+
+            $dispositions = @($indexedLines | Where-Object {
+                $_.Index -gt $invalidations[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @(
+                        'filetransfer_route_transition_disposition_applied')) -and
+                (& $sameOperation $_) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'disposition').Replace(
+                        '_',
+                        '').ToLowerInvariant() -eq 'terminalinvalidated'
+            })
+            if ($dispositions.Count -eq 0) {
+                continue
+            }
+
+            $terminal = @($indexedLines | Where-Object {
+                if ($_.Index -le $grace.Index -or
+                    (Get-TunaGuiLogLineFieldValue `
+                        -Line $_.Line `
+                        -Name 'log_writer_id') -ne $writer -or
+                    (Get-TunaGuiLogLineFieldValue `
+                        -Line $_.Line `
+                        -Name 'session_id') -ne $session -or
+                    (Get-TunaGuiLogLineFieldValue `
+                        -Line $_.Line `
+                        -Name 'transfer_id') -ne $transfer) {
+                    return $false
+                }
+                $expectedTerminalEvent = if ($direction -eq 'outbound') {
+                    'file_transfer_outbound_terminal'
+                }
+                else {
+                    'file_transfer_inbound_terminal'
+                }
+                return (Test-TunaGuiLogLineHasEvent `
+                        -Line $_.Line `
+                        -Events @($expectedTerminalEvent)) -and
+                    (
+                        (Get-TunaGuiLogLineFieldValue `
+                            -Line $_.Line `
+                            -Name 'state') -eq 'Failed' -or
+                        (Get-TunaGuiLogLineFieldValue `
+                            -Line $_.Line `
+                            -Name 'error_code') -notin @(
+                                '',
+                                '(none)',
+                                'none')
+                    )
+            })
+            if ($terminal.Count -gt 0) {
+                return $true
+            }
+        }
+
+        return $false
+    }
+
     $bridgeBootstrapNotReady = Test-TunaGuiBridgeBootstrapNotReadyEvidence -Lines $evidenceLines
     $rawListenerUnavailable = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('listener_unavailable')
     $rawListenerSidecarUnavailable = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('listener_sidecar_unavailable')
@@ -7398,6 +7689,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $receiveRecoveryCompletedProvenSuccessorMissing =
         Test-TunaGuiReceiveRecoveryCompletedProvenSuccessorMissing `
             -Lines $regularV4EvidenceLineText
+    $routeTransitionDrainingTransportGraceTerminalization =
+        Test-TunaGuiRouteTransitionDrainingTransportGraceFailure `
+            -Lines $regularV4EvidenceLineText
     $regularV4RecoveryPredecessorSettlementClosedSuccessor =
         Test-TunaGuiRegularV4PredecessorSettlementClosedSuccessor -Lines $regularV4EvidenceLineText
     $regularV4FrontierRepairSettlementClosed =
@@ -7467,6 +7761,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $bridgeRecoveryExecutionSubmissionBarrierDrainMissing -or
         $receiveRecoveryCompletedUnprovenSuccessorMissing -or
         $receiveRecoveryCompletedProvenSuccessorMissing -or
+        $routeTransitionDrainingTransportGraceTerminalization -or
         $regularV4FrontierRepairSettledStalledUnclosed -or
         $regularV4FrontierRepairSendDeferred -or
         $regularV4FrontierRepairStalled -or
@@ -7512,6 +7807,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
 
         $phase = 'preflight_bridge_bootstrap'
         $reason = $bridgeBootstrapSubreason
+    }
+    elseif ($routeTransitionDrainingTransportGraceTerminalization) {
+        $phase = 'route_transition'
+        $reason =
+            'coordinator_route_transition_draining_treated_as_transport_disconnect'
     }
     elseif ($initialActivationReceiveRecoveryHoldNotPreserved) {
         $phase = 'runtime_unlock_initial_activation'
@@ -7788,6 +8088,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         RuntimeUnlockRetrySourcePublicationMismatch = [bool]$runtimeUnlockRetrySourcePublicationMismatch
         InitialActivationReceiveRecoveryHoldNotPreserved =
             [bool]$initialActivationReceiveRecoveryHoldNotPreserved
+        RouteTransitionDrainingTransportGraceTerminalization =
+            [bool]$routeTransitionDrainingTransportGraceTerminalization
         BridgeBootstrapNotReady = [bool]$bridgeBootstrapNotReady
         ActivationOfferSent = [bool]$activationOfferSent
         ActivationOfferReceived = [bool]$activationOfferReceived

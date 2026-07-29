@@ -1806,6 +1806,97 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task RouteTransitionTransportGraceRequiresExactCoordinatorInvalidation()
+    {
+        var guiText = File.ReadAllText(
+            Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = Regex.Replace(
+            guiText,
+            @"(?m)^ {4}",
+            string.Empty);
+        var fieldValueBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Test-TunaGuiLogLineHasEvent");
+        var hasEventBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineHasEvent",
+            "Test-TunaGuiLogLineFieldMatch");
+        var fieldMatchBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineFieldMatch",
+            "Test-TunaGuiRuntimeUnlockFileTransferOwnerRejectionUnresolved");
+        var graceMatch = Regex.Match(
+            nestedFunctionText,
+            @"(?s)function\s+Test-TunaGuiRouteTransitionDrainingTransportGraceFailure\s*\{" +
+            @"(?<body>.*?)\r?\n\}\s*\r?\n\s*\$bridgeBootstrapNotReady");
+        Assert.True(
+            graceMatch.Success,
+            "Could not extract route-transition transport-grace classifier.");
+        var graceBody = graceMatch.Groups["body"].Value;
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
+            function Test-TunaGuiLogLineHasEvent { {{hasEventBody}} }
+            function Test-TunaGuiLogLineFieldMatch { {{fieldMatchBody}} }
+            function Test-TunaGuiRouteTransitionDrainingTransportGraceFailure {
+                {{graceBody}}
+            }
+
+            $writer = 'writer-route-transition-grace'
+            $scope = 'session_id=session-a; transfer_id=transfer-a; direction=outbound'
+            $transitionScope = 'transition_kind=RegularV4ToTunaV4; source_route=regular_nkn_v4_fast; source_protocol_version=4; source_transport=regular_nkn; source_live_route_epoch=0; source_runtime_generation=1; source_route_publication_generation=1; source_route_commit_generation=0; source_terminal_generation=0; source_leg_generation=1; source_transport_epoch=0; source_bridge_recovery_generation=0; source_data_session_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna'
+            $old = 'authority_id=transition-old; transition_generation=1'
+            $current = 'authority_id=transition-current; transition_generation=2'
+            $lines = @(
+                "event=filetransfer_route_transition_prepared; $scope; $old; $transitionScope; decision_status=Prepared; log_writer_id=$writer",
+                "event=filetransfer_route_transition_pause_bound; $scope; $old; $transitionScope; decision_status=Installed; log_writer_id=$writer",
+                "event=filetransfer_route_transition_draining; $scope; $old; $transitionScope; decision_status=Draining; log_writer_id=$writer",
+                "event=filetransfer_route_transition_committed; $scope; $old; $transitionScope; decision_status=Committed; log_writer_id=$writer",
+                "event=filetransfer_route_transition_prepared; $scope; $current; $transitionScope; decision_status=Prepared; log_writer_id=$writer",
+                "event=filetransfer_route_transition_pause_bound; $scope; $current; $transitionScope; decision_status=Installed; log_writer_id=$writer",
+                "event=filetransfer_route_transition_draining; $scope; $current; $transitionScope; decision_status=Draining; log_writer_id=$writer",
+                "event=filetransfer_transport_grace_exhausted; $scope; reason=filetransfer_route_transition_draining; log_writer_id=$writer",
+                "event=filetransfer_route_transition_invalidated; $scope; $current; $transitionScope; decision_status=Invalidated; decision_reason=outbound_transfer_terminal; log_writer_id=$writer",
+                "event=filetransfer_route_transition_disposition_applied; $scope; $current; $transitionScope; disposition=terminalinvalidated; apply_status=applied; log_writer_id=$writer",
+                "event=file_transfer_outbound_terminal; session_id=session-a; transfer_id=transfer-a; state=Failed; error_code=peer_disconnected; log_writer_id=$writer"
+            )
+            if (-not (Test-TunaGuiRouteTransitionDrainingTransportGraceFailure -Lines $lines)) {
+                throw 'exact transition-grace terminalization was not classified'
+            }
+
+            $mutated = @($lines)
+            $mutated[9] = $mutated[9].Replace(
+                'source_runtime_generation=1',
+                'source_runtime_generation=2')
+            if (Test-TunaGuiRouteTransitionDrainingTransportGraceFailure -Lines $mutated) {
+                throw 'mutated disposition scope was classified'
+            }
+
+            $safe = @($lines[0..7])
+            $safe += "event=filetransfer_route_transition_committed; $scope; $current; $transitionScope; decision_status=Committed; log_writer_id=$writer"
+            if (Test-TunaGuiRouteTransitionDrainingTransportGraceFailure -Lines $safe) {
+                throw 'safe post-ACK commit was classified'
+            }
+
+            Write-Output 'gui-route-transition-grace-correlation-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(
+            scriptText,
+            Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Route-transition grace GUI classification failed.{Environment.NewLine}" +
+            $"{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "gui-route-transition-grace-correlation-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task BridgeRecoveryPayloadHoldRequiresExactRepairEscalation()
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));

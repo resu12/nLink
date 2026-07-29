@@ -2491,6 +2491,185 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedAuthorityProofSuite", "FileTransferRouteTransition")]
+    public async Task AnalyzeRetained_RouteTransitionDrainingTransportGrace_HasFullCompactParity(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_route_transition_transport_grace";
+        const string writerId = "writer_route_transition_grace";
+        const int generation = 31;
+        const string authorityId = "transition-grace-31";
+        var prepared = FileTransferRouteTransitionMessage(
+            "filetransfer_route_transition_prepared",
+            transferId,
+            generation,
+            authorityId,
+            sourceRoute: "regular_nkn_v4_fast",
+            targetRoute: "file_tuna_v4",
+            targetProtocol: 4,
+            targetTransport: "Tuna",
+            writerSequence: 100);
+        var pause = FileTransferRouteTransitionMessage(
+            "filetransfer_route_transition_pause_bound",
+            transferId,
+            generation,
+            authorityId,
+            status: "Installed",
+            sourceRoute: "regular_nkn_v4_fast",
+            targetRoute: "file_tuna_v4",
+            targetProtocol: 4,
+            targetTransport: "Tuna",
+            writerSequence: 101);
+        var draining = FileTransferRouteTransitionMessage(
+            "filetransfer_route_transition_draining",
+            transferId,
+            generation,
+            authorityId,
+            status: "Draining",
+            sourceRoute: "regular_nkn_v4_fast",
+            targetRoute: "file_tuna_v4",
+            targetProtocol: 4,
+            targetTransport: "Tuna",
+            writerSequence: 102);
+        var rejectedDrain = FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_drain_receipt_decided",
+                transferId,
+                generation,
+                authorityId,
+                status: "Rejected",
+                sourceRoute: "regular_nkn_v4_fast",
+                targetRoute: "file_tuna_v4",
+                targetProtocol: 4,
+                targetTransport: "Tuna",
+                writerSequence: 103)
+            .Replace(
+                "decision_reason=fixture",
+                "decision_reason=activation_proof_mismatch",
+                StringComparison.Ordinal);
+        var invalidated = FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_invalidated",
+                transferId,
+                generation,
+                authorityId,
+                status: "Invalidated",
+                sourceRoute: "regular_nkn_v4_fast",
+                targetRoute: "file_tuna_v4",
+                targetProtocol: 4,
+                targetTransport: "Tuna",
+                writerSequence: 105)
+            .Replace(
+                "decision_reason=fixture",
+                "decision_reason=outbound_transfer_terminal",
+                StringComparison.Ordinal);
+        var disposition = FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_disposition_applied",
+                transferId,
+                generation,
+                authorityId,
+                status: "Applied",
+                sourceRoute: "regular_nkn_v4_fast",
+                targetRoute: "file_tuna_v4",
+                targetProtocol: 4,
+                targetTransport: "Tuna",
+                writerSequence: 106)
+            .Replace(
+                "decision_reason=fixture",
+                "disposition=terminalinvalidated; apply_status=applied; " +
+                "decision_reason=filetransfer_route_transition_terminal_invalidated",
+                StringComparison.Ordinal);
+        var lines = BuildAuthorityProofFixture(
+            transferId,
+            $"event=filetransfer_regular_v4_frontier_repair_send_deferred; " +
+            $"session_id=sess_a; transfer_id={transferId}; direction=outbound; stage=send; " +
+            "repair_request_key=regular_v4_peer_silence_safety_replay:3:3:64:2; " +
+            "route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=4; " +
+            "runtime_generation=6; terminal_generation=0; leg_generation=5; " +
+            "transport_epoch=2; bridge_recovery_generation=1; " +
+            "route_publication_generation=8; route_commit_generation=0; " +
+            "target_transport=regular_nkn; decision_generation=9; " +
+            "scheduled_chunk_count=64; remote_next_expected_chunk_index=3; " +
+            "chunks_accepted_for_transport=387; deferral_reason=repair_dispatch_not_observed; " +
+            "repair_delivery_mode=control_bulk_escalated; " +
+            "repair_delivery_escalation_reason=regular_v4_peer_silence_safety_replay; " +
+            $"log_writer_id={writerId}; log_writer_sequence=99",
+            prepared,
+            pause,
+            draining,
+            rejectedDrain,
+            $"event=filetransfer_transport_grace_exhausted; session_id=sess_a; " +
+            $"transfer_id={transferId}; direction=outbound; " +
+            "reason=filetransfer_route_transition_draining; " +
+            $"log_writer_id={writerId}; log_writer_sequence=104",
+            invalidated,
+            disposition,
+            $"event=file_transfer_outbound_terminal; session_id=sess_a; " +
+            $"transfer_id={transferId}; state=Canceled; error_code=peer_disconnected; integrity_ok=0; " +
+            $"log_writer_id={writerId}; log_writer_sequence=107");
+        for (var index = 0; index < lines.Count; index++)
+        {
+            lines[index] = lines[index].Replace(
+                "log_writer_id=writer_route_transition;",
+                $"log_writer_id={writerId};",
+                StringComparison.Ordinal);
+        }
+
+        var result = compact
+            ? await RunAnalyzeFixtureAsync(
+                lines,
+                environment: new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                })
+            : await RunAnalyzeFixtureAsync(lines);
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+
+        var verdict = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
+        Assert.Equal("fail", verdict["runtime_correctness_verdict"]);
+        Assert.Equal(
+            "0",
+            verdict["filetransfer_route_transition_incomplete_unresolved_count"]);
+        Assert.Equal(
+            "1",
+            verdict[
+                "filetransfer_route_transition_draining_transport_grace_terminalization_raw_count"]);
+        Assert.Equal(
+            "1",
+            verdict[
+                "filetransfer_route_transition_draining_transport_grace_terminalization_distinct_count"]);
+        Assert.Equal(
+            "0",
+            verdict[
+                "filetransfer_route_transition_draining_transport_grace_terminalization_recovered_count"]);
+        Assert.Equal(
+            "1",
+            verdict[
+                "filetransfer_route_transition_draining_transport_grace_terminalization_unresolved_count"]);
+        Assert.Equal(
+            "filetransfer_route_transition_draining_transport_grace_terminalization",
+            verdict["first_proof_chain_failure_class"]);
+        Assert.Equal(
+            "filetransfer_transport_grace_exhausted",
+            verdict["first_proof_chain_failure_event"]);
+        Assert.Equal(
+            "coordinator_route_transition_draining_treated_as_transport_disconnect",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("104", verdict["first_proof_chain_failure_writer_sequence"]);
+    }
+
+    [Theory]
     [InlineData(false, "missing_frame")]
     [InlineData(true, "missing_frame")]
     [InlineData(false, "local_proof_consumed")]
@@ -3553,7 +3732,8 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
                $"source_route={sourceRoute}; source_protocol_version={sourceProtocol}; " +
                $"source_transport={(sourceRoute == "file_tuna_v4" ? "tuna" : "regular_nkn")}; " +
                "source_live_route_epoch=4; " +
-               "source_runtime_generation=6; source_route_publication_generation=8; source_terminal_generation=0; " +
+               "source_runtime_generation=6; source_route_publication_generation=8; source_route_commit_generation=0; " +
+               "source_terminal_generation=0; " +
                "source_leg_generation=5; source_transport_epoch=2; source_bridge_recovery_generation=1; " +
                "source_data_session_generation=3; peer_proof_generation=4; peer_proof_transport_epoch=3; " +
                "peer_proof_kind=post_tuna_fallback_nkn; retained_frame_type=filetransfer.state.v6; " +
