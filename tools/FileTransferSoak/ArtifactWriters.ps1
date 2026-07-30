@@ -27057,7 +27057,11 @@ function Get-FileTransferReceiveRecoveryCompletedUnprovenSuccessorCorrelation {
             [Parameter(Mandatory = $true)]$Rejection
         )
 
-        foreach ($field in @('session_id', 'transfer_id', 'direction')) {
+        foreach ($field in @(
+                'log_writer_id',
+                'session_id',
+                'transfer_id',
+                'direction')) {
             $operationValue = Get-CompletedUnprovenField -Event $Operation -Names @($field)
             $rejectionValue = Get-CompletedUnprovenField -Event $Rejection -Names @($field)
             if (-not (Test-CompletedUnprovenPresent $operationValue) -or
@@ -28183,6 +28187,85 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
                 [System.StringComparison]::OrdinalIgnoreCase))
     }
 
+    function Test-ProofStatePublicationCommandMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Issued,
+            [Parameter(Mandatory = $true)]$Retained,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        foreach ($field in @('session_id', 'transfer_id', 'direction')) {
+            $left = Get-ProofStateField -Event $Issued -Names @($field)
+            $right = Get-ProofStateField -Event $Candidate -Names @($field)
+            if ([string]::IsNullOrWhiteSpace($left) -or
+                [string]::IsNullOrWhiteSpace($right) -or
+                -not [string]::Equals(
+                    $left,
+                    $right,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        $issuedGeneration = Get-ProofStateField `
+            -Event $Issued `
+            -Names @(
+                'receive_recovery_operation_generation',
+                'recovery_operation_generation')
+        $candidateGeneration = Get-ProofStateField `
+            -Event $Candidate `
+            -Names @(
+                'receive_recovery_operation_generation',
+                'recovery_operation_generation')
+        $issuedBridgeDecisionGeneration = Get-ProofStateField `
+            -Event $Issued `
+            -Names @('bridge_decision_generation')
+        $candidateBridgeDecisionGeneration = Get-ProofStateField `
+            -Event $Candidate `
+            -Names @('bridge_decision_generation')
+        if ([string]::IsNullOrWhiteSpace($issuedGeneration) -or
+            [string]::IsNullOrWhiteSpace($candidateGeneration) -or
+            $issuedGeneration -ne $candidateGeneration) {
+            return $false
+        }
+        if (-not [string]::IsNullOrWhiteSpace(
+                $candidateBridgeDecisionGeneration) -and
+            ([string]::IsNullOrWhiteSpace(
+                    $issuedBridgeDecisionGeneration) -or
+                $issuedBridgeDecisionGeneration -ne
+                    $candidateBridgeDecisionGeneration)) {
+            return $false
+        }
+
+        $issuedAuthority = Get-ProofStateField `
+            -Event $Issued `
+            -Names @(
+                'receive_recovery_operation_authority_id',
+                'recovery_operation_authority_id')
+        $candidateAuthority = Get-ProofStateField `
+            -Event $Candidate `
+            -Names @(
+                'receive_recovery_operation_authority_id',
+                'recovery_operation_authority_id')
+        if ((Test-ProofStateVisible $issuedAuthority) -and
+            (Test-ProofStateVisible $candidateAuthority) -and
+            -not [string]::Equals(
+                $issuedAuthority,
+                $candidateAuthority,
+                [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+
+        $retainedClosureGeneration = Get-ProofStateField `
+            -Event $Retained `
+            -Names @('closure_generation')
+        $candidateClosureGeneration = Get-ProofStateField `
+            -Event $Candidate `
+            -Names @('closure_generation')
+        return [string]::IsNullOrWhiteSpace($candidateClosureGeneration) -or
+            $candidateClosureGeneration -eq $retainedClosureGeneration
+    }
+
     [object[]]$issuedEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_receive_recovery_operation_issued' -and
         (Get-ProofStateField -Event $_ -Names @('direction')) -eq 'inbound' -and
@@ -28238,6 +28321,18 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
             -Event $_ `
             -Names @('repair_publication_kind')) -eq
             'receive_recovery_proof_state'
+    })
+    [object[]]$publicationReceipts = @($events | Where-Object {
+        $_.EventName -eq
+            'filetransfer_receive_recovery_proof_state_publication_receipt_applied' -and
+        (Get-ProofStateField `
+            -Event $_ `
+            -Names @('publication_outcome', 'outcome')) -eq 'Delivered' -and
+        (Get-ProofStateField `
+            -Event $_ `
+            -Names @('decision_status', 'status')) -in @(
+                'Accepted',
+                'Idempotent')
     })
     [object[]]$proofEvents = @($events | Where-Object {
         $_.EventName -in @(
@@ -28344,12 +28439,30 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
     foreach ($record in @($distinct.Values)) {
         $decision = @($decisions | Where-Object {
             [int64]$_.Sequence -gt [int64]$record.Event.Sequence -and
-            (Test-ProofStateOperationMatch `
+            (Test-ProofStatePublicationCommandMatch `
                 -Issued $record.Issued `
+                -Retained $record.Retained `
                 -Candidate $_)
         } | Select-Object -First 1)
         $stateSend = @($stateSends | Where-Object {
-            [int64]$_.Sequence -gt [int64]$record.Event.Sequence -and
+            $decision.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$decision[0].Sequence -and
+            (Test-ProofStatePublicationCommandMatch `
+                -Issued $record.Issued `
+                -Retained $record.Retained `
+                -Candidate $_)
+        } | Select-Object -First 1)
+        $publicationReceipt = @($publicationReceipts | Where-Object {
+            $stateSend.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$stateSend[0].Sequence -and
+            (Test-ProofStatePublicationCommandMatch `
+                -Issued $record.Issued `
+                -Retained $record.Retained `
+                -Candidate $_)
+        } | Select-Object -First 1)
+        $proof = @($proofEvents | Where-Object {
+            $publicationReceipt.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$publicationReceipt[0].Sequence -and
             (Get-ProofStateField -Event $_ -Names @('session_id')) -eq
                 (Get-ProofStateField `
                     -Event $record.Issued `
@@ -28359,49 +28472,46 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
                     -Event $record.Issued `
                     -Names @('transfer_id')) -and
             (Get-ProofStateField -Event $_ -Names @('direction')) -eq
-                'inbound'
-        } | Select-Object -First 1)
-        $proof = @($proofEvents | Where-Object {
-            [int64]$_.Sequence -gt [int64]$record.Event.Sequence -and
-            (Get-ProofStateField -Event $_ -Names @('session_id')) -eq
-                (Get-ProofStateField `
-                    -Event $record.Issued `
-                    -Names @('session_id')) -and
-            (Get-ProofStateField -Event $_ -Names @('transfer_id')) -eq
-                (Get-ProofStateField `
-                    -Event $record.Issued `
-                    -Names @('transfer_id'))
+                'outbound'
         } | Select-Object -First 1)
         $adopted = @($adoptedEvents | Where-Object {
             $proof.Count -eq 1 -and
             [int64]$_.Sequence -gt [int64]$proof[0].Sequence -and
-            (Get-ProofStateField -Event $_ -Names @('session_id')) -eq
-                (Get-ProofStateField `
-                    -Event $record.Issued `
-                    -Names @('session_id')) -and
-            (Get-ProofStateField -Event $_ -Names @('transfer_id')) -eq
-                (Get-ProofStateField `
-                    -Event $record.Issued `
-                    -Names @('transfer_id'))
+            (Test-ProofStateOperationMatch `
+                -Issued $proof[0] `
+                -Candidate $_)
         } | Select-Object -First 1)
         $resumed = @($resumedEvents | Where-Object {
             $adopted.Count -eq 1 -and
             [int64]$_.Sequence -gt [int64]$adopted[0].Sequence -and
-            (Get-ProofStateField -Event $_ -Names @('session_id')) -eq
-                (Get-ProofStateField `
-                    -Event $record.Issued `
-                    -Names @('session_id')) -and
-            (Get-ProofStateField -Event $_ -Names @('transfer_id')) -eq
-                (Get-ProofStateField `
-                    -Event $record.Issued `
-                    -Names @('transfer_id'))
+            (Test-ProofStateOperationMatch `
+                -Issued $proof[0] `
+                -Candidate $_)
         } | Select-Object -First 1)
+        $returnProof = @($proofEvents | Where-Object {
+            $adopted.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$adopted[0].Sequence -and
+            (Test-ProofStateOperationMatch `
+                -Issued $record.Issued `
+                -Candidate $_)
+        } | Select-Object -First 1)
+        $returnAdopted = @($adoptedEvents | Where-Object {
+            $returnProof.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$returnProof[0].Sequence -and
+            (Test-ProofStateOperationMatch `
+                -Issued $returnProof[0] `
+                -Candidate $_)
+        } | Select-Object -First 1)
+        $coordinatorReleaseObserved =
+            $resumed.Count -eq 1 -or
+            ($returnProof.Count -eq 1 -and $returnAdopted.Count -eq 1)
 
         if ($decision.Count -eq 1 -and
             $stateSend.Count -eq 1 -and
+            $publicationReceipt.Count -eq 1 -and
             $proof.Count -eq 1 -and
             $adopted.Count -eq 1 -and
-            $resumed.Count -eq 1) {
+            $coordinatorReleaseObserved) {
             $recovered.Add($record.Event) | Out-Null
         }
         else {
