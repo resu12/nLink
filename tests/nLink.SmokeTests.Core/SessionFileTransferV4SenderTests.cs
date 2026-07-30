@@ -1153,6 +1153,60 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 Interlocked.Increment(ref pumpLoopCount) > 1;
         try
         {
+            using var heldSource =
+                new MemoryStream(
+                    new byte[512 * 21 * 1024],
+                    writable: false);
+            var heldPumpTask = Assert.IsAssignableFrom<Task>(
+                typeof(SessionFileTransferService)
+                    .GetMethod(
+                        "RunOutboundV4SenderPumpAsync",
+                        BindingFlags.Instance |
+                        BindingFlags.NonPublic)!
+                    .Invoke(
+                        service,
+                        [
+                            context,
+                            heldSource,
+                            dataSession,
+                            CancellationToken.None,
+                            pumpInstall,
+                        ]));
+            await heldPumpTask.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            SessionFileTransferService
+                .OutboundSparseSenderPumpNormalCompletionForTests =
+                previousCompletion;
+        }
+
+        Assert.Empty(dataSession.SentFrames);
+        Assert.Single(GetQueuedV4RepairSends(context));
+
+        transport.RaiseReceiveRecoveryProof(command);
+        await WaitUntilAsync(
+            () =>
+                GetPrivateProperty<
+                        FileTransferCoordinatorPersistentState>(
+                        context,
+                        "CoordinatorPersistentState")
+                    .FileTransferReceiveRecovery
+                    .CurrentOperation?
+                    .ClosureState ==
+                FileTransferReceiveRecoveryClosureState.Adopted);
+
+        pumpLoopCount = 0;
+        SessionFileTransferService
+            .OutboundSparseSenderPumpNormalCompletionForTests =
+            (observedTransferId, _) =>
+                string.Equals(
+                    observedTransferId,
+                    transferId,
+                    StringComparison.Ordinal) &&
+                Interlocked.Increment(ref pumpLoopCount) > 1;
+        try
+        {
             using var source =
                 new MemoryStream(
                     new byte[512 * 21 * 1024],

@@ -15468,7 +15468,32 @@ internal static class FileTransferCoordinator
         operation = default;
         reason = "filetransfer_receive_recovery_execution_not_active";
         var recovery = state.PersistentState.FileTransferReceiveRecovery;
-        if (recovery.CurrentOperation is not null ||
+        if (recovery.CurrentOperation is { } current)
+        {
+            if (current.ExecutionState !=
+                    FileTransferReceiveRecoveryExecutionState.Completed ||
+                current.ExecutionReceipt is not
+                {
+                    Outcome:
+                        FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                } ||
+                current.ClosureState !=
+                    FileTransferReceiveRecoveryClosureState.Retained ||
+                current.ReceiveProof is not null ||
+                !IsReceiveRecoveryOperationCurrent(
+                    state,
+                    current.Authority))
+            {
+                return false;
+            }
+
+            operation = current;
+            reason =
+                "filetransfer_receive_recovery_completed_awaiting_receive_proof";
+            return true;
+        }
+
+        if (
             recovery.LastTerminalOperation is not
             {
                 ExecutionState:
@@ -15494,6 +15519,39 @@ internal static class FileTransferCoordinator
         operation = terminal;
         reason =
             "filetransfer_receive_recovery_execution_terminal_without_completion";
+        return true;
+    }
+
+    internal static bool
+        TryGetReceiveRecoveryPayloadSubmissionProofRelease(
+            FileTransferCoordinatorState state,
+            out FileTransferReceiveRecoveryOperation operation)
+    {
+        operation = default;
+        if (state.PersistentState.FileTransferReceiveRecovery
+                .CurrentOperation is not
+            {
+                ExecutionState:
+                    FileTransferReceiveRecoveryExecutionState.Completed,
+                ExecutionReceipt:
+                {
+                    Outcome:
+                        FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                },
+                ReceiveProof: not null,
+                ClosureState:
+                    FileTransferReceiveRecoveryClosureState.Adopted or
+                    FileTransferReceiveRecoveryClosureState.Reserved or
+                    FileTransferReceiveRecoveryClosureState.Consumed,
+            } current ||
+            !IsReceiveRecoveryOperationCurrent(
+                state,
+                current.Authority))
+        {
+            return false;
+        }
+
+        operation = current;
         return true;
     }
 

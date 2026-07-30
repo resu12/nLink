@@ -7128,6 +7128,12 @@ public sealed partial class SessionFileTransferService :
             initialActivationHoldDecision = null)
     {
         var previous = context.CoordinatorPersistentState.FileTransferReceiveRecovery;
+        var previousCoordinatorState = CreateCoordinatorStateLocked(context);
+        var payloadWasHeld =
+            FileTransferCoordinator.TryGetReceiveRecoveryPayloadSubmissionHold(
+                previousCoordinatorState,
+                out var heldPayloadOperation,
+                out _);
         context.CoordinatorPersistentState = state.PersistentState;
         var current = state.PersistentState.FileTransferReceiveRecovery;
         LogReceiveRecoveryOperationTransitions(
@@ -7149,42 +7155,38 @@ public sealed partial class SessionFileTransferService :
                     current);
             }
         }
-        var heldPayloadWakePrefix =
-            previous.CurrentOperation is { } previousOperation
-                ? $"receive_recovery_execution_payload_hold:{previousOperation.Authority.OperationGeneration}:"
-                : string.Empty;
-        if (previous.CurrentOperation is
-                {
-                    ExecutionState:
-                        FileTransferReceiveRecoveryExecutionState.Issued or
-                        FileTransferReceiveRecoveryExecutionState.Running,
-                } held &&
-            current.CurrentOperation is
-                {
-                    ExecutionState:
-                        FileTransferReceiveRecoveryExecutionState.Completed,
-                    ExecutionReceipt:
-                    {
-                        Outcome:
-                            FileTransferBridgeRecoveryExecutionOutcome.Completed,
-                    },
-                } completed &&
-            completed.Authority == held.Authority &&
-            !string.IsNullOrEmpty(heldPayloadWakePrefix) &&
+        if (payloadWasHeld &&
+            FileTransferCoordinator
+                .TryGetReceiveRecoveryPayloadSubmissionProofRelease(
+                    state,
+                    out var released) &&
+            IsSameReceiveRecoveryPayloadHoldLineage(
+                heldPayloadOperation,
+                released) &&
             context.SparseSenderPumpLastWakeReason.StartsWith(
-                heldPayloadWakePrefix,
+                "receive_recovery_execution_payload_hold:",
                 StringComparison.Ordinal))
         {
             context.SparseSenderPumpLastWakeReason =
-                "receive_recovery_execution_payload_resumed";
+                "receive_recovery_proof_owned_payload_resumed";
             context.SignalSparseSenderPump();
-            var authority = completed.Authority;
+            var authority = released.Authority;
             var observation = authority.Observation;
+            var proof = released.ReceiveProof!.Value;
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_bridge_recovery_payload_submission_resumed; session_id={FormatProtocolLogValue(observation.SessionId)}; transfer_id={FormatProtocolLogValue(observation.TransferId)}; direction=outbound; recovery_operation_generation={authority.OperationGeneration}; recovery_operation_authority_id={FormatProtocolLogValue(authority.AuthorityId.ToString())}; recovery_execution_state={completed.ExecutionState}; bridge_decision_generation={authority.BridgeRecoveryDecision.BridgeDecisionGeneration}; recovery_liveness_lease_generation={authority.RecoveryLivenessLease?.LeaseGeneration ?? 0}; route={FormatProtocolLogValue(observation.RouteToken)}; protocol_version={observation.ProtocolVersion}; live_route_epoch={observation.LiveRouteEpoch}; runtime_generation={observation.RuntimeOwner.RuntimeGeneration}; terminal_generation={observation.TerminalGeneration}; leg_generation={observation.LegGeneration}; transport_epoch={observation.TransportEpoch}; bridge_recovery_generation={observation.BridgeRecoveryGeneration}; route_publication_generation={observation.RoutePublication.PublicationGeneration}; data_session_generation={observation.DataSessionGeneration}; decision_reason=receive_recovery_execution_completed");
+                $"event=filetransfer_bridge_recovery_payload_submission_resumed; session_id={FormatProtocolLogValue(observation.SessionId)}; transfer_id={FormatProtocolLogValue(observation.TransferId)}; direction=outbound; recovery_operation_generation={authority.OperationGeneration}; recovery_operation_authority_id={FormatProtocolLogValue(authority.AuthorityId.ToString())}; recovery_execution_state={released.ExecutionState}; execution_receipt_observed_utc_ms={released.ExecutionReceiptObservedUtcMs}; closure_state={released.ClosureState}; closure_generation={released.ClosureGeneration}; proof_identity={FormatProtocolLogValue(proof.ProofIdentity)}; proof_observed_utc_ms={proof.ObservedUtcMs}; bridge_decision_generation={authority.BridgeRecoveryDecision.BridgeDecisionGeneration}; recovery_liveness_lease_generation={authority.RecoveryLivenessLease?.LeaseGeneration ?? 0}; route={FormatProtocolLogValue(observation.RouteToken)}; protocol_version={observation.ProtocolVersion}; live_route_epoch={observation.LiveRouteEpoch}; runtime_generation={observation.RuntimeOwner.RuntimeGeneration}; terminal_generation={observation.TerminalGeneration}; leg_generation={observation.LegGeneration}; transport_epoch={observation.TransportEpoch}; bridge_recovery_generation={observation.BridgeRecoveryGeneration}; route_publication_generation={observation.RoutePublication.PublicationGeneration}; data_session_generation={observation.DataSessionGeneration}; decision_reason=receive_recovery_proof_adopted");
         }
     }
+
+    private static bool IsSameReceiveRecoveryPayloadHoldLineage(
+        FileTransferReceiveRecoveryOperation held,
+        FileTransferReceiveRecoveryOperation released)
+        => released.Authority == held.Authority ||
+           (released.Authority.PredecessorAuthorityId ==
+                held.Authority.AuthorityId &&
+            released.Authority.PredecessorOperationGeneration ==
+                held.Authority.OperationGeneration);
 
     private void ApplyReceiveRecoveryStateLocked(
         InboundTransferContext context,

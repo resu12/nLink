@@ -8602,7 +8602,7 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
-    public void BridgeRecoveryExecutionPayloadHold_CoordinatorReleasesOnlyOnCompleted()
+    public void BridgeRecoveryExecutionPayloadHold_CoordinatorReleasesOnlyOnCompletedProof()
     {
         var runningFixture = CreateReceiveRecoveryOperationFixture();
         var runningAuthority =
@@ -8646,12 +8646,46 @@ public sealed class FileTransferCoordinatorTests
             FileTransferCoordinator.ObserveReceiveRecoveryExecutionReceipt(
                 running.State,
                 completedReceipt);
-        Assert.False(
+        Assert.True(
             FileTransferCoordinator
                 .TryGetReceiveRecoveryPayloadSubmissionHold(
                     completed.State,
+                    out var completedHeld,
+                    out var completedHoldReason));
+        Assert.Equal(
+            FileTransferReceiveRecoveryClosureState.Retained,
+            completedHeld.ClosureState);
+        Assert.Equal(
+            "filetransfer_receive_recovery_completed_awaiting_receive_proof",
+            completedHoldReason);
+        Assert.False(
+            FileTransferCoordinator
+                .TryGetReceiveRecoveryPayloadSubmissionProofRelease(
+                    completed.State,
+                    out _));
+
+        var proof = FileTransferCoordinator.ObserveReceiveRecoveryProof(
+            completed.State,
+            new FileTransferReceiveRecoveryProof(
+                runningAuthority,
+                "payload-hold-release-proof",
+                "receive_proof_observed",
+                completedHeld.ExecutionReceiptObservedUtcMs + 1));
+        Assert.True(proof.Accepted, proof.Reason);
+        Assert.False(
+            FileTransferCoordinator
+                .TryGetReceiveRecoveryPayloadSubmissionHold(
+                    proof.State,
                     out _,
                     out _));
+        Assert.True(
+            FileTransferCoordinator
+                .TryGetReceiveRecoveryPayloadSubmissionProofRelease(
+                    proof.State,
+                    out var released));
+        Assert.Equal(
+            FileTransferReceiveRecoveryClosureState.Adopted,
+            released.ClosureState);
 
         foreach (var outcome in new[]
                  {
