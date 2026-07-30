@@ -1108,6 +1108,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'nkn_bridge_receive_stall_recovery_soft_failed_hard_restart') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'nkn_bridge_receive_stall_recovery_hard_restart') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'nkn_bridge_recovery_execution_hard_restart_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_bridge_recovery_lifecycle_diagnostic_only') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'session_liveness_heartbeat_received') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'session_liveness_proof_received') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'session_liveness_peer_proof_observed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'nkn_bridge_recovery_submission_barrier_closed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'nkn_bridge_recovery_submission_barrier_drain_started') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'nkn_bridge_recovery_submission_barrier_drain_completed') +
@@ -1206,6 +1210,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_physical_send_lease_retired') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_bridge_recovery_payload_submission_held') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_bridge_recovery_payload_submission_resumed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_peer_reachability_observed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_proof_state_publication_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_proof_state_publication_receipt_applied') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_proof_state_publication_invalidated') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v4_state_sent') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v4_repair_delivery_both_failed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v4_sender_failed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_frontier_repair_settlement_handoff_adopted') +
@@ -1223,6 +1232,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             )
     $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof =
         Get-FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldCorrelation `
+            -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
+    $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof =
+        Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCorrelation `
             -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
     $fileTransferReceiveRecoveryCompletedUnprovenSuccessorProof =
         Get-FileTransferReceiveRecoveryCompletedUnprovenSuccessorCorrelation `
@@ -2004,6 +2016,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'completed_unproven_receive_recovery_payload_resumed_before_proof'
         }) | Out-Null
     }
+    foreach ($candidateEvent in @($fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.UnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing'
+            Event = $candidateEvent
+            Reason =
+                'completed_retained_receive_recovery_peer_reachability_not_rechecked_for_v4_state_publication'
+        }) | Out-Null
+    }
     foreach ($candidateEvent in @($bridgeRecoveryExecutionSubmissionBarrierDrainProof.UnresolvedCandidateEvents)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing'
@@ -2237,6 +2257,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureLivenessUnresolvedCount -gt 0 -or
         $bridgeRecoveryExecutionPayloadHoldProof.UnresolvedCount -gt 0 -or
         $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.UnresolvedCount -gt 0 -or
+        $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.UnresolvedCount -gt 0 -or
         $bridgeRecoveryExecutionSubmissionBarrierDrainProof.UnresolvedCount -gt 0 -or
         $bridgeRecoveryExecutionStartupPayloadIsolationProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.UnresolvedCount -gt 0 -or
@@ -2293,6 +2314,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'filetransfer_receive_recovery_operation_incomplete',
                 'filetransfer_receive_recovery_completed_unproven_successor_missing',
                 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved',
+                'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing',
                 'filetransfer_receive_recovery_completed_proven_successor_missing',
                 'runtime_unlock_regular_v4_recovery_lease_not_issued',
                 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted',
@@ -2380,6 +2402,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'filetransfer_receive_recovery_operation_incomplete',
             'filetransfer_receive_recovery_completed_unproven_successor_missing',
             'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved',
+            'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing',
             'filetransfer_receive_recovery_completed_proven_successor_missing',
             'filetransfer_route_transition_draining_transport_grace_terminalization',
             'filetransfer_route_transition_incomplete',
@@ -2591,6 +2614,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.RecoveredCount),
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_unresolved_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.UnresolvedCount),
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_verdict={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.Verdict),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_raw_count={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.RawCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.DistinctCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.RecoveredCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_unresolved_count={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.UnresolvedCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_verdict={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.Verdict),
         ("filetransfer_receive_recovery_completed_proven_successor_missing_raw_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.RawCount),
         ("filetransfer_receive_recovery_completed_proven_successor_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.DistinctCount),
         ("filetransfer_receive_recovery_completed_proven_successor_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.RecoveredCount),
@@ -2900,6 +2928,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.RecoveredCount),
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_unresolved_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.UnresolvedCount),
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_verdict={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.Verdict),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_raw_count={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.RawCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.DistinctCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.RecoveredCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_unresolved_count={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.UnresolvedCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_verdict={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.Verdict),
         ("filetransfer_receive_recovery_completed_proven_successor_missing_raw_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.RawCount),
         ("filetransfer_receive_recovery_completed_proven_successor_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.DistinctCount),
         ("filetransfer_receive_recovery_completed_proven_successor_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.RecoveredCount),
@@ -3205,6 +3238,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.RecoveredCount),
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_unresolved_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.UnresolvedCount),
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_verdict={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.Verdict),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_raw_count={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.RawCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.DistinctCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.RecoveredCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_unresolved_count={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.UnresolvedCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_verdict={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.Verdict),
         ("filetransfer_receive_recovery_completed_proven_successor_missing_raw_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.RawCount),
         ("filetransfer_receive_recovery_completed_proven_successor_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.DistinctCount),
         ("filetransfer_receive_recovery_completed_proven_successor_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.RecoveredCount),
@@ -3489,6 +3527,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.RecoveredCount),
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_unresolved_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.UnresolvedCount),
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_verdict={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.Verdict),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_raw_count={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.RawCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.DistinctCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.RecoveredCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_unresolved_count={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.UnresolvedCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_verdict={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.Verdict),
         ("filetransfer_receive_recovery_completed_proven_successor_missing_raw_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.RawCount),
         ("filetransfer_receive_recovery_completed_proven_successor_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.DistinctCount),
         ("filetransfer_receive_recovery_completed_proven_successor_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.RecoveredCount),
@@ -3803,6 +3846,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_recovered_count = $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.RecoveredCount
         filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_unresolved_count = $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.UnresolvedCount
         filetransfer_receive_recovery_completed_unproven_payload_hold_verdict = $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.Verdict
+        filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_raw_count = $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.RawCount
+        filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_distinct_count = $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.DistinctCount
+        filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_recovered_count = $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.RecoveredCount
+        filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_unresolved_count = $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.UnresolvedCount
+        filetransfer_receive_recovery_completed_retained_proof_state_publication_verdict = $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.Verdict
         filetransfer_receive_recovery_completed_proven_successor_missing_raw_count = $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.RawCount
         filetransfer_receive_recovery_completed_proven_successor_missing_distinct_count = $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.DistinctCount
         filetransfer_receive_recovery_completed_proven_successor_missing_recovered_count = $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.RecoveredCount

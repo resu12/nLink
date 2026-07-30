@@ -7110,6 +7110,119 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         return $false
     }
 
+    function Test-TunaGuiReceiveRecoveryCompletedRetainedProofStatePublicationFailure {
+        param(
+            [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+        )
+
+        $indexedLines = @(
+            for ($index = 0; $index -lt $Lines.Count; $index++) {
+                [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
+            }
+        )
+        $issuedEvents = @($indexedLines | Where-Object {
+            (Test-TunaGuiLogLineHasEvent `
+                -Line $_.Line `
+                -Events @('filetransfer_receive_recovery_operation_issued')) -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -eq
+                'inbound' -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'route') -eq
+                'regular_nkn_v4_fast'
+        })
+        foreach ($issued in $issuedEvents) {
+            $writer = Get-TunaGuiLogLineFieldValue `
+                -Line $issued.Line `
+                -Name 'log_writer_id'
+            $operationGeneration = Get-TunaGuiLogLineFieldValue `
+                -Line $issued.Line `
+                -Name 'receive_recovery_operation_generation'
+            $bridgeDecisionGeneration = Get-TunaGuiLogLineFieldValue `
+                -Line $issued.Line `
+                -Name 'bridge_decision_generation'
+
+            $retained = @($indexedLines | Where-Object {
+                $_.Index -gt $issued.Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @(
+                        'filetransfer_receive_recovery_operation_closure_retained')) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'receive_recovery_operation_generation') -eq
+                    $operationGeneration -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'closure_state') -eq 'Retained'
+            } | Select-Object -First 1)
+            if ($retained.Count -ne 1) {
+                continue
+            }
+
+            $diagnostic = @($indexedLines | Where-Object {
+                $_.Index -gt $retained[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @(
+                        'filetransfer_bridge_recovery_lifecycle_diagnostic_only')) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'bridge_decision_generation') -eq
+                    $bridgeDecisionGeneration -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'lifecycle').ToLowerInvariant() -eq
+                    'receivestallrecoveryreceiveresumed' -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'reason') -eq
+                    'coordinator_operation_receipt_or_proof_required'
+            } | Select-Object -First 1)
+            if ($diagnostic.Count -ne 1) {
+                continue
+            }
+
+            $resolved = @($indexedLines | Where-Object {
+                $_.Index -gt $diagnostic[0].Index -and
+                (
+                    (
+                        (Test-TunaGuiLogLineHasEvent `
+                            -Line $_.Line `
+                            -Events @(
+                                'filetransfer_receive_recovery_proof_state_publication_decided')) -and
+                        (Get-TunaGuiLogLineFieldValue `
+                            -Line $_.Line `
+                            -Name 'receive_recovery_operation_generation') -eq
+                            $operationGeneration
+                    ) -or
+                    (
+                        (Test-TunaGuiLogLineHasEvent `
+                            -Line $_.Line `
+                            -Events @(
+                                'filetransfer_receive_recovery_operation_proof_observed',
+                                'filetransfer_receive_recovery_operation_closure_adopted')) -and
+                        (Get-TunaGuiLogLineFieldValue `
+                            -Line $_.Line `
+                            -Name 'log_writer_id') -eq $writer -and
+                        (Get-TunaGuiLogLineFieldValue `
+                            -Line $_.Line `
+                            -Name 'receive_recovery_operation_generation') -eq
+                            $operationGeneration
+                    )
+                )
+            } | Select-Object -First 1)
+            if ($resolved.Count -eq 0) {
+                return $true
+            }
+        }
+        return $false
+    }
+
     function Test-TunaGuiBridgeRecoveryExecutionSubmissionBarrierDrainFailure {
         param(
             [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
@@ -8925,6 +9038,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $receiveRecoveryCompletedUnprovenPayloadHoldNotPreserved =
         Test-TunaGuiReceiveRecoveryCompletedUnprovenPayloadHoldFailure `
             -Lines $regularV4EvidenceLineText
+    $receiveRecoveryCompletedRetainedProofStatePublicationMissing =
+        Test-TunaGuiReceiveRecoveryCompletedRetainedProofStatePublicationFailure `
+            -Lines $regularV4EvidenceLineText
     $bridgeRecoveryExecutionSubmissionBarrierDrainMissing =
         Test-TunaGuiBridgeRecoveryExecutionSubmissionBarrierDrainFailure `
             -Lines $regularV4EvidenceLineText
@@ -9007,6 +9123,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $initialActivationReceiveRecoveryHoldReleasedOfferExpired -or
         $bridgeRecoveryExecutionPayloadHoldMissing -or
         $receiveRecoveryCompletedUnprovenPayloadHoldNotPreserved -or
+        $receiveRecoveryCompletedRetainedProofStatePublicationMissing -or
         $bridgeRecoveryExecutionSubmissionBarrierDrainMissing -or
         $receiveRecoveryCompletedUnprovenSuccessorMissing -or
         $receiveRecoveryCompletedProvenSuccessorMissing -or
@@ -9078,6 +9195,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $phase = 'receive_recovery'
         $reason =
             'completed_unproven_receive_recovery_payload_resumed_before_proof'
+    }
+    elseif ($receiveRecoveryCompletedRetainedProofStatePublicationMissing) {
+        $phase = 'receive_recovery'
+        $reason =
+            'completed_retained_receive_recovery_peer_reachability_not_rechecked_for_v4_state_publication'
     }
     elseif ($bridgeRecoveryExecutionPayloadHoldMissing) {
         $phase = 'bridge_recovery_execution'

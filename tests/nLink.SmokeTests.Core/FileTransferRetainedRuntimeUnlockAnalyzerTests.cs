@@ -14,6 +14,85 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransferOpsScriptsTestBase
 {
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_ReceiveRecoveryCompletedRetainedProofStatePublicationMissing_HasFullCompactParity(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string scope =
+            "session_id=sess_proof_state; transfer_id=transfer_proof_state; direction=inbound; " +
+            "route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; " +
+            "route_publication_generation=1; runtime_generation=1; terminal_generation=0; " +
+            "leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; " +
+            "data_session_generation=1; log_writer_id=writer_inbound";
+        const string operation =
+            "receive_recovery_operation_generation=2; " +
+            "receive_recovery_operation_authority_id=fta2-proof-state-operation; " +
+            "bridge_decision_generation=2";
+        string[] messages =
+        [
+            $"event=filetransfer_receive_recovery_operation_issued; {operation}; {scope}",
+            "event=bridge_ready; pid=42; start_mode=cold; " +
+                "session_id=sess_proof_state; log_writer_id=writer_inbound",
+            $"event=filetransfer_receive_recovery_operation_execution_receipt_applied; {operation}; {scope}; " +
+                "execution_outcome=Completed; closure_state=Retained; closure_generation=2; proof_identity=(none)",
+            $"event=filetransfer_receive_recovery_operation_closure_retained; {operation}; {scope}; " +
+                "execution_outcome=Completed; closure_state=Retained; closure_generation=2; proof_identity=(none)",
+            "event=session_liveness_proof_received; session_id=sess_proof_state; generation=1; " +
+                "sequence=18; proof_kind=heartbeat_received; lane=bulk; " +
+                "log_writer_id=writer_inbound",
+            "event=filetransfer_bridge_recovery_lifecycle_diagnostic_only; " +
+                "lifecycle=receivestallrecoveryreceiveresumed; " +
+                "reason=coordinator_operation_receipt_or_proof_required; " +
+                "bridge_decision_generation=2; log_writer_id=writer_inbound"
+        ];
+
+        var result = await RunAnalyzeFixtureAsync(
+            messages.Select(message => LogLine(message)).ToArray(),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-operator-verdict.txt");
+        Assert.Equal(
+            "1",
+            verdict[
+                "filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_raw_count"]);
+        Assert.Equal(
+            "1",
+            verdict[
+                "filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_distinct_count"]);
+        Assert.Equal(
+            "0",
+            verdict[
+                "filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_recovered_count"]);
+        Assert.Equal(
+            "1",
+            verdict[
+                "filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_unresolved_count"]);
+        Assert.Equal(
+            "filetransfer_receive_recovery_completed_retained_proof_state_publication_missing",
+            verdict["first_proof_chain_failure_class"]);
+        Assert.Equal(
+            "filetransfer_bridge_recovery_lifecycle_diagnostic_only",
+            verdict["first_proof_chain_failure_event"]);
+    }
+
+    [Theory]
     [InlineData(false, false, "valid")]
     [InlineData(false, true, "valid")]
     [InlineData(true, false, "valid")]

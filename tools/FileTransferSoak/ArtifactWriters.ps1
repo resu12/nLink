@@ -12980,6 +12980,11 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_recovered_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount)) | Out-Null
     $lines.Add(("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_unresolved_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedUnresolvedCount)) | Out-Null
     $lines.Add(("filetransfer_receive_recovery_completed_unproven_payload_hold_verdict={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldPreservationVerdict)) | Out-Null
+    $lines.Add(("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_raw_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRawCount)) | Out-Null
+    $lines.Add(("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_distinct_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingDistinctCount)) | Out-Null
+    $lines.Add(("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_recovered_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRecoveredCount)) | Out-Null
+    $lines.Add(("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_unresolved_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingUnresolvedCount)) | Out-Null
+    $lines.Add(("filetransfer_receive_recovery_completed_retained_proof_state_publication_verdict={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationVerdict)) | Out-Null
     $lines.Add(("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_raw_count={0}" -f $RecoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount)) | Out-Null
     $lines.Add(("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_distinct_count={0}" -f $RecoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingDistinctCount)) | Out-Null
     $lines.Add(("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_recovered_count={0}" -f $RecoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRecoveredCount)) | Out-Null
@@ -15010,6 +15015,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_recovered_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount),
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_unresolved_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedUnresolvedCount),
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_verdict={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldPreservationVerdict),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_raw_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRawCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_distinct_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingDistinctCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_recovered_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRecoveredCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_unresolved_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingUnresolvedCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_verdict={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationVerdict),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_raw_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_distinct_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingDistinctCount),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_recovered_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRecoveredCount),
@@ -28070,6 +28080,355 @@ function Get-FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldCorrelation 
     }
 }
 
+function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCorrelation {
+    param(
+        [AllowEmptyCollection()][object[]]$Events = @()
+    )
+
+    [object[]]$events = @(
+        $Events |
+            Where-Object { $null -ne $_ } |
+            Sort-Object Sequence, LineNumber)
+
+    function Get-ProofStateField {
+        param(
+            [Parameter(Mandatory = $true)]$Event,
+            [Parameter(Mandatory = $true)][string[]]$Names,
+            [string]$Default = ''
+        )
+
+        foreach ($name in $Names) {
+            $value = Get-FileTransferEventField `
+                -Event $Event `
+                -Name $name `
+                -Default ''
+            if (-not [string]::IsNullOrWhiteSpace($value) -and
+                $value -notin @('(missing)', '__missing__')) {
+                return $value
+            }
+        }
+        return $Default
+    }
+
+    function Test-ProofStateVisible {
+        param([AllowNull()][string]$Value)
+
+        return -not [string]::IsNullOrWhiteSpace($Value) -and
+            $Value -notmatch 'redacted|missing|none'
+    }
+
+    function Test-ProofStateOperationMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Issued,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        foreach ($field in @(
+                'log_writer_id',
+                'session_id',
+                'transfer_id',
+                'direction',
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'route_publication_generation',
+                'runtime_generation',
+                'terminal_generation',
+                'leg_generation',
+                'transport_epoch',
+                'bridge_recovery_generation',
+                'data_session_generation')) {
+            $left = Get-ProofStateField -Event $Issued -Names @($field)
+            $right = Get-ProofStateField -Event $Candidate -Names @($field)
+            if ([string]::IsNullOrWhiteSpace($left) -or
+                [string]::IsNullOrWhiteSpace($right) -or
+                -not [string]::Equals(
+                    $left,
+                    $right,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        $issuedGeneration = Get-ProofStateField `
+            -Event $Issued `
+            -Names @(
+                'receive_recovery_operation_generation',
+                'recovery_operation_generation')
+        $candidateGeneration = Get-ProofStateField `
+            -Event $Candidate `
+            -Names @(
+                'receive_recovery_operation_generation',
+                'recovery_operation_generation')
+        if ($issuedGeneration -ne $candidateGeneration) {
+            return $false
+        }
+
+        $issuedAuthority = Get-ProofStateField `
+            -Event $Issued `
+            -Names @(
+                'receive_recovery_operation_authority_id',
+                'recovery_operation_authority_id')
+        $candidateAuthority = Get-ProofStateField `
+            -Event $Candidate `
+            -Names @(
+                'receive_recovery_operation_authority_id',
+                'recovery_operation_authority_id')
+        return -not (
+            (Test-ProofStateVisible $issuedAuthority) -and
+            (Test-ProofStateVisible $candidateAuthority) -and
+            -not [string]::Equals(
+                $issuedAuthority,
+                $candidateAuthority,
+                [System.StringComparison]::OrdinalIgnoreCase))
+    }
+
+    [object[]]$issuedEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_receive_recovery_operation_issued' -and
+        (Get-ProofStateField -Event $_ -Names @('direction')) -eq 'inbound' -and
+        (Get-ProofStateField -Event $_ -Names @('route')) -eq
+            'regular_nkn_v4_fast'
+    })
+    [object[]]$receiptEvents = @($events | Where-Object {
+        $_.EventName -in @(
+            'filetransfer_receive_recovery_operation_execution_receipt_applied',
+            'filetransfer_receive_recovery_operation_receipt_applied') -and
+        (Get-ProofStateField `
+            -Event $_ `
+            -Names @('execution_outcome', 'operation_outcome', 'outcome')) -eq
+                'Completed' -and
+        (Get-ProofStateField -Event $_ -Names @('closure_state')) -eq
+            'Retained'
+    })
+    [object[]]$retainedEvents = @($events | Where-Object {
+        $_.EventName -eq
+            'filetransfer_receive_recovery_operation_closure_retained' -and
+        (Get-ProofStateField -Event $_ -Names @('closure_state')) -eq
+            'Retained'
+    })
+    [object[]]$diagnostics = @($events | Where-Object {
+        $_.EventName -eq
+            'filetransfer_bridge_recovery_lifecycle_diagnostic_only' -and
+        (Get-ProofStateField -Event $_ -Names @('lifecycle')).ToLowerInvariant() -eq
+            'receivestallrecoveryreceiveresumed' -and
+        (Get-ProofStateField -Event $_ -Names @('reason')) -eq
+            'coordinator_operation_receipt_or_proof_required'
+    })
+    [object[]]$readyEvents = @($events | Where-Object {
+        $_.EventName -eq 'bridge_ready'
+    })
+    [object[]]$heartbeatEvents = @($events | Where-Object {
+        $_.EventName -eq 'session_liveness_proof_received' -and
+        (Get-ProofStateField -Event $_ -Names @('proof_kind')) -eq
+            'heartbeat_received'
+    })
+    [object[]]$decisions = @($events | Where-Object {
+        $_.EventName -eq
+            'filetransfer_receive_recovery_proof_state_publication_decided' -and
+        (Get-ProofStateField `
+            -Event $_ `
+            -Names @('decision_status', 'status')) -in @(
+                'Started',
+                'Idempotent',
+                'Accepted')
+    })
+    [object[]]$stateSends = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_v4_state_sent' -and
+        (Get-ProofStateField `
+            -Event $_ `
+            -Names @('repair_publication_kind')) -eq
+            'receive_recovery_proof_state'
+    })
+    [object[]]$proofEvents = @($events | Where-Object {
+        $_.EventName -in @(
+            'filetransfer_receive_recovery_operation_proof_observed',
+            'filetransfer_receive_recovery_operation_receive_proof_observed')
+    })
+    [object[]]$adoptedEvents = @($events | Where-Object {
+        $_.EventName -eq
+            'filetransfer_receive_recovery_operation_closure_adopted' -and
+        (Get-ProofStateField -Event $_ -Names @('closure_state')) -eq
+            'Adopted'
+    })
+    [object[]]$resumedEvents = @($events | Where-Object {
+        $_.EventName -eq
+            'filetransfer_bridge_recovery_payload_submission_resumed'
+    })
+
+    $raw = New-Object System.Collections.Generic.List[object]
+    foreach ($issued in $issuedEvents) {
+        $receipt = @($receiptEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$issued.Sequence -and
+            (Test-ProofStateOperationMatch -Issued $issued -Candidate $_)
+        } | Select-Object -First 1)
+        if ($receipt.Count -ne 1) {
+            continue
+        }
+        $retained = @($retainedEvents | Where-Object {
+            [int64]$_.Sequence -ge [int64]$receipt[0].Sequence -and
+            (Test-ProofStateOperationMatch -Issued $issued -Candidate $_)
+        } | Select-Object -First 1)
+        if ($retained.Count -ne 1) {
+            continue
+        }
+
+        $bridgeDecisionGeneration = Get-ProofStateField `
+            -Event $issued `
+            -Names @('bridge_decision_generation')
+        $writerId = Get-ProofStateField -Event $issued -Names @('log_writer_id')
+        $matchingDiagnostics = @($diagnostics | Where-Object {
+            [int64]$_.Sequence -gt [int64]$retained[0].Sequence -and
+            (Get-ProofStateField -Event $_ -Names @('log_writer_id')) -eq
+                $writerId -and
+            (Get-ProofStateField `
+                -Event $_ `
+                -Names @('bridge_decision_generation')) -eq
+                $bridgeDecisionGeneration
+        })
+        if ($matchingDiagnostics.Count -ne 1) {
+            continue
+        }
+        $diagnostic = $matchingDiagnostics[0]
+        $ready = @($readyEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$issued.Sequence -and
+            [int64]$_.Sequence -lt [int64]$diagnostic.Sequence -and
+            (Get-ProofStateField -Event $_ -Names @('log_writer_id')) -eq
+                $writerId
+        } | Select-Object -Last 1)
+        $heartbeat = @($heartbeatEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$retained[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$diagnostic.Sequence -and
+            (Get-ProofStateField -Event $_ -Names @('log_writer_id')) -eq
+                $writerId
+        } | Select-Object -First 1)
+        if ($ready.Count -ne 1 -or $heartbeat.Count -ne 1) {
+            continue
+        }
+
+        $proofBeforeBoundary = @($proofEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$retained[0].Sequence -and
+            [int64]$_.Sequence -le [int64]$diagnostic.Sequence -and
+            (Test-ProofStateOperationMatch -Issued $issued -Candidate $_)
+        }).Count -gt 0
+        if ($proofBeforeBoundary) {
+            continue
+        }
+
+        $raw.Add([pscustomobject]@{
+            Event = $diagnostic
+            Issued = $issued
+            Retained = $retained[0]
+            Key = [string]::Join('|', @(
+                $writerId,
+                (Get-ProofStateField -Event $issued -Names @('session_id')),
+                (Get-ProofStateField -Event $issued -Names @('transfer_id')),
+                (Get-ProofStateField `
+                    -Event $issued `
+                    -Names @('receive_recovery_operation_generation')),
+                (Get-ProofStateField `
+                    -Event $retained[0] `
+                    -Names @('closure_generation')),
+                $bridgeDecisionGeneration))
+        }) | Out-Null
+    }
+
+    $distinct = [ordered]@{}
+    foreach ($record in $raw) {
+        if (-not $distinct.Contains($record.Key)) {
+            $distinct[$record.Key] = $record
+        }
+    }
+
+    $recovered = New-Object System.Collections.Generic.List[object]
+    $unresolved = New-Object System.Collections.Generic.List[object]
+    foreach ($record in @($distinct.Values)) {
+        $decision = @($decisions | Where-Object {
+            [int64]$_.Sequence -gt [int64]$record.Event.Sequence -and
+            (Test-ProofStateOperationMatch `
+                -Issued $record.Issued `
+                -Candidate $_)
+        } | Select-Object -First 1)
+        $stateSend = @($stateSends | Where-Object {
+            [int64]$_.Sequence -gt [int64]$record.Event.Sequence -and
+            (Get-ProofStateField -Event $_ -Names @('session_id')) -eq
+                (Get-ProofStateField `
+                    -Event $record.Issued `
+                    -Names @('session_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('transfer_id')) -eq
+                (Get-ProofStateField `
+                    -Event $record.Issued `
+                    -Names @('transfer_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('direction')) -eq
+                'inbound'
+        } | Select-Object -First 1)
+        $proof = @($proofEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$record.Event.Sequence -and
+            (Get-ProofStateField -Event $_ -Names @('session_id')) -eq
+                (Get-ProofStateField `
+                    -Event $record.Issued `
+                    -Names @('session_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('transfer_id')) -eq
+                (Get-ProofStateField `
+                    -Event $record.Issued `
+                    -Names @('transfer_id'))
+        } | Select-Object -First 1)
+        $adopted = @($adoptedEvents | Where-Object {
+            $proof.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$proof[0].Sequence -and
+            (Get-ProofStateField -Event $_ -Names @('session_id')) -eq
+                (Get-ProofStateField `
+                    -Event $record.Issued `
+                    -Names @('session_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('transfer_id')) -eq
+                (Get-ProofStateField `
+                    -Event $record.Issued `
+                    -Names @('transfer_id'))
+        } | Select-Object -First 1)
+        $resumed = @($resumedEvents | Where-Object {
+            $adopted.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$adopted[0].Sequence -and
+            (Get-ProofStateField -Event $_ -Names @('session_id')) -eq
+                (Get-ProofStateField `
+                    -Event $record.Issued `
+                    -Names @('session_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('transfer_id')) -eq
+                (Get-ProofStateField `
+                    -Event $record.Issued `
+                    -Names @('transfer_id'))
+        } | Select-Object -First 1)
+
+        if ($decision.Count -eq 1 -and
+            $stateSend.Count -eq 1 -and
+            $proof.Count -eq 1 -and
+            $adopted.Count -eq 1 -and
+            $resumed.Count -eq 1) {
+            $recovered.Add($record.Event) | Out-Null
+        }
+        else {
+            $unresolved.Add($record.Event) | Out-Null
+        }
+    }
+
+    return [pscustomobject]@{
+        RawCount = $raw.Count
+        DistinctCount = $distinct.Count
+        RecoveredCount = $recovered.Count
+        UnresolvedCount = $unresolved.Count
+        Verdict = if ($unresolved.Count -gt 0) {
+            'fail'
+        }
+        elseif ($distinct.Count -gt 0) {
+            'pass'
+        }
+        else {
+            'none'
+        }
+        RawCandidateEvents = @($raw | ForEach-Object { $_.Event })
+        RecoveredCandidateEvents = @($recovered.ToArray())
+        UnresolvedCandidateEvents = @($unresolved.ToArray())
+    }
+}
+
 function Get-FileTransferRuntimeUnlockRegularV4RecoverySettlementCorrelation {
     param(
         [AllowEmptyCollection()][object[]]$Events = @(),
@@ -36114,6 +36473,9 @@ function Get-FileTransferRecoveryFailureClassification {
     $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof =
         Get-FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldCorrelation `
             -Events $events
+    $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof =
+        Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCorrelation `
+            -Events $events
     $fileTransferReceiveRecoveryCompletedUnprovenSuccessorProof =
         Get-FileTransferReceiveRecoveryCompletedUnprovenSuccessorCorrelation `
             -Events $events
@@ -39447,6 +39809,12 @@ function Get-FileTransferRecoveryFailureClassification {
         -UseDefaultReason
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
+        -Class 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing' `
+        -Events @($fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.UnresolvedCandidateEvents) `
+        -DefaultReason 'completed_retained_receive_recovery_peer_reachability_not_rechecked_for_v4_state_publication' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
         -Class 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing' `
         -Events @($bridgeRecoveryExecutionSubmissionBarrierDrainProof.UnresolvedCandidateEvents) `
         -DefaultReason 'bridge_recovery_execution_restart_not_ready' `
@@ -39947,6 +40315,10 @@ function Get-FileTransferRecoveryFailureClassification {
         $class =
             'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved'
     }
+    elseif ($fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.UnresolvedCount -gt 0) {
+        $class =
+            'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing'
+    }
     elseif ($bridgeRecoveryExecutionSubmissionBarrierDrainProof.UnresolvedCount -gt 0) {
         $class = 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing'
     }
@@ -40340,6 +40712,7 @@ function Get-FileTransferRecoveryFailureClassification {
                 'filetransfer_receive_recovery_operation_incomplete',
                 'filetransfer_receive_recovery_completed_unproven_successor_missing',
                 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved',
+                'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing',
                 'filetransfer_receive_recovery_completed_proven_successor_missing',
                 'filetransfer_route_transition_draining_transport_grace_terminalization',
                 'filetransfer_route_transition_incomplete',
@@ -40541,6 +40914,11 @@ function Get-FileTransferRecoveryFailureClassification {
         FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount = $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.RecoveredCount
         FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedUnresolvedCount = $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.UnresolvedCount
         FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldPreservationVerdict = $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.Verdict
+        FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRawCount = $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.RawCount
+        FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingDistinctCount = $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.DistinctCount
+        FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRecoveredCount = $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.RecoveredCount
+        FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingUnresolvedCount = $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.UnresolvedCount
+        FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationVerdict = $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.Verdict
         FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount = $bridgeRecoveryExecutionSubmissionBarrierDrainProof.RawCount
         FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingDistinctCount = $bridgeRecoveryExecutionSubmissionBarrierDrainProof.DistinctCount
         FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRecoveredCount = $bridgeRecoveryExecutionSubmissionBarrierDrainProof.RecoveredCount
@@ -41295,6 +41673,11 @@ function New-FileTransferInvariantLedgerObject {
         filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_recovered_count = [string]$recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount
         filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_unresolved_count = [string]$recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedUnresolvedCount
         filetransfer_receive_recovery_completed_unproven_payload_hold_verdict = $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldPreservationVerdict
+        filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_raw_count = [string]$recoveryClassification.FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRawCount
+        filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_distinct_count = [string]$recoveryClassification.FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingDistinctCount
+        filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_recovered_count = [string]$recoveryClassification.FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRecoveredCount
+        filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_unresolved_count = [string]$recoveryClassification.FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingUnresolvedCount
+        filetransfer_receive_recovery_completed_retained_proof_state_publication_verdict = $recoveryClassification.FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationVerdict
         filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_raw_count = [string]$recoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount
         filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_distinct_count = [string]$recoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingDistinctCount
         filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_recovered_count = [string]$recoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRecoveredCount
@@ -41565,6 +41948,8 @@ function Write-FileTransferDiagnosticsArtifacts {
             'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved',
             'filetransfer_receive_recovery_completed_unproven_successor_missing',
             'filetransfer_receive_recovery_completed_proven_successor_missing',
+            'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved',
+            'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing',
             'filetransfer_bridge_recovery_execution_payload_hold_missing',
             'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing',
             'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing',
@@ -41652,6 +42037,14 @@ function Write-FileTransferDiagnosticsArtifacts {
             }
             'filetransfer_receive_recovery_completed_proven_successor_missing' {
                 'recovery: completed receive recovery with proof but an unreserved adopted closure blocked a fresh coordinator successor'
+                break
+            }
+            'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved' {
+                'recovery: completed receive recovery resumed payload before exact receive proof'
+                break
+            }
+            'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing' {
+                'recovery: completed receive recovery observed peer reachability without coordinator-authorized V4 proof-state publication'
                 break
             }
             'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing' {
@@ -41757,7 +42150,7 @@ function Write-FileTransferDiagnosticsArtifacts {
     $operatorAcceptanceFailureClass = if ($recoveryClassification.Class -in @('filetransfer_live_route_epoch_projection_missing', 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'runtime_unlock_precommit_probe_start_handoff_missing', 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing', 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_initial_pressure_install_missing', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery', 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
         'incomplete_proof'
     }
-    elseif ($recoveryClassification.Class -in @('filetransfer_receive_recovery_operation_incomplete', 'filetransfer_receive_recovery_completed_unproven_successor_missing', 'filetransfer_receive_recovery_completed_proven_successor_missing', 'runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'filetransfer_bridge_recovery_execution_payload_hold_missing', 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing', 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing', 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing', 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved', 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing', 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'fallback_tail_yield_authority_invalid', 'filetransfer_route_transition_draining_transport_grace_terminalization', 'filetransfer_route_transition_incomplete', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
+    elseif ($recoveryClassification.Class -in @('filetransfer_receive_recovery_operation_incomplete', 'filetransfer_receive_recovery_completed_unproven_successor_missing', 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved', 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing', 'filetransfer_receive_recovery_completed_proven_successor_missing', 'runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'filetransfer_bridge_recovery_execution_payload_hold_missing', 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing', 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing', 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing', 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved', 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing', 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'fallback_tail_yield_authority_invalid', 'filetransfer_route_transition_draining_transport_grace_terminalization', 'filetransfer_route_transition_incomplete', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
         'route_runtime'
     }
     elseif ($invariantMayOwnAcceptanceFailure) {
@@ -41850,6 +42243,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_recovered_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount),
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_unresolved_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedUnresolvedCount),
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_verdict={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldPreservationVerdict),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_raw_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRawCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_distinct_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingDistinctCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_recovered_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRecoveredCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_unresolved_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingUnresolvedCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_publication_verdict={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationVerdict),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_raw_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_distinct_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingDistinctCount),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_recovered_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRecoveredCount),
