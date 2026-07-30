@@ -1360,6 +1360,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_selected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transitioned') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_recovered') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_started') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_owner_changed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_terminalized') +
@@ -1694,23 +1695,40 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_availability_changed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_acked') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transitioned') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_recovered') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_outbound_terminal') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_inbound_terminal') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'transfer_terminal') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_terminalized') |
             Sort-Object Sequence, LineNumber
     )
+    $dataPathCorrelationStopwatch =
+        [System.Diagnostics.Stopwatch]::StartNew()
     $fileTransferRouteTransitionProof =
         Get-FileTransferRouteTransitionCorrelation -Events $fileTunaV4DataPathEvents
+    $fileTransferRouteTransitionLiveEpochProjectionProof =
+        Get-FileTransferRouteTransitionLiveEpochProjectionCorrelation `
+            -Events $fileTunaV4DataPathEvents
     $fileTransferRouteTransitionDrainingTransportGraceProof =
         Get-FileTransferRouteTransitionDrainingTransportGraceCorrelation `
             -Events $fileTunaV4DataPathEvents
+    $dataPathIndexStopwatch =
+        [System.Diagnostics.Stopwatch]::StartNew()
+    $fileTunaV4DataPathCorrelationIndex =
+        New-FileTransferFileTunaV4DataPathCorrelationIndex `
+            -Events $fileTunaV4DataPathEvents
+    $dataPathIndexStopwatch.Stop()
     $runtimeUnlockRegularV4RouteCommitSendDrainProof =
-        Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation -Events $fileTunaV4DataPathEvents
+        Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation `
+            -Events $fileTunaV4DataPathEvents `
+            -DataPathIndex $fileTunaV4DataPathCorrelationIndex
     $fileTunaV4DataPathMismatchProof =
         Get-FileTransferFileTunaV4DataPathMismatchProof `
             -Events $fileTunaV4DataPathEvents `
-            -RouteCommitSendDrainProof $runtimeUnlockRegularV4RouteCommitSendDrainProof
+            -RouteCommitSendDrainProof $runtimeUnlockRegularV4RouteCommitSendDrainProof `
+            -DataPathIndex $fileTunaV4DataPathCorrelationIndex
+    $dataPathCorrelationStopwatch.Stop()
     $validFallbackTerminalProofCount =
         @($fallbackTailBridgeRecoveryPairingProof.ValidTerminalProofEvents).Count
     $fallbackPairedYield =
@@ -1862,6 +1880,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     foreach ($candidateRecord in @($fileTransferRouteTransitionProof.UnresolvedCandidateRecords)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'filetransfer_route_transition_incomplete'
+            Event = $candidateRecord.Event
+            Reason = $candidateRecord.Reason
+        }) | Out-Null
+    }
+    foreach ($candidateRecord in @(
+            $fileTransferRouteTransitionLiveEpochProjectionProof.UnresolvedCandidateRecords)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'filetransfer_live_route_epoch_projection_missing'
             Event = $candidateRecord.Event
             Reason = $candidateRecord.Reason
         }) | Out-Null
@@ -2237,6 +2263,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'runtime_unlock_retry_regular_v4_recovery_settlement_missing',
                 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved',
                 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid',
+                'filetransfer_live_route_epoch_projection_missing',
                 'runtime_unlock_precommit_probe_start_handoff_missing',
                 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing',
                 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed',
@@ -2332,7 +2359,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     else {
         0L
     }
-    $semanticFailureDomain = if ($firstProofChainFailureClass -in @(
+    $semanticFailureDomain = if ($firstProofChainFailureClass -eq
+        'filetransfer_live_route_epoch_projection_missing') {
+        'route_evidence'
+    }
+    elseif ($firstProofChainFailureClass -in @(
             'filetransfer_receive_recovery_operation_incomplete',
             'filetransfer_receive_recovery_completed_unproven_successor_missing',
             'filetransfer_receive_recovery_completed_proven_successor_missing',
@@ -2413,6 +2444,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
         ("first_proof_chain_failure_writer_sequence={0}" -f $firstProofChainFailureWriterSequence),
         ("semantic_failure_domain={0}" -f $semanticFailureDomain),
+        ("filetransfer_live_route_epoch_projection_missing_raw_count={0}" -f $fileTransferRouteTransitionLiveEpochProjectionProof.RawCount),
+        ("filetransfer_live_route_epoch_projection_missing_distinct_count={0}" -f $fileTransferRouteTransitionLiveEpochProjectionProof.DistinctCount),
+        ("filetransfer_live_route_epoch_projection_missing_recovered_count={0}" -f $fileTransferRouteTransitionLiveEpochProjectionProof.RecoveredCount),
+        ("filetransfer_live_route_epoch_projection_missing_unresolved_count={0}" -f $fileTransferRouteTransitionLiveEpochProjectionProof.UnresolvedCount),
         ("filetransfer_route_transition_incomplete_raw_count={0}" -f $fileTransferRouteTransitionProof.RawCount),
         ("filetransfer_route_transition_incomplete_distinct_count={0}" -f $fileTransferRouteTransitionProof.DistinctCount),
         ("filetransfer_route_transition_incomplete_recovered_count={0}" -f $fileTransferRouteTransitionProof.RecoveredCount),
@@ -2739,6 +2774,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_route_transition_incomplete_distinct_count={0}" -f $fileTransferRouteTransitionProof.DistinctCount),
         ("filetransfer_route_transition_incomplete_recovered_count={0}" -f $fileTransferRouteTransitionProof.RecoveredCount),
         ("filetransfer_route_transition_incomplete_unresolved_count={0}" -f $fileTransferRouteTransitionProof.UnresolvedCount),
+        ("filetransfer_live_route_epoch_projection_missing_raw_count={0}" -f $fileTransferRouteTransitionLiveEpochProjectionProof.RawCount),
+        ("filetransfer_live_route_epoch_projection_missing_distinct_count={0}" -f $fileTransferRouteTransitionLiveEpochProjectionProof.DistinctCount),
+        ("filetransfer_live_route_epoch_projection_missing_recovered_count={0}" -f $fileTransferRouteTransitionLiveEpochProjectionProof.RecoveredCount),
+        ("filetransfer_live_route_epoch_projection_missing_unresolved_count={0}" -f $fileTransferRouteTransitionLiveEpochProjectionProof.UnresolvedCount),
         ("filetransfer_route_transition_verdict={0}" -f $fileTransferRouteTransitionProof.Verdict),
         ("filetransfer_route_transition_draining_transport_grace_terminalization_raw_count={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.RawCount),
         ("filetransfer_route_transition_draining_transport_grace_terminalization_distinct_count={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.DistinctCount),
@@ -3034,6 +3073,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_route_transition_incomplete_distinct_count={0}" -f $fileTransferRouteTransitionProof.DistinctCount),
         ("filetransfer_route_transition_incomplete_recovered_count={0}" -f $fileTransferRouteTransitionProof.RecoveredCount),
         ("filetransfer_route_transition_incomplete_unresolved_count={0}" -f $fileTransferRouteTransitionProof.UnresolvedCount),
+        ("filetransfer_live_route_epoch_projection_missing_raw_count={0}" -f $fileTransferRouteTransitionLiveEpochProjectionProof.RawCount),
+        ("filetransfer_live_route_epoch_projection_missing_distinct_count={0}" -f $fileTransferRouteTransitionLiveEpochProjectionProof.DistinctCount),
+        ("filetransfer_live_route_epoch_projection_missing_recovered_count={0}" -f $fileTransferRouteTransitionLiveEpochProjectionProof.RecoveredCount),
+        ("filetransfer_live_route_epoch_projection_missing_unresolved_count={0}" -f $fileTransferRouteTransitionLiveEpochProjectionProof.UnresolvedCount),
         ("filetransfer_route_transition_verdict={0}" -f $fileTransferRouteTransitionProof.Verdict),
         ("filetransfer_route_transition_draining_transport_grace_terminalization_raw_count={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.RawCount),
         ("filetransfer_route_transition_draining_transport_grace_terminalization_distinct_count={0}" -f $fileTransferRouteTransitionDrainingTransportGraceProof.DistinctCount),
@@ -3304,6 +3347,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
         ("first_proof_chain_failure_writer_sequence={0}" -f $firstProofChainFailureWriterSequence),
         ("semantic_failure_domain={0}" -f $semanticFailureDomain),
+        ("filetransfer_live_route_epoch_projection_missing_raw_count={0}" -f $fileTransferRouteTransitionLiveEpochProjectionProof.RawCount),
+        ("filetransfer_live_route_epoch_projection_missing_distinct_count={0}" -f $fileTransferRouteTransitionLiveEpochProjectionProof.DistinctCount),
+        ("filetransfer_live_route_epoch_projection_missing_recovered_count={0}" -f $fileTransferRouteTransitionLiveEpochProjectionProof.RecoveredCount),
+        ("filetransfer_live_route_epoch_projection_missing_unresolved_count={0}" -f $fileTransferRouteTransitionLiveEpochProjectionProof.UnresolvedCount),
         ("filetransfer_route_transition_incomplete_raw_count={0}" -f $fileTransferRouteTransitionProof.RawCount),
         ("filetransfer_route_transition_incomplete_distinct_count={0}" -f $fileTransferRouteTransitionProof.DistinctCount),
         ("filetransfer_route_transition_incomplete_recovered_count={0}" -f $fileTransferRouteTransitionProof.RecoveredCount),
@@ -3594,6 +3641,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         filetransfer_route_transition_incomplete_recovered_count = $fileTransferRouteTransitionProof.RecoveredCount
         filetransfer_route_transition_incomplete_unresolved_count = $fileTransferRouteTransitionProof.UnresolvedCount
         filetransfer_route_transition_verdict = $fileTransferRouteTransitionProof.Verdict
+        filetransfer_live_route_epoch_projection_missing_raw_count = $fileTransferRouteTransitionLiveEpochProjectionProof.RawCount
+        filetransfer_live_route_epoch_projection_missing_distinct_count = $fileTransferRouteTransitionLiveEpochProjectionProof.DistinctCount
+        filetransfer_live_route_epoch_projection_missing_recovered_count = $fileTransferRouteTransitionLiveEpochProjectionProof.RecoveredCount
+        filetransfer_live_route_epoch_projection_missing_unresolved_count = $fileTransferRouteTransitionLiveEpochProjectionProof.UnresolvedCount
         filetransfer_route_transition_draining_transport_grace_terminalization_raw_count = $fileTransferRouteTransitionDrainingTransportGraceProof.RawCount
         filetransfer_route_transition_draining_transport_grace_terminalization_distinct_count = $fileTransferRouteTransitionDrainingTransportGraceProof.DistinctCount
         filetransfer_route_transition_draining_transport_grace_terminalization_recovered_count = $fileTransferRouteTransitionDrainingTransportGraceProof.RecoveredCount
@@ -3866,12 +3917,24 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count = $fallbackTailTransportEpochReauthorizationProof.DistinctCount
         post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count = $fallbackTailTransportEpochReauthorizationProof.RecoveredCount
         post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count = $fallbackTailTransportEpochReauthorizationProof.UnresolvedCount
+        data_path_correlation_index_ms = $dataPathIndexStopwatch.ElapsedMilliseconds
+        data_path_correlation_total_ms = $dataPathCorrelationStopwatch.ElapsedMilliseconds
+        data_path_correlation_index_build_visit_count = [int64]$fileTunaV4DataPathCorrelationIndex.Statistics.build_visit_count
+        data_path_correlation_bounded_lookup_visit_count = [int64]$fileTunaV4DataPathCorrelationIndex.Statistics.bounded_lookup_visit_count
     }
     $compactDto | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-compact-summary.json') -Encoding UTF8
 
     return [pscustomobject]@{
         Verdict = $verdict
         GateStatus = $gateStatus
+        DataPathCorrelationIndexMilliseconds =
+            $dataPathIndexStopwatch.ElapsedMilliseconds
+        DataPathCorrelationTotalMilliseconds =
+            $dataPathCorrelationStopwatch.ElapsedMilliseconds
+        DataPathCorrelationIndexBuildVisitCount =
+            [int64]$fileTunaV4DataPathCorrelationIndex.Statistics.build_visit_count
+        DataPathCorrelationBoundedLookupVisitCount =
+            [int64]$fileTunaV4DataPathCorrelationIndex.Statistics.bounded_lookup_visit_count
     }
 }
 
@@ -4709,6 +4772,10 @@ function Invoke-FileTransferRetainedAnalysis {
         gate_ms = 0
         artifact_write_ms = 0
         json_write_ms = 0
+        data_path_correlation_index_ms = 0
+        data_path_correlation_total_ms = 0
+        data_path_correlation_index_build_visit_count = 0
+        data_path_correlation_bounded_lookup_visit_count = 0
         total_ms = 0
         event_count = 0
         indexed_event_count = 0
@@ -4766,6 +4833,14 @@ function Invoke-FileTransferRetainedAnalysis {
                 LiveRouteProofMode = $LiveRouteProofMode
             }
             $compactResult = Write-FileTransferCompactRetainedAnalysisArtifacts @compactArtifactArgs
+            $stageDiagnostics['data_path_correlation_index_ms'] =
+                $compactResult.DataPathCorrelationIndexMilliseconds
+            $stageDiagnostics['data_path_correlation_total_ms'] =
+                $compactResult.DataPathCorrelationTotalMilliseconds
+            $stageDiagnostics['data_path_correlation_index_build_visit_count'] =
+                $compactResult.DataPathCorrelationIndexBuildVisitCount
+            $stageDiagnostics['data_path_correlation_bounded_lookup_visit_count'] =
+                $compactResult.DataPathCorrelationBoundedLookupVisitCount
             $efficiencyArtifactArgs = @{
                 ArtifactDir = $resolvedArtifactDir
                 Index = $index

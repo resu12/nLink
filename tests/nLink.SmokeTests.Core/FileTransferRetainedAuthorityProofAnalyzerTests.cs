@@ -2494,6 +2494,129 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
     [InlineData(false)]
     [InlineData(true)]
     [Trait("RetainedAuthorityProofSuite", "FileTransferRouteTransition")]
+    public async Task AnalyzeRetained_FileTransferRouteTransitionLiveEpochProjection_MissingIsPrecise(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_route_transition_projection_missing";
+        const int generation = 17;
+        const string authorityId = "transition-projection-17";
+        var commit = FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_committed",
+                transferId,
+                generation,
+                authorityId,
+                status: "Committed",
+                sourceRoute: "regular_nkn_v4_fast",
+                sourceProtocol: 4,
+                targetRoute: "file_tuna_v4",
+                targetProtocol: 4,
+                targetTransport: "Tuna",
+                writerSequence: 105)
+            + "; projected_target_route=file_tuna_v4; target_runtime_generation=20; " +
+              "target_terminal_generation=0; target_leg_generation=21; " +
+              "target_route_publication_generation=22; target_route_commit_generation=23; " +
+              "decision_status=Committed";
+        var disposition = FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_disposition_applied",
+                transferId,
+                generation,
+                authorityId,
+                status: "Committed",
+                sourceRoute: "regular_nkn_v4_fast",
+                sourceProtocol: 4,
+                targetRoute: "file_tuna_v4",
+                targetProtocol: 4,
+                targetTransport: "Tuna",
+                writerSequence: 107)
+            + "; disposition=committed; resulting_route_publication_generation=22; " +
+              "resulting_route_commit_generation=23";
+        var lines = BuildFileTunaV4DataPathProofFixture(
+            transferId,
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_prepared",
+                transferId,
+                generation,
+                authorityId,
+                sourceRoute: "regular_nkn_v4_fast",
+                sourceProtocol: 4,
+                targetRoute: "file_tuna_v4",
+                targetProtocol: 4,
+                targetTransport: "Tuna",
+                writerSequence: 101),
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_pause_bound",
+                transferId,
+                generation,
+                authorityId,
+                status: "Installed",
+                sourceRoute: "regular_nkn_v4_fast",
+                sourceProtocol: 4,
+                targetRoute: "file_tuna_v4",
+                targetProtocol: 4,
+                targetTransport: "Tuna",
+                writerSequence: 102),
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_draining",
+                transferId,
+                generation,
+                authorityId,
+                status: "Draining",
+                sourceRoute: "regular_nkn_v4_fast",
+                sourceProtocol: 4,
+                targetRoute: "file_tuna_v4",
+                targetProtocol: 4,
+                targetTransport: "Tuna",
+                writerSequence: 103),
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_drain_receipt_decided",
+                transferId,
+                generation,
+                authorityId,
+                status: "Accepted",
+                sourceRoute: "regular_nkn_v4_fast",
+                sourceProtocol: 4,
+                targetRoute: "file_tuna_v4",
+                targetProtocol: 4,
+                targetTransport: "Tuna",
+                writerSequence: 104),
+            commit,
+            $"event=filetransfer_route_hint_authorized_publication_accepted; session_id=sess_a; transfer_id={transferId}; direction=outbound; route=file_tuna_v4; protocol_version=4; live_route_epoch=5; runtime_generation=20; terminal_generation=0; leg_generation=21; route_publication_generation=22; route_commit_generation=23; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; log_writer_id=writer_route_transition; log_writer_sequence=106",
+            disposition,
+            $"event=filetransfer_data_path_send_result; session_id=sess_a; transfer_id={transferId}; direction=outbound; route=file_tuna_v4; protocol_version=4; live_route_epoch=5; runtime_generation=20; terminal_generation=0; leg_generation=21; route_publication_generation=22; route_commit_generation=23; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; delivery_result=sent; log_writer_id=writer_route_transition; log_writer_sequence=108");
+
+        var result = compact
+            ? await RunAnalyzeFixtureAsync(
+                lines,
+                environment: new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                })
+            : await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["filetransfer_live_route_epoch_projection_missing_raw_count"]);
+        Assert.Equal("1", verdict["filetransfer_live_route_epoch_projection_missing_distinct_count"]);
+        Assert.Equal("0", verdict["filetransfer_live_route_epoch_projection_missing_recovered_count"]);
+        Assert.Equal("1", verdict["filetransfer_live_route_epoch_projection_missing_unresolved_count"]);
+        Assert.Equal("filetransfer_live_route_epoch_projection_missing", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("filetransfer_route_transition_committed", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("incomplete_proof", verdict["acceptance_failure_class"]);
+        Assert.Equal("incomplete_proof", verdict["runtime_correctness_verdict"]);
+        Assert.Equal("route_evidence", verdict["semantic_failure_domain"]);
+        Assert.Equal(
+            "committed_route_transition_not_projected_to_live_route_epoch_evidence",
+            verdict["first_proof_chain_failure_reason"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedAuthorityProofSuite", "FileTransferRouteTransition")]
     public async Task AnalyzeRetained_RouteTransitionDrainingTransportGrace_HasFullCompactParity(
         bool compact)
     {

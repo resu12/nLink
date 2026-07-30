@@ -8506,11 +8506,258 @@ function Test-FileTransferFileTunaV4DataPathActualEvent {
         (Test-FileTransferFileTunaV4PayloadDataPathEvent -Event $Event)
 }
 
+function Get-FileTransferFileTunaV4DataPathPayloadIdentityKey {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    if (-not (Test-FileTransferFileTunaV4DataPathHasRange -Event $Event)) {
+        return ''
+    }
+
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($fieldName in @('session_id', 'transfer_id', 'frame_type')) {
+        $value = Get-FileTransferEventField -Event $Event -Name $fieldName -Default ''
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            return ''
+        }
+
+        $parts.Add($value.ToLowerInvariant()) | Out-Null
+    }
+
+    $rangeStart = Get-FileTransferFileTunaV4DataPathRangeStart -Event $Event
+    $rangeEndExclusive =
+        Get-FileTransferFileTunaV4DataPathRangeEndExclusive -Event $Event
+    $rawPayloadBytes =
+        Get-FileTransferEventInt64Field -Event $Event -Name 'raw_payload_bytes' -Default 0
+    $batchChunkCount =
+        Get-FileTransferEventInt64Field -Event $Event -Name 'batch_chunk_count' -Default 0
+    if ($rangeStart -lt 0 -or
+        $rangeEndExclusive -le $rangeStart -or
+        $rawPayloadBytes -le 0 -or
+        $batchChunkCount -le 0) {
+        return ''
+    }
+
+    $parts.Add([string]$rangeStart) | Out-Null
+    $parts.Add([string]$rangeEndExclusive) | Out-Null
+    $parts.Add([string]$rawPayloadBytes) | Out-Null
+    $parts.Add([string]$batchChunkCount) | Out-Null
+    return [string]::Join('|', $parts)
+}
+
+function Get-FileTransferFileTunaV4DataPathTransferScopeKey {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    $sessionId = Get-FileTransferEventField -Event $Event -Name 'session_id' -Default ''
+    $transferId = Get-FileTransferEventField -Event $Event -Name 'transfer_id' -Default ''
+    if ([string]::IsNullOrWhiteSpace($sessionId) -or
+        [string]::IsNullOrWhiteSpace($transferId)) {
+        return ''
+    }
+
+    return ("{0}|{1}" -f $sessionId.ToLowerInvariant(), $transferId.ToLowerInvariant())
+}
+
+function Add-FileTransferFileTunaV4DataPathIndexEvent {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Lookup,
+        [Parameter(Mandatory = $true)][string]$Key,
+        [Parameter(Mandatory = $true)]$Event
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Key)) {
+        return
+    }
+
+    if (-not $Lookup.ContainsKey($Key)) {
+        $Lookup[$Key] = New-Object System.Collections.Generic.List[object]
+    }
+
+    $Lookup[$Key].Add($Event) | Out-Null
+}
+
+function New-FileTransferFileTunaV4DataPathCorrelationIndex {
+    param([object[]]$Events = @())
+
+    $payloadEvents = @{}
+    $writerSequenceEvents = @{}
+    $terminalEventsByScope = @{}
+    $receiverTransitionsByWriterScope = @{}
+    $orderedEvents = @($Events | Sort-Object Sequence, LineNumber)
+    $buildVisitCount = 0L
+
+    foreach ($event in @($orderedEvents)) {
+        $buildVisitCount++
+        $payloadKey =
+            Get-FileTransferFileTunaV4DataPathPayloadIdentityKey -Event $event
+        if (-not [string]::IsNullOrWhiteSpace($payloadKey)) {
+            Add-FileTransferFileTunaV4DataPathIndexEvent `
+                -Lookup $payloadEvents `
+                -Key $payloadKey `
+                -Event $event
+        }
+
+        $writerId =
+            Get-FileTransferEventField -Event $event -Name 'log_writer_id' -Default ''
+        $writerSequence =
+            Get-FileTransferEventInt64Field `
+                -Event $event `
+                -Name 'log_writer_sequence' `
+                -Default 0
+        if (-not [string]::IsNullOrWhiteSpace($writerId) -and
+            $writerSequence -gt 0) {
+            $writerKey = $writerId.ToLowerInvariant()
+            if (-not $writerSequenceEvents.ContainsKey($writerKey)) {
+                $writerSequenceEvents[$writerKey] = @{}
+            }
+
+            $sequenceKey = [string]$writerSequence
+            Add-FileTransferFileTunaV4DataPathIndexEvent `
+                -Lookup $writerSequenceEvents[$writerKey] `
+                -Key $sequenceKey `
+                -Event $event
+        }
+
+        $scopeKey =
+            Get-FileTransferFileTunaV4DataPathTransferScopeKey -Event $event
+        if ($event.EventName -in @(
+                'file_transfer_outbound_terminal',
+                'file_transfer_inbound_terminal',
+                'transfer_terminal',
+                'filetransfer_runtime_terminalized')) {
+            Add-FileTransferFileTunaV4DataPathIndexEvent `
+                -Lookup $terminalEventsByScope `
+                -Key $scopeKey `
+                -Event $event
+        }
+
+        if ($event.EventName -eq 'filetransfer_route_transitioned' -and
+            -not [string]::IsNullOrWhiteSpace($writerId)) {
+            $writerScopeKey =
+                "{0}|{1}" -f $writerId.ToLowerInvariant(), $scopeKey
+            Add-FileTransferFileTunaV4DataPathIndexEvent `
+                -Lookup $receiverTransitionsByWriterScope `
+                -Key $writerScopeKey `
+                -Event $event
+        }
+    }
+
+    return [pscustomobject]@{
+        OrderedEvents = $orderedEvents
+        PayloadEvents = $payloadEvents
+        WriterSequenceEvents = $writerSequenceEvents
+        TerminalEventsByScope = $terminalEventsByScope
+        ReceiverTransitionsByWriterScope = $receiverTransitionsByWriterScope
+        Statistics = [ordered]@{
+            build_visit_count = $buildVisitCount
+            bounded_lookup_visit_count = 0L
+            payload_key_count = $payloadEvents.Count
+            writer_count = $writerSequenceEvents.Count
+        }
+    }
+}
+
+function Get-FileTransferFileTunaV4DataPathIndexedPayloadEvents {
+    param(
+        [Parameter(Mandatory = $true)]$Index,
+        [Parameter(Mandatory = $true)]$Event
+    )
+
+    $key = Get-FileTransferFileTunaV4DataPathPayloadIdentityKey -Event $Event
+    if ([string]::IsNullOrWhiteSpace($key) -or
+        -not $Index.PayloadEvents.ContainsKey($key)) {
+        return @()
+    }
+
+    [object[]]$events = $Index.PayloadEvents[$key].ToArray()
+    $Index.Statistics.bounded_lookup_visit_count += $events.Count
+    return $events
+}
+
+function Get-FileTransferFileTunaV4DataPathIndexedWriterWindow {
+    param(
+        [Parameter(Mandatory = $true)]$Index,
+        [Parameter(Mandatory = $true)][string]$WriterId,
+        [Parameter(Mandatory = $true)][int64]$AfterSequence,
+        [int]$WindowSize = 8
+    )
+
+    if ([string]::IsNullOrWhiteSpace($WriterId) -or $WindowSize -le 0) {
+        return @()
+    }
+
+    $writerKey = $WriterId.ToLowerInvariant()
+    if (-not $Index.WriterSequenceEvents.ContainsKey($writerKey)) {
+        return @()
+    }
+
+    $events = New-Object System.Collections.Generic.List[object]
+    $sequenceLookup = $Index.WriterSequenceEvents[$writerKey]
+    for ($offset = 1; $offset -le $WindowSize; $offset++) {
+        $Index.Statistics.bounded_lookup_visit_count++
+        $sequenceKey = [string]($AfterSequence + $offset)
+        if ($sequenceLookup.ContainsKey($sequenceKey)) {
+            foreach ($event in $sequenceLookup[$sequenceKey].ToArray()) {
+                $events.Add($event) | Out-Null
+            }
+        }
+    }
+
+    return @($events.ToArray())
+}
+
+function Get-FileTransferFileTunaV4DataPathIndexedTerminalEvents {
+    param(
+        [Parameter(Mandatory = $true)]$Index,
+        [Parameter(Mandatory = $true)]$Event
+    )
+
+    $key = Get-FileTransferFileTunaV4DataPathTransferScopeKey -Event $Event
+    if ([string]::IsNullOrWhiteSpace($key) -or
+        -not $Index.TerminalEventsByScope.ContainsKey($key)) {
+        return @()
+    }
+
+    [object[]]$events = $Index.TerminalEventsByScope[$key].ToArray()
+    $Index.Statistics.bounded_lookup_visit_count += $events.Count
+    return $events
+}
+
+function Get-FileTransferFileTunaV4DataPathIndexedReceiverTransitions {
+    param(
+        [Parameter(Mandatory = $true)]$Index,
+        [Parameter(Mandatory = $true)]$Event,
+        [Parameter(Mandatory = $true)][string]$WriterId
+    )
+
+    $scopeKey =
+        Get-FileTransferFileTunaV4DataPathTransferScopeKey -Event $Event
+    if ([string]::IsNullOrWhiteSpace($scopeKey) -or
+        [string]::IsNullOrWhiteSpace($WriterId)) {
+        return @()
+    }
+
+    $key = "{0}|{1}" -f $WriterId.ToLowerInvariant(), $scopeKey
+    if (-not $Index.ReceiverTransitionsByWriterScope.ContainsKey($key)) {
+        return @()
+    }
+
+    [object[]]$events =
+        $Index.ReceiverTransitionsByWriterScope[$key].ToArray()
+    $Index.Statistics.bounded_lookup_visit_count += $events.Count
+    return $events
+}
+
 function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
     param(
         [Parameter(Mandatory = $true)]$Mismatch,
-        [Parameter(Mandatory = $true)][object[]]$Events
+        [Parameter(Mandatory = $true)][object[]]$Events,
+        $DataPathIndex = $null
     )
+
+    if ($null -eq $DataPathIndex) {
+        $DataPathIndex =
+            New-FileTransferFileTunaV4DataPathCorrelationIndex -Events $Events
+    }
 
     $proofDirection = Get-FileTransferEventField -Event $Mismatch -Name 'proof_direction' -Default ''
     if ($Mismatch.EventName -ne 'filetransfer_data_path_receive_result' -and
@@ -8526,7 +8773,12 @@ function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
 
     $ignoredWindowAnchorSequence = $writerSequence
     if ($Mismatch.EventName -eq 'filetransfer_data_path_receive_result') {
-        [object[]]$exactMismatchCompanions = @($Events | Where-Object {
+        [object[]]$exactMismatchCompanions = @(
+            Get-FileTransferFileTunaV4DataPathIndexedWriterWindow `
+                -Index $DataPathIndex `
+                -WriterId $writerId `
+                -AfterSequence $writerSequence |
+            Where-Object {
                 $companion = $_
                 if ($companion.EventName -ne 'filetransfer_tuna_data_path_mismatch' -or
                     (Get-FileTransferEventField -Event $companion -Name 'proof_direction' -Default '') -ne 'receive' -or
@@ -8600,10 +8852,16 @@ function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
     }
 
     $mismatchSequence = if ($null -ne $Mismatch.PSObject.Properties['Sequence']) { [int64]$Mismatch.Sequence } else { 0L }
-    [object[]]$ignoredEvents = @($Events | Where-Object {
-                $_.EventName -eq 'filetransfer_data_frame_ignored' -and
-                (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'file_tuna_v4_payload_requires_tuna'
-            })
+    [object[]]$ignoredEvents = @(
+        Get-FileTransferFileTunaV4DataPathIndexedWriterWindow `
+            -Index $DataPathIndex `
+            -WriterId $writerId `
+            -AfterSequence $ignoredWindowAnchorSequence |
+        Where-Object {
+            $_.EventName -eq 'filetransfer_data_frame_ignored' -and
+            (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq
+                'file_tuna_v4_payload_requires_tuna'
+        })
     foreach ($ignored in @($ignoredEvents)) {
         $ignoredWriterId = Get-FileTransferEventField -Event $ignored -Name 'log_writer_id' -Default ''
         $ignoredWriterSequence = Get-FileTransferEventInt64Field -Event $ignored -Name 'log_writer_sequence' -Default 0
@@ -8643,7 +8901,11 @@ function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
         $mismatchRangeEndExclusive = Get-FileTransferFileTunaV4DataPathRangeEndExclusive -Event $Mismatch
         $mismatchRawBytes = Get-FileTransferEventInt64Field -Event $Mismatch -Name 'raw_payload_bytes' -Default 0
         $mismatchChunkCount = Get-FileTransferEventInt64Field -Event $Mismatch -Name 'batch_chunk_count' -Default 0
-        [object[]]$sourceSends = @($Events | Where-Object {
+        [object[]]$sourceSends = @(
+            Get-FileTransferFileTunaV4DataPathIndexedPayloadEvents `
+                -Index $DataPathIndex `
+                -Event $Mismatch |
+            Where-Object {
                 $_.EventName -eq 'filetransfer_data_path_send_result' -and
                 $_.Sequence -lt $mismatchSequence -and
                 (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
@@ -8680,7 +8942,11 @@ function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
                 continue
             }
 
-            [object[]]$terminalBoundaries = @($Events | Where-Object {
+            [object[]]$terminalBoundaries = @(
+                Get-FileTransferFileTunaV4DataPathIndexedTerminalEvents `
+                    -Index $DataPathIndex `
+                    -Event $Mismatch |
+                Where-Object {
                     $_.Sequence -gt $sourceSend.Sequence -and
                     $_.Sequence -lt $mismatchSequence -and
                     $_.EventName -in @(
@@ -8701,7 +8967,12 @@ function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
                 continue
             }
 
-            [object[]]$receiverTransitions = @($Events | Where-Object {
+            [object[]]$receiverTransitions = @(
+                Get-FileTransferFileTunaV4DataPathIndexedReceiverTransitions `
+                    -Index $DataPathIndex `
+                    -Event $Mismatch `
+                    -WriterId $writerId |
+                Where-Object {
                     $_.EventName -eq 'filetransfer_route_transitioned' -and
                     $_.Sequence -gt $sourceSend.Sequence -and
                     $_.Sequence -lt $mismatchSequence -and
@@ -8973,6 +9244,7 @@ function Get-FileTransferRouteTransitionCorrelation {
             'retained_frame_transport_epoch' { @('retained_frame_transport_epoch', 'frame_transport_epoch', 'peer_proof_frame_transport_epoch') }
             'retained_frame_fingerprint' { @('retained_frame_fingerprint', 'frame_fingerprint', 'peer_proof_frame_sha256') }
             'status' { @('status', 'decision_status', 'apply_status', 'bind_status') }
+            'outcome' { @('outcome', 'drain_outcome') }
             default { @($Name) }
         }
 
@@ -9592,6 +9864,285 @@ function Get-FileTransferRouteTransitionCorrelation {
         RawCandidateRecords = @($rawRecords.ToArray())
         CandidateRecords = @($distinctRecords.ToArray())
         UnresolvedCandidateRecords = @($distinctRecords.ToArray())
+    }
+}
+
+function Get-FileTransferRouteTransitionLiveEpochProjectionCorrelation {
+    param([object[]]$Events = @())
+
+    [object[]]$orderedEvents =
+        @($Events | Where-Object { $null -ne $_ } | Sort-Object Sequence, LineNumber)
+    [object[]]$commits = @($orderedEvents | Where-Object {
+            $_.EventName -eq 'filetransfer_route_transition_committed' -and
+            (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in
+                @('Committed', 'Idempotent')
+        })
+    [object[]]$publications = @($orderedEvents | Where-Object {
+            $_.EventName -eq 'filetransfer_route_hint_authorized_publication_accepted'
+        })
+    [object[]]$dispositions = @($orderedEvents | Where-Object {
+            $_.EventName -eq 'filetransfer_route_transition_disposition_applied'
+        })
+    [object[]]$payloadEvents = @($orderedEvents | Where-Object {
+            $_.EventName -in @(
+                'filetransfer_data_path_send_result',
+                'filetransfer_data_path_receive_result',
+                'filetransfer_tuna_data_path_peer_visible')
+        })
+    [object[]]$legacyEvents = @($orderedEvents | Where-Object {
+            $_.EventName -in @(
+                'filetransfer_route_transitioned',
+                'filetransfer_route_selected',
+                'filetransfer_live_route_epoch_started',
+                'filetransfer_live_route_epoch_recovered')
+        })
+    [object[]]$frameAppliedEvents = @($orderedEvents | Where-Object {
+            $_.EventName -eq 'filetransfer_route_transition_retained_frame_applied'
+        })
+
+    function Get-ProjectionField {
+        param(
+            [Parameter(Mandatory = $true)]$Event,
+            [Parameter(Mandatory = $true)][string]$Name
+        )
+
+        $aliases = switch ($Name) {
+            'authority_id' { @('authority_id', 'transition_authority_id') }
+            'transition_generation' { @('transition_generation', 'operation_generation') }
+            'runtime_generation' { @('runtime_generation', 'target_runtime_generation') }
+            'terminal_generation' { @('terminal_generation', 'target_terminal_generation') }
+            'leg_generation' { @('leg_generation', 'target_leg_generation') }
+            'route_publication_generation' {
+                @(
+                    'route_publication_generation',
+                    'target_route_publication_generation',
+                    'resulting_route_publication_generation')
+            }
+            'route_commit_generation' {
+                @(
+                    'route_commit_generation',
+                    'target_route_commit_generation',
+                    'resulting_route_commit_generation')
+            }
+            'route' { @('route', 'target_route', 'projected_target_route') }
+            'protocol_version' { @('protocol_version', 'target_protocol_version') }
+            default { @($Name) }
+        }
+        foreach ($alias in @($aliases)) {
+            $value = Get-FileTransferEventField -Event $Event -Name $alias -Default ''
+            if (-not [string]::IsNullOrWhiteSpace($value) -and
+                $value -notin @('(none)', 'none', '(missing)', '__missing__')) {
+                if ($Name -eq 'route') {
+                    if ([string]::Equals(
+                            $value,
+                            'FileTunaV4',
+                            [System.StringComparison]::OrdinalIgnoreCase)) {
+                        return 'file_tuna_v4'
+                    }
+                    if ([string]::Equals(
+                            $value,
+                            'PostTunaFallbackV6',
+                            [System.StringComparison]::OrdinalIgnoreCase)) {
+                        return 'post_tuna_fallback_v6'
+                    }
+                    if ([string]::Equals(
+                            $value,
+                            'RegularNknV4Fast',
+                            [System.StringComparison]::OrdinalIgnoreCase)) {
+                        return 'regular_nkn_v4_fast'
+                    }
+                }
+                return $value
+            }
+        }
+        return ''
+    }
+
+    function Test-ProjectionFieldsEqual {
+        param(
+            [Parameter(Mandatory = $true)]$Left,
+            [Parameter(Mandatory = $true)]$Right,
+            [Parameter(Mandatory = $true)][string[]]$Fields
+        )
+
+        foreach ($field in $Fields) {
+            $leftValue = Get-ProjectionField -Event $Left -Name $field
+            $rightValue = Get-ProjectionField -Event $Right -Name $field
+            if ([string]::IsNullOrWhiteSpace($leftValue) -or
+                [string]::IsNullOrWhiteSpace($rightValue) -or
+                -not [string]::Equals(
+                    $leftValue,
+                    $rightValue,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    $candidateRecords = New-Object System.Collections.Generic.List[object]
+    $authoritativeRecords = New-Object System.Collections.Generic.List[object]
+    $distinctKeys = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($commit in $commits) {
+        $authorityId = Get-ProjectionField -Event $commit -Name 'authority_id'
+        $transitionGeneration =
+            Get-ProjectionField -Event $commit -Name 'transition_generation'
+        $direction = Get-ProjectionField -Event $commit -Name 'direction'
+        $sessionId = Get-ProjectionField -Event $commit -Name 'session_id'
+        $transferId = Get-ProjectionField -Event $commit -Name 'transfer_id'
+        if (@(
+                $authorityId,
+                $transitionGeneration,
+                $direction,
+                $sessionId,
+                $transferId,
+                (Get-ProjectionField -Event $commit -Name 'route'),
+                (Get-ProjectionField -Event $commit -Name 'protocol_version'),
+                (Get-ProjectionField -Event $commit -Name 'runtime_generation'),
+                (Get-ProjectionField -Event $commit -Name 'leg_generation'),
+                (Get-ProjectionField -Event $commit -Name 'route_publication_generation'),
+                (Get-ProjectionField -Event $commit -Name 'route_commit_generation')) |
+                Where-Object { [string]::IsNullOrWhiteSpace($_) } |
+                Select-Object -First 1) {
+            continue
+        }
+
+        $key = @(
+            $sessionId,
+            $transferId,
+            $direction,
+            $authorityId,
+            $transitionGeneration) -join '|'
+        if (-not $distinctKeys.Add($key.ToLowerInvariant())) {
+            continue
+        }
+
+        [object[]]$matchingPublications = @($publications | Where-Object {
+                [int64]$_.Sequence -gt [int64]$commit.Sequence -and
+                (Test-ProjectionFieldsEqual -Left $commit -Right $_ -Fields @(
+                        'session_id',
+                        'transfer_id',
+                        'direction',
+                        'route',
+                        'protocol_version',
+                        'runtime_generation',
+                        'terminal_generation',
+                        'leg_generation',
+                        'route_publication_generation',
+                        'route_commit_generation'))
+            } | Sort-Object Sequence, LineNumber)
+        [object[]]$matchingDispositions = @($dispositions | Where-Object {
+                [int64]$_.Sequence -gt [int64]$commit.Sequence -and
+                (Test-ProjectionFieldsEqual -Left $commit -Right $_ -Fields @(
+                        'session_id',
+                        'transfer_id',
+                        'direction',
+                        'authority_id',
+                        'transition_generation',
+                        'route_publication_generation',
+                        'route_commit_generation')) -and
+                (
+                    (Get-ProjectionField -Event $_ -Name 'disposition') -eq 'committed' -or
+                    (Get-ProjectionField -Event $_ -Name 'decision_status') -in
+                        @('Applied', 'Committed', 'Idempotent')
+                )
+            } | Sort-Object Sequence, LineNumber)
+        if ($matchingPublications.Count -eq 0 -or $matchingDispositions.Count -eq 0) {
+            continue
+        }
+
+        $targetRoute = Get-ProjectionField -Event $commit -Name 'route'
+        $disposition = $matchingDispositions[0]
+        if ($targetRoute -eq 'post_tuna_fallback_v6') {
+            [object[]]$matchingFrames = @($frameAppliedEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$commit.Sequence -and
+                    [int64]$_.Sequence -lt [int64]$disposition.Sequence -and
+                    (Test-ProjectionFieldsEqual -Left $commit -Right $_ -Fields @(
+                            'session_id',
+                            'transfer_id',
+                            'direction',
+                            'authority_id',
+                            'transition_generation'))
+                })
+            if ($matchingFrames.Count -eq 0) {
+                continue
+            }
+        }
+
+        [object[]]$matchingPayloads = @($payloadEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$disposition.Sequence -and
+                (Get-ProjectionField -Event $_ -Name 'delivery_result') -in
+                    @('', 'sent', 'received', 'accepted', 'applied') -and
+                (Test-ProjectionFieldsEqual -Left $commit -Right $_ -Fields @(
+                        'session_id',
+                        'transfer_id',
+                        'direction',
+                        'route',
+                        'protocol_version',
+                        'runtime_generation',
+                        'terminal_generation',
+                        'leg_generation',
+                        'route_publication_generation',
+                        'route_commit_generation'))
+            } | Sort-Object Sequence, LineNumber)
+        if ($matchingPayloads.Count -eq 0) {
+            continue
+        }
+
+        $authoritativeRecords.Add([pscustomobject]@{
+                Commit = $commit
+                Publication = $matchingPublications[0]
+                Disposition = $disposition
+                Payload = $matchingPayloads[0]
+                Key = $key
+            }) | Out-Null
+
+        $requiredProjectionNames = @(
+            'filetransfer_route_transitioned',
+            'filetransfer_route_selected',
+            'filetransfer_live_route_epoch_started',
+            'filetransfer_live_route_epoch_recovered')
+        $missingProjection = $false
+        foreach ($projectionName in $requiredProjectionNames) {
+            [object[]]$matchingProjection = @($legacyEvents | Where-Object {
+                    $_.EventName -eq $projectionName -and
+                    [int64]$_.Sequence -gt [int64]$commit.Sequence -and
+                    (Test-ProjectionFieldsEqual -Left $commit -Right $_ -Fields @(
+                            'session_id',
+                            'transfer_id',
+                            'direction',
+                            'route',
+                            'protocol_version',
+                            'runtime_generation',
+                            'terminal_generation',
+                            'leg_generation',
+                            'route_publication_generation',
+                            'route_commit_generation'))
+                })
+            if ($matchingProjection.Count -eq 0) {
+                $missingProjection = $true
+                break
+            }
+        }
+        if ($missingProjection) {
+            $candidateRecords.Add([pscustomobject]@{
+                    Event = $commit
+                    Reason =
+                        'committed_route_transition_not_projected_to_live_route_epoch_evidence'
+                    DistinctKey = $key
+                }) | Out-Null
+        }
+    }
+
+    return [pscustomobject]@{
+        RawCount = $candidateRecords.Count
+        DistinctCount = $candidateRecords.Count
+        RecoveredCount = 0
+        UnresolvedCount = $candidateRecords.Count
+        Verdict = if ($candidateRecords.Count -gt 0) { 'fail' } else { 'pass' }
+        AuthoritativeRecords = @($authoritativeRecords.ToArray())
+        CandidateRecords = @($candidateRecords.ToArray())
+        UnresolvedCandidateRecords = @($candidateRecords.ToArray())
     }
 }
 
@@ -10671,9 +11222,17 @@ function Get-FileTransferRouteTransitionDrainingTransportGraceCorrelation {
 }
 
 function Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation {
-    param([object[]]$Events = @())
+    param(
+        [object[]]$Events = @(),
+        $DataPathIndex = $null
+    )
 
     [object[]]$orderedEvents = @($Events | Sort-Object Sequence, LineNumber)
+    if ($null -eq $DataPathIndex) {
+        $DataPathIndex =
+            New-FileTransferFileTunaV4DataPathCorrelationIndex `
+                -Events $orderedEvents
+    }
     $coordinatorTransitionProof =
         Get-FileTransferRegularV4ToTunaRouteTransitionCorrelation -Events $orderedEvents
     [object[]]$ownerRetirements = @($orderedEvents | Where-Object {
@@ -11116,7 +11675,11 @@ function Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation {
 
         $writerId = Get-FileTransferEventField -Event $Send -Name 'log_writer_id' -Default ''
         $minimumSequence = [Math]::Max([int64]$Send.Sequence, [int64]$OwnerBoundary.Sequence)
-        [object[]]$receives = @($orderedEvents | Where-Object {
+        [object[]]$receives = @(
+            Get-FileTransferFileTunaV4DataPathIndexedPayloadEvents `
+                -Index $DataPathIndex `
+                -Event $Send |
+            Where-Object {
                 $_.EventName -eq 'filetransfer_data_path_receive_result' -and
                 [int64]$_.Sequence -gt $minimumSequence -and
                 (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' -and
@@ -11136,7 +11699,12 @@ function Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation {
                 continue
             }
 
-            [object[]]$mismatches = @($orderedEvents | Where-Object {
+            [object[]]$mismatches = @(
+                Get-FileTransferFileTunaV4DataPathIndexedWriterWindow `
+                    -Index $DataPathIndex `
+                    -WriterId $receiveWriterId `
+                    -AfterSequence $receiveWriterSequence |
+                Where-Object {
                     $_.EventName -eq 'filetransfer_tuna_data_path_mismatch' -and
                     (Get-FileTransferEventField -Event $_ -Name 'proof_direction' -Default '') -eq 'receive' -and
                     (Get-FileTransferEventField -Event $_ -Name 'mismatch_reason' -Default '') -eq 'file_tuna_v4_resolved_to_regular_nkn' -and
@@ -11157,7 +11725,12 @@ function Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation {
                 -Event $mismatch `
                 -Name 'log_writer_sequence' `
                 -Default 0
-            [object[]]$ignoredEvents = @($orderedEvents | Where-Object {
+            [object[]]$ignoredEvents = @(
+                Get-FileTransferFileTunaV4DataPathIndexedWriterWindow `
+                    -Index $DataPathIndex `
+                    -WriterId $receiveWriterId `
+                    -AfterSequence $mismatchWriterSequence |
+                Where-Object {
                     $_.EventName -eq 'filetransfer_data_frame_ignored' -and
                     (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'file_tuna_v4_payload_requires_tuna' -and
                     [string]::Equals(
@@ -11522,20 +12095,37 @@ function Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation {
         RawCandidateEvents = @($rawCandidateRecords | ForEach-Object { $_.Event })
         CorroboratingMismatchEvents = @($corroboratingEvents.ToArray())
         CorroboratingMismatchSequences = @($corroboratingSequences)
+        DataPathIndexBuildVisitCount =
+            [int64]$DataPathIndex.Statistics.build_visit_count
+        DataPathIndexLookupVisitCount =
+            [int64]$DataPathIndex.Statistics.bounded_lookup_visit_count
     }
 }
 
 function Get-FileTransferFileTunaV4DataPathMismatchProof {
     param(
         [object[]]$Events = @(),
-        $RouteCommitSendDrainProof = $null
+        $RouteCommitSendDrainProof = $null,
+        $DataPathIndex = $null
     )
 
     [object[]]$orderedEvents = @($Events | Sort-Object Sequence, LineNumber)
-    if ($null -eq $RouteCommitSendDrainProof) {
-        $RouteCommitSendDrainProof = Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation -Events $orderedEvents
+    if ($null -eq $DataPathIndex) {
+        $DataPathIndex =
+            New-FileTransferFileTunaV4DataPathCorrelationIndex `
+                -Events $orderedEvents
     }
-    [long[]]$corroboratingMismatchSequences = @($RouteCommitSendDrainProof.CorroboratingMismatchSequences)
+    if ($null -eq $RouteCommitSendDrainProof) {
+        $RouteCommitSendDrainProof =
+            Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation `
+                -Events $orderedEvents `
+                -DataPathIndex $DataPathIndex
+    }
+    $corroboratingMismatchSequences =
+        New-Object 'System.Collections.Generic.HashSet[int64]'
+    foreach ($sequence in @($RouteCommitSendDrainProof.CorroboratingMismatchSequences)) {
+        [void]$corroboratingMismatchSequences.Add([int64]$sequence)
+    }
     [object[]]$actualEvents = @($orderedEvents | Where-Object {
             Test-FileTransferFileTunaV4DataPathActualEvent -Event $_
         })
@@ -11545,14 +12135,21 @@ function Get-FileTransferFileTunaV4DataPathMismatchProof {
             (Get-FileTransferEventField -Event $_ -Name 'delivery_transport' -Default '') -eq 'regular_nkn'
         })
     [object[]]$effectiveMismatchEvents = @($rawMismatchEvents | Where-Object {
-            [int64]$_.Sequence -notin $corroboratingMismatchSequences -and
-            -not (Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed -Mismatch $_ -Events $orderedEvents)
+            -not $corroboratingMismatchSequences.Contains([int64]$_.Sequence) -and
+            -not (Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed `
+                -Mismatch $_ `
+                -Events $orderedEvents `
+                -DataPathIndex $DataPathIndex)
         })
 
     return [pscustomobject]@{
         RawCount = [int]$rawMismatchEvents.Count
         EffectiveCount = [int]$effectiveMismatchEvents.Count
         EffectiveEvents = $effectiveMismatchEvents
+        DataPathIndexBuildVisitCount =
+            [int64]$DataPathIndex.Statistics.build_visit_count
+        DataPathIndexLookupVisitCount =
+            [int64]$DataPathIndex.Statistics.bounded_lookup_visit_count
     }
 }
 
@@ -11576,13 +12173,21 @@ function Get-FileTransferFileTunaV4DataPathProof {
     [object[]]$intentEvents = @($events | Where-Object { Test-FileTransferFileTunaV4DataPathIntentEvent -Event $_ })
     [object[]]$actualEvents = @($events | Where-Object { Test-FileTransferFileTunaV4DataPathActualEvent -Event $_ })
     $routeTransitionProof = Get-FileTransferRouteTransitionCorrelation -Events $events
+    $routeTransitionLiveEpochProjectionProof =
+        Get-FileTransferRouteTransitionLiveEpochProjectionCorrelation -Events $events
     $routeTransitionTransportGraceProof =
         Get-FileTransferRouteTransitionDrainingTransportGraceCorrelation `
             -Events $events
-    $routeCommitSendDrainProof = Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation -Events $events
+    $dataPathIndex =
+        New-FileTransferFileTunaV4DataPathCorrelationIndex -Events $events
+    $routeCommitSendDrainProof =
+        Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation `
+            -Events $events `
+            -DataPathIndex $dataPathIndex
     $mismatchProof = Get-FileTransferFileTunaV4DataPathMismatchProof `
         -Events $events `
-        -RouteCommitSendDrainProof $routeCommitSendDrainProof
+        -RouteCommitSendDrainProof $routeCommitSendDrainProof `
+        -DataPathIndex $dataPathIndex
     [object[]]$mismatchEvents = @($mismatchProof.EffectiveEvents)
     [object[]]$tunaActualEvents = @($actualEvents | Where-Object {
             (Get-FileTransferEventField -Event $_ -Name 'actual_transport' -Default '') -eq 'tuna' -or
@@ -11792,6 +12397,8 @@ function Get-FileTransferFileTunaV4DataPathProof {
         Findings = $findings
         EvidenceEvents = @($evidence.ToArray() | Select-Object -First 20)
         RouteTransitionProof = $routeTransitionProof
+        RouteTransitionLiveEpochProjectionProof =
+            $routeTransitionLiveEpochProjectionProof
         RouteTransitionTransportGraceProof =
             $routeTransitionTransportGraceProof
         RouteCommitSendDrainProof = $routeCommitSendDrainProof
@@ -12331,6 +12938,8 @@ function New-FileTransferRouteConsistencySummaryLines {
     $publicationAuthorityFieldCoverageProof = Get-FileTransferPublicationAuthorityFieldCoverageProof -Summary $Summary
     $fileTunaV4DataPathProof = Get-FileTransferFileTunaV4DataPathProof -Summary $Summary
     $fileTransferRouteTransitionProof = $fileTunaV4DataPathProof.RouteTransitionProof
+    $fileTransferRouteTransitionLiveEpochProjectionProof =
+        $fileTunaV4DataPathProof.RouteTransitionLiveEpochProjectionProof
     $fileTransferRouteTransitionDrainingTransportGraceProof =
         $fileTunaV4DataPathProof.RouteTransitionTransportGraceProof
     $runtimeUnlockRegularV4RouteCommitSendDrainProof = $fileTunaV4DataPathProof.RouteCommitSendDrainProof
@@ -12475,6 +13084,10 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("filetransfer_route_transition_incomplete_distinct_count={0}" -f $RecoveryClassification.FileTransferRouteTransitionIncompleteDistinctCount)) | Out-Null
     $lines.Add(("filetransfer_route_transition_incomplete_recovered_count={0}" -f $RecoveryClassification.FileTransferRouteTransitionIncompleteRecoveredCount)) | Out-Null
     $lines.Add(("filetransfer_route_transition_incomplete_unresolved_count={0}" -f $RecoveryClassification.FileTransferRouteTransitionIncompleteUnresolvedCount)) | Out-Null
+    $lines.Add(("filetransfer_live_route_epoch_projection_missing_raw_count={0}" -f $RecoveryClassification.FileTransferLiveRouteEpochProjectionMissingRawCount)) | Out-Null
+    $lines.Add(("filetransfer_live_route_epoch_projection_missing_distinct_count={0}" -f $RecoveryClassification.FileTransferLiveRouteEpochProjectionMissingDistinctCount)) | Out-Null
+    $lines.Add(("filetransfer_live_route_epoch_projection_missing_recovered_count={0}" -f $RecoveryClassification.FileTransferLiveRouteEpochProjectionMissingRecoveredCount)) | Out-Null
+    $lines.Add(("filetransfer_live_route_epoch_projection_missing_unresolved_count={0}" -f $RecoveryClassification.FileTransferLiveRouteEpochProjectionMissingUnresolvedCount)) | Out-Null
     $lines.Add(("filetransfer_route_transition_verdict={0}" -f $RecoveryClassification.FileTransferRouteTransitionVerdict)) | Out-Null
     $lines.Add(("filetransfer_route_transition_draining_transport_grace_terminalization_raw_count={0}" -f $RecoveryClassification.FileTransferRouteTransitionDrainingTransportGraceTerminalizationRawCount)) | Out-Null
     $lines.Add(("filetransfer_route_transition_draining_transport_grace_terminalization_distinct_count={0}" -f $RecoveryClassification.FileTransferRouteTransitionDrainingTransportGraceTerminalizationDistinctCount)) | Out-Null
@@ -14322,6 +14935,10 @@ function New-FileTransferStabilityGateSummaryLines {
         ("filetransfer_route_transition_incomplete_distinct_count={0}" -f $recoveryClassification.FileTransferRouteTransitionIncompleteDistinctCount),
         ("filetransfer_route_transition_incomplete_recovered_count={0}" -f $recoveryClassification.FileTransferRouteTransitionIncompleteRecoveredCount),
         ("filetransfer_route_transition_incomplete_unresolved_count={0}" -f $recoveryClassification.FileTransferRouteTransitionIncompleteUnresolvedCount),
+        ("filetransfer_live_route_epoch_projection_missing_raw_count={0}" -f $recoveryClassification.FileTransferLiveRouteEpochProjectionMissingRawCount),
+        ("filetransfer_live_route_epoch_projection_missing_distinct_count={0}" -f $recoveryClassification.FileTransferLiveRouteEpochProjectionMissingDistinctCount),
+        ("filetransfer_live_route_epoch_projection_missing_recovered_count={0}" -f $recoveryClassification.FileTransferLiveRouteEpochProjectionMissingRecoveredCount),
+        ("filetransfer_live_route_epoch_projection_missing_unresolved_count={0}" -f $recoveryClassification.FileTransferLiveRouteEpochProjectionMissingUnresolvedCount),
         ("filetransfer_route_transition_verdict={0}" -f $recoveryClassification.FileTransferRouteTransitionVerdict),
         ("filetransfer_route_transition_draining_transport_grace_terminalization_raw_count={0}" -f $recoveryClassification.FileTransferRouteTransitionDrainingTransportGraceTerminalizationRawCount),
         ("filetransfer_route_transition_draining_transport_grace_terminalization_distinct_count={0}" -f $recoveryClassification.FileTransferRouteTransitionDrainingTransportGraceTerminalizationDistinctCount),
@@ -34714,6 +35331,11 @@ function Get-FileTransferRecoveryFailureClassification {
         [Parameter(Mandatory = $true)]$Summary
     )
 
+    $cachePropertyName = '__FileTransferRecoveryFailureClassification'
+    if ($null -ne $Summary.PSObject.Properties[$cachePropertyName]) {
+        return $Summary.PSObject.Properties[$cachePropertyName].Value
+    }
+
     [object[]]$events = @()
     if ($null -ne $Summary.PSObject.Properties['AllEvents']) {
         $events = @($Summary.AllEvents)
@@ -34722,6 +35344,20 @@ function Get-FileTransferRecoveryFailureClassification {
     if ($events.Count -eq 0) {
         $events = @($Summary.GlobalEvents + $Summary.TransferEvents)
     }
+
+    [object[]]$allEvents = @($events)
+    [object[]]$events = @($allEvents | Where-Object {
+        $_.EventName -notin @(
+            'filetransfer_tuna_data_path_peer_visible',
+            'filetransfer_data_path_send_result',
+            'filetransfer_route_transition_physical_send_lease_registered',
+            'filetransfer_outbound_physical_send_lease_retired',
+            'filetransfer_route_transition_physical_send_lease_retired',
+            'tuna_accelerated_envelope_sent',
+            'tuna_accelerated_file_frame_sent',
+            'filetransfer_outbound_physical_send_lease_registered'
+        )
+    })
 
     $runtimeUnlockOfferNotObservedEvents = @($events | Where-Object {
         $_.EventName -eq 'tuna_acceleration_activation_offer_not_observed' -and
@@ -35311,7 +35947,23 @@ function Get-FileTransferRecoveryFailureClassification {
         (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'runtime_unlock_tuna_listener_rearm_after_probe_close_failed'
     })
     $regularV4TerminalBeforeActivationEvents = @($events | Where-Object {
-        $_.EventName -eq 'filetransfer_tuna_gui_regular_v4_terminal_before_tuna_activation_commit'
+        $guiFailure = $_
+        if ($guiFailure.EventName -ne
+            'filetransfer_tuna_gui_regular_v4_terminal_before_tuna_activation_commit') {
+            return $false
+        }
+
+        @(
+            $fileTransferRouteTransitionLiveEpochProjectionProof.AuthoritativeRecords |
+                Where-Object {
+                    [int64]$_.Commit.Sequence -lt [int64]$guiFailure.Sequence -and
+                    (Get-FileTransferEventField -Event $_.Commit -Name 'session_id' -Default '') -eq
+                        (Get-FileTransferEventField -Event $guiFailure -Name 'session_id' -Default '') -and
+                    (Get-FileTransferEventField -Event $_.Commit -Name 'transfer_id' -Default '') -eq
+                        (Get-FileTransferEventField -Event $guiFailure -Name 'transfer_id' -Default '') -and
+                    (Get-FileTransferEventField -Event $_.Commit -Name 'direction' -Default '') -eq
+                        (Get-FileTransferEventField -Event $guiFailure -Name 'direction' -Default '')
+                }).Count -eq 0
     })
     $runtimeUnlockPreCommitRouteEpochProofEvents = @($events | Where-Object {
         ($_.EventName -eq 'filetransfer_live_route_epoch_started' -or $_.EventName -eq 'filetransfer_live_route_epoch_recovered') -and
@@ -35483,6 +36135,7 @@ function Get-FileTransferRecoveryFailureClassification {
             (Get-FileTransferEventField -Event $_ -Name 'state' -Default '') -eq 'Completed'
         )
     })
+    [object[]]$events = @($allEvents)
     $fileTunaV6Events = @($events | Where-Object {
         (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'file_tuna_v6'
     })
@@ -35493,6 +36146,8 @@ function Get-FileTransferRecoveryFailureClassification {
     $publicationAuthorityFieldCoverageProof = Get-FileTransferPublicationAuthorityFieldCoverageProof -Summary $Summary
     $fileTunaV4DataPathProof = Get-FileTransferFileTunaV4DataPathProof -Summary $Summary
     $fileTransferRouteTransitionProof = $fileTunaV4DataPathProof.RouteTransitionProof
+    $fileTransferRouteTransitionLiveEpochProjectionProof =
+        $fileTunaV4DataPathProof.RouteTransitionLiveEpochProjectionProof
     $fileTransferRouteTransitionDrainingTransportGraceProof =
         $fileTunaV4DataPathProof.RouteTransitionTransportGraceProof
     $runtimeUnlockRegularV4RouteCommitSendDrainProof = $fileTunaV4DataPathProof.RouteCommitSendDrainProof
@@ -38293,6 +38948,15 @@ function Get-FileTransferRecoveryFailureClassification {
             -DefaultReason ([string]$candidateRecord.Reason) `
             -UseDefaultReason
     }
+    foreach ($candidateRecord in @(
+            $fileTransferRouteTransitionLiveEpochProjectionProof.UnresolvedCandidateRecords)) {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class 'filetransfer_live_route_epoch_projection_missing' `
+            -Events @($candidateRecord.Event) `
+            -DefaultReason ([string]$candidateRecord.Reason) `
+            -UseDefaultReason
+    }
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
         -Class 'filetransfer_route_transition_draining_transport_grace_terminalization' `
@@ -38559,6 +39223,9 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($fileTransferRouteTransitionProof.UnresolvedCount -gt 0) {
         $class = 'filetransfer_route_transition_incomplete'
+    }
+    elseif ($fileTransferRouteTransitionLiveEpochProjectionProof.UnresolvedCount -gt 0) {
+        $class = 'filetransfer_live_route_epoch_projection_missing'
     }
     elseif ($runtimeUnlockRegularV4RouteCommitSendDrainProof.UnresolvedCount -gt 0) {
         $class = 'runtime_unlock_regular_v4_route_commit_send_drain_missing'
@@ -38955,7 +39622,7 @@ function Get-FileTransferRecoveryFailureClassification {
         'fail'
     }
 
-    [pscustomobject]@{
+    $classification = [pscustomobject]@{
         Class = $class
         FirstProofChainFailureClass = if ($null -ne $firstProofChainFailure) { $firstProofChainFailure.Class } else { '(none)' }
         FirstProofChainFailureEvent = if ($null -ne $firstProofChainFailure) { $firstProofChainFailure.Event } else { '(none)' }
@@ -38967,6 +39634,10 @@ function Get-FileTransferRecoveryFailureClassification {
             [int64]$firstProofChainFailure.WriterSequence
         } else { 0L }
         SemanticFailureDomain = if ($class -in @(
+                'filetransfer_live_route_epoch_projection_missing')) {
+            'route_evidence'
+        }
+        elseif ($class -in @(
                 'filetransfer_receive_recovery_operation_incomplete',
                 'filetransfer_receive_recovery_completed_unproven_successor_missing',
                 'filetransfer_receive_recovery_completed_proven_successor_missing',
@@ -39403,6 +40074,16 @@ function Get-FileTransferRecoveryFailureClassification {
         FileTransferRouteTransitionIncompleteRecoveredCount = $fileTransferRouteTransitionProof.RecoveredCount
         FileTransferRouteTransitionIncompleteUnresolvedCount = $fileTransferRouteTransitionProof.UnresolvedCount
         FileTransferRouteTransitionVerdict = $fileTransferRouteTransitionProof.Verdict
+        FileTransferLiveRouteEpochProjectionMissingRawCount =
+            $fileTransferRouteTransitionLiveEpochProjectionProof.RawCount
+        FileTransferLiveRouteEpochProjectionMissingDistinctCount =
+            $fileTransferRouteTransitionLiveEpochProjectionProof.DistinctCount
+        FileTransferLiveRouteEpochProjectionMissingRecoveredCount =
+            $fileTransferRouteTransitionLiveEpochProjectionProof.RecoveredCount
+        FileTransferLiveRouteEpochProjectionMissingUnresolvedCount =
+            $fileTransferRouteTransitionLiveEpochProjectionProof.UnresolvedCount
+        FileTransferLiveRouteEpochProjectionVerdict =
+            $fileTransferRouteTransitionLiveEpochProjectionProof.Verdict
         FileTransferRouteTransitionDrainingTransportGraceTerminalizationRawCount =
             $fileTransferRouteTransitionDrainingTransportGraceProof.RawCount
         FileTransferRouteTransitionDrainingTransportGraceTerminalizationDistinctCount =
@@ -39579,6 +40260,8 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockFallbackUnavailableMarkCount = $fallbackRuntimeUnlockSeparationProof.FallbackUnavailableMarkCount
         RuntimeUnlockFallbackUnavailableWithoutDenialCount = $fallbackRuntimeUnlockSeparationProof.FallbackUnavailableWithoutCoordinatorDenialCount
     }
+    $Summary | Add-Member -NotePropertyName $cachePropertyName -NotePropertyValue $classification -Force
+    return $classification
 }
 
 function New-FileTransferInvariantLedgerObject {
@@ -39859,6 +40542,10 @@ function New-FileTransferInvariantLedgerObject {
         filetransfer_route_transition_incomplete_distinct_count = [string]$recoveryClassification.FileTransferRouteTransitionIncompleteDistinctCount
         filetransfer_route_transition_incomplete_recovered_count = [string]$recoveryClassification.FileTransferRouteTransitionIncompleteRecoveredCount
         filetransfer_route_transition_incomplete_unresolved_count = [string]$recoveryClassification.FileTransferRouteTransitionIncompleteUnresolvedCount
+        filetransfer_live_route_epoch_projection_missing_raw_count = [string]$recoveryClassification.FileTransferLiveRouteEpochProjectionMissingRawCount
+        filetransfer_live_route_epoch_projection_missing_distinct_count = [string]$recoveryClassification.FileTransferLiveRouteEpochProjectionMissingDistinctCount
+        filetransfer_live_route_epoch_projection_missing_recovered_count = [string]$recoveryClassification.FileTransferLiveRouteEpochProjectionMissingRecoveredCount
+        filetransfer_live_route_epoch_projection_missing_unresolved_count = [string]$recoveryClassification.FileTransferLiveRouteEpochProjectionMissingUnresolvedCount
         filetransfer_route_transition_verdict = $recoveryClassification.FileTransferRouteTransitionVerdict
         filetransfer_route_transition_draining_transport_grace_terminalization_raw_count = [string]$recoveryClassification.FileTransferRouteTransitionDrainingTransportGraceTerminalizationRawCount
         filetransfer_route_transition_draining_transport_grace_terminalization_distinct_count = [string]$recoveryClassification.FileTransferRouteTransitionDrainingTransportGraceTerminalizationDistinctCount
@@ -40357,7 +41044,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         $effectiveNextArtifact = 'filetransfer-operator-verdict.txt'
     }
 
-    $operatorAcceptanceFailureClass = if ($recoveryClassification.Class -in @('runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'runtime_unlock_precommit_probe_start_handoff_missing', 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing', 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_initial_pressure_install_missing', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery', 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
+    $operatorAcceptanceFailureClass = if ($recoveryClassification.Class -in @('filetransfer_live_route_epoch_projection_missing', 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'runtime_unlock_precommit_probe_start_handoff_missing', 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing', 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_initial_pressure_install_missing', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery', 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
         'incomplete_proof'
     }
     elseif ($recoveryClassification.Class -in @('filetransfer_receive_recovery_operation_incomplete', 'filetransfer_receive_recovery_completed_unproven_successor_missing', 'filetransfer_receive_recovery_completed_proven_successor_missing', 'runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'filetransfer_bridge_recovery_execution_payload_hold_missing', 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing', 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing', 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing', 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved', 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing', 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'fallback_tail_yield_authority_invalid', 'filetransfer_route_transition_draining_transport_grace_terminalization', 'filetransfer_route_transition_incomplete', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
@@ -40801,6 +41488,10 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("filetransfer_route_transition_incomplete_distinct_count={0}" -f $recoveryClassification.FileTransferRouteTransitionIncompleteDistinctCount),
         ("filetransfer_route_transition_incomplete_recovered_count={0}" -f $recoveryClassification.FileTransferRouteTransitionIncompleteRecoveredCount),
         ("filetransfer_route_transition_incomplete_unresolved_count={0}" -f $recoveryClassification.FileTransferRouteTransitionIncompleteUnresolvedCount),
+        ("filetransfer_live_route_epoch_projection_missing_raw_count={0}" -f $recoveryClassification.FileTransferLiveRouteEpochProjectionMissingRawCount),
+        ("filetransfer_live_route_epoch_projection_missing_distinct_count={0}" -f $recoveryClassification.FileTransferLiveRouteEpochProjectionMissingDistinctCount),
+        ("filetransfer_live_route_epoch_projection_missing_recovered_count={0}" -f $recoveryClassification.FileTransferLiveRouteEpochProjectionMissingRecoveredCount),
+        ("filetransfer_live_route_epoch_projection_missing_unresolved_count={0}" -f $recoveryClassification.FileTransferLiveRouteEpochProjectionMissingUnresolvedCount),
         ("filetransfer_route_transition_verdict={0}" -f $recoveryClassification.FileTransferRouteTransitionVerdict),
         ("filetransfer_route_transition_draining_transport_grace_terminalization_raw_count={0}" -f $recoveryClassification.FileTransferRouteTransitionDrainingTransportGraceTerminalizationRawCount),
         ("filetransfer_route_transition_draining_transport_grace_terminalization_distinct_count={0}" -f $recoveryClassification.FileTransferRouteTransitionDrainingTransportGraceTerminalizationDistinctCount),

@@ -7408,6 +7408,13 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     return $false
                 }
 
+                if ($normalizedSettlementOutcome -eq 'stalerejected') {
+                    # Without an atomic recovery-proof requirement, the exact
+                    # coordinator apply plus binding retirement is terminal
+                    # cleanup. Contract settlement is optional telemetry.
+                    continue
+                }
+
                 $acceptedSuccessor = Get-TunaGuiLogLineFieldValue `
                     -Line $accepted.Line `
                     -Name 'successor_authority_id'
@@ -9660,6 +9667,17 @@ function Wait-TunaGuiFileTunaV4PublicationAfterBookmark {
         [bool]$RequirePositiveRouteCommitGeneration = $false
     )
 
+    if ($RequirePositiveRouteCommitGeneration) {
+        return [string](Wait-TunaGuiLiveRouteEpochStarted `
+            -Bookmark $Bookmark `
+            -Route 'file_tuna_v4' `
+            -ProtocolVersion 4 `
+            -HandoffKind 'normal_to_tuna_activation' `
+            -TargetTransport 'tuna' `
+            -Description $Description `
+            -TimeoutMs $TimeoutMs)
+    }
+
     try {
         $line = [string](Wait-Until -TimeoutMs $TimeoutMs -PollMs 500 -OnTimeoutMessage "Timed out waiting for app log evidence: $Description" -Condition {
             foreach ($candidateLine in @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)) {
@@ -10673,13 +10691,22 @@ function Wait-TunaGuiLiveRouteEpochEvidence {
         'live_route_epoch='
     )
     $label = if ([string]::IsNullOrWhiteSpace($Description)) { $EventName } else { $Description }
-    $requiresAfterLine = -not [string]::IsNullOrWhiteSpace($AfterLine)
+    $requiresAfterLine =
+        -not [string]::IsNullOrWhiteSpace($AfterLine) -and
+        $AfterLine.IndexOf(
+            'gui_authoritative_projection=1',
+            [System.StringComparison]::OrdinalIgnoreCase) -lt 0
     $newScanState = {
         param([int]$CandidateBookmark)
 
         return [pscustomobject]@{
             Cursor = $CandidateBookmark
             AfterLineSeen = -not $requiresAfterLine
+            TransitionCommits = @{}
+            TransitionPublications = @{}
+            TransitionDispositions = @{}
+            TransitionFramesApplied = @{}
+            TransitionPayloads = @{}
         }
     }
     $primaryScanState = & $newScanState $Bookmark
@@ -10695,6 +10722,151 @@ function Wait-TunaGuiLiveRouteEpochEvidence {
     $waitStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $pollMs = 500
     $timeoutMessage = "Timed out waiting for app log evidence: $label"
+    $getTransitionScopeKey = {
+        param($Fields)
+
+        $parts = New-Object System.Collections.Generic.List[string]
+        foreach ($name in @('session_id', 'transfer_id', 'direction')) {
+            $value = Get-GuiSmokeFieldValue -Fields $Fields -Name $name -Default ''
+            if ([string]::IsNullOrWhiteSpace($value)) {
+                return ''
+            }
+            $parts.Add($value.ToLowerInvariant()) | Out-Null
+        }
+        return [string]::Join('|', $parts)
+    }
+    $getTransitionAuthorityKey = {
+        param($Fields)
+
+        $scopeKey = & $getTransitionScopeKey $Fields
+        $authorityId =
+            Get-GuiSmokeFieldValue -Fields $Fields -Name 'authority_id' -Default ''
+        $generation =
+            Get-GuiSmokeFieldValue -Fields $Fields -Name 'transition_generation' -Default ''
+        if ([string]::IsNullOrWhiteSpace($scopeKey) -or
+            [string]::IsNullOrWhiteSpace($authorityId) -or
+            [string]::IsNullOrWhiteSpace($generation)) {
+            return ''
+        }
+        return "{0}|{1}|{2}" -f
+            $scopeKey,
+            $authorityId.ToLowerInvariant(),
+            $generation.ToLowerInvariant()
+    }
+    $getTransitionTargetKey = {
+        param(
+            $Fields,
+            [bool]$CommitShape
+        )
+
+        $scopeKey = & $getTransitionScopeKey $Fields
+        if ([string]::IsNullOrWhiteSpace($scopeKey)) {
+            return ''
+        }
+        $names = if ($CommitShape) {
+            [ordered]@{
+                route = @('projected_target_route', 'target_route')
+                protocol = @('target_protocol_version')
+                runtime = @('target_runtime_generation')
+                terminal = @('target_terminal_generation')
+                leg = @('target_leg_generation')
+                publication = @('target_route_publication_generation')
+                commit = @('target_route_commit_generation')
+            }
+        }
+        else {
+            [ordered]@{
+                route = @('route', 'target_route')
+                protocol = @('protocol_version', 'target_protocol_version')
+                runtime = @('runtime_generation')
+                terminal = @('terminal_generation')
+                leg = @('leg_generation')
+                publication = @('route_publication_generation')
+                commit = @('route_commit_generation')
+            }
+        }
+        $values = New-Object System.Collections.Generic.List[string]
+        $values.Add($scopeKey) | Out-Null
+        foreach ($entry in $names.GetEnumerator()) {
+            $value = ''
+            foreach ($alias in $entry.Value) {
+                $value =
+                    Get-GuiSmokeFieldValue -Fields $Fields -Name $alias -Default ''
+                if (-not [string]::IsNullOrWhiteSpace($value)) {
+                    break
+                }
+            }
+            if ([string]::IsNullOrWhiteSpace($value)) {
+                return ''
+            }
+            $values.Add($value.ToLowerInvariant()) | Out-Null
+        }
+        return [string]::Join('|', $values)
+    }
+    $tryGetAuthoritativeTransitionProjection = {
+        param(
+            [Parameter(Mandatory = $true)]$ScanState
+        )
+
+        foreach ($entry in $ScanState.TransitionCommits.GetEnumerator()) {
+            $commit = $entry.Value
+            $commitFields = $commit.Fields
+            $targetKey = & $getTransitionTargetKey $commitFields $true
+            if ([string]::IsNullOrWhiteSpace($targetKey) -or
+                -not $ScanState.TransitionPublications.ContainsKey($targetKey) -or
+                -not $ScanState.TransitionDispositions.ContainsKey($entry.Key) -or
+                -not $ScanState.TransitionPayloads.ContainsKey($targetKey)) {
+                continue
+            }
+
+            $targetRoute =
+                Get-GuiSmokeFieldValue -Fields $commitFields -Name 'projected_target_route' -Default (
+                    Get-GuiSmokeFieldValue -Fields $commitFields -Name 'target_route' -Default '')
+            if ($targetRoute -eq 'post_tuna_fallback_v6' -and
+                -not $ScanState.TransitionFramesApplied.ContainsKey($entry.Key)) {
+                continue
+            }
+
+            $publication = $ScanState.TransitionPublications[$targetKey]
+            $epoch = ConvertTo-GuiSmokeInt -Value (
+                Get-GuiSmokeFieldValue -Fields $publication.Fields -Name 'live_route_epoch' -Default '0') -Default 0
+            if ($LiveRouteEpoch -gt 0 -and $epoch -ne $LiveRouteEpoch) {
+                continue
+            }
+            if ($AfterLiveRouteEpoch -gt 0 -and $epoch -le $AfterLiveRouteEpoch) {
+                continue
+            }
+            if (-not [string]::Equals(
+                    $targetRoute,
+                    $Route,
+                    [System.StringComparison]::OrdinalIgnoreCase) -or
+                (ConvertTo-GuiSmokeInt -Value (
+                    Get-GuiSmokeFieldValue -Fields $commitFields -Name 'target_protocol_version' -Default '-1') -Default -1) -ne
+                    $ProtocolVersion -or
+                -not (Test-GuiSmokeFieldEquals -Fields $commitFields -Name 'handoff_kind' -Expected $HandoffKind) -or
+                -not (Test-GuiSmokeFieldEquals -Fields $commitFields -Name 'target_transport' -Expected $TargetTransport)) {
+                continue
+            }
+
+            return (
+                "event={0}; route={1}; protocol_version={2}; live_route_epoch={3}; handoff_kind={4}; target_transport={5}; authority_id={6}; transition_generation={7}; runtime_generation={8}; terminal_generation={9}; leg_generation={10}; route_publication_generation={11}; route_commit_generation={12}; coordinator_decision_reason=accepted; gui_authoritative_projection=1; source_commit_sequence={13}" -f
+                    $EventName,
+                    $targetRoute,
+                    $ProtocolVersion,
+                    $epoch,
+                    $HandoffKind,
+                    $TargetTransport,
+                    (Get-GuiSmokeFieldValue -Fields $commitFields -Name 'authority_id' -Default ''),
+                    (Get-GuiSmokeFieldValue -Fields $commitFields -Name 'transition_generation' -Default ''),
+                    (Get-GuiSmokeFieldValue -Fields $commitFields -Name 'target_runtime_generation' -Default ''),
+                    (Get-GuiSmokeFieldValue -Fields $commitFields -Name 'target_terminal_generation' -Default ''),
+                    (Get-GuiSmokeFieldValue -Fields $commitFields -Name 'target_leg_generation' -Default ''),
+                    (Get-GuiSmokeFieldValue -Fields $commitFields -Name 'target_route_publication_generation' -Default ''),
+                    (Get-GuiSmokeFieldValue -Fields $commitFields -Name 'target_route_commit_generation' -Default ''),
+                    $commit.Sequence)
+        }
+        return $null
+    }
     $findMatchingLine = {
         param(
             [Parameter(Mandatory = $true)]$ScanState,
@@ -10721,6 +10893,59 @@ function Wait-TunaGuiLiveRouteEpochEvidence {
                     return $null
                 }
 
+                $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $line
+                $event =
+                    Get-GuiSmokeFieldValue -Fields $fields -Name 'event' -Default ''
+                switch ($event) {
+                    'filetransfer_route_transition_committed' {
+                        $authorityKey = & $getTransitionAuthorityKey $fields
+                        if (-not [string]::IsNullOrWhiteSpace($authorityKey) -and
+                            (Test-GuiSmokeFieldEquals -Fields $fields -Name 'decision_status' -Expected 'Committed')) {
+                            $ScanState.TransitionCommits[$authorityKey] = [pscustomobject]@{
+                                Fields = $fields
+                                Sequence = $lineIndex
+                            }
+                        }
+                    }
+                    'filetransfer_route_hint_authorized_publication_accepted' {
+                        $targetKey = & $getTransitionTargetKey $fields $false
+                        if (-not [string]::IsNullOrWhiteSpace($targetKey)) {
+                            $ScanState.TransitionPublications[$targetKey] = [pscustomobject]@{
+                                Fields = $fields
+                                Sequence = $lineIndex
+                            }
+                        }
+                    }
+                    'filetransfer_route_transition_disposition_applied' {
+                        $authorityKey = & $getTransitionAuthorityKey $fields
+                        if (-not [string]::IsNullOrWhiteSpace($authorityKey) -and
+                            (
+                                (Test-GuiSmokeFieldEquals -Fields $fields -Name 'disposition' -Expected 'committed') -or
+                                (Test-GuiSmokeFieldEquals -Fields $fields -Name 'decision_status' -Expected 'Applied')
+                            )) {
+                            $ScanState.TransitionDispositions[$authorityKey] = [pscustomobject]@{
+                                Fields = $fields
+                                Sequence = $lineIndex
+                            }
+                        }
+                    }
+                    'filetransfer_route_transition_retained_frame_applied' {
+                        $authorityKey = & $getTransitionAuthorityKey $fields
+                        if (-not [string]::IsNullOrWhiteSpace($authorityKey)) {
+                            $ScanState.TransitionFramesApplied[$authorityKey] = $lineIndex
+                        }
+                    }
+                    { $_ -in @(
+                            'filetransfer_data_path_send_result',
+                            'filetransfer_data_path_receive_result',
+                            'filetransfer_tuna_data_path_peer_visible') } {
+                        $targetKey = & $getTransitionTargetKey $fields $false
+                        if (-not [string]::IsNullOrWhiteSpace($targetKey)) {
+                            $ScanState.TransitionPayloads[$targetKey] = $lineIndex
+                        }
+                    }
+                }
+
                 $matched = $true
                 foreach ($needle in $needles) {
                     if ($line.IndexOf([string]$needle, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
@@ -10733,7 +10958,6 @@ function Wait-TunaGuiLiveRouteEpochEvidence {
                     return $null
                 }
 
-                $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $line
                 $epoch = ConvertTo-GuiSmokeInt -Value (Get-GuiSmokeFieldValue -Fields $fields -Name 'live_route_epoch' -Default '0') -Default 0
                 if ($LiveRouteEpoch -gt 0 -and $epoch -ne $LiveRouteEpoch) {
                     return $null
@@ -10770,9 +10994,17 @@ function Wait-TunaGuiLiveRouteEpochEvidence {
             if ($line) {
                 return $line
             }
+            $line = & $tryGetAuthoritativeTransitionProjection $primaryScanState
+            if ($line) {
+                return $line
+            }
 
             if ($fallbackEnabled) {
                 $line = & $findMatchingLine $fallbackScanState $endIndex
+                if ($line) {
+                    return $line
+                }
+                $line = & $tryGetAuthoritativeTransitionProjection $fallbackScanState
                 if ($line) {
                     return $line
                 }

@@ -395,6 +395,92 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeWindows_LiveRouteWaitAcceptsExactCoordinatorTransitionWithoutLegacyProjection()
+    {
+        var repoRoot = FindRepoRoot();
+        var helperPath = Path.Combine(repoRoot, "tools", "GuiSmokeLogLedger.ps1")
+            .Replace("'", "''", StringComparison.Ordinal);
+        var guiText = File.ReadAllText(Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1"));
+        var waitBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Wait-TunaGuiLiveRouteEpochEvidence",
+            "Wait-TunaGuiActiveBridgeQuietWindow");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            . '{{helperPath}}'
+            function Wait-TunaGuiLiveRouteEpochEvidence { {{waitBody}} }
+            function Assert-GuiSmokeScenarioDeadline {}
+            function ConvertFrom-GuiSmokeSemicolonFields {
+                param([string]$Message)
+                $fields = @{}
+                foreach ($part in @($Message -split ';')) {
+                    $pair = $part.Trim() -split '=', 2
+                    if ($pair.Count -eq 2) { $fields[$pair[0].Trim()] = $pair[1].Trim() }
+                }
+                return $fields
+            }
+            function Get-GuiSmokeFieldValue {
+                param($Fields, [string]$Name, [string]$Default)
+                if ($Fields.ContainsKey($Name)) { return [string]$Fields[$Name] }
+                return $Default
+            }
+            function ConvertTo-GuiSmokeInt {
+                param($Value, [int]$Default)
+                $parsed = 0
+                if ([int]::TryParse([string]$Value, [ref]$parsed)) { return $parsed }
+                return $Default
+            }
+            function Test-GuiSmokeFieldEquals {
+                param($Fields, [string]$Name, [string]$Expected)
+                return [string]::Equals(
+                    (Get-GuiSmokeFieldValue -Fields $Fields -Name $Name -Default ''),
+                    $Expected,
+                    [StringComparison]::OrdinalIgnoreCase)
+            }
+
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-route-authority-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $script:testLogPath = Join-Path $tempRoot 'nlink.log'
+                $lines = @(
+                    'event=filetransfer_route_transition_committed; session_id=s1; transfer_id=t1; direction=outbound; authority_id=a1; transition_generation=1; decision_status=Committed; projected_target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; handoff_kind=NormalToTunaActivation; target_runtime_generation=2; target_terminal_generation=0; target_leg_generation=2; target_route_publication_generation=2; target_route_commit_generation=1',
+                    'event=filetransfer_route_hint_authorized_publication_accepted; session_id=s1; transfer_id=t1; direction=outbound; route=file_tuna_v4; protocol_version=4; live_route_epoch=1; runtime_generation=2; terminal_generation=0; leg_generation=2; route_publication_generation=2; route_commit_generation=1',
+                    'event=filetransfer_route_transition_disposition_applied; session_id=s1; transfer_id=t1; direction=outbound; authority_id=a1; transition_generation=1; disposition=committed; resulting_route_publication_generation=2; resulting_route_commit_generation=1',
+                    'event=filetransfer_data_path_send_result; session_id=s1; transfer_id=t1; direction=outbound; route=file_tuna_v4; protocol_version=4; runtime_generation=2; terminal_generation=0; leg_generation=2; route_publication_generation=2; route_commit_generation=1; delivery_result=sent'
+                )
+                [IO.File]::WriteAllLines($script:testLogPath, $lines, [Text.UTF8Encoding]::new($false))
+                $script:GuiSmokeAppLogLedger = New-GuiSmokeLogLedgerState
+                function Sync-GuiSmokeAppLogLedger {
+                    Sync-GuiSmokeLogLedger -State $script:GuiSmokeAppLogLedger -Paths @($script:testLogPath)
+                }
+
+                $matched = Wait-TunaGuiLiveRouteEpochEvidence `
+                    -Bookmark 0 `
+                    -Route file_tuna_v4 `
+                    -ProtocolVersion 4 `
+                    -HandoffKind NormalToTunaActivation `
+                    -TargetTransport Tuna `
+                    -EventName filetransfer_live_route_epoch_started `
+                    -Description authoritative-route-transition `
+                    -TimeoutMs 2000
+
+                if ($matched.IndexOf('gui_authoritative_projection=1', [StringComparison]::Ordinal) -lt 0) {
+                    throw "generic coordinator transition was not normalized: $matched"
+                }
+                Write-Output 'gui-live-route-authority-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Authoritative live-route wait test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-live-route-authority-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GuiSmokeLogLedger_CancellationBeforeCommitLeavesCursorReusable()
     {
         var helperPath = Path.Combine(FindRepoRoot(), "tools", "GuiSmokeLogLedger.ps1")
