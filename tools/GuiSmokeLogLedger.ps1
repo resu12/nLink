@@ -549,12 +549,22 @@ function Assert-GuiSmokeLogLedgerHealthy {
     }
 }
 
+function Invoke-GuiSmokeLogLedgerCancellationProbe {
+    param([AllowNull()][scriptblock]$CancellationProbe = $null)
+
+    if ($null -ne $CancellationProbe) {
+        [void](& $CancellationProbe)
+    }
+}
+
 function Sync-GuiSmokeLogLedger {
     param(
         [Parameter(Mandatory = $true)]$State,
-        [AllowEmptyCollection()][string[]]$Paths = @()
+        [AllowEmptyCollection()][string[]]$Paths = @(),
+        [AllowNull()][scriptblock]$CancellationProbe = $null
     )
 
+    Invoke-GuiSmokeLogLedgerCancellationProbe -CancellationProbe $CancellationProbe
     Assert-GuiSmokeLogLedgerHealthy -State $State
     $State.SyncCount++
 
@@ -572,6 +582,7 @@ function Sync-GuiSmokeLogLedger {
         $scanFailureDetail = ''
         try {
             foreach ($path in @(Get-GuiSmokeLogLedgerScanPaths -Paths $Paths)) {
+                Invoke-GuiSmokeLogLedgerCancellationProbe -CancellationProbe $CancellationProbe
                 $openResult = Open-GuiSmokeLogLedgerFileSnapshot -Path $path
                 if ([string]$openResult.Status -eq 'Opened') {
                     $snapshot = $openResult.Snapshot
@@ -594,6 +605,7 @@ function Sync-GuiSmokeLogLedger {
             try {
                 $validationGenerationByPath = @{}
                 foreach ($path in @(Get-GuiSmokeLogLedgerScanPaths -Paths $Paths)) {
+                    Invoke-GuiSmokeLogLedgerCancellationProbe -CancellationProbe $CancellationProbe
                     $validationResult = Open-GuiSmokeLogLedgerFileSnapshot -Path $path
                     if ([string]$validationResult.Status -eq 'Opened') {
                         $validationSnapshot = $validationResult.Snapshot
@@ -631,6 +643,7 @@ function Sync-GuiSmokeLogLedger {
                 }
             }
 
+            Invoke-GuiSmokeLogLedgerCancellationProbe -CancellationProbe $CancellationProbe
             $candidateSnapshots = @($snapshotByGeneration.Values)
             $activeSnapshot = @($candidateSnapshots | Where-Object { [bool]$_.IsActivePath } | Select-Object -Last 1)
             $candidateActiveGenerationKey = if ($activeSnapshot.Count -gt 0) {
@@ -686,10 +699,12 @@ function Sync-GuiSmokeLogLedger {
         $newGenerationCount = 0
         $newLineCount = 0
         foreach ($snapshot in @($acceptedSnapshots)) {
+            Invoke-GuiSmokeLogLedgerCancellationProbe -CancellationProbe $CancellationProbe
             $generationKey = [string]$snapshot.GenerationKey
             $generation = $State.Generations[$generationKey]
             $consumedByteOffset = if ($null -eq $generation) { 0L } else { [long]$generation.ConsumedByteOffset }
             $delta = Read-GuiSmokeLogLedgerFileDelta -Snapshot $snapshot -ByteOffset $consumedByteOffset
+            Invoke-GuiSmokeLogLedgerCancellationProbe -CancellationProbe $CancellationProbe
             if ($null -eq $delta) {
                 $State.GapCount++
                 Set-GuiSmokeLogLedgerFailure `
@@ -740,6 +755,9 @@ function Sync-GuiSmokeLogLedger {
             $firstLineOrdinal = if ($null -eq $generation) { 0L } else { [long]$generation.ConsumedLineCount }
             $lines = @($pending.Delta.Lines)
             for ($lineIndex = 0; $lineIndex -lt $lines.Count; $lineIndex++) {
+                if (($lineIndex % 256) -eq 0) {
+                    Invoke-GuiSmokeLogLedgerCancellationProbe -CancellationProbe $CancellationProbe
+                }
                 $lineOrdinal = $firstLineOrdinal + [long]$lineIndex
                 $lineIdentity = "{0}`n{1}" -f [string]$pending.GenerationKey, $lineOrdinal
                 if ($State.ConsumedLineIdentities.Contains($lineIdentity) -or -not $pendingLineIdentities.Add($lineIdentity)) {
@@ -753,6 +771,11 @@ function Sync-GuiSmokeLogLedger {
             }
         }
 
+        # Cancellation is safe through this point because the accepted deltas
+        # have only been validated. Once the commit begins, finish it
+        # atomically so byte offsets, line identities, and writer evidence
+        # cannot diverge.
+        Invoke-GuiSmokeLogLedgerCancellationProbe -CancellationProbe $CancellationProbe
         foreach ($pending in @($pendingDeltas.ToArray())) {
             $snapshot = $pending.Snapshot
             $generation = $pending.Generation
@@ -818,6 +841,7 @@ function Sync-GuiSmokeLogLedger {
         }
 
         Assert-GuiSmokeLogLedgerHealthy -State $State
+        Invoke-GuiSmokeLogLedgerCancellationProbe -CancellationProbe $CancellationProbe
     }
     finally {
         foreach ($snapshot in @($acceptedHandles)) {

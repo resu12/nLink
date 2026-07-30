@@ -217,18 +217,22 @@ function Get-RouteAcceptanceEvidenceFileSnapshot {
 }
 
 function Get-RouteAcceptanceEvidenceHarnessAggregateSha256 {
-    param([Parameter(Mandatory = $true)][object[]]$Files)
-
-    $lines = @(
-        $Files |
-            Sort-Object { [string](Get-RouteAcceptanceEvidencePropertyValue -Object $_ -Name 'relativePath' -DefaultValue '') } |
-            ForEach-Object {
-                $relativePath = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $_ -Name 'relativePath' -DefaultValue '')
-                $exists = ConvertTo-RouteAcceptanceEvidenceBoolean -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $_ -Name 'exists' -DefaultValue $false)
-                $sha256 = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $_ -Name 'sha256' -DefaultValue '')
-                "{0}`0{1}`0{2}" -f $relativePath, ([int]$exists), $sha256.ToLowerInvariant()
-            }
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Files,
+        [switch]$PreserveInputOrder
     )
+
+    $lineList = New-Object System.Collections.Generic.List[string]
+    foreach ($file in $Files) {
+        $relativePath = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $file -Name 'relativePath' -DefaultValue '')
+        $exists = ConvertTo-RouteAcceptanceEvidenceBoolean -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $file -Name 'exists' -DefaultValue $false)
+        $sha256 = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $file -Name 'sha256' -DefaultValue '')
+        $lineList.Add(("{0}`0{1}`0{2}" -f $relativePath, ([int]$exists), $sha256.ToLowerInvariant())) | Out-Null
+    }
+    $lines = [string[]]$lineList.ToArray()
+    if (-not $PreserveInputOrder) {
+        [System.Array]::Sort($lines, [System.StringComparer]::Ordinal)
+    }
     return Get-RouteAcceptanceEvidenceTextSha256 -Value ($lines -join "`n")
 }
 
@@ -247,10 +251,11 @@ function New-RouteAcceptanceEvidenceSnapshot {
     }
 
     $runtime = Get-RouteAcceptanceEvidenceFileSnapshot -RepoRoot $resolvedRoot -Path $PortableExecutablePath
+    $orderedHarnessFiles = [string[]]@($HarnessFiles | ForEach-Object { [System.IO.Path]::GetFullPath($_) })
+    [System.Array]::Sort($orderedHarnessFiles, [System.StringComparer]::Ordinal)
     $harnessSnapshots = @(
-        $HarnessFiles |
-            ForEach-Object { Get-RouteAcceptanceEvidenceFileSnapshot -RepoRoot $resolvedRoot -Path $_ } |
-            Sort-Object relativePath
+        $orderedHarnessFiles |
+            ForEach-Object { Get-RouteAcceptanceEvidenceFileSnapshot -RepoRoot $resolvedRoot -Path $_ }
     )
 
     $resolvedBridgeDir = [System.IO.Path]::GetFullPath($BridgeDir)
@@ -1257,19 +1262,79 @@ function Get-RouteAcceptanceScenarioEvidence {
         [Parameter(Mandatory = $true)][string]$AnalyzerInputPath
     )
 
-    $cursor = Get-RouteAcceptanceCursorEvidence `
-        -LogLedger $LogLedgerPath `
-        -AnalyzerDiagnostics $AnalyzerDiagnosticsPath `
-        -AcceptanceRunId $AcceptanceRunId `
-        -ScenarioRunId $ScenarioRunId
+    $cursor = if ($ArtifactFinalized) {
+        Get-RouteAcceptanceCursorEvidence `
+            -LogLedger $LogLedgerPath `
+            -AnalyzerDiagnostics $AnalyzerDiagnosticsPath `
+            -AcceptanceRunId $AcceptanceRunId `
+            -ScenarioRunId $ScenarioRunId
+    }
+    else {
+        [pscustomobject][ordered]@{
+            verdict = 'FAIL'
+            reasons = @('scenario_artifact_not_finalized')
+            producerCursorIntegrityVerdict = ''
+            producerCursorIntegrityReasons = @()
+            acceptanceRunId = $AcceptanceRunId
+            scenarioRunId = $ScenarioRunId
+            ledgerId = ''
+            initialGenerationKey = ''
+            finalGenerationKey = ''
+            rotationCount = 0L
+            transientRescanCount = 0L
+            gapCount = 0L
+            duplicateIndexCount = 0L
+            writerEvidenceVersion = 0L
+            writerGapCount = 0L
+            writerDuplicateCount = 0L
+            writerIdentityMismatchCount = 0L
+            writerWriteFailureCount = 0L
+            writerDeferredBatchCount = 0L
+            writerDeferredLineCount = 0L
+            writerRecoveredBatchCount = 0L
+            writerRecoveredLineCount = 0L
+            writerUnresolvedDeferredBatchCount = 0L
+            writerUnresolvedDeferredLineCount = 0L
+            writerTerminalFailureCount = 0L
+            writerRecoveryMismatchCount = 0L
+            writerChronologyInversionCount = 0L
+            writerChronologyCollisionCount = 0L
+            writerDrainMissingCount = 0L
+            writerRecoveryVerdict = ''
+            writerChronologyVerdict = ''
+            producerWriterIntegrityVerdict = ''
+            producerWriterIntegrityReasons = @()
+            writerIntegrityVerdict = 'FAIL'
+            writerIntegrityReasons = @('scenario_artifact_not_finalized')
+            consumedIndexCount = 0L
+            indexedEventCount = 0L
+            eventCount = 0L
+            logFileCount = 0L
+            ledgerPath = [System.IO.Path]::GetFullPath($LogLedgerPath)
+            ledgerSha256 = ''
+            diagnosticsPath = [System.IO.Path]::GetFullPath($AnalyzerDiagnosticsPath)
+            diagnosticsSha256 = ''
+            retainedSlicePath = ''
+            retainedSliceSha256 = ''
+            retainedSliceLineCount = 0L
+            finalLineCount = 0L
+        }
+    }
     $resolvedAnalyzerInputPath = [System.IO.Path]::GetFullPath($AnalyzerInputPath)
     $analyzerInputExists = Test-Path -LiteralPath $resolvedAnalyzerInputPath -PathType Leaf
+    $timeoutMarkerPath = Join-Path ([System.IO.Path]::GetFullPath($ArtifactDir)) 'filetransfer-gui-evidence-finalization-timeout.json'
+    $timeoutMarkerExists = Test-Path -LiteralPath $timeoutMarkerPath -PathType Leaf
     return [pscustomobject][ordered]@{
         scenarioName = $ScenarioName
         attempt = $Attempt
         scenarioRunId = $ScenarioRunId
         artifactDir = [System.IO.Path]::GetFullPath($ArtifactDir)
         artifactFinalized = $ArtifactFinalized
+        finalizationTimeout = [pscustomobject][ordered]@{
+            path = [System.IO.Path]::GetFullPath($timeoutMarkerPath)
+            exists = $timeoutMarkerExists
+            sha256 = if ($timeoutMarkerExists) { Get-RouteAcceptanceEvidenceSha256 -Path $timeoutMarkerPath } else { '' }
+        }
         logLedger = [pscustomobject][ordered]@{
             acceptanceRunId = $cursor.acceptanceRunId
             scenarioRunId = $cursor.scenarioRunId
@@ -1422,7 +1487,8 @@ function Merge-RouteAcceptanceEvidenceSnapshots {
 function Get-RouteAcceptanceEvidenceMergedHarnessAggregateSha256 {
     param(
         [Parameter(Mandatory = $true)][object[]]$Files,
-        [Parameter(Mandatory = $true)][ValidateSet('initialSha256', 'finalSha256')][string]$HashProperty
+        [Parameter(Mandatory = $true)][ValidateSet('initialSha256', 'finalSha256')][string]$HashProperty,
+        [switch]$PreserveInputOrder
     )
 
     $snapshots = @(
@@ -1434,7 +1500,80 @@ function Get-RouteAcceptanceEvidenceMergedHarnessAggregateSha256 {
             }
         }
     )
-    return Get-RouteAcceptanceEvidenceHarnessAggregateSha256 -Files $snapshots
+    return Get-RouteAcceptanceEvidenceHarnessAggregateSha256 -Files $snapshots -PreserveInputOrder:$PreserveInputOrder
+}
+
+function Get-RouteAcceptanceEvidenceFinalizationTimeoutValidation {
+    param(
+        [Parameter(Mandatory = $true)]$ScenarioAttempt,
+        [Parameter(Mandatory = $true)][string]$AcceptanceRunId,
+        [Parameter(Mandatory = $true)][string]$ScenarioRunId
+    )
+
+    $artifactDir = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $ScenarioAttempt -Name 'artifactDir' -DefaultValue '')
+    if ([string]::IsNullOrWhiteSpace($artifactDir)) {
+        return [pscustomobject]@{ Present = $false; Valid = $false }
+    }
+
+    $snapshot = Get-RouteAcceptanceEvidencePropertyValue -Object $ScenarioAttempt -Name 'finalizationTimeout' -DefaultValue $null
+    $snapshotExists = $null -ne $snapshot -and
+        (ConvertTo-RouteAcceptanceEvidenceBoolean -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $snapshot -Name 'exists' -DefaultValue $false))
+    try {
+        $resolvedArtifactDir = [System.IO.Path]::GetFullPath($artifactDir)
+        $expectedPath = [System.IO.Path]::GetFullPath((Join-Path $resolvedArtifactDir 'filetransfer-gui-evidence-finalization-timeout.json'))
+    }
+    catch {
+        return [pscustomobject]@{
+            Present = $true
+            Valid = $false
+        }
+    }
+
+    $fileExists = Test-Path -LiteralPath $expectedPath -PathType Leaf
+    if (-not $fileExists) {
+        return [pscustomobject]@{
+            Present = $snapshotExists
+            Valid = $false
+        }
+    }
+
+    $snapshotValid = $true
+    if ($null -ne $snapshot) {
+        $snapshotPath = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $snapshot -Name 'path' -DefaultValue '')
+        $snapshotSha256 = ([string](Get-RouteAcceptanceEvidencePropertyValue -Object $snapshot -Name 'sha256' -DefaultValue '')).Trim().ToLowerInvariant()
+        try {
+            $resolvedSnapshotPath = [System.IO.Path]::GetFullPath($snapshotPath)
+            $snapshotValid = $snapshotExists -and
+                -not [string]::IsNullOrWhiteSpace($snapshotPath) -and
+                [string]::Equals($resolvedSnapshotPath, $expectedPath, [System.StringComparison]::OrdinalIgnoreCase) -and
+                (Test-RouteAcceptanceEvidenceSha256Value -Value $snapshotSha256) -and
+                [string]::Equals((Get-RouteAcceptanceEvidenceSha256 -Path $expectedPath), $snapshotSha256, [System.StringComparison]::OrdinalIgnoreCase)
+        }
+        catch {
+            $snapshotValid = $false
+        }
+    }
+
+    $markerValid = $false
+    try {
+        $marker = Get-Content -LiteralPath $expectedPath -Raw | ConvertFrom-Json
+        $markerValid =
+            [string]::Equals([string](Get-RouteAcceptanceEvidencePropertyValue -Object $marker -Name 'event' -DefaultValue ''), 'filetransfer_gui_evidence_finalization_timeout', [System.StringComparison]::Ordinal) -and
+            (ConvertTo-RouteAcceptanceEvidenceBoolean -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $marker -Name 'permanentlyNonAuthoritative' -DefaultValue $false)) -and
+            [string]::Equals([string](Get-RouteAcceptanceEvidencePropertyValue -Object $marker -Name 'acceptanceRunId' -DefaultValue ''), $AcceptanceRunId, [System.StringComparison]::Ordinal) -and
+            [string]::Equals([string](Get-RouteAcceptanceEvidencePropertyValue -Object $marker -Name 'scenarioRunId' -DefaultValue ''), $ScenarioRunId, [System.StringComparison]::Ordinal) -and
+            [string]::Equals([System.IO.Path]::GetFullPath([string](Get-RouteAcceptanceEvidencePropertyValue -Object $marker -Name 'artifactDir' -DefaultValue '')), $resolvedArtifactDir, [System.StringComparison]::OrdinalIgnoreCase) -and
+            (ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $marker -Name 'exitCode' -DefaultValue 0)) -eq 124 -and
+            [string]::Equals([string](Get-RouteAcceptanceEvidencePropertyValue -Object $marker -Name 'reason' -DefaultValue ''), 'gui_evidence_finalization_hard_deadline_exceeded', [System.StringComparison]::Ordinal)
+    }
+    catch {
+        $markerValid = $false
+    }
+
+    return [pscustomobject]@{
+        Present = $true
+        Valid = $snapshotValid -and $markerValid
+    }
 }
 
 function Get-RouteAcceptanceEvidenceManifestValidation {
@@ -1537,9 +1676,19 @@ function Get-RouteAcceptanceEvidenceManifestValidation {
     $harnessPaths = @($harnessFiles | ForEach-Object { ([string](Get-RouteAcceptanceEvidencePropertyValue -Object $_ -Name 'relativePath' -DefaultValue '')).Replace('\', '/') })
     $normalizedHarnessPaths = @($harnessPaths | ForEach-Object { $_.ToLowerInvariant() } | Sort-Object)
     $normalizedRequiredHarnessPaths = @($requiredHarnessPaths | ForEach-Object { $_.ToLowerInvariant() } | Sort-Object)
-    if ($harnessFiles.Count -ne 5 -or
-        @($normalizedHarnessPaths | Select-Object -Unique).Count -ne 5 -or
-        ($normalizedHarnessPaths -join "`n") -ne ($normalizedRequiredHarnessPaths -join "`n")) {
+    $hasExactRequiredHarnessSet = $harnessFiles.Count -eq 5 -and
+        @($normalizedHarnessPaths | Select-Object -Unique).Count -eq 5 -and
+        ($normalizedHarnessPaths -join "`n") -eq ($normalizedRequiredHarnessPaths -join "`n")
+    $legacyWindowsPowerShellHarnessPaths = @(
+        'tools/filetransferrouteacceptanceevidence.ps1',
+        'tools/guismokelogledger.ps1',
+        'tools/guismoke-windows.ps1',
+        'tools/run-filetransferrouteacceptance.ps1',
+        'tools/run-filetransfertunaguismoke.ps1'
+    )
+    $isLegacyWindowsPowerShellHarnessOrder = $hasExactRequiredHarnessSet -and
+        (@($harnessPaths | ForEach-Object { $_.ToLowerInvariant() }) -join "`n") -eq ($legacyWindowsPowerShellHarnessPaths -join "`n")
+    if (-not $hasExactRequiredHarnessSet) {
         $provenanceReasons.Add('harness_required_files_mismatch') | Out-Null
     }
 
@@ -1571,10 +1720,22 @@ function Get-RouteAcceptanceEvidenceManifestValidation {
     $claimedHarnessAggregate = ([string](Get-RouteAcceptanceEvidencePropertyValue -Object $harness -Name 'aggregateSha256' -DefaultValue '')).Trim().ToLowerInvariant()
     $recomputedInitialHarnessAggregate = Get-RouteAcceptanceEvidenceMergedHarnessAggregateSha256 -Files $harnessFiles -HashProperty initialSha256
     $recomputedFinalHarnessAggregate = Get-RouteAcceptanceEvidenceMergedHarnessAggregateSha256 -Files $harnessFiles -HashProperty finalSha256
+    $legacyInitialHarnessAggregate = if ($isLegacyWindowsPowerShellHarnessOrder) {
+        Get-RouteAcceptanceEvidenceMergedHarnessAggregateSha256 -Files $harnessFiles -HashProperty initialSha256 -PreserveInputOrder
+    } else {
+        ''
+    }
+    $legacyFinalHarnessAggregate = if ($isLegacyWindowsPowerShellHarnessOrder) {
+        Get-RouteAcceptanceEvidenceMergedHarnessAggregateSha256 -Files $harnessFiles -HashProperty finalSha256 -PreserveInputOrder
+    } else {
+        ''
+    }
     $initialHarnessAggregateMatches = (Test-RouteAcceptanceEvidenceSha256Value -Value $initialHarnessAggregate) -and
-        [string]::Equals($initialHarnessAggregate, $recomputedInitialHarnessAggregate, [System.StringComparison]::OrdinalIgnoreCase)
+        ([string]::Equals($initialHarnessAggregate, $recomputedInitialHarnessAggregate, [System.StringComparison]::OrdinalIgnoreCase) -or
+            [string]::Equals($initialHarnessAggregate, $legacyInitialHarnessAggregate, [System.StringComparison]::OrdinalIgnoreCase))
     $finalHarnessAggregateMatches = (Test-RouteAcceptanceEvidenceSha256Value -Value $finalHarnessAggregate) -and
-        [string]::Equals($finalHarnessAggregate, $recomputedFinalHarnessAggregate, [System.StringComparison]::OrdinalIgnoreCase)
+        ([string]::Equals($finalHarnessAggregate, $recomputedFinalHarnessAggregate, [System.StringComparison]::OrdinalIgnoreCase) -or
+            [string]::Equals($finalHarnessAggregate, $legacyFinalHarnessAggregate, [System.StringComparison]::OrdinalIgnoreCase))
     if (-not $initialHarnessAggregateMatches -or -not $finalHarnessAggregateMatches) {
         $provenanceReasons.Add('harness_aggregate_sha256_mismatch') | Out-Null
     }
@@ -1674,8 +1835,31 @@ function Get-RouteAcceptanceEvidenceManifestValidation {
         if ([string]::IsNullOrWhiteSpace($scenarioRunId) -or -not $seenScenarioRunIds.Add($scenarioRunId)) {
             $cursorReasons.Add('scenario_run_id_duplicate_or_missing') | Out-Null
         }
-        if (-not (ConvertTo-RouteAcceptanceEvidenceBoolean -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $scenarioAttempt -Name 'artifactFinalized' -DefaultValue $false))) {
+        $artifactFinalized = ConvertTo-RouteAcceptanceEvidenceBoolean -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $scenarioAttempt -Name 'artifactFinalized' -DefaultValue $false)
+        $finalizationTimeout = Get-RouteAcceptanceEvidenceFinalizationTimeoutValidation `
+            -ScenarioAttempt $scenarioAttempt `
+            -AcceptanceRunId $runId `
+            -ScenarioRunId $scenarioRunId
+        if (-not $artifactFinalized) {
             $cursorReasons.Add('scenario_artifact_not_finalized') | Out-Null
+            if ([bool]$finalizationTimeout.Present) {
+                $cursorReasons.Add($(if ([bool]$finalizationTimeout.Valid) {
+                            'scenario_evidence_finalization_timeout'
+                        }
+                        else {
+                            'scenario_evidence_finalization_timeout_invalid'
+                        })) | Out-Null
+            }
+            continue
+        }
+        if ([bool]$finalizationTimeout.Present) {
+            $cursorReasons.Add($(if ([bool]$finalizationTimeout.Valid) {
+                        'scenario_evidence_finalization_timeout'
+                    }
+                    else {
+                        'scenario_evidence_finalization_timeout_invalid'
+                    })) | Out-Null
+            continue
         }
         $logLedger = Get-RouteAcceptanceEvidencePropertyValue -Object $scenarioAttempt -Name 'logLedger' -DefaultValue $null
         if (-not [string]::Equals([string](Get-RouteAcceptanceEvidencePropertyValue -Object $logLedger -Name 'acceptanceRunId' -DefaultValue ''), $runId, [System.StringComparison]::Ordinal)) {

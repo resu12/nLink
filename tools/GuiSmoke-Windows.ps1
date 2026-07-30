@@ -9,6 +9,8 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'GuiSmokeLogLedger.ps1')
 
 $script:GuiSmokeAppLogLedger = New-GuiSmokeLogLedgerState
+$script:GuiSmokeScenarioDeadlineUtc = [DateTimeOffset]::MaxValue
+$script:GuiSmokeScenarioDeadlineName = ''
 
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
@@ -41,6 +43,26 @@ public static class NtProcessControl {
 }
 "@
 
+function Assert-GuiSmokeScenarioDeadline {
+    $deadlineReached = $script:GuiSmokeScenarioDeadlineUtc -ne [DateTimeOffset]::MaxValue -and
+        [DateTimeOffset]::UtcNow -ge $script:GuiSmokeScenarioDeadlineUtc
+    $requestPath = [string]$env:NLINK_FILETRANSFER_GUI_SCENARIO_DEADLINE_REQUEST_PATH
+    $deadlineRequested = -not [string]::IsNullOrWhiteSpace($requestPath) -and
+        (Test-Path -LiteralPath $requestPath -PathType Leaf)
+    if (-not $deadlineReached -and -not $deadlineRequested) {
+        return
+    }
+
+    $scenarioName = if ([string]::IsNullOrWhiteSpace($script:GuiSmokeScenarioDeadlineName)) {
+        '(unknown)'
+    }
+    else {
+        $script:GuiSmokeScenarioDeadlineName
+    }
+    throw [System.OperationCanceledException]::new(
+        "gui_smoke_scenario_deadline_exceeded: scenario=$scenarioName")
+}
+
 function Wait-Until {
     param(
         [Parameter(Mandatory = $true)][int]$TimeoutMs,
@@ -51,9 +73,14 @@ function Wait-Until {
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        Assert-GuiSmokeScenarioDeadline
         try {
             $result = & $Condition
+            Assert-GuiSmokeScenarioDeadline
             if ($result) { return $result }
+        }
+        catch [System.OperationCanceledException] {
+            throw
         }
         catch {
             # Ignore transient UIA issues while windows are rendering.
@@ -1479,9 +1506,16 @@ function Read-AppLogLinesSnapshot {
 }
 
 function Sync-GuiSmokeAppLogLedger {
-    Sync-GuiSmokeLogLedger `
-        -State $script:GuiSmokeAppLogLedger `
-        -Paths @(Get-AppLogPaths)
+    param([switch]$IgnoreScenarioDeadline)
+
+    $syncParameters = @{
+        State = $script:GuiSmokeAppLogLedger
+        Paths = @(Get-AppLogPaths)
+    }
+    if (-not $IgnoreScenarioDeadline) {
+        $syncParameters.CancellationProbe = { Assert-GuiSmokeScenarioDeadline }
+    }
+    Sync-GuiSmokeLogLedger @syncParameters
 }
 
 function Read-AppLogLinesSafe {
@@ -2928,7 +2962,7 @@ function Write-FileTransferGuiLogLedgerEvidence {
     # The authoritative log boundary must be captured only after all scenario
     # writers have stopped and their redirected output has reached EOF.
     try {
-        Sync-GuiSmokeAppLogLedger
+        Sync-GuiSmokeAppLogLedger -IgnoreScenarioDeadline
         $finalSnapshot = Get-GuiSmokeLogLedgerSnapshot `
             -State $script:GuiSmokeAppLogLedger `
             -Bookmark $Bookmark
@@ -10080,7 +10114,9 @@ function Wait-TunaGuiSwitchOffToggleOrTerminal {
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        Assert-GuiSmokeScenarioDeadline
         $terminalPair = Get-TunaGuiCompletedTerminalPairAfterBookmark -Bookmark $Bookmark
+        Assert-GuiSmokeScenarioDeadline
         if ($null -ne $terminalPair) {
             return [pscustomobject]@{
                 Kind = 'terminal'
@@ -10102,6 +10138,7 @@ function Wait-TunaGuiSwitchOffToggleOrTerminal {
         }
 
         $freshToggle = Find-VisibleByAutomationId -Root $Window -AutomationId 'SessionHeader.TunaUnlockToggle'
+        Assert-GuiSmokeScenarioDeadline
         if (Test-TunaGuiSwitchOffToggleReady -Toggle $freshToggle) {
             return [pscustomobject]@{
                 Kind = 'toggle'
@@ -10144,6 +10181,9 @@ function Try-PrearmTunaGuiSwitchOffToggle {
             -Window $targetWindow `
             -Bookmark $Bookmark `
             -TimeoutMs $TimeoutMs
+    }
+    catch [System.OperationCanceledException] {
+        throw
     }
     catch {
         if ($_.Exception.Message.IndexOf('gui_smoke_log_cursor_', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
@@ -10708,9 +10748,11 @@ function Wait-TunaGuiLiveRouteEpochEvidence {
     }
 
     while ($waitStopwatch.ElapsedMilliseconds -lt $TimeoutMs) {
+        Assert-GuiSmokeScenarioDeadline
         try {
             if ($null -ne $OnPoll) {
                 [void](& $OnPoll)
+                Assert-GuiSmokeScenarioDeadline
             }
 
             if ($waitStopwatch.ElapsedMilliseconds -ge $TimeoutMs) {
@@ -10718,6 +10760,7 @@ function Wait-TunaGuiLiveRouteEpochEvidence {
             }
 
             Sync-GuiSmokeAppLogLedger
+            Assert-GuiSmokeScenarioDeadline
             if ($waitStopwatch.ElapsedMilliseconds -ge $TimeoutMs) {
                 break
             }
@@ -10737,6 +10780,9 @@ function Wait-TunaGuiLiveRouteEpochEvidence {
         }
         catch [System.TimeoutException] {
             throw $timeoutMessage
+        }
+        catch [System.OperationCanceledException] {
+            throw
         }
         catch {
             # Preserve the existing tolerance for transient UIA and log-read failures.
@@ -12108,16 +12154,16 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                     $lastActivationPayloadBookmark = $stepBookmark
                     $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step; step={1}; action=on; prearmed=1; immediate_after_fallback_recovered=1" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber)) | Out-Null
                     [void](Submit-TunaWalletPasswordDialogsForPayersIfPresent -Context $Context -PayerMode $PayerMode -Password $WalletPassword -Reason ("prearmed_on_step_{0}_immediate_after_fallback_recovered" -f $stepNumber))
+                    Write-Host ("[GUI Smoke][filetransfer_tuna] event=filetransfer_gui_evidence_activity; activity=switch_off_prearm; status=started; step={0}" -f $stepNumber) -ForegroundColor DarkGray
                     $switchOffPrearmResult = Try-PrearmTunaGuiSwitchOffToggle -Context $Context -PayerMode $PayerMode -Bookmark $bookmark
+                    Write-Host ("[GUI Smoke][filetransfer_tuna] event=filetransfer_gui_evidence_activity; activity=switch_off_prearm; status=completed; step={0}" -f $stepNumber) -ForegroundColor DarkGray
                     $prearmedSwitchOffToggle = if ([string]::Equals([string]$switchOffPrearmResult.Kind, 'toggle', [System.StringComparison]::OrdinalIgnoreCase)) { $switchOffPrearmResult.Toggle } else { $null }
                     $prearmedSwitchOffToggleWaitMs = [long]$switchOffPrearmResult.WaitMs
 
                     $activationProofTimeoutMs = 240000
-                    $serviceWalletPrompts = {
-                        Submit-TunaWalletPasswordDialogsForPayersIfPresent -Context $Context -PayerMode $PayerMode -Password $WalletPassword -Reason ("activation_route_wait_step_{0}" -f $stepNumber)
-                    }
+                    Write-Host ("[GUI Smoke][filetransfer_tuna] event=filetransfer_gui_evidence_activity; activity=activation_route_wait; status=started; step={0}" -f $stepNumber) -ForegroundColor DarkGray
                     try {
-                        $activationStartedLine = Wait-TunaGuiLiveRouteEpochStarted -Bookmark $stepBookmark -FallbackBookmark $bookmark -Route 'file_tuna_v4' -ProtocolVersion 4 -HandoffKind 'normal_to_tuna_activation' -TargetTransport 'tuna' -Description 'live regular activation cycle immediate normal-to-Tuna route epoch started' -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch -TimeoutMs $activationProofTimeoutMs -OnPoll $serviceWalletPrompts
+                        $activationStartedLine = Wait-TunaGuiLiveRouteEpochStarted -Bookmark $stepBookmark -FallbackBookmark $bookmark -Route 'file_tuna_v4' -ProtocolVersion 4 -HandoffKind 'normal_to_tuna_activation' -TargetTransport 'tuna' -Description 'live regular activation cycle immediate normal-to-Tuna route epoch started' -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch -TimeoutMs $activationProofTimeoutMs
                     }
                     catch {
                         $terminalProbeInboundRole = if ($Direction -eq 'helper-to-helpee') { 'helpee' } else { 'helper' }
@@ -12155,6 +12201,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
 
                         throw
                     }
+                    Write-Host ("[GUI Smoke][filetransfer_tuna] event=filetransfer_gui_evidence_activity; activity=activation_route_wait; status=completed; step={0}" -f $stepNumber) -ForegroundColor DarkGray
                     $observedEvidenceLines.Add($activationStartedLine) | Out-Null
                     Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'on_started' -Line $activationStartedLine
                     $activationEpochStartedObserved = $true
@@ -12197,16 +12244,16 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 else {
                     [void](Submit-TunaWalletPasswordDialogsForPayersIfPresent -Context $Context -PayerMode $PayerMode -Password $WalletPassword -Reason ("prearmed_on_step_{0}_existing_prompt" -f $stepNumber))
                 }
+                Write-Host ("[GUI Smoke][filetransfer_tuna] event=filetransfer_gui_evidence_activity; activity=switch_off_prearm; status=started; step={0}" -f $stepNumber) -ForegroundColor DarkGray
                 $switchOffPrearmResult = Try-PrearmTunaGuiSwitchOffToggle -Context $Context -PayerMode $PayerMode -Bookmark $bookmark
+                Write-Host ("[GUI Smoke][filetransfer_tuna] event=filetransfer_gui_evidence_activity; activity=switch_off_prearm; status=completed; step={0}" -f $stepNumber) -ForegroundColor DarkGray
                 $prearmedSwitchOffToggle = if ([string]::Equals([string]$switchOffPrearmResult.Kind, 'toggle', [System.StringComparison]::OrdinalIgnoreCase)) { $switchOffPrearmResult.Toggle } else { $null }
                 $prearmedSwitchOffToggleWaitMs = [long]$switchOffPrearmResult.WaitMs
 
                 $activationProofTimeoutMs = if ($RouteMode -eq 'live-regular-activation-cycle' -or $RouteMode -eq 'live-reactivation-second-transfer') { 240000 } else { 90000 }
-                $serviceWalletPrompts = {
-                    Submit-TunaWalletPasswordDialogsForPayersIfPresent -Context $Context -PayerMode $PayerMode -Password $WalletPassword -Reason ("activation_route_wait_step_{0}" -f $stepNumber)
-                }
+                Write-Host ("[GUI Smoke][filetransfer_tuna] event=filetransfer_gui_evidence_activity; activity=activation_route_wait; status=started; step={0}" -f $stepNumber) -ForegroundColor DarkGray
                 try {
-                    $activationStartedLine = Wait-TunaGuiLiveRouteEpochStarted -Bookmark $stepBookmark -FallbackBookmark $bookmark -Route 'file_tuna_v4' -ProtocolVersion 4 -HandoffKind 'normal_to_tuna_activation' -TargetTransport 'tuna' -Description 'live multi-toggle normal-to-Tuna route epoch started' -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch -TimeoutMs $activationProofTimeoutMs -OnPoll $serviceWalletPrompts
+                    $activationStartedLine = Wait-TunaGuiLiveRouteEpochStarted -Bookmark $stepBookmark -FallbackBookmark $bookmark -Route 'file_tuna_v4' -ProtocolVersion 4 -HandoffKind 'normal_to_tuna_activation' -TargetTransport 'tuna' -Description 'live multi-toggle normal-to-Tuna route epoch started' -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch -TimeoutMs $activationProofTimeoutMs
                 }
                 catch {
                     if ($RouteMode -eq 'live-reactivation-second-transfer' -or
@@ -12322,6 +12369,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
 
                     throw
                 }
+                Write-Host ("[GUI Smoke][filetransfer_tuna] event=filetransfer_gui_evidence_activity; activity=activation_route_wait; status=completed; step={0}" -f $stepNumber) -ForegroundColor DarkGray
                 $observedEvidenceLines.Add($activationStartedLine) | Out-Null
                 Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'on_started' -Line $activationStartedLine
                 $activationEpochStartedObserved = $true
@@ -15559,13 +15607,21 @@ function Invoke-Scenario {
         [Parameter(Mandatory = $true)][int]$TimeoutSec,
         [Parameter(Mandatory = $true)][scriptblock]$Action
     )
+    $previousDeadlineUtc = $script:GuiSmokeScenarioDeadlineUtc
+    $previousDeadlineName = $script:GuiSmokeScenarioDeadlineName
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    Write-Host "[GUI Smoke][$Name] START" -ForegroundColor Cyan
-    & $Action
-    if ($sw.Elapsed.TotalSeconds -gt $TimeoutSec) {
-        throw "Scenario $Name exceeded timeout ($($sw.Elapsed.TotalSeconds.ToString('N1'))s > ${TimeoutSec}s)."
+    $script:GuiSmokeScenarioDeadlineUtc = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSec)
+    $script:GuiSmokeScenarioDeadlineName = $Name
+    try {
+        Write-Host "[GUI Smoke][$Name] START" -ForegroundColor Cyan
+        & $Action
+        Assert-GuiSmokeScenarioDeadline
+        Write-Host "[GUI Smoke][$Name] PASS ($([math]::Round($sw.Elapsed.TotalSeconds,1))s)" -ForegroundColor Green
     }
-    Write-Host "[GUI Smoke][$Name] PASS ($([math]::Round($sw.Elapsed.TotalSeconds,1))s)" -ForegroundColor Green
+    finally {
+        $script:GuiSmokeScenarioDeadlineUtc = $previousDeadlineUtc
+        $script:GuiSmokeScenarioDeadlineName = $previousDeadlineName
+    }
 }
 
 function Get-AutomationNativeWindowHandleSafe {

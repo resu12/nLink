@@ -81,6 +81,72 @@ $partialValidation = Test-RouteAcceptanceEvidenceManifest -Manifest $partial
 Assert-Equal $partialValidation.verdict 'FAIL' 'partially finalized live manifest verdict'
 Assert-False $partialValidation.currentRuntimeProof 'partially finalized live evidence must fail closed'
 Assert-Contains $partialValidation.reasons 'scenario_artifact_not_finalized' 'partial-finalization proof reason'
+Assert-Equal @($partialValidation.reasons).Count 1 'partial finalization must not expand absent cursor sentinels into derivative failures'
+Assert-Equal @($partialValidation.cursorIntegrityReasons).Count 1 'partial cursor reasons remain canonical'
+
+$timeoutMarkerPath = Join-Path $fixture.ArtifactDir 'filetransfer-gui-evidence-finalization-timeout.json'
+[ordered]@{
+    schemaVersion = 1
+    event = 'filetransfer_gui_evidence_finalization_timeout'
+    permanentlyNonAuthoritative = $true
+    acceptanceRunId = $fixture.RunId
+    scenarioRunId = ($fixture.RunId + ':regular-v4-live-activation-off-on-off-256mb:1')
+    artifactDir = $fixture.ArtifactDir
+    exitCode = 124
+    reason = 'gui_evidence_finalization_hard_deadline_exceeded'
+} | ConvertTo-Json | Set-Content -LiteralPath $timeoutMarkerPath -Encoding UTF8
+$timeoutAttempt = Get-RouteAcceptanceScenarioEvidence `
+    -AcceptanceRunId $fixture.RunId `
+    -ScenarioName 'regular-v4-live-activation-off-on-off-256mb' `
+    -Attempt 1 `
+    -ScenarioRunId ($fixture.RunId + ':regular-v4-live-activation-off-on-off-256mb:1') `
+    -ArtifactDir $fixture.ArtifactDir `
+    -ArtifactFinalized $false `
+    -LogLedgerPath $fixture.LedgerPath `
+    -AnalyzerDiagnosticsPath $fixture.DiagnosticsPath `
+    -AnalyzerInputPath $fixture.AnalyzerInputPath
+Assert-True $timeoutAttempt.finalizationTimeout.exists 'timeout attempt binds the permanent marker'
+Assert-True (Test-RouteAcceptanceEvidenceSha256Value -Value $timeoutAttempt.finalizationTimeout.sha256) 'timeout attempt binds the marker hash'
+$timeoutManifest = New-RouteAcceptanceEvidenceManifest `
+    -RunId $fixture.RunId `
+    -MatrixMode 'phase5-analyzer-gui-acceptance' `
+    -ExecutionMode live `
+    -ArtifactRoot $fixture.ArtifactDir `
+    -StartedUtc ([datetime]'2026-07-12T10:00:00Z') `
+    -FinalizedUtc ([datetime]'2026-07-12T10:05:00Z') `
+    -ScenarioNames @('regular-v4-live-activation-off-on-off-256mb') `
+    -InitialSnapshot $fixture.Initial `
+    -FinalSnapshot $final `
+    -ScenarioAttempts @($timeoutAttempt)
+$timeoutValidation = Test-RouteAcceptanceEvidenceManifest -Manifest $timeoutManifest
+Assert-Equal @($timeoutValidation.reasons).Count 2 'timeout finalization reports only canonical reasons'
+Assert-Contains $timeoutValidation.reasons 'scenario_artifact_not_finalized' 'timeout remains unfinalized'
+Assert-Contains $timeoutValidation.reasons 'scenario_evidence_finalization_timeout' 'timeout marker reason'
+
+$malformedArtifactPathAttempt = $timeoutAttempt | ConvertTo-Json -Depth 100 | ConvertFrom-Json
+$malformedArtifactPathAttempt.artifactDir = "invalid`0artifact"
+$malformedArtifactPathValidation = Get-RouteAcceptanceEvidenceFinalizationTimeoutValidation `
+    -ScenarioAttempt $malformedArtifactPathAttempt `
+    -AcceptanceRunId $fixture.RunId `
+    -ScenarioRunId ($fixture.RunId + ':regular-v4-live-activation-off-on-off-256mb:1')
+Assert-True $malformedArtifactPathValidation.Present 'malformed artifact path must fail closed as present invalid evidence'
+Assert-False $malformedArtifactPathValidation.Valid 'malformed artifact path must not throw or validate'
+
+$malformedSnapshotPathAttempt = $timeoutAttempt | ConvertTo-Json -Depth 100 | ConvertFrom-Json
+$malformedSnapshotPathAttempt.finalizationTimeout.path = "invalid`0marker"
+$malformedSnapshotPathValidation = Get-RouteAcceptanceEvidenceFinalizationTimeoutValidation `
+    -ScenarioAttempt $malformedSnapshotPathAttempt `
+    -AcceptanceRunId $fixture.RunId `
+    -ScenarioRunId ($fixture.RunId + ':regular-v4-live-activation-off-on-off-256mb:1')
+Assert-True $malformedSnapshotPathValidation.Present 'malformed snapshot path remains bound evidence'
+Assert-False $malformedSnapshotPathValidation.Valid 'malformed snapshot path must not throw or validate'
+
+$timeoutMarker = Get-Content -LiteralPath $timeoutMarkerPath -Raw | ConvertFrom-Json
+$timeoutMarker.reason = 'mutated'
+$timeoutMarker | ConvertTo-Json | Set-Content -LiteralPath $timeoutMarkerPath -Encoding UTF8
+$mutatedTimeoutValidation = Get-RouteAcceptanceEvidenceManifestValidation -Manifest $timeoutManifest
+Assert-Contains $mutatedTimeoutValidation.reasons 'scenario_evidence_finalization_timeout_invalid' 'mutated timeout marker fails closed'
+Remove-Item -LiteralPath $timeoutMarkerPath -Force
 
 $dryRun = New-RouteAcceptanceEvidenceManifest `
     -RunId $fixture.RunId `
@@ -358,6 +424,126 @@ Assert-Contains $diagnosticsRace.reasons 'analyzer_diagnostics_current_sha256_mi
 [System.IO.File]::AppendAllText($fixture.AnalyzerInputPath, 'event=late')
 $analyzerRace = Test-RouteAcceptanceEvidenceManifest -Manifest $manifest
 Assert-Contains $analyzerRace.reasons 'analyzer_input_current_sha256_mismatch' 'analyzer input bytes are rehashed during reopen validation'
+""");
+
+        AssertScriptPassed(result);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task EvidenceManifest_HarnessAggregateUsesOrdinalOrderingAndReadsLegacyWindowsPowerShellOrder()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunEvidenceScriptAsync(
+            FixturePrelude +
+            """
+$knownFiles = @(
+    [pscustomobject]@{ relativePath = 'tools/Run-FileTransferTunaGuiSmoke.ps1'; exists = $true; sha256 = '8dcddf50a85a03e094bc272676d23f312bbc032184f7b057bede548b7e26cfad' },
+    [pscustomobject]@{ relativePath = 'tools/GuiSmokeLogLedger.ps1'; exists = $true; sha256 = '91c76fa2bcbcf43883425a2b32479e530b7910dca32470fd1ad012d9f7170464' },
+    [pscustomobject]@{ relativePath = 'tools/FileTransferRouteAcceptanceEvidence.ps1'; exists = $true; sha256 = '4ba431f9a4f14a646fb89e7eff79e43fb634cc5783078ec255b90a247d0fc06a' },
+    [pscustomobject]@{ relativePath = 'tools/Run-FileTransferRouteAcceptance.ps1'; exists = $true; sha256 = '1feb70f23f648f085cae3e4b5a43819cedc21f41a2405961aa368e1962af2f3e' },
+    [pscustomobject]@{ relativePath = 'tools/GuiSmoke-Windows.ps1'; exists = $true; sha256 = 'd82ce847044c94fcb8d307ffd0e28c97137a3bef4d52b8a4e662743c2f5ba876' }
+)
+$expectedOrdinalAggregate = 'c1328746d144cc0a5a52711c24187d6e18bdf3b6f76e1bf7e3c15d65f419c294'
+$actualOrdinalAggregate = Get-RouteAcceptanceEvidenceHarnessAggregateSha256 -Files $knownFiles
+Assert-Equal $actualOrdinalAggregate $expectedOrdinalAggregate 'aggregate must use ordinal path ordering'
+Assert-Equal (Get-RouteAcceptanceEvidenceHarnessAggregateSha256 -Files @($knownFiles[4], $knownFiles[3], $knownFiles[2], $knownFiles[1], $knownFiles[0])) $expectedOrdinalAggregate 'aggregate must ignore input permutation'
+
+$legacyKnownFiles = @($knownFiles[2], $knownFiles[1], $knownFiles[4], $knownFiles[3], $knownFiles[0])
+$legacyKnownAggregate = Get-RouteAcceptanceEvidenceHarnessAggregateSha256 -Files $legacyKnownFiles -PreserveInputOrder
+Assert-Equal $legacyKnownAggregate '3aebf60737b24505486ee99a0c57456cb9d19825054a42cd47fdb97eeb8cdea6' 'legacy Windows PowerShell order'
+Assert-False ([string]::Equals($legacyKnownAggregate, $expectedOrdinalAggregate, [System.StringComparison]::Ordinal)) 'fixture must expose the host collation boundary'
+
+$fixture = New-EvidenceFixture -Name 'cross-host-aggregate'
+$attempt = Get-RouteAcceptanceScenarioEvidence `
+    -AcceptanceRunId $fixture.RunId `
+    -ScenarioName 'scenario' `
+    -Attempt 1 `
+    -ScenarioRunId $fixture.ScenarioRunId `
+    -ArtifactDir $fixture.ArtifactDir `
+    -ArtifactFinalized $true `
+    -LogLedgerPath $fixture.LedgerPath `
+    -AnalyzerDiagnosticsPath $fixture.DiagnosticsPath `
+    -AnalyzerInputPath $fixture.AnalyzerInputPath
+$final = New-RouteAcceptanceEvidenceSnapshot -RepoRoot $fixture.Root -PortableExecutablePath $fixture.ExecutablePath -HarnessFiles $fixture.HarnessFiles -BridgeDir $fixture.BridgeDir -GitState $fixture.GitState
+$manifest = New-RouteAcceptanceEvidenceManifest `
+    -RunId $fixture.RunId `
+    -MatrixMode 'phase5-analyzer-gui-acceptance' `
+    -ExecutionMode live `
+    -ArtifactRoot $fixture.ArtifactDir `
+    -StartedUtc ([datetime]'2026-07-12T10:00:00Z') `
+    -FinalizedUtc ([datetime]'2026-07-12T10:05:00Z') `
+    -ScenarioNames @('scenario') `
+    -InitialSnapshot $fixture.Initial `
+    -FinalSnapshot $final `
+    -ScenarioAttempts @($attempt)
+Assert-Equal (Test-RouteAcceptanceEvidenceManifest -Manifest $manifest).verdict 'PASS' 'ordinal control manifest'
+
+$legacyManifest = $manifest | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+$legacyPathOrder = @(
+    'tools/FileTransferRouteAcceptanceEvidence.ps1',
+    'tools/GuiSmokeLogLedger.ps1',
+    'tools/GuiSmoke-Windows.ps1',
+    'tools/Run-FileTransferRouteAcceptance.ps1',
+    'tools/Run-FileTransferTunaGuiSmoke.ps1'
+)
+$legacyFileList = New-Object System.Collections.Generic.List[object]
+foreach ($relativePath in $legacyPathOrder) {
+    $match = @($legacyManifest.harness.files | Where-Object { [string]$_.relativePath -eq $relativePath })
+    Assert-Equal $match.Count 1 ('legacy harness path ' + $relativePath)
+    $legacyFileList.Add($match[0]) | Out-Null
+}
+$legacyManifest.harness.files = @($legacyFileList.ToArray())
+$legacyInitialAggregate = Get-RouteAcceptanceEvidenceMergedHarnessAggregateSha256 -Files @($legacyManifest.harness.files) -HashProperty initialSha256 -PreserveInputOrder
+$legacyFinalAggregate = Get-RouteAcceptanceEvidenceMergedHarnessAggregateSha256 -Files @($legacyManifest.harness.files) -HashProperty finalSha256 -PreserveInputOrder
+$legacyManifest.harness.initialAggregateSha256 = $legacyInitialAggregate
+$legacyManifest.harness.finalAggregateSha256 = $legacyFinalAggregate
+$legacyManifest.harness.aggregateSha256 = $legacyFinalAggregate
+$legacyManifest.validation = Get-RouteAcceptanceEvidenceManifestValidation -Manifest $legacyManifest
+$legacyValidation = Test-RouteAcceptanceEvidenceManifest -Manifest $legacyManifest
+Assert-Equal $legacyValidation.verdict 'PASS' 'legacy producer order remains readable'
+
+$arbitraryOrderManifest = $manifest | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+$arbitraryOrderManifest.harness.files = @($arbitraryOrderManifest.harness.files[4], $arbitraryOrderManifest.harness.files[3], $arbitraryOrderManifest.harness.files[2], $arbitraryOrderManifest.harness.files[1], $arbitraryOrderManifest.harness.files[0])
+$arbitraryInitialAggregate = Get-RouteAcceptanceEvidenceMergedHarnessAggregateSha256 -Files @($arbitraryOrderManifest.harness.files) -HashProperty initialSha256 -PreserveInputOrder
+$arbitraryFinalAggregate = Get-RouteAcceptanceEvidenceMergedHarnessAggregateSha256 -Files @($arbitraryOrderManifest.harness.files) -HashProperty finalSha256 -PreserveInputOrder
+$arbitraryOrderManifest.harness.initialAggregateSha256 = $arbitraryInitialAggregate
+$arbitraryOrderManifest.harness.finalAggregateSha256 = $arbitraryFinalAggregate
+$arbitraryOrderManifest.harness.aggregateSha256 = $arbitraryFinalAggregate
+$arbitraryOrderResult = Get-RouteAcceptanceEvidenceManifestValidation -Manifest $arbitraryOrderManifest
+Assert-Contains $arbitraryOrderResult.reasons 'harness_aggregate_sha256_mismatch' 'legacy compatibility is limited to the known Windows PowerShell order'
+
+$legacyManifestPath = Join-Path $fixture.ArtifactDir 'legacy-cross-host-manifest.json'
+[System.IO.File]::WriteAllText($legacyManifestPath, ($legacyManifest | ConvertTo-Json -Depth 32), [System.Text.UTF8Encoding]::new($false))
+$pwshPath = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
+if (Test-Path -LiteralPath $pwshPath -PathType Leaf) {
+    $knownFilesPath = Join-Path $fixture.ArtifactDir 'known-harness-files.json'
+    [System.IO.File]::WriteAllText($knownFilesPath, ($knownFiles | ConvertTo-Json -Depth 8), [System.Text.UTF8Encoding]::new($false))
+    $crossHostScriptPath = Join-Path $fixture.ArtifactDir 'validate-cross-host.ps1'
+    $crossHostScript = @'
+param([string]$HelperPath, [string]$ManifestPath, [string]$FilesPath, [string]$ExpectedAggregate)
+$ErrorActionPreference = 'Stop'
+. $HelperPath
+$files = @(Get-Content -LiteralPath $FilesPath -Raw | ConvertFrom-Json)
+$aggregate = Get-RouteAcceptanceEvidenceHarnessAggregateSha256 -Files $files
+if (-not [string]::Equals($aggregate, $ExpectedAggregate, [System.StringComparison]::Ordinal)) { exit 21 }
+$validation = Test-RouteAcceptanceEvidenceManifestFile -Path $ManifestPath
+if ($validation.verdict -ne 'PASS' -or $validation.provenanceVerdict -ne 'PASS') { exit 22 }
+exit 0
+'@
+    [System.IO.File]::WriteAllText($crossHostScriptPath, $crossHostScript, [System.Text.UTF8Encoding]::new($false))
+    & $pwshPath -NoProfile -ExecutionPolicy Bypass -File $crossHostScriptPath $HelperPath $legacyManifestPath $knownFilesPath $expectedOrdinalAggregate
+    Assert-Equal $LASTEXITCODE 0 'PowerShell 7 must reproduce the ordinal aggregate and read the Windows PowerShell manifest'
+}
+
+$mutatedLegacyManifest = $legacyManifest | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+$mutatedLegacyManifest.harness.files[0].finalSha256 = ('b' * 64)
+$mutatedLegacyResult = Get-RouteAcceptanceEvidenceManifestValidation -Manifest $mutatedLegacyManifest
+Assert-Contains $mutatedLegacyResult.reasons 'harness_aggregate_sha256_mismatch' 'legacy compatibility cannot mask a mutated file hash'
 """);
 
         AssertScriptPassed(result);

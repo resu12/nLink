@@ -143,6 +143,151 @@ function Stop-TunaGuiSmokeProcessTree {
     }
 }
 
+function Stop-TunaGuiSmokeApplicationDescendants {
+    param(
+        [Parameter(Mandatory = $true)]$GuiChildProcess,
+        [Parameter(Mandatory = $true)][string]$ExePath,
+        [int]$GraceMilliseconds = 7000
+    )
+
+    $resolvedExePath = ''
+    try {
+        $resolvedExePath = [System.IO.Path]::GetFullPath($ExePath)
+    }
+    catch {
+        return
+    }
+
+    $processSnapshot = @()
+    try {
+        $processSnapshot = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+    }
+    catch {
+        return
+    }
+
+    $descendantIds = [System.Collections.Generic.HashSet[int]]::new()
+    [void]$descendantIds.Add([int]$GuiChildProcess.Id)
+    $changed = $true
+    while ($changed) {
+        $changed = $false
+        foreach ($candidate in $processSnapshot) {
+            $candidateId = [int]$candidate.ProcessId
+            if ($descendantIds.Contains($candidateId) -or
+                -not $descendantIds.Contains([int]$candidate.ParentProcessId)) {
+                continue
+            }
+
+            [void]$descendantIds.Add($candidateId)
+            $changed = $true
+        }
+    }
+
+    $targets = @(
+        $processSnapshot |
+            Where-Object {
+                $descendantIds.Contains([int]$_.ProcessId) -and
+                [int]$_.ProcessId -ne [int]$GuiChildProcess.Id -and
+                -not [string]::IsNullOrWhiteSpace([string]$_.ExecutablePath) -and
+                [string]::Equals(
+                    [System.IO.Path]::GetFullPath([string]$_.ExecutablePath),
+                    $resolvedExePath,
+                    [System.StringComparison]::OrdinalIgnoreCase)
+            } |
+            ForEach-Object {
+                [pscustomobject]@{
+                    ProcessId = [int]$_.ProcessId
+                    CreationDate = [string]$_.CreationDate
+                }
+            }
+    )
+    if ($targets.Count -eq 0) {
+        return
+    }
+
+    foreach ($target in $targets) {
+        try {
+            $application = [System.Diagnostics.Process]::GetProcessById([int]$target.ProcessId)
+            [void]$application.CloseMainWindow()
+            $application.Dispose()
+        }
+        catch {
+        }
+    }
+
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($stopwatch.ElapsedMilliseconds -lt $GraceMilliseconds) {
+        $remaining = @(
+            $targets |
+                Where-Object {
+                    $null -ne (Get-Process -Id ([int]$_.ProcessId) -ErrorAction SilentlyContinue)
+                }
+        )
+        if ($remaining.Count -eq 0) {
+            return
+        }
+        Start-Sleep -Milliseconds 100
+    }
+
+    foreach ($target in $targets) {
+        try {
+            $current = Get-CimInstance Win32_Process -Filter ("ProcessId = {0}" -f [int]$target.ProcessId) -ErrorAction SilentlyContinue
+            if ($null -ne $current -and
+                [string]::Equals([string]$current.CreationDate, [string]$target.CreationDate, [System.StringComparison]::Ordinal)) {
+                Stop-Process -Id ([int]$target.ProcessId) -Force -ErrorAction SilentlyContinue
+            }
+        }
+        catch {
+        }
+    }
+}
+
+function Request-TunaGuiScenarioDeadline {
+    param(
+        [Parameter(Mandatory = $true)][string]$RequestPath,
+        [Parameter(Mandatory = $true)][string]$StatePath,
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)]$GuiChildProcess,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$ScenarioDeadlineUtc
+    )
+
+    $requestedUtc = [DateTimeOffset]::UtcNow
+    $request = [ordered]@{
+        schemaVersion = 1
+        event = 'filetransfer_gui_scenario_deadline_requested'
+        acceptanceRunId = [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID
+        scenarioRunId = [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID
+        artifactDir = $ArtifactDir
+        guiChildProcessId = [int]$GuiChildProcess.Id
+        scenarioDeadlineUtc = $ScenarioDeadlineUtc.ToString('O')
+        requestedUtc = $requestedUtc.ToString('O')
+        reason = 'gui_smoke_scenario_deadline_exceeded'
+    }
+    try {
+        $state = Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json
+        foreach ($field in @(
+                @{ Name = 'scenarioDeadlineRequested'; Value = $true },
+                @{ Name = 'scenarioDeadlineRequestPath'; Value = $RequestPath },
+                @{ Name = 'scenarioDeadlineRequestedUtc'; Value = $requestedUtc.ToString('O') },
+                @{ Name = 'updatedUtc'; Value = $requestedUtc.ToString('O') })) {
+            if ($state.PSObject.Properties.Name -contains $field.Name) {
+                $state.($field.Name) = $field.Value
+            }
+            else {
+                $state | Add-Member -NotePropertyName $field.Name -NotePropertyValue $field.Value
+            }
+        }
+        Write-TunaGuiAtomicJson -Path $StatePath -Value $state
+    }
+    catch {
+        # The immutable request remains authoritative for cooperative
+        # cancellation if the diagnostic state cannot be updated.
+    }
+    # Publish the request only after the state write so a child that reacts
+    # immediately cannot have its capture fields overwritten by this update.
+    Write-TunaGuiAtomicJson -Path $RequestPath -Value $request
+}
+
 function Invoke-TunaGuiSmokeWithHardDeadline {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
@@ -154,9 +299,11 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
     $finalizationGraceSeconds = Get-TunaGuiFinalizationGraceSeconds
     $hardDeadlineSeconds = [long]$TimeoutSeconds + [long]$finalizationGraceSeconds
     $startedUtc = [DateTimeOffset]::UtcNow
+    $scenarioDeadlineUtc = $startedUtc.AddSeconds($TimeoutSeconds)
     $deadlineUtc = $startedUtc.AddSeconds($hardDeadlineSeconds)
     $statePath = Join-Path $ArtifactDir 'filetransfer-gui-evidence-finalization-state.json'
     $timeoutPath = Join-Path $ArtifactDir 'filetransfer-gui-evidence-finalization-timeout.json'
+    $scenarioDeadlineRequestPath = Join-Path $ArtifactDir 'filetransfer-gui-scenario-deadline-request.json'
     $stdoutPath = Join-Path $ArtifactDir 'gui-smoke-stdout.log'
     $stderrPath = Join-Path $ArtifactDir 'gui-smoke-stderr.log'
     $arguments = @(
@@ -168,9 +315,11 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
     $argumentLine = ($arguments | ForEach-Object { ConvertTo-TunaGuiProcessArgument -Value ([string]$_) }) -join ' '
 
     $oldStatePath = $env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH
+    $oldScenarioDeadlineRequestPath = $env:NLINK_FILETRANSFER_GUI_SCENARIO_DEADLINE_REQUEST_PATH
     $process = $null
     try {
         $env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH = $statePath
+        $env:NLINK_FILETRANSFER_GUI_SCENARIO_DEADLINE_REQUEST_PATH = $scenarioDeadlineRequestPath
         $state = [ordered]@{
             schemaVersion = 1
             event = 'filetransfer_gui_evidence_finalization_state'
@@ -182,7 +331,11 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
             finalizationGraceSeconds = $finalizationGraceSeconds
             hardDeadlineSeconds = $hardDeadlineSeconds
             startedUtc = $startedUtc.ToString('O')
+            scenarioDeadlineUtc = $scenarioDeadlineUtc.ToString('O')
             deadlineUtc = $deadlineUtc.ToString('O')
+            scenarioDeadlineRequested = $false
+            scenarioDeadlineRequestPath = $scenarioDeadlineRequestPath
+            scenarioDeadlineRequestedUtc = ''
             lastCompletedStage = 'gui_child_starting'
             timedOut = $false
             exitCode = $null
@@ -205,13 +358,37 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
         Write-TunaGuiAtomicJson -Path $statePath -Value $state
 
         $timedOut = $false
+        $scenarioDeadlineRequested = $false
+        $scenarioDeadlineRequestedUtc = ''
         while ($true) {
             $process.Refresh()
             if ($process.HasExited) {
                 break
             }
 
-            $remainingMilliseconds = [long][Math]::Ceiling(($deadlineUtc - [DateTimeOffset]::UtcNow).TotalMilliseconds)
+            $nowUtc = [DateTimeOffset]::UtcNow
+            if (-not $scenarioDeadlineRequested -and $nowUtc -ge $scenarioDeadlineUtc) {
+                $process.Refresh()
+                if ($process.HasExited) {
+                    break
+                }
+
+                Request-TunaGuiScenarioDeadline `
+                    -RequestPath $scenarioDeadlineRequestPath `
+                    -StatePath $statePath `
+                    -ArtifactDir $ArtifactDir `
+                    -GuiChildProcess $process `
+                    -ScenarioDeadlineUtc $scenarioDeadlineUtc
+                $scenarioDeadlineRequested = $true
+                $scenarioDeadlineRequestedUtc = [DateTimeOffset]::UtcNow.ToString('O')
+                Stop-TunaGuiSmokeApplicationDescendants `
+                    -GuiChildProcess $process `
+                    -ExePath $ExePath
+                continue
+            }
+
+            $nextDeadlineUtc = if ($scenarioDeadlineRequested) { $deadlineUtc } else { $scenarioDeadlineUtc }
+            $remainingMilliseconds = [long][Math]::Ceiling(($nextDeadlineUtc - $nowUtc).TotalMilliseconds)
             if ($remainingMilliseconds -gt 0) {
                 $waitMilliseconds = [int][Math]::Min(1000L, $remainingMilliseconds)
                 if ($process.WaitForExit($waitMilliseconds)) {
@@ -271,6 +448,10 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
                 finalizationGraceSeconds = $finalizationGraceSeconds
                 hardDeadlineSeconds = $hardDeadlineSeconds
                 startedUtc = $startedUtc.ToString('O')
+                scenarioDeadlineUtc = $scenarioDeadlineUtc.ToString('O')
+                scenarioDeadlineRequested = $scenarioDeadlineRequested
+                scenarioDeadlineRequestPath = $scenarioDeadlineRequestPath
+                scenarioDeadlineRequestedUtc = $scenarioDeadlineRequestedUtc
                 deadlineUtc = $deadlineUtc.ToString('O')
                 endedUtc = $endedUtc.ToString('O')
                 elapsedMilliseconds = [long][Math]::Max(0, ($endedUtc - $startedUtc).TotalMilliseconds)
@@ -294,6 +475,10 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
                 finalizationGraceSeconds = $finalizationGraceSeconds
                 hardDeadlineSeconds = $hardDeadlineSeconds
                 startedUtc = $startedUtc.ToString('O')
+                scenarioDeadlineUtc = $scenarioDeadlineUtc.ToString('O')
+                scenarioDeadlineRequested = $scenarioDeadlineRequested
+                scenarioDeadlineRequestPath = $scenarioDeadlineRequestPath
+                scenarioDeadlineRequestedUtc = $scenarioDeadlineRequestedUtc
                 deadlineUtc = $deadlineUtc.ToString('O')
                 endedUtc = $endedUtc.ToString('O')
                 lastCompletedStage = $lastCompletedStage
@@ -347,6 +532,10 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
             finalizationGraceSeconds = $finalizationGraceSeconds
             hardDeadlineSeconds = $hardDeadlineSeconds
             startedUtc = $startedUtc.ToString('O')
+            scenarioDeadlineUtc = $scenarioDeadlineUtc.ToString('O')
+            scenarioDeadlineRequested = $scenarioDeadlineRequested
+            scenarioDeadlineRequestPath = $scenarioDeadlineRequestPath
+            scenarioDeadlineRequestedUtc = $scenarioDeadlineRequestedUtc
             deadlineUtc = $deadlineUtc.ToString('O')
             endedUtc = $endedUtc.ToString('O')
             lastCompletedStage = 'gui_child_exited'
@@ -370,6 +559,12 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
         }
         else {
             $env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH = $oldStatePath
+        }
+        if ($null -eq $oldScenarioDeadlineRequestPath) {
+            Remove-Item Env:NLINK_FILETRANSFER_GUI_SCENARIO_DEADLINE_REQUEST_PATH -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:NLINK_FILETRANSFER_GUI_SCENARIO_DEADLINE_REQUEST_PATH = $oldScenarioDeadlineRequestPath
         }
 
         if ($process -is [System.IDisposable]) {

@@ -287,6 +287,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             . '{{helperPath}}'
             function Wait-TunaGuiLiveRouteEpochEvidence { {{waitBody}} }
+            function Assert-GuiSmokeScenarioDeadline {}
             function ConvertFrom-GuiSmokeSemicolonFields {
                 param([string]$Message)
                 $fields = @{}
@@ -391,6 +392,59 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
 
         Assert.True(result.ExitCode == 0, $"Incremental live-route wait test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("gui-live-route-incremental-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeLogLedger_CancellationBeforeCommitLeavesCursorReusable()
+    {
+        var helperPath = Path.Combine(FindRepoRoot(), "tools", "GuiSmokeLogLedger.ps1")
+            .Replace("'", "''", StringComparison.Ordinal);
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            . '{{helperPath}}'
+
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-ledger-cancel-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $logPath = Join-Path $tempRoot 'nlink.log'
+                [IO.File]::WriteAllText(
+                    $logPath,
+                    ("event=one{0}event=two{0}" -f [Environment]::NewLine),
+                    [Text.UTF8Encoding]::new($false))
+                $state = New-GuiSmokeLogLedgerState
+                $cancelled = $false
+                try {
+                    Sync-GuiSmokeLogLedger `
+                        -State $state `
+                        -Paths @($logPath) `
+                        -CancellationProbe {
+                            throw [OperationCanceledException]::new('test-deadline')
+                        }
+                }
+                catch [OperationCanceledException] {
+                    $cancelled = $_.Exception.Message -eq 'test-deadline'
+                }
+                if (-not $cancelled) { throw 'ledger synchronization did not propagate cancellation' }
+                if ($state.Lines.Count -ne 0 -or $state.Generations.Count -ne 0) {
+                    throw 'cancellation mutated the ledger before its atomic commit'
+                }
+
+                Sync-GuiSmokeLogLedger -State $state -Paths @($logPath)
+                $lines = @(Get-GuiSmokeLogLedgerLines -State $state)
+                if (($lines -join '|') -ne 'event=one|event=two') {
+                    throw "ledger was not reusable after cancellation: $($lines -join '|')"
+                }
+                Write-Output 'gui-ledger-cancellation-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Ledger cancellation test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-ledger-cancellation-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -683,6 +737,11 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
 
         var repoRoot = FindRepoRoot();
         var wrapperText = File.ReadAllText(Path.Combine(repoRoot, "tools", "Run-FileTransferTunaGuiSmoke.ps1"));
+        var guiSmokeText = File.ReadAllText(Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1"));
+        var scenarioDeadlineBody = ExtractPowerShellFunctionBody(
+            guiSmokeText,
+            "Assert-GuiSmokeScenarioDeadline",
+            "Wait-Until");
         var convertArgumentBody = ExtractPowerShellFunctionBody(
             wrapperText,
             "ConvertTo-TunaGuiProcessArgument",
@@ -698,6 +757,14 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var stopTreeBody = ExtractPowerShellFunctionBody(
             wrapperText,
             "Stop-TunaGuiSmokeProcessTree",
+            "Stop-TunaGuiSmokeApplicationDescendants");
+        var stopApplicationsBody = ExtractPowerShellFunctionBody(
+            wrapperText,
+            "Stop-TunaGuiSmokeApplicationDescendants",
+            "Request-TunaGuiScenarioDeadline");
+        var requestDeadlineBody = ExtractPowerShellFunctionBody(
+            wrapperText,
+            "Request-TunaGuiScenarioDeadline",
             "Invoke-TunaGuiSmokeWithHardDeadline");
         var watchdogBody = ExtractPowerShellFunctionBody(
             wrapperText,
@@ -709,23 +776,116 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             function Write-TunaGuiAtomicJson { {{atomicJsonBody}} }
             function Get-TunaGuiFinalizationGraceSeconds { {{graceBody}} }
             function Stop-TunaGuiSmokeProcessTree { {{stopTreeBody}} }
+            function Stop-TunaGuiSmokeApplicationDescendants { {{stopApplicationsBody}} }
+            function Request-TunaGuiScenarioDeadline { {{requestDeadlineBody}} }
             function Invoke-TunaGuiSmokeWithHardDeadline { {{watchdogBody}} }
+            function Assert-GuiSmokeScenarioDeadline { {{scenarioDeadlineBody}} }
 
             $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-tuna-gui-watchdog-' + [guid]::NewGuid().ToString('N'))
             $toolsDir = Join-Path $tempRoot 'tools'
+            $cooperativeArtifact = Join-Path $tempRoot 'cooperative-artifact'
             $routeWaitArtifact = Join-Path $tempRoot 'route-wait-artifact'
             $timeoutArtifact = Join-Path $tempRoot 'timeout-artifact'
             $successArtifact = Join-Path $tempRoot 'success-artifact'
             [void][IO.Directory]::CreateDirectory($toolsDir)
+            [void][IO.Directory]::CreateDirectory($cooperativeArtifact)
             [void][IO.Directory]::CreateDirectory($routeWaitArtifact)
             [void][IO.Directory]::CreateDirectory($timeoutArtifact)
             [void][IO.Directory]::CreateDirectory($successArtifact)
             try {
+                $deadlineProbePath = Join-Path $tempRoot 'scenario-deadline-request.json'
+                $script:GuiSmokeScenarioDeadlineUtc = [DateTimeOffset]::MaxValue
+                $script:GuiSmokeScenarioDeadlineName = 'deadline-probe'
+                $env:NLINK_FILETRANSFER_GUI_SCENARIO_DEADLINE_REQUEST_PATH = $deadlineProbePath
+                Assert-GuiSmokeScenarioDeadline
+                '{}' | Set-Content -LiteralPath $deadlineProbePath -Encoding UTF8
+                $deadlineCancelled = $false
+                try {
+                    Assert-GuiSmokeScenarioDeadline
+                }
+                catch [OperationCanceledException] {
+                    $deadlineCancelled = $_.Exception.Message -eq 'gui_smoke_scenario_deadline_exceeded: scenario=deadline-probe'
+                }
+                if (-not $deadlineCancelled) {
+                    throw 'GUI child did not consume the wrapper scenario-deadline request'
+                }
+                Remove-Item -LiteralPath $deadlineProbePath -Force
+
+                $script:stoppedApplicationPids = [System.Collections.Generic.List[int]]::new()
+                function Get-CimInstance {
+                    [CmdletBinding()]
+                    param([Parameter(Position = 0)]$ClassName, [string]$Filter)
+                    if (-not [string]::IsNullOrWhiteSpace($Filter)) {
+                        return [pscustomobject]@{
+                            ProcessId = 101
+                            ParentProcessId = 100
+                            ExecutablePath = 'C:\target.exe'
+                            CreationDate = 'target-created'
+                        }
+                    }
+                    return @(
+                        [pscustomobject]@{ ProcessId = 100; ParentProcessId = 1; ExecutablePath = 'powershell.exe'; CreationDate = 'child-created' },
+                        [pscustomobject]@{ ProcessId = 101; ParentProcessId = 100; ExecutablePath = 'C:\target.exe'; CreationDate = 'target-created' },
+                        [pscustomobject]@{ ProcessId = 102; ParentProcessId = 100; ExecutablePath = 'C:\other.exe'; CreationDate = 'other-created' })
+                }
+                function Get-Process {
+                    [CmdletBinding()]
+                    param([int]$Id)
+                    return [pscustomobject]@{ Id = $Id }
+                }
+                function Stop-Process {
+                    [CmdletBinding()]
+                    param([int]$Id, [switch]$Force)
+                    $script:stoppedApplicationPids.Add($Id) | Out-Null
+                }
+                Stop-TunaGuiSmokeApplicationDescendants `
+                    -GuiChildProcess ([pscustomobject]@{ Id = 100 }) `
+                    -ExePath 'C:\target.exe' `
+                    -GraceMilliseconds 1
+                if (($script:stoppedApplicationPids -join ',') -ne '101') {
+                    throw "application descendant cleanup was not exact: $($script:stoppedApplicationPids -join ',')"
+                }
+                Remove-Item function:Get-CimInstance
+                Remove-Item function:Get-Process
+                Remove-Item function:Stop-Process
+
                 $env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID = 'acceptance-run'
                 $env:NLINK_FILETRANSFER_SCENARIO_RUN_ID = 'scenario-run'
                 $env:NLINK_FILETRANSFER_GUI_FINALIZATION_GRACE_SECONDS_TEST_ONLY = '1'
                 $env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH = 'sentinel-state-path'
+                $env:NLINK_FILETRANSFER_GUI_SCENARIO_DEADLINE_REQUEST_PATH = 'sentinel-request-path'
                 $stubPath = Join-Path $toolsDir 'GuiSmoke-Windows.ps1'
+                @'
+            param([string]$ExePath, [int]$TimeoutSeconds)
+            while (-not (Test-Path -LiteralPath $env:NLINK_FILETRANSFER_GUI_SCENARIO_DEADLINE_REQUEST_PATH -PathType Leaf)) {
+                Start-Sleep -Milliseconds 25
+            }
+            $state = Get-Content -LiteralPath $env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH -Raw | ConvertFrom-Json
+            $state.lastCompletedStage = 'capture_persisted'
+            $state | Add-Member -NotePropertyName capturePath -NotePropertyValue 'cooperative-capture.log'
+            $state | Add-Member -NotePropertyName captureSha256 -NotePropertyValue 'cooperative-sha256'
+            $state | Add-Member -NotePropertyName captureLineCount -NotePropertyValue 7
+            $state | ConvertTo-Json | Set-Content -LiteralPath $env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH -Encoding UTF8
+            exit 1
+            '@ | Set-Content -LiteralPath $stubPath -Encoding UTF8
+                $cooperative = Invoke-TunaGuiSmokeWithHardDeadline `
+                    -RepoRoot $tempRoot `
+                    -ArtifactDir $cooperativeArtifact `
+                    -ExePath 'unused.exe' `
+                    -TimeoutSeconds 1
+                if ($cooperative.TimedOut) {
+                    throw "cooperative scenario deadline did not preserve child finalization: $($cooperative | ConvertTo-Json -Compress)"
+                }
+                if (Test-Path -LiteralPath (Join-Path $cooperativeArtifact 'filetransfer-gui-evidence-finalization-timeout.json')) {
+                    throw 'cooperative scenario deadline wrote a hard-timeout marker'
+                }
+                $cooperativeState = Get-Content -LiteralPath (Join-Path $cooperativeArtifact 'filetransfer-gui-evidence-finalization-state.json') -Raw | ConvertFrom-Json
+                if (-not $cooperativeState.scenarioDeadlineRequested -or
+                    $cooperativeState.childLastCompletedStage -ne 'capture_persisted' -or
+                    $cooperativeState.capturePath -ne 'cooperative-capture.log') {
+                    throw "cooperative finalization state was incomplete: $($cooperativeState | ConvertTo-Json -Compress)"
+                }
+
                 @'
             param([string]$ExePath, [int]$TimeoutSeconds)
             Start-Sleep -Seconds 10
@@ -770,6 +930,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 }
                 if ($env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH -ne 'sentinel-state-path') {
                     throw 'watchdog did not restore the parent state-path environment value'
+                }
+                if ($env:NLINK_FILETRANSFER_GUI_SCENARIO_DEADLINE_REQUEST_PATH -ne 'sentinel-request-path') {
+                    throw 'watchdog did not restore the parent deadline-request environment value'
                 }
                 $timeoutPath = Join-Path $timeoutArtifact 'filetransfer-gui-evidence-finalization-timeout.json'
                 $statePath = Join-Path $timeoutArtifact 'filetransfer-gui-evidence-finalization-state.json'
@@ -817,6 +980,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 Remove-Item Env:NLINK_FILETRANSFER_SCENARIO_RUN_ID -ErrorAction SilentlyContinue
                 Remove-Item Env:NLINK_FILETRANSFER_GUI_FINALIZATION_GRACE_SECONDS_TEST_ONLY -ErrorAction SilentlyContinue
                 Remove-Item Env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH -ErrorAction SilentlyContinue
+                Remove-Item Env:NLINK_FILETRANSFER_GUI_SCENARIO_DEADLINE_REQUEST_PATH -ErrorAction SilentlyContinue
                 if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
             }
             """;
@@ -2206,6 +2370,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             function Wait-TunaGuiSwitchOffToggleOrTerminal { {{waitBody}} }
             function Try-PrearmTunaGuiSwitchOffToggle { {{prearmBody}} }
             function Invoke-TunaGuiFallbackFault { {{invokeBody}} }
+            function Assert-GuiSmokeScenarioDeadline {}
 
             function Get-TunaGuiCompletedTerminalFromLogLine {
                 param([string]$Line)
@@ -4064,7 +4229,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
-    public void GuiSmokeWindows_LiveTunaReactivationServicesLateWalletPrompt()
+    public void GuiSmokeWindows_LiveTunaReactivationServicesWalletPromptBeforeRouteWait()
     {
         var repoRoot = FindRepoRoot();
         var scriptText = File.ReadAllText(Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1"));
@@ -4075,8 +4240,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("runtime_evidence_late_wallet_prompt", unlockFunctionBody, StringComparison.Ordinal);
         Assert.Contains("Submit-TunaWalletPasswordDialogsForPayersIfPresent", scriptText, StringComparison.Ordinal);
         Assert.Contains("prearmed_on_step_", liveCycleFunctionBody, StringComparison.Ordinal);
-        Assert.Contains("activation_route_wait_step_", liveCycleFunctionBody, StringComparison.Ordinal);
-        Assert.Contains("-OnPoll $serviceWalletPrompts", liveCycleFunctionBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("activation_route_wait_step_", liveCycleFunctionBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("-OnPoll $serviceWalletPrompts", liveCycleFunctionBody, StringComparison.Ordinal);
     }
 
     [Fact]
