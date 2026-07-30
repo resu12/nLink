@@ -12975,6 +12975,11 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("filetransfer_bridge_recovery_execution_payload_hold_missing_recovered_count={0}" -f $RecoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount)) | Out-Null
     $lines.Add(("filetransfer_bridge_recovery_execution_payload_hold_missing_unresolved_count={0}" -f $RecoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount)) | Out-Null
     $lines.Add(("filetransfer_bridge_recovery_execution_payload_hold_verdict={0}" -f $RecoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldVerdict)) | Out-Null
+    $lines.Add(("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_raw_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRawCount)) | Out-Null
+    $lines.Add(("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_distinct_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedDistinctCount)) | Out-Null
+    $lines.Add(("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_recovered_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount)) | Out-Null
+    $lines.Add(("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_unresolved_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedUnresolvedCount)) | Out-Null
+    $lines.Add(("filetransfer_receive_recovery_completed_unproven_payload_hold_verdict={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldPreservationVerdict)) | Out-Null
     $lines.Add(("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_raw_count={0}" -f $RecoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount)) | Out-Null
     $lines.Add(("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_distinct_count={0}" -f $RecoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingDistinctCount)) | Out-Null
     $lines.Add(("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_recovered_count={0}" -f $RecoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRecoveredCount)) | Out-Null
@@ -15000,6 +15005,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("filetransfer_bridge_recovery_execution_payload_hold_missing_recovered_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount),
         ("filetransfer_bridge_recovery_execution_payload_hold_missing_unresolved_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount),
         ("filetransfer_bridge_recovery_execution_payload_hold_verdict={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldVerdict),
+        ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_raw_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRawCount),
+        ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_distinct_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedDistinctCount),
+        ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_recovered_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount),
+        ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_unresolved_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedUnresolvedCount),
+        ("filetransfer_receive_recovery_completed_unproven_payload_hold_verdict={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldPreservationVerdict),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_raw_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_distinct_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingDistinctCount),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_recovered_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRecoveredCount),
@@ -26445,9 +26455,41 @@ function Get-FileTransferReceiveRecoveryOperationCorrelation {
                 'exhausted',
                 'discarded')
         } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
-        if ($successorReceipt.Count -ne 1) {
+        if ($successorReceipt.Count -eq 1) {
+            return $supersession
+        }
+
+        $successorInvalidation = @($successorEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$successorStart[0].Sequence -and
+            $_.EventName -in $eventNames.Invalidated -and
+            (
+                (Get-ReceiveRecoveryOperationField `
+                    -Event $_ `
+                    -Names @(
+                        'decision_reason',
+                        'invalidation_reason',
+                        'reason') `
+                    -Default '').ToLowerInvariant() -notmatch
+                        'ttl|missing.callback|observation.expir|bridge.started.timeout'
+            )
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($successorInvalidation.Count -ne 1) {
             return $null
         }
+
+        $closureAfterInvalidation = @($successorEvents | Where-Object {
+            [int64]$_.Sequence -gt
+                [int64]$successorInvalidation[0].Sequence -and
+            $_.EventName -in @(
+                $eventNames.ClosureRetained +
+                $eventNames.ClosureAdopted +
+                $eventNames.ClosureReserved +
+                $eventNames.ClosureConsumed)
+        } | Select-Object -First 1)
+        if ($closureAfterInvalidation.Count -gt 0) {
+            return $null
+        }
+
         return $supersession
     }
 
@@ -27381,6 +27423,650 @@ function Get-FileTransferReceiveRecoveryCompletedUnprovenSuccessorCorrelation {
         RawCandidateEvents = @($rawRecords.ToArray() | ForEach-Object { $_.Event })
         RecoveredCandidateEvents = @($recoveredEvents.ToArray())
         UnresolvedCandidateEvents = @($unresolvedEvents.ToArray())
+    }
+}
+
+function Get-FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldCorrelation {
+    param(
+        [AllowEmptyCollection()][object[]]$Events = @()
+    )
+
+    [object[]]$events = @(
+        $Events |
+            Where-Object { $null -ne $_ } |
+            Sort-Object Sequence, LineNumber)
+    [string[]]$scopeFields = @(
+        'log_writer_id',
+        'session_id',
+        'transfer_id',
+        'direction',
+        'route',
+        'protocol_version',
+        'live_route_epoch',
+        'route_publication_generation',
+        'runtime_generation',
+        'terminal_generation',
+        'leg_generation',
+        'transport_epoch',
+        'bridge_recovery_generation',
+        'data_session_generation')
+
+    function Get-CompletedUnprovenPayloadHoldField {
+        param(
+            [Parameter(Mandatory = $true)]$Event,
+            [Parameter(Mandatory = $true)][string[]]$Names,
+            [string]$Default = '',
+            [switch]$AllowNone
+        )
+
+        if ($null -eq $Event.PSObject.Properties['Fields'] -and
+            $null -ne $Event.PSObject.Properties['Event']) {
+            $Event = $Event.Event
+        }
+        if ($null -eq $Event -or
+            $null -eq $Event.PSObject.Properties['Fields']) {
+            return $Default
+        }
+
+        foreach ($name in $Names) {
+            $value = Get-FileTransferEventField `
+                -Event $Event `
+                -Name $name `
+                -Default ''
+            if (-not [string]::IsNullOrWhiteSpace($value) -and
+                $value -notin @('(missing)', '__missing__') -and
+                ($AllowNone -or $value -notin @('(none)', 'none'))) {
+                return $value
+            }
+        }
+        return $Default
+    }
+
+    function Test-CompletedUnprovenPayloadHoldVisible {
+        param([AllowNull()][string]$Value)
+
+        return -not [string]::IsNullOrWhiteSpace($Value) -and
+            $Value -notmatch 'redacted|missing|none'
+    }
+
+    function Get-CompletedUnprovenPayloadHoldGeneration {
+        param([Parameter(Mandatory = $true)]$Event)
+
+        return Get-CompletedUnprovenPayloadHoldField `
+            -Event $Event `
+            -Names @(
+                'receive_recovery_operation_generation',
+                'recovery_operation_generation',
+                'operation_generation')
+    }
+
+    function Get-CompletedUnprovenPayloadHoldAuthority {
+        param([Parameter(Mandatory = $true)]$Event)
+
+        return Get-CompletedUnprovenPayloadHoldField `
+            -Event $Event `
+            -Names @(
+                'receive_recovery_operation_authority_id',
+                'recovery_operation_authority_id')
+    }
+
+    function Test-CompletedUnprovenPayloadHoldScopeMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Anchor,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        foreach ($field in $scopeFields) {
+            $left = Get-CompletedUnprovenPayloadHoldField `
+                -Event $Anchor `
+                -Names @($field)
+            $right = Get-CompletedUnprovenPayloadHoldField `
+                -Event $Candidate `
+                -Names @($field)
+            if ([string]::IsNullOrWhiteSpace($left) -or
+                [string]::IsNullOrWhiteSpace($right) -or
+                -not [string]::Equals(
+                    $left,
+                    $right,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        foreach ($optional in @(
+                'checkpoint_request_id',
+                'data_session_identity')) {
+            $left = Get-CompletedUnprovenPayloadHoldField `
+                -Event $Anchor `
+                -Names @($optional) `
+                -Default '(none)' `
+                -AllowNone
+            $right = Get-CompletedUnprovenPayloadHoldField `
+                -Event $Candidate `
+                -Names @($optional) `
+                -Default '(none)' `
+                -AllowNone
+            if ($left -ne '(none)' -and
+                $right -ne '(none)' -and
+                -not [string]::Equals(
+                    $left,
+                    $right,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-CompletedUnprovenPayloadHoldOperationMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Issued,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        if (-not (Test-CompletedUnprovenPayloadHoldScopeMatch `
+                -Anchor $Issued `
+                -Candidate $Candidate) -or
+            (Get-CompletedUnprovenPayloadHoldGeneration -Event $Issued) -ne
+                (Get-CompletedUnprovenPayloadHoldGeneration -Event $Candidate)) {
+            return $false
+        }
+
+        $issuedAuthority =
+            Get-CompletedUnprovenPayloadHoldAuthority -Event $Issued
+        $candidateAuthority =
+            Get-CompletedUnprovenPayloadHoldAuthority -Event $Candidate
+        return -not (
+            (Test-CompletedUnprovenPayloadHoldVisible $issuedAuthority) -and
+            (Test-CompletedUnprovenPayloadHoldVisible $candidateAuthority) -and
+            -not [string]::Equals(
+                $issuedAuthority,
+                $candidateAuthority,
+                [System.StringComparison]::OrdinalIgnoreCase))
+    }
+
+    function Get-CompletedUnprovenPayloadHoldOperationKey {
+        param([Parameter(Mandatory = $true)]$Issued)
+
+        $parts = New-Object System.Collections.Generic.List[string]
+        foreach ($field in $scopeFields) {
+            $parts.Add((
+                Get-CompletedUnprovenPayloadHoldField `
+                    -Event $Issued `
+                    -Names @($field) `
+                    -Default '(missing)').ToLowerInvariant()) | Out-Null
+        }
+        $parts.Add((
+            Get-CompletedUnprovenPayloadHoldGeneration -Event $Issued).
+                ToLowerInvariant()) | Out-Null
+        $parts.Add((
+            Get-CompletedUnprovenPayloadHoldAuthority -Event $Issued).
+                ToLowerInvariant()) | Out-Null
+        return $parts -join '|'
+    }
+
+    function Test-CompletedUnprovenPayloadHoldSuccessorLineage {
+        param(
+            [Parameter(Mandatory = $true)]$Predecessor,
+            [Parameter(Mandatory = $true)]$Supersession,
+            [Parameter(Mandatory = $true)]$Successor
+        )
+
+        if (-not (Test-CompletedUnprovenPayloadHoldScopeMatch `
+                -Anchor $Predecessor `
+                -Candidate $Supersession) -or
+            -not (Test-CompletedUnprovenPayloadHoldScopeMatch `
+                -Anchor $Predecessor `
+                -Candidate $Successor)) {
+            return $false
+        }
+
+        $predecessorGeneration =
+            Get-CompletedUnprovenPayloadHoldGeneration -Event $Predecessor
+        $predecessorAuthority =
+            Get-CompletedUnprovenPayloadHoldAuthority -Event $Predecessor
+        $successorGeneration = Get-CompletedUnprovenPayloadHoldField `
+            -Event $Supersession `
+            -Names @('successor_receive_recovery_operation_generation')
+        $successorAuthority = Get-CompletedUnprovenPayloadHoldField `
+            -Event $Supersession `
+            -Names @('successor_receive_recovery_operation_authority_id')
+        $candidatePredecessorGeneration =
+            Get-CompletedUnprovenPayloadHoldField `
+                -Event $Successor `
+                -Names @('predecessor_receive_recovery_operation_generation')
+        $candidatePredecessorAuthority =
+            Get-CompletedUnprovenPayloadHoldField `
+                -Event $Successor `
+                -Names @('predecessor_receive_recovery_operation_authority_id')
+        if ((Get-CompletedUnprovenPayloadHoldGeneration -Event $Successor) -ne
+                $successorGeneration -or
+            $candidatePredecessorGeneration -ne $predecessorGeneration) {
+            return $false
+        }
+
+        foreach ($pair in @(
+                @($predecessorAuthority, $candidatePredecessorAuthority),
+                @(
+                    Get-CompletedUnprovenPayloadHoldAuthority -Event $Successor,
+                    $successorAuthority))) {
+            if ((Test-CompletedUnprovenPayloadHoldVisible $pair[0]) -and
+                (Test-CompletedUnprovenPayloadHoldVisible $pair[1]) -and
+                -not [string]::Equals(
+                    $pair[0],
+                    $pair[1],
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    [object[]]$issuedEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_receive_recovery_operation_issued' -and
+        (Get-CompletedUnprovenPayloadHoldField `
+            -Event $_ `
+            -Names @('direction')) -eq 'outbound' -and
+        (Get-CompletedUnprovenPayloadHoldGeneration -Event $_) -match
+            '^[1-9][0-9]*$'
+    })
+    $issuedByKey = [ordered]@{}
+    foreach ($issued in $issuedEvents) {
+        $key = Get-CompletedUnprovenPayloadHoldOperationKey -Issued $issued
+        if (-not $issuedByKey.Contains($key)) {
+            $issuedByKey[$key] = $issued
+        }
+    }
+    [object[]]$distinctIssued = @($issuedByKey.Values)
+    $rootByOperationKey = @{}
+    foreach ($issued in @($distinctIssued | Sort-Object Sequence, LineNumber)) {
+        $issuedKey = Get-CompletedUnprovenPayloadHoldOperationKey -Issued $issued
+        $predecessorGeneration = Get-CompletedUnprovenPayloadHoldField `
+            -Event $issued `
+            -Names @('predecessor_receive_recovery_operation_generation') `
+            -Default '0'
+        $predecessorAuthority = Get-CompletedUnprovenPayloadHoldField `
+            -Event $issued `
+            -Names @('predecessor_receive_recovery_operation_authority_id')
+        $predecessors = @($distinctIssued | Where-Object {
+            [int64]$_.Sequence -lt [int64]$issued.Sequence -and
+            (Get-CompletedUnprovenPayloadHoldGeneration -Event $_) -eq
+                $predecessorGeneration -and
+            (Test-CompletedUnprovenPayloadHoldScopeMatch `
+                -Anchor $_ `
+                -Candidate $issued) -and
+            (
+                -not (Test-CompletedUnprovenPayloadHoldVisible $predecessorAuthority) -or
+                [string]::Equals(
+                    (Get-CompletedUnprovenPayloadHoldAuthority -Event $_),
+                    $predecessorAuthority,
+                    [System.StringComparison]::OrdinalIgnoreCase)
+            )
+        })
+        if ($predecessors.Count -eq 1) {
+            $predecessorKey =
+                Get-CompletedUnprovenPayloadHoldOperationKey `
+                    -Issued $predecessors[0]
+            if ($rootByOperationKey.ContainsKey($predecessorKey)) {
+                $rootByOperationKey[$issuedKey] =
+                    $rootByOperationKey[$predecessorKey]
+                continue
+            }
+        }
+        $rootByOperationKey[$issuedKey] = $issuedKey
+    }
+
+    [object[]]$starts = @($events | Where-Object {
+        $_.EventName -in @(
+            'filetransfer_receive_recovery_operation_execution_start_decided',
+            'filetransfer_receive_recovery_operation_execution_started') -and
+        (Get-CompletedUnprovenPayloadHoldField `
+            -Event $_ `
+            -Names @(
+                'execution_start_status',
+                'decision_status',
+                'start_status',
+                'status')) -in @(
+                    'Started',
+                    'Idempotent',
+                    'Accepted')
+    })
+    [object[]]$heldEvents = @($events | Where-Object {
+        $_.EventName -eq
+            'filetransfer_bridge_recovery_payload_submission_held'
+    })
+    [object[]]$receiptEvents = @($events | Where-Object {
+        $_.EventName -in @(
+            'filetransfer_receive_recovery_operation_execution_receipt_applied',
+            'filetransfer_receive_recovery_operation_receipt_applied') -and
+        (Get-CompletedUnprovenPayloadHoldField `
+            -Event $_ `
+            -Names @('execution_outcome', 'operation_outcome', 'outcome')) -eq
+                'Completed'
+    })
+    [object[]]$retainedEvents = @($events | Where-Object {
+        $_.EventName -eq
+            'filetransfer_receive_recovery_operation_closure_retained' -and
+        (Get-CompletedUnprovenPayloadHoldField `
+            -Event $_ `
+            -Names @('closure_state')) -eq 'Retained'
+    })
+    [object[]]$proofEvents = @($events | Where-Object {
+        $_.EventName -in @(
+            'filetransfer_receive_recovery_operation_proof_observed',
+            'filetransfer_receive_recovery_operation_receive_proof_observed')
+    })
+    [object[]]$adoptedEvents = @($events | Where-Object {
+        $_.EventName -eq
+            'filetransfer_receive_recovery_operation_closure_adopted' -and
+        (Get-CompletedUnprovenPayloadHoldField `
+            -Event $_ `
+            -Names @('closure_state')) -eq 'Adopted'
+    })
+    [object[]]$resumedEvents = @($events | Where-Object {
+        $_.EventName -eq
+            'filetransfer_bridge_recovery_payload_submission_resumed'
+    })
+    [object[]]$supersessions = @($events | Where-Object {
+        $_.EventName -eq
+            'filetransfer_receive_recovery_operation_superseded' -and
+        (Get-CompletedUnprovenPayloadHoldField `
+            -Event $_ `
+            -Names @('direction')) -eq 'outbound' -and
+        (Get-CompletedUnprovenPayloadHoldField `
+            -Event $_ `
+            -Names @('decision_reason')) -eq
+            'completed_unproven_receive_recovery_superseded_by_newer_health_observation' -and
+        (Get-CompletedUnprovenPayloadHoldField `
+            -Event $_ `
+            -Names @('health_evaluation_kind')) -notin @('', '(none)', 'None') -and
+        (Get-CompletedUnprovenPayloadHoldField `
+            -Event $_ `
+            -Names @('health_evidence_generation')) -match '^[1-9][0-9]*$'
+    })
+
+    function Get-CompletedUnprovenPayloadHoldSuccessor {
+        param(
+            [Parameter(Mandatory = $true)]$Predecessor,
+            [Parameter(Mandatory = $true)]$Supersession
+        )
+
+        $matches = @($distinctIssued | Where-Object {
+            [int64]$_.Sequence -gt [int64]$Supersession.Sequence -and
+            (Test-CompletedUnprovenPayloadHoldSuccessorLineage `
+                -Predecessor $Predecessor `
+                -Supersession $Supersession `
+                -Successor $_)
+        })
+        if ($matches.Count -ne 1) {
+            return $null
+        }
+        return $matches[0]
+    }
+
+    function Test-CompletedUnprovenPayloadHoldRecovered {
+        param([Parameter(Mandatory = $true)]$InitialSuccessor)
+
+        $current = $InitialSuccessor
+        for ($depth = 0; $depth -lt 64; $depth++) {
+            $start = @($starts | Where-Object {
+                [int64]$_.Sequence -gt [int64]$current.Sequence -and
+                (Test-CompletedUnprovenPayloadHoldOperationMatch `
+                    -Issued $current `
+                    -Candidate $_)
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            if ($start.Count -ne 1) {
+                return $false
+            }
+
+            $receipt = @($receiptEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$start[0].Sequence -and
+                (Test-CompletedUnprovenPayloadHoldOperationMatch `
+                    -Issued $current `
+                    -Candidate $_)
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            $proof = @($proofEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$start[0].Sequence -and
+                (Test-CompletedUnprovenPayloadHoldOperationMatch `
+                    -Issued $current `
+                    -Candidate $_) -and
+                (Get-CompletedUnprovenPayloadHoldField `
+                    -Event $_ `
+                    -Names @('proof_identity')) -notin @(
+                        '',
+                        '(none)',
+                        'none') -and
+                (Get-CompletedUnprovenPayloadHoldField `
+                    -Event $_ `
+                    -Names @('proof_observed_utc_ms')) -match
+                        '^[1-9][0-9]*$'
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            if ($receipt.Count -eq 1 -and $proof.Count -eq 1) {
+                $adoptionFloor = [Math]::Max(
+                    [int64]$receipt[0].Sequence,
+                    [int64]$proof[0].Sequence)
+                $adopted = @($adoptedEvents | Where-Object {
+                    [int64]$_.Sequence -gt $adoptionFloor -and
+                    (Test-CompletedUnprovenPayloadHoldOperationMatch `
+                        -Issued $current `
+                        -Candidate $_)
+                } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+                if ($adopted.Count -eq 1) {
+                    $earlyResume = @($resumedEvents | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$receipt[0].Sequence -and
+                        [int64]$_.Sequence -lt [int64]$adopted[0].Sequence -and
+                        (Test-CompletedUnprovenPayloadHoldOperationMatch `
+                            -Issued $current `
+                            -Candidate $_)
+                    }).Count -gt 0
+                    $release = @($resumedEvents | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$adopted[0].Sequence -and
+                        (Test-CompletedUnprovenPayloadHoldOperationMatch `
+                            -Issued $current `
+                            -Candidate $_)
+                    } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+                    return -not $earlyResume -and $release.Count -eq 1
+                }
+            }
+
+            if ($receipt.Count -ne 1) {
+                return $false
+            }
+            $earlyResume = @($resumedEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$receipt[0].Sequence -and
+                (Test-CompletedUnprovenPayloadHoldOperationMatch `
+                    -Issued $current `
+                    -Candidate $_)
+            } | Select-Object -First 1)
+            if ($earlyResume.Count -gt 0) {
+                return $false
+            }
+
+            $nextSupersession = @($supersessions | Where-Object {
+                [int64]$_.Sequence -gt [int64]$receipt[0].Sequence -and
+                (Get-CompletedUnprovenPayloadHoldField `
+                    -Event $_ `
+                    -Names @(
+                        'predecessor_receive_recovery_operation_generation')) -eq
+                    (Get-CompletedUnprovenPayloadHoldGeneration -Event $current) -and
+                (Test-CompletedUnprovenPayloadHoldScopeMatch `
+                    -Anchor $current `
+                    -Candidate $_)
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            if ($nextSupersession.Count -ne 1) {
+                return $false
+            }
+            $next = Get-CompletedUnprovenPayloadHoldSuccessor `
+                -Predecessor $current `
+                -Supersession $nextSupersession[0]
+            if ($null -eq $next) {
+                return $false
+            }
+            $current = $next
+        }
+        return $false
+    }
+
+    $candidateRecords = New-Object System.Collections.Generic.List[object]
+    foreach ($supersession in $supersessions) {
+        $predecessorGeneration = Get-CompletedUnprovenPayloadHoldField `
+            -Event $supersession `
+            -Names @('predecessor_receive_recovery_operation_generation')
+        $predecessorAuthority = Get-CompletedUnprovenPayloadHoldField `
+            -Event $supersession `
+            -Names @('predecessor_receive_recovery_operation_authority_id')
+        $predecessors = @($distinctIssued | Where-Object {
+            [int64]$_.Sequence -lt [int64]$supersession.Sequence -and
+            (Get-CompletedUnprovenPayloadHoldGeneration -Event $_) -eq
+                $predecessorGeneration -and
+            (Test-CompletedUnprovenPayloadHoldScopeMatch `
+                -Anchor $_ `
+                -Candidate $supersession) -and
+            (
+                -not (Test-CompletedUnprovenPayloadHoldVisible $predecessorAuthority) -or
+                [string]::Equals(
+                    (Get-CompletedUnprovenPayloadHoldAuthority -Event $_),
+                    $predecessorAuthority,
+                    [System.StringComparison]::OrdinalIgnoreCase)
+            )
+        })
+        if ($predecessors.Count -ne 1) {
+            continue
+        }
+        $predecessor = $predecessors[0]
+        $start = @($starts | Where-Object {
+            [int64]$_.Sequence -gt [int64]$predecessor.Sequence -and
+            [int64]$_.Sequence -lt [int64]$supersession.Sequence -and
+            (Test-CompletedUnprovenPayloadHoldOperationMatch `
+                -Issued $predecessor `
+                -Candidate $_)
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($start.Count -ne 1) {
+            continue
+        }
+        $held = @($heldEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$start[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$supersession.Sequence -and
+            (Test-CompletedUnprovenPayloadHoldOperationMatch `
+                -Issued $predecessor `
+                -Candidate $_)
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($held.Count -ne 1) {
+            continue
+        }
+        $receipt = @($receiptEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$start[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$supersession.Sequence -and
+            (Test-CompletedUnprovenPayloadHoldOperationMatch `
+                -Issued $predecessor `
+                -Candidate $_) -and
+            (Get-CompletedUnprovenPayloadHoldField `
+                -Event $_ `
+                -Names @('closure_state')) -eq 'Retained' -and
+            (Get-CompletedUnprovenPayloadHoldField `
+                -Event $_ `
+                -Names @('proof_identity') `
+                -Default '(none)' `
+                -AllowNone) -in @('(none)', 'none')
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($receipt.Count -ne 1) {
+            continue
+        }
+        $closureGeneration = Get-CompletedUnprovenPayloadHoldField `
+            -Event $supersession `
+            -Names @('predecessor_closure_generation')
+        $retained = @($retainedEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$receipt[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$supersession.Sequence -and
+            (Test-CompletedUnprovenPayloadHoldOperationMatch `
+                -Issued $predecessor `
+                -Candidate $_) -and
+            (Get-CompletedUnprovenPayloadHoldField `
+                -Event $_ `
+                -Names @('closure_generation')) -eq $closureGeneration
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($retained.Count -ne 1) {
+            continue
+        }
+        $resume = @($resumedEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$retained[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$supersession.Sequence -and
+            (Test-CompletedUnprovenPayloadHoldOperationMatch `
+                -Issued $predecessor `
+                -Candidate $_)
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($resume.Count -ne 1) {
+            continue
+        }
+        $successor = Get-CompletedUnprovenPayloadHoldSuccessor `
+            -Predecessor $predecessor `
+            -Supersession $supersession
+        if ($null -eq $successor) {
+            continue
+        }
+        $successorStart = @($starts | Where-Object {
+            [int64]$_.Sequence -gt [int64]$successor.Sequence -and
+            (Test-CompletedUnprovenPayloadHoldOperationMatch `
+                -Issued $successor `
+                -Candidate $_)
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($successorStart.Count -ne 1) {
+            continue
+        }
+
+        $predecessorKey =
+            Get-CompletedUnprovenPayloadHoldOperationKey -Issued $predecessor
+        $rootKey = if ($rootByOperationKey.ContainsKey($predecessorKey)) {
+            $rootByOperationKey[$predecessorKey]
+        }
+        else {
+            $predecessorKey
+        }
+        $candidateRecords.Add([pscustomobject]@{
+            Event = $supersession
+            RootKey = $rootKey
+            Successor = $successor
+        }) | Out-Null
+    }
+
+    $distinctByRoot = [ordered]@{}
+    foreach ($record in $candidateRecords) {
+        if (-not $distinctByRoot.Contains($record.RootKey)) {
+            $distinctByRoot[$record.RootKey] = $record
+        }
+    }
+    $recovered = New-Object System.Collections.Generic.List[object]
+    $unresolved = New-Object System.Collections.Generic.List[object]
+    foreach ($record in @($distinctByRoot.Values)) {
+        if (Test-CompletedUnprovenPayloadHoldRecovered `
+                -InitialSuccessor $record.Successor) {
+            $recovered.Add($record.Event) | Out-Null
+        }
+        else {
+            $unresolved.Add($record.Event) | Out-Null
+        }
+    }
+
+    return [pscustomobject]@{
+        RawCount = $candidateRecords.Count
+        DistinctCount = $distinctByRoot.Count
+        RecoveredCount = $recovered.Count
+        UnresolvedCount = $unresolved.Count
+        Verdict = if ($unresolved.Count -gt 0) {
+            'fail'
+        }
+        elseif ($distinctByRoot.Count -gt 0) {
+            'pass'
+        }
+        else {
+            'none'
+        }
+        RawCandidateEvents = @($candidateRecords | ForEach-Object { $_.Event })
+        DistinctCandidateEvents = @(
+            $distinctByRoot.Values | ForEach-Object { $_.Event })
+        RecoveredCandidateEvents = @($recovered.ToArray())
+        UnresolvedCandidateEvents = @($unresolved.ToArray())
     }
 }
 
@@ -35425,6 +36111,9 @@ function Get-FileTransferRecoveryFailureClassification {
     })
     $fileTransferReceiveRecoveryOperationProof =
         Get-FileTransferReceiveRecoveryOperationCorrelation -Events $events
+    $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof =
+        Get-FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldCorrelation `
+            -Events $events
     $fileTransferReceiveRecoveryCompletedUnprovenSuccessorProof =
         Get-FileTransferReceiveRecoveryCompletedUnprovenSuccessorCorrelation `
             -Events $events
@@ -38752,6 +39441,12 @@ function Get-FileTransferRecoveryFailureClassification {
         -UseDefaultReason
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
+        -Class 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved' `
+        -Events @($fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.UnresolvedCandidateEvents) `
+        -DefaultReason 'completed_unproven_receive_recovery_payload_resumed_before_proof' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
         -Class 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing' `
         -Events @($bridgeRecoveryExecutionSubmissionBarrierDrainProof.UnresolvedCandidateEvents) `
         -DefaultReason 'bridge_recovery_execution_restart_not_ready' `
@@ -39248,6 +39943,10 @@ function Get-FileTransferRecoveryFailureClassification {
     elseif ($bridgeRecoveryExecutionPayloadHoldProof.UnresolvedCount -gt 0) {
         $class = 'filetransfer_bridge_recovery_execution_payload_hold_missing'
     }
+    elseif ($fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.UnresolvedCount -gt 0) {
+        $class =
+            'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved'
+    }
     elseif ($bridgeRecoveryExecutionSubmissionBarrierDrainProof.UnresolvedCount -gt 0) {
         $class = 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing'
     }
@@ -39640,6 +40339,7 @@ function Get-FileTransferRecoveryFailureClassification {
         elseif ($class -in @(
                 'filetransfer_receive_recovery_operation_incomplete',
                 'filetransfer_receive_recovery_completed_unproven_successor_missing',
+                'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved',
                 'filetransfer_receive_recovery_completed_proven_successor_missing',
                 'filetransfer_route_transition_draining_transport_grace_terminalization',
                 'filetransfer_route_transition_incomplete',
@@ -39836,6 +40536,11 @@ function Get-FileTransferRecoveryFailureClassification {
         FileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount = $bridgeRecoveryExecutionPayloadHoldProof.RecoveredCount
         FileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount = $bridgeRecoveryExecutionPayloadHoldProof.UnresolvedCount
         FileTransferBridgeRecoveryExecutionPayloadHoldVerdict = $bridgeRecoveryExecutionPayloadHoldProof.Verdict
+        FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRawCount = $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.RawCount
+        FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedDistinctCount = $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.DistinctCount
+        FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount = $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.RecoveredCount
+        FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedUnresolvedCount = $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.UnresolvedCount
+        FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldPreservationVerdict = $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.Verdict
         FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount = $bridgeRecoveryExecutionSubmissionBarrierDrainProof.RawCount
         FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingDistinctCount = $bridgeRecoveryExecutionSubmissionBarrierDrainProof.DistinctCount
         FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRecoveredCount = $bridgeRecoveryExecutionSubmissionBarrierDrainProof.RecoveredCount
@@ -40585,6 +41290,11 @@ function New-FileTransferInvariantLedgerObject {
         filetransfer_bridge_recovery_execution_payload_hold_missing_recovered_count = [string]$recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount
         filetransfer_bridge_recovery_execution_payload_hold_missing_unresolved_count = [string]$recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount
         filetransfer_bridge_recovery_execution_payload_hold_verdict = $recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldVerdict
+        filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_raw_count = [string]$recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRawCount
+        filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_distinct_count = [string]$recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedDistinctCount
+        filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_recovered_count = [string]$recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount
+        filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_unresolved_count = [string]$recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedUnresolvedCount
+        filetransfer_receive_recovery_completed_unproven_payload_hold_verdict = $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldPreservationVerdict
         filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_raw_count = [string]$recoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount
         filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_distinct_count = [string]$recoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingDistinctCount
         filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_recovered_count = [string]$recoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRecoveredCount
@@ -41135,6 +41845,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("filetransfer_bridge_recovery_execution_payload_hold_missing_recovered_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount),
         ("filetransfer_bridge_recovery_execution_payload_hold_missing_unresolved_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount),
         ("filetransfer_bridge_recovery_execution_payload_hold_verdict={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldVerdict),
+        ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_raw_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRawCount),
+        ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_distinct_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedDistinctCount),
+        ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_recovered_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount),
+        ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_unresolved_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedUnresolvedCount),
+        ("filetransfer_receive_recovery_completed_unproven_payload_hold_verdict={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldPreservationVerdict),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_raw_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_distinct_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingDistinctCount),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_recovered_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRecoveredCount),
