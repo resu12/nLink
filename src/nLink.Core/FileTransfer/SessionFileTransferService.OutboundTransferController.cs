@@ -1378,6 +1378,9 @@ public sealed partial class SessionFileTransferService
                     OnBridgeRecoveryEvaluationRequested;
                 bridgeRecoveryExecutionBridge.ReceiveRecoveryProofObserved -=
                     OnReceiveRecoveryProofObserved;
+                bridgeRecoveryExecutionBridge
+                        .ReceiveRecoveryPeerReachabilityObserved -=
+                    OnReceiveRecoveryPeerReachabilityObserved;
             }
         }
 

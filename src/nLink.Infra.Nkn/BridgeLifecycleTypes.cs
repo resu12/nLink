@@ -46,7 +46,11 @@ internal readonly record struct BridgeLifecycleEvent(
     long ControlMessagesReceivedSinceLast = 0,
     long MediaMessagesReceivedSinceLast = 0,
     long BulkMessagesReceivedSinceLast = 0,
-    FileTransferBridgeRecoveryExecutionCommand? RecoveryExecutionCommand = null);
+    FileTransferBridgeRecoveryExecutionCommand? RecoveryExecutionCommand = null,
+    long SubmissionEpoch = 0,
+    long ProcessEpoch = 0,
+    long ProcessSpawnTicks = 0,
+    string? PeerReachabilityIdentity = null);
 
 internal readonly record struct BridgeExitClassification(
     BridgeExitReasonKind ReasonKind,

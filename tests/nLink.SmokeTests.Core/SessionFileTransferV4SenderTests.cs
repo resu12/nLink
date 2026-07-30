@@ -895,6 +895,108 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "ReceiveRecoveryOperation")]
+    public async Task FileTransferReceiveRecoveryProofStatePublication_ReachabilitySendsOneEmptyRepairState()
+    {
+        const string transferId =
+            "transfer_receive_recovery_proof_state_publication";
+        using var service = new SessionFileTransferService();
+        using var transport =
+            new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4InboundContext(
+            transferId,
+            chunkCount: 256,
+            nextChunkIndex: 9,
+            durableHighestChunkIndex: 8,
+            creditUntilChunkIndexExclusive: 64);
+        using var dataSession =
+            new RecordingDataSession($"session_{transferId}", transferId);
+        SetPrivateProperty(context, "DataSession", dataSession);
+        SetPrivateProperty(context, "DataSessionGeneration", 1L);
+        SeedCurrentRuntimeOwnerForTest(
+            context,
+            FileTransferDirection.Inbound,
+            "receive_recovery_proof_state_publication");
+        typeof(SessionFileTransferService)
+            .GetField(
+                "inboundTransfer",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        Assert.True((bool)typeof(SessionFileTransferService)
+            .GetMethod(
+                "TryRequestFileTransferReceiveRecovery",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    new FileTransferReceiveRecoveryRequest(
+                        $"session_{transferId}",
+                        transferId,
+                        FileTransferDirection.Inbound,
+                        "session_liveness_timeout_pending"),
+                ])!);
+        var command = Assert.Single(
+            transport.BridgeRecoveryExecutionCommands);
+        transport.CompleteBridgeRecoveryExecution(
+            command,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            "loopback_bridge_recovery_completed");
+        await WaitUntilAsync(
+            () =>
+                GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                        context,
+                        "CoordinatorPersistentState")
+                    .FileTransferReceiveRecovery
+                    .CurrentOperation?
+                    .ClosureState ==
+                FileTransferReceiveRecoveryClosureState.Retained);
+
+        transport.RaiseReceiveRecoveryPeerReachability(
+            new FileTransferReceiveRecoveryPeerReachabilityObservation(
+                command,
+                SubmissionEpoch: 2,
+                ProcessEpoch: 2,
+                ProcessId: 1234,
+                ProcessSpawnTicks: DateTime.UtcNow.Ticks,
+                HeartbeatIdentity: "heartbeat-2",
+                ReceiveResumedIdentity: "receive-resumed-2",
+                ObservedUtcMs:
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                Source: "loopback_expected_source_heartbeat"));
+
+        await WaitUntilAsync(
+            () =>
+                GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                        context,
+                        "CoordinatorPersistentState")
+                    .FileTransferReceiveRecovery
+                    .ProofStatePublication?
+                    .LastReceipt?
+                    .Outcome ==
+                FileTransferReceiveRecoveryProofStatePublicationOutcome
+                    .Delivered);
+
+        var state = Assert.IsType<FileTransferStateFrameV4>(
+            Assert.Single(dataSession.SentFrames));
+        Assert.Empty(state.MissingRanges);
+        Assert.Empty(transport.RegularV4PressureInstallReceipts);
+        var recovery =
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                    context,
+                    "CoordinatorPersistentState")
+                .FileTransferReceiveRecovery;
+        Assert.Equal(
+            FileTransferReceiveRecoveryClosureState.Retained,
+            recovery.CurrentOperation?.ClosureState);
+        Assert.Null(recovery.CurrentOperation?.ReceiveProof);
+        Assert.Equal(
+            FileTransferReceiveRecoveryProofStatePublicationOutcome.Delivered,
+            recovery.ProofStatePublication?.LastReceipt?.Outcome);
+    }
+
+    [Fact]
     [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
     public async Task BridgeRecoveryExecutionPayloadHold_StartAtPreReservationRestoresExactPeerSilenceAuthority()
     {

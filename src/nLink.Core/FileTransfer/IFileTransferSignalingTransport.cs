@@ -221,6 +221,17 @@ internal sealed class FileTransferReceiveRecoveryProofObservedEventArgs(
         observation;
 }
 
+internal sealed class
+    FileTransferReceiveRecoveryPeerReachabilityObservedEventArgs(
+        FileTransferReceiveRecoveryPeerReachabilityObservation observation)
+    : EventArgs
+{
+    public FileTransferReceiveRecoveryPeerReachabilityObservation Observation
+    {
+        get;
+    } = observation;
+}
+
 internal interface IFileTransferBridgeRecoveryExecutionBridge
 {
     event EventHandler<FileTransferBridgeRecoveryEvaluationRequestedEventArgs>?
@@ -228,6 +239,10 @@ internal interface IFileTransferBridgeRecoveryExecutionBridge
 
     event EventHandler<FileTransferReceiveRecoveryProofObservedEventArgs>?
         ReceiveRecoveryProofObserved;
+
+    event EventHandler<
+        FileTransferReceiveRecoveryPeerReachabilityObservedEventArgs>?
+        ReceiveRecoveryPeerReachabilityObserved;
 
     FileTransferBridgeRecoveryExecutionStartResult BeginBridgeRecoveryExecution(
         FileTransferBridgeRecoveryExecutionCommand command);

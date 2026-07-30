@@ -487,6 +487,9 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         FileTransferBridgeRecoveryEvaluationRequested;
     private event EventHandler<FileTransferReceiveRecoveryProofObservedEventArgs>?
         FileTransferReceiveRecoveryProofObserved;
+    private event EventHandler<
+        FileTransferReceiveRecoveryPeerReachabilityObservedEventArgs>?
+        FileTransferReceiveRecoveryPeerReachabilityObserved;
 
     event EventHandler<FileTransferBridgeRecoveryEvaluationRequestedEventArgs>?
         IFileTransferBridgeRecoveryExecutionBridge.BridgeRecoveryEvaluationRequested
@@ -500,6 +503,15 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     {
         add => FileTransferReceiveRecoveryProofObserved += value;
         remove => FileTransferReceiveRecoveryProofObserved -= value;
+    }
+
+    event EventHandler<
+        FileTransferReceiveRecoveryPeerReachabilityObservedEventArgs>?
+        IFileTransferBridgeRecoveryExecutionBridge
+            .ReceiveRecoveryPeerReachabilityObserved
+    {
+        add => FileTransferReceiveRecoveryPeerReachabilityObserved += value;
+        remove => FileTransferReceiveRecoveryPeerReachabilityObserved -= value;
     }
     public event EventHandler<ScreenShareFrameCompletedEventArgs>? ScreenShareFrameCompleted;
     public event EventHandler? ScreenShareStopped;
@@ -3123,6 +3135,41 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             LocalOperationalLog.Info(
                 "NKN.Tuna",
                 $"event=filetransfer_bridge_recovery_lifecycle_diagnostic_only; lifecycle={e.Kind.ToString().ToLowerInvariant()}; reason={(current ? "coordinator_operation_receipt_or_proof_required" : "bridge_recovery_execution_command_not_current")}; bridge_decision_generation={executionCommand.Decision.BridgeDecisionGeneration}");
+            if (current &&
+                e.Kind ==
+                    BridgeLifecycleEventKind
+                        .ReceiveStallRecoveryReceiveResumed &&
+                e.Pid is > 0 &&
+                e.SubmissionEpoch > 0 &&
+                e.ProcessEpoch > 0 &&
+                e.ProcessSpawnTicks > 0 &&
+                !string.IsNullOrWhiteSpace(e.PeerReachabilityIdentity))
+            {
+                var observedUtcMs =
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                var heartbeatIdentity =
+                    $"bridge_peer_receive:{e.PeerReachabilityIdentity}:{e.ProcessEpoch}:{e.SubmissionEpoch}:{e.TotalMessagesReceivedSinceLast}:{e.ControlMessagesReceivedSinceLast}:{e.BulkMessagesReceivedSinceLast}";
+                var receiveResumedIdentity =
+                    $"receive_resumed:{executionCommand.Decision.BridgeDecisionGeneration}:{e.ProcessEpoch}:{e.SubmissionEpoch}:{observedUtcMs}";
+                var observation =
+                    new FileTransferReceiveRecoveryPeerReachabilityObservation(
+                        executionCommand,
+                        e.SubmissionEpoch,
+                        e.ProcessEpoch,
+                        e.Pid.Value,
+                        e.ProcessSpawnTicks,
+                        heartbeatIdentity,
+                        receiveResumedIdentity,
+                        observedUtcMs,
+                        "authenticated_expected_source_receive_resumed");
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=filetransfer_receive_recovery_peer_reachability_observed; session_id={SanitizeLogToken(executionCommand.Decision.RuntimeOwner.SessionId)}; transfer_id={SanitizeLogToken(executionCommand.Decision.RuntimeOwner.TransferId)}; direction={executionCommand.Decision.RuntimeOwner.Direction.ToString().ToLowerInvariant()}; bridge_decision_generation={executionCommand.Decision.BridgeDecisionGeneration}; recovery_liveness_lease_generation={executionCommand.RecoveryLivenessLease?.LeaseGeneration ?? 0}; submission_epoch={e.SubmissionEpoch}; process_epoch={e.ProcessEpoch}; process_id={e.Pid.Value}; process_spawn_ticks={e.ProcessSpawnTicks}; heartbeat_identity={SanitizeLogToken(heartbeatIdentity)}; receive_resumed_identity={SanitizeLogToken(receiveResumedIdentity)}; observed_utc_ms={observedUtcMs}; decision_reason=authenticated_expected_source_receive_resumed");
+                FileTransferReceiveRecoveryPeerReachabilityObserved?.Invoke(
+                    this,
+                    new FileTransferReceiveRecoveryPeerReachabilityObservedEventArgs(
+                        observation));
+            }
             PublishCompatibilityLifecycle(e);
             return;
         }

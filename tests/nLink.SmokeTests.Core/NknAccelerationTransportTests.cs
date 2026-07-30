@@ -15041,6 +15041,105 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
     }
 
     [Fact]
+    [Trait("FileTransferInfraSuite", "ReceiveRecoveryOperation")]
+    public void FileTransferReceiveRecoveryProofStatePublication_ReceiveResumedForwardsExactReachabilityEvidence()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var identity = new NknIdentity(
+                "receive-recovery-proof-state-reachability-id",
+                "receive.recovery.proof.state.reachability.address");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            using var transport = new NknSignalingTransport(
+                adapter,
+                options,
+                identity,
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            var request = AttachBridgeRecoveryExecutionCommandForTests(
+                new FileTransferReceiveRecoveryRequest(
+                    "session_receive_recovery_proof_state",
+                    "transfer_receive_recovery_proof_state",
+                    FileTransferDirection.Inbound,
+                    "session_liveness_timeout_pending")
+                {
+                    RouteToken =
+                        FileTransferRouteResolver.RegularNknV4FastToken,
+                    ProtocolVersion =
+                        FileTransferProtocol.ProtocolVersionV4,
+                    LiveRouteEpoch = 3,
+                    TransferLegGeneration = 4,
+                    TransportEpoch = 5,
+                    BridgeRecoveryGeneration = 6,
+                    AuthorityReason = "session_liveness_timeout_pending",
+                },
+                leaseGeneration: 9);
+            var command =
+                CreateBridgeRecoveryExecutionCommandForRegularV4AuthorityTest(
+                    request);
+            SetPrivateField(
+                adapter,
+                "lastFileTransferBridgeRecoveryExecutionReceipt",
+                (FileTransferBridgeRecoveryExecutionReceipt?)
+                    new FileTransferBridgeRecoveryExecutionReceipt(
+                        command,
+                        FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                        "hard",
+                        "bridge_recovery_completed"));
+            FileTransferReceiveRecoveryPeerReachabilityObservation? observed =
+                null;
+            var bridge =
+                Assert.IsAssignableFrom<
+                    IFileTransferBridgeRecoveryExecutionBridge>(transport);
+            bridge.ReceiveRecoveryPeerReachabilityObserved += (_, args) =>
+                observed = args.Observation;
+
+            InvokePrivateMethod(
+                transport,
+                "OnBridgeLifecycleCore",
+                new BridgeLifecycleEvent(
+                    BridgeLifecycleEventKind
+                        .ReceiveStallRecoveryReceiveResumed,
+                    StartMode: null,
+                    Pid: 4242,
+                    ReadyTimeMs: null,
+                    PingRttMs: null,
+                    UptimeMs: 10,
+                    ExitCode: null,
+                    ExitReasonKind: null,
+                    ExitReasonText:
+                        "receive_stall_recovery_receive_resumed",
+                    TotalMessagesReceivedSinceLast: 1,
+                    ControlMessagesReceivedSinceLast: 1,
+                    RecoveryExecutionCommand: command,
+                    SubmissionEpoch: 2,
+                    ProcessEpoch: 2,
+                    ProcessSpawnTicks: 9001,
+                    PeerReachabilityIdentity: "peer-connect-key"),
+                false);
+
+            var exact =
+                Assert.IsType<
+                    FileTransferReceiveRecoveryPeerReachabilityObservation>(
+                    observed);
+            Assert.Equal(command, exact.ExecutionCommand);
+            Assert.Equal(2, exact.SubmissionEpoch);
+            Assert.Equal(2, exact.ProcessEpoch);
+            Assert.Equal(4242, exact.ProcessId);
+            Assert.Contains(
+                "bridge_peer_receive",
+                exact.HeartbeatIdentity,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
     [Trait("Category", "Smoke")]
     public async Task RuntimeUnlockInitialActivationReceiveRecoveryHold_PreservesOfferUntilExactRelease()
     {

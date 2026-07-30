@@ -173,6 +173,130 @@ public sealed partial class SessionFileTransferService
             ProcessReceiveRecoveryProofObserved(executionBridge, observation));
     }
 
+    private void OnReceiveRecoveryPeerReachabilityObserved(
+        object? sender,
+        FileTransferReceiveRecoveryPeerReachabilityObservedEventArgs args)
+    {
+        if (sender is not IFileTransferBridgeRecoveryExecutionBridge executionBridge)
+        {
+            return;
+        }
+
+        var observation = args.Observation;
+        _ = Task.Run(() =>
+            ProcessReceiveRecoveryPeerReachabilityObserved(
+                executionBridge,
+                observation));
+    }
+
+    private void ProcessReceiveRecoveryPeerReachabilityObserved(
+        IFileTransferBridgeRecoveryExecutionBridge executionBridge,
+        FileTransferReceiveRecoveryPeerReachabilityObservation observation)
+    {
+        FileTransferReceiveRecoveryDecision? decision = null;
+        FileTransferReceiveRecoveryOperation? operation = null;
+        FileTransferReceiveRecoveryProofStatePublicationCommand? command = null;
+        InboundTransferContext? publicationContext = null;
+        lock (gate)
+        {
+            if (observation.IsDefault ||
+                transport is not IFileTransferBridgeRecoveryExecutionBridge currentBridge ||
+                !ReferenceEquals(currentBridge, executionBridge) ||
+                inboundTransfer is not { IsTerminal: false } inbound)
+            {
+                return;
+            }
+
+            var recovery =
+                inbound.CoordinatorPersistentState.FileTransferReceiveRecovery;
+            if (recovery.CurrentOperation is not { } matched ||
+                matched.Authority.ExecutionCommand !=
+                    observation.ExecutionCommand)
+            {
+                return;
+            }
+
+            decision =
+                FileTransferCoordinator.ObserveReceiveRecoveryPeerReachability(
+                    CreateCoordinatorStateLocked(inbound),
+                    observation);
+            ApplyReceiveRecoveryStateLocked(inbound, decision.Value.State);
+            operation =
+                inbound.CoordinatorPersistentState.FileTransferReceiveRecovery
+                    .CurrentOperation;
+            command = decision.Value.ProofStatePublicationCommand;
+            if (command is { } exactCommand &&
+                inbound.ReceiveRecoveryProofStatePublicationInFlightCommand is null)
+            {
+                inbound.ReceiveRecoveryProofStatePublicationInFlightCommand =
+                    exactCommand;
+                publicationContext = inbound;
+            }
+        }
+
+        var authority = operation?.Authority;
+        var scope = authority?.Observation;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_receive_recovery_proof_state_publication_decided; session_id={FormatProtocolLogValue(scope?.SessionId ?? observation.ExecutionCommand.Decision.RuntimeOwner.SessionId)}; transfer_id={FormatProtocolLogValue(scope?.TransferId ?? observation.ExecutionCommand.Decision.RuntimeOwner.TransferId)}; direction={scope?.Direction.ToString().ToLowerInvariant() ?? observation.ExecutionCommand.Decision.RuntimeOwner.Direction.ToString().ToLowerInvariant()}; recovery_operation_authority_id={FormatProtocolLogValue(authority?.AuthorityId.ToString() ?? "(none)")}; recovery_operation_generation={authority?.OperationGeneration ?? 0}; closure_generation={operation?.ClosureGeneration ?? 0}; closure_state={operation?.ClosureState.ToString() ?? "none"}; bridge_decision_generation={observation.ExecutionCommand.Decision.BridgeDecisionGeneration}; recovery_liveness_lease_generation={observation.ExecutionCommand.RecoveryLivenessLease?.LeaseGeneration ?? 0}; submission_epoch={observation.SubmissionEpoch}; process_epoch={observation.ProcessEpoch}; process_id={observation.ProcessId}; process_spawn_ticks={observation.ProcessSpawnTicks}; heartbeat_identity={FormatProtocolLogValue(observation.HeartbeatIdentity)}; receive_resumed_identity={FormatProtocolLogValue(observation.ReceiveResumedIdentity)}; publication_generation={command?.PublicationGeneration ?? 0}; decision_status={decision?.Status.ToString() ?? "Rejected"}; decision_reason={FormatProtocolLogValue(decision?.Reason ?? "filetransfer_receive_recovery_inbound_operation_missing")}");
+
+        if (publicationContext is not null &&
+            command is { } publicationCommand)
+        {
+            _ = PublishReceiveRecoveryProofStateAsync(
+                publicationContext,
+                publicationCommand);
+        }
+    }
+
+    private async Task PublishReceiveRecoveryProofStateAsync(
+        InboundTransferContext context,
+        FileTransferReceiveRecoveryProofStatePublicationCommand command)
+    {
+        var sendResult =
+            await SendInboundReceiveRecoveryProofStateAsync(
+                    context,
+                    command)
+                .ConfigureAwait(false);
+        FileTransferReceiveRecoveryDecision? decision = null;
+        FileTransferReceiveRecoveryOperation? operation = null;
+        lock (gate)
+        {
+            if (context.ReceiveRecoveryProofStatePublicationInFlightCommand ==
+                command)
+            {
+                context.ReceiveRecoveryProofStatePublicationInFlightCommand =
+                    null;
+            }
+
+            if (!ReferenceEquals(inboundTransfer, context))
+            {
+                return;
+            }
+
+            var receipt =
+                new FileTransferReceiveRecoveryProofStatePublicationReceipt(
+                    command,
+                    sendResult.Outcome,
+                    sendResult.FrameFingerprint,
+                    sendResult.Reason);
+            decision =
+                FileTransferCoordinator
+                    .ApplyReceiveRecoveryProofStatePublicationReceipt(
+                        CreateCoordinatorStateLocked(context),
+                        receipt);
+            ApplyReceiveRecoveryStateLocked(context, decision.Value.State);
+            operation =
+                context.CoordinatorPersistentState.FileTransferReceiveRecovery
+                    .CurrentOperation;
+        }
+
+        var observation = command.Authority.Observation;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_receive_recovery_proof_state_publication_receipt_applied; session_id={FormatProtocolLogValue(observation.SessionId)}; transfer_id={FormatProtocolLogValue(observation.TransferId)}; direction={observation.Direction.ToString().ToLowerInvariant()}; recovery_operation_authority_id={FormatProtocolLogValue(command.Authority.AuthorityId.ToString())}; recovery_operation_generation={command.Authority.OperationGeneration}; closure_generation={command.ClosureGeneration}; closure_state={operation?.ClosureState.ToString() ?? "none"}; publication_generation={command.PublicationGeneration}; submission_epoch={command.Observation.SubmissionEpoch}; process_epoch={command.Observation.ProcessEpoch}; frame_fingerprint={FormatProtocolLogValue(sendResult.FrameFingerprint)}; publication_outcome={sendResult.Outcome}; decision_status={decision?.Status.ToString() ?? "Rejected"}; decision_reason={FormatProtocolLogValue(decision?.Reason ?? "filetransfer_receive_recovery_transfer_replaced")}");
+    }
+
     private void ProcessReceiveRecoveryProofObserved(
         IFileTransferBridgeRecoveryExecutionBridge executionBridge,
         FileTransferReceiveRecoveryProofObservation observation)

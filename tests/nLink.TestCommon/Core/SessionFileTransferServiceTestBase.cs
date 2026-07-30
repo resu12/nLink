@@ -357,6 +357,9 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             bridgeRecoveryEvaluationRequested;
         private event EventHandler<FileTransferReceiveRecoveryProofObservedEventArgs>?
             receiveRecoveryProofObserved;
+        private event EventHandler<
+            FileTransferReceiveRecoveryPeerReachabilityObservedEventArgs>?
+            receiveRecoveryPeerReachabilityObserved;
         event EventHandler<FileTransferBridgeRecoveryEvaluationRequestedEventArgs>?
             IFileTransferBridgeRecoveryExecutionBridge.BridgeRecoveryEvaluationRequested
         {
@@ -368,6 +371,14 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         {
             add => receiveRecoveryProofObserved += value;
             remove => receiveRecoveryProofObserved -= value;
+        }
+        event EventHandler<
+            FileTransferReceiveRecoveryPeerReachabilityObservedEventArgs>?
+            IFileTransferBridgeRecoveryExecutionBridge
+                .ReceiveRecoveryPeerReachabilityObserved
+        {
+            add => receiveRecoveryPeerReachabilityObserved += value;
+            remove => receiveRecoveryPeerReachabilityObserved -= value;
         }
         public void Connect(LoopbackFileTransferTransport other)
         {
@@ -564,6 +575,13 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                 this,
                 new FileTransferBridgeRecoveryEvaluationRequestedEventArgs(
                     request));
+
+        internal void RaiseReceiveRecoveryPeerReachability(
+            FileTransferReceiveRecoveryPeerReachabilityObservation observation)
+            => receiveRecoveryPeerReachabilityObserved?.Invoke(
+                this,
+                new FileTransferReceiveRecoveryPeerReachabilityObservedEventArgs(
+                    observation));
 
         void IFileTransferBridgeRecoveryExecutionBridge.ObserveBridgeRecoveryExecutionReceiptDecision(
             FileTransferBridgeRecoveryExecutionReceipt receipt,

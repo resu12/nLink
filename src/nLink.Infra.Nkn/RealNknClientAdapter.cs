@@ -5442,6 +5442,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             ? Math.Max(0, (long)Stopwatch.GetElapsedTime(completedTick, Stopwatch.GetTimestamp()).TotalMilliseconds)
             : -1;
         FileTransferBridgeRecoveryExecutionCommand? recoveryExecutionCommand;
+        BridgeSubmissionReadySnapshot readySnapshot;
         lock (gate)
         {
             recoveryExecutionCommand =
@@ -5451,6 +5452,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                     } receipt
                     ? receipt.Command
                     : null;
+            readySnapshot = bridgeSubmissionReadySnapshot;
         }
         Log(
             "event=nkn_bridge_receive_stall_recovery_receive_resumed; " +
@@ -5471,7 +5473,11 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             ControlMessagesReceivedSinceLast: controlMessagesReceivedSinceLast,
             MediaMessagesReceivedSinceLast: mediaMessagesReceivedSinceLast,
             BulkMessagesReceivedSinceLast: bulkMessagesReceivedSinceLast,
-            RecoveryExecutionCommand: recoveryExecutionCommand));
+            RecoveryExecutionCommand: recoveryExecutionCommand,
+            SubmissionEpoch: readySnapshot.SubmissionEpoch,
+            ProcessEpoch: readySnapshot.ProcessIdentity.ProcessEpoch,
+            ProcessSpawnTicks: readySnapshot.ProcessIdentity.SpawnTicks,
+            PeerReachabilityIdentity: connectKey));
     }
 
     private void MaybeLogReceiveStallRecoveryUnproven(

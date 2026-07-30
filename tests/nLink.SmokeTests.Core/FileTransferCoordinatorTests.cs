@@ -6663,6 +6663,233 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void FileTransferReceiveRecoveryProofStatePublication_ReceiptAndReachabilityArrivalOrdersConverge()
+    {
+        var reachabilityFirst =
+            CreateReceiveRecoveryOperationFixture(
+                FileTransferDirection.Inbound);
+        var receiptFirst =
+            CreateReceiveRecoveryOperationFixture(
+                FileTransferDirection.Inbound);
+        var reachabilityAuthority =
+            Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+                reachabilityFirst.Decision.Authority);
+        var receiptAuthority =
+            Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+                receiptFirst.Decision.Authority);
+        var reachabilityReceipt =
+            new FileTransferBridgeRecoveryExecutionReceipt(
+                reachabilityAuthority.ExecutionCommand,
+                FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                "hard",
+                "bridge_recovery_completed");
+        var receiptFirstReceipt = reachabilityReceipt with
+        {
+            Command = receiptAuthority.ExecutionCommand,
+        };
+        var reachabilityStarted =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(
+                reachabilityFirst.Decision.State,
+                new FileTransferBridgeRecoveryExecutionStartResult(
+                    reachabilityAuthority.ExecutionCommand,
+                    FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                    "bridge_recovery_execution_started",
+                    Task.FromResult(reachabilityReceipt)),
+                observedUtcMs: 100);
+        var receiptStarted =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(
+                receiptFirst.Decision.State,
+                new FileTransferBridgeRecoveryExecutionStartResult(
+                    receiptAuthority.ExecutionCommand,
+                    FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                    "bridge_recovery_execution_started",
+                    Task.FromResult(receiptFirstReceipt)),
+                observedUtcMs: 100);
+        var reachabilityObservation =
+            CreateReceiveRecoveryPeerReachabilityObservation(
+                reachabilityAuthority.ExecutionCommand,
+                observedUtcMs: 300);
+        var observedFirst =
+            FileTransferCoordinator.ObserveReceiveRecoveryPeerReachability(
+                reachabilityStarted.State,
+                reachabilityObservation);
+        Assert.True(observedFirst.Accepted, observedFirst.Reason);
+        Assert.Null(observedFirst.ProofStatePublicationCommand);
+
+        var reachabilityThenReceipt =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionReceipt(
+                observedFirst.State,
+                reachabilityReceipt,
+                observedUtcMs: 200);
+        var firstCommand =
+            Assert.IsType<
+                FileTransferReceiveRecoveryProofStatePublicationCommand>(
+                reachabilityThenReceipt.ProofStatePublicationCommand);
+
+        var receiptApplied =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionReceipt(
+                receiptStarted.State,
+                receiptFirstReceipt,
+                observedUtcMs: 200);
+        Assert.Null(receiptApplied.ProofStatePublicationCommand);
+        var receiptThenReachability =
+            FileTransferCoordinator.ObserveReceiveRecoveryPeerReachability(
+                receiptApplied.State,
+                reachabilityObservation with
+                {
+                    ExecutionCommand = receiptAuthority.ExecutionCommand,
+                });
+        var secondCommand =
+            Assert.IsType<
+                FileTransferReceiveRecoveryProofStatePublicationCommand>(
+                receiptThenReachability.ProofStatePublicationCommand);
+
+        Assert.Equal(firstCommand.ClosureGeneration, secondCommand.ClosureGeneration);
+        Assert.Equal(
+            firstCommand.PublicationGeneration,
+            secondCommand.PublicationGeneration);
+        Assert.Equal(
+            FileTransferReceiveRecoveryClosureState.Retained,
+            reachabilityThenReceipt.State.PersistentState
+                .FileTransferReceiveRecovery.CurrentOperation?.ClosureState);
+    }
+
+    [Fact]
+    public void FileTransferReceiveRecoveryProofStatePublication_DeliveredReceiptIsEvidenceOnlyAndProofInvalidatesPendingCommand()
+    {
+        var fixture =
+            CreateReceiveRecoveryOperationFixture(
+                FileTransferDirection.Inbound);
+        var authority =
+            Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+                fixture.Decision.Authority);
+        var receipt = new FileTransferBridgeRecoveryExecutionReceipt(
+            authority.ExecutionCommand,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            "hard",
+            "bridge_recovery_completed");
+        var started =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(
+                fixture.Decision.State,
+                new FileTransferBridgeRecoveryExecutionStartResult(
+                    authority.ExecutionCommand,
+                    FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                    "bridge_recovery_execution_started",
+                    Task.FromResult(receipt)),
+                observedUtcMs: 100);
+        var completed =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionReceipt(
+                started.State,
+                receipt,
+                observedUtcMs: 200);
+        var reachability =
+            CreateReceiveRecoveryPeerReachabilityObservation(
+                authority.ExecutionCommand,
+                observedUtcMs: 300);
+        var issued =
+            FileTransferCoordinator.ObserveReceiveRecoveryPeerReachability(
+                completed.State,
+                reachability);
+        var command =
+            Assert.IsType<
+                FileTransferReceiveRecoveryProofStatePublicationCommand>(
+                issued.ProofStatePublicationCommand);
+        var delivered =
+            FileTransferCoordinator
+                .ApplyReceiveRecoveryProofStatePublicationReceipt(
+                    issued.State,
+                    new FileTransferReceiveRecoveryProofStatePublicationReceipt(
+                        command,
+                        FileTransferReceiveRecoveryProofStatePublicationOutcome
+                            .Delivered,
+                        "frame-fingerprint",
+                        "delivered"));
+        Assert.True(delivered.Accepted, delivered.Reason);
+        var retained = Assert.IsType<FileTransferReceiveRecoveryOperation>(
+            delivered.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentOperation);
+        Assert.Equal(
+            FileTransferReceiveRecoveryClosureState.Retained,
+            retained.ClosureState);
+        Assert.Null(retained.ReceiveProof);
+        var duplicate =
+            FileTransferCoordinator.ObserveReceiveRecoveryPeerReachability(
+                delivered.State,
+                reachability);
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Idempotent,
+            duplicate.Status);
+        Assert.Null(duplicate.ProofStatePublicationCommand);
+        Assert.Equal(delivered.State, duplicate.State);
+
+        var reissued =
+            FileTransferCoordinator.ObserveReceiveRecoveryPeerReachability(
+                delivered.State,
+                CreateReceiveRecoveryPeerReachabilityObservation(
+                    authority.ExecutionCommand,
+                    observedUtcMs: 400));
+        Assert.False(reissued.Accepted);
+        Assert.Null(reissued.ProofStatePublicationCommand);
+
+        var pendingFixture =
+            CreateReceiveRecoveryOperationFixture(
+                FileTransferDirection.Inbound);
+        var pendingAuthority =
+            Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+                pendingFixture.Decision.Authority);
+        var pendingReceipt =
+            new FileTransferBridgeRecoveryExecutionReceipt(
+                pendingAuthority.ExecutionCommand,
+                FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                "hard",
+                "bridge_recovery_completed");
+        var pendingStarted =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(
+                pendingFixture.Decision.State,
+                new FileTransferBridgeRecoveryExecutionStartResult(
+                    pendingAuthority.ExecutionCommand,
+                    FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                    "bridge_recovery_execution_started",
+                    Task.FromResult(pendingReceipt)),
+                observedUtcMs: 100);
+        var pendingCompleted =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionReceipt(
+                pendingStarted.State,
+                pendingReceipt,
+                observedUtcMs: 200);
+        var pendingIssued =
+            FileTransferCoordinator.ObserveReceiveRecoveryPeerReachability(
+                pendingCompleted.State,
+                CreateReceiveRecoveryPeerReachabilityObservation(
+                    pendingAuthority.ExecutionCommand,
+                    observedUtcMs: 300));
+        var pending =
+            Assert.IsType<
+                FileTransferReceiveRecoveryProofStatePublicationCommand>(
+                pendingIssued.ProofStatePublicationCommand);
+        var proved = FileTransferCoordinator.ObserveReceiveRecoveryProof(
+            pendingIssued.State,
+            new FileTransferReceiveRecoveryProof(
+                pendingAuthority,
+                "peer-v4-state-proof",
+                "file_transfer_data_frame",
+                500));
+        Assert.True(proved.Accepted, proved.Reason);
+        Assert.Null(
+            proved.State.PersistentState.FileTransferReceiveRecovery
+                .ProofStatePublication?.PendingCommand);
+        Assert.Equal(
+            FileTransferReceiveRecoveryClosureState.Adopted,
+            proved.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentOperation?.ClosureState);
+        Assert.False(
+            FileTransferCoordinator
+                .IsReceiveRecoveryProofStatePublicationCommandCurrent(
+                    proved.State,
+                    pending));
+    }
+
+    [Fact]
     public void RuntimeUnlockInitialActivationReceiveRecoveryHold_ProofReleasesAfterCompletionAndProofFirstDoesNotInstallOne()
     {
         var heldFixture = CreateReceiveRecoveryOperationFixture();
@@ -17021,12 +17248,20 @@ public sealed class FileTransferCoordinatorTests
     private static (
         FileTransferCoordinatorState State,
         FileTransferReceiveRecoveryDecision Decision)
-        CreateReceiveRecoveryOperationFixture()
+        CreateReceiveRecoveryOperationFixture(
+            FileTransferDirection direction =
+                FileTransferDirection.Outbound)
     {
         var regular =
             FileTransferRouteResolver.Resolve(
                 FileTransferRoute.RegularNknV4Fast);
-        var state = StartRegular(regular).State with
+        var state = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.StartTransfer,
+                regular,
+                state: FileTransferLegState.Active,
+                canSendData: true),
+            EmptyState(regular) with { Direction = direction }).State with
         {
             CurrentDataSessionIdentity = "data-session-1",
             CurrentDataSessionGeneration = 1,
@@ -17066,6 +17301,21 @@ public sealed class FileTransferCoordinatorTests
         Assert.True(decision.Accepted, decision.Reason);
         return (state, decision);
     }
+
+    private static FileTransferReceiveRecoveryPeerReachabilityObservation
+        CreateReceiveRecoveryPeerReachabilityObservation(
+            FileTransferBridgeRecoveryExecutionCommand command,
+            long observedUtcMs)
+        => new(
+            command,
+            SubmissionEpoch: 2,
+            ProcessEpoch: 2,
+            ProcessId: 4242,
+            ProcessSpawnTicks: 9001,
+            HeartbeatIdentity: $"heartbeat:{observedUtcMs}",
+            ReceiveResumedIdentity: $"receive-resumed:{observedUtcMs}",
+            ObservedUtcMs: observedUtcMs,
+            Source: "authenticated_expected_source_receive_resumed");
 
     private static
         RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest

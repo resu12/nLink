@@ -763,6 +763,9 @@ public sealed partial class SessionFileTransferService :
                 OnBridgeRecoveryEvaluationRequested;
             bridgeRecoveryExecutionBridge.ReceiveRecoveryProofObserved +=
                 OnReceiveRecoveryProofObserved;
+            bridgeRecoveryExecutionBridge
+                    .ReceiveRecoveryPeerReachabilityObserved +=
+                OnReceiveRecoveryPeerReachabilityObserved;
         }
 
         if (transport is ISignalingTransport lifecycleTransport)
@@ -7684,6 +7687,20 @@ public sealed partial class SessionFileTransferService :
         FileTransferReceiveRecoverySubstate current,
         string reason)
     {
+        if (previous.ProofStatePublication?.PendingCommand is
+                { } previousPublication &&
+            current.ProofStatePublication?.PendingCommand !=
+                previousPublication &&
+            current.ProofStatePublication?.LastReceipt?.Command !=
+                previousPublication)
+        {
+            var publicationObservation =
+                previousPublication.Authority.Observation;
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_receive_recovery_proof_state_publication_invalidated; session_id={FormatProtocolLogValue(publicationObservation.SessionId)}; transfer_id={FormatProtocolLogValue(publicationObservation.TransferId)}; direction={publicationObservation.Direction.ToString().ToLowerInvariant()}; recovery_operation_authority_id={FormatProtocolLogValue(previousPublication.Authority.AuthorityId.ToString())}; recovery_operation_generation={previousPublication.Authority.OperationGeneration}; closure_generation={previousPublication.ClosureGeneration}; publication_generation={previousPublication.PublicationGeneration}; submission_epoch={previousPublication.Observation.SubmissionEpoch}; process_epoch={previousPublication.Observation.ProcessEpoch}; decision_reason={FormatProtocolLogValue(reason)}");
+        }
+
         if (previous.CurrentOperation is { } supersededPredecessor &&
             current.LastTerminalOperation is { } terminalPredecessor &&
             terminalPredecessor.Authority ==
@@ -23359,6 +23376,9 @@ public sealed partial class SessionFileTransferService :
 
         public BridgeRecoveryExecutionDispatchOrdering?
             BridgeRecoveryExecutionDispatchOrdering { get; set; }
+
+        public FileTransferReceiveRecoveryProofStatePublicationCommand?
+            ReceiveRecoveryProofStatePublicationInFlightCommand { get; set; }
 
         public long LastBridgeRecoveryEvaluationObservationGeneration { get; set; }
 
