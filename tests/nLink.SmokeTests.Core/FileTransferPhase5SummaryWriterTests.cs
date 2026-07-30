@@ -16,6 +16,42 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptancePhase5TestBase
 {
     [Fact]
+    public async Task RunFileTransferRouteAcceptance_ProofStatePublicationCountersExistOnFatalRunResults()
+    {
+        var repoRoot = FindRepoRoot();
+        var script = await File.ReadAllTextAsync(
+            Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"));
+        var constructorStart = script.IndexOf(
+            "function New-RouteAcceptanceRunResult",
+            StringComparison.Ordinal);
+        var constructorEnd = script.IndexOf(
+            "function Add-RouteAcceptanceFailure",
+            constructorStart,
+            StringComparison.Ordinal);
+
+        Assert.True(constructorStart >= 0);
+        Assert.True(constructorEnd > constructorStart);
+        var constructor = script[constructorStart..constructorEnd];
+
+        Assert.Contains(
+            "fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRawCount = 0",
+            constructor,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingDistinctCount = 0",
+            constructor,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRecoveredCount = 0",
+            constructor,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingUnresolvedCount = 0",
+            constructor,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RunFileTransferRouteAcceptance_RouteTransitionTransportGraceCountersReachScenarioAndRootSummaries()
     {
         var repoRoot = FindRepoRoot();

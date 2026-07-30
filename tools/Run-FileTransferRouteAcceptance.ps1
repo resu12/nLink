@@ -1204,6 +1204,10 @@ function New-RouteAcceptanceRunResult {
         fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedDistinctCount = 0
         fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount = 0
         fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedUnresolvedCount = 0
+        fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRawCount = 0
+        fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingDistinctCount = 0
+        fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRecoveredCount = 0
+        fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingUnresolvedCount = 0
         fileTransferBridgeRecoveryExecutionPayloadHoldVerdict = 'none'
         fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount = 0
         fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingDistinctCount = 0
