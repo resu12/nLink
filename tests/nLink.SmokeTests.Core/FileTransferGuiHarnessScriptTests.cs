@@ -728,6 +728,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     captureLineCount = 0
                 } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8
 
+                Update-FileTransferGuiEvidenceFinalizationStage -Stage 'scenario_summary_persisted'
+                Update-FileTransferGuiEvidenceFinalizationStage -Stage 'failure_record_persisted'
+                Update-FileTransferGuiEvidenceFinalizationStage -Stage 'process_cleanup_started'
+                Update-FileTransferGuiEvidenceFinalizationStage -Stage 'process_output_drained'
                 Update-FileTransferGuiEvidenceFinalizationStage `
                     -Stage 'capture_persisted' `
                     -CapturePath 'frozen-capture.log' `
@@ -763,9 +767,11 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     -CapturePath 'mutated-capture.log' `
                     -CaptureSha256 'mutated-sha256' `
                     -CaptureLineCount 1
+                Update-FileTransferGuiEvidenceFinalizationStage -Stage 'failure_classification_started'
+                Update-FileTransferGuiEvidenceFinalizationStage -Stage 'failure_classification_completed'
 
                 $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-                if ($state.lastCompletedStage -ne 'writer_validation_completed' -or
+                if ($state.lastCompletedStage -ne 'failure_classification_completed' -or
                     $state.capturePath -ne 'frozen-capture.log' -or
                     $state.captureSha256 -ne 'frozen-sha256' -or
                     [long]$state.captureLineCount -ne 190000 -or
@@ -781,7 +787,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     -CaptureSha256 'late-sha256' `
                     -CaptureLineCount 2
                 $timedOutState = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-                if ($timedOutState.lastCompletedStage -ne 'writer_validation_completed' -or
+                if ($timedOutState.lastCompletedStage -ne 'failure_classification_completed' -or
                     $timedOutState.capturePath -ne 'frozen-capture.log' -or
                     $timedOutState.captureSha256 -ne 'frozen-sha256' -or
                     [long]$timedOutState.captureLineCount -ne 190000) {
@@ -802,6 +808,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
 
         Assert.Contains("Write-GuiSmokeLogLedgerRangeCapture", writerBody, StringComparison.Ordinal);
         Assert.Contains("Copy-GuiSmokeFileAtomicCreateNew", writerBody, StringComparison.Ordinal);
+        Assert.Contains("-Stage 'process_cleanup_started'", writerBody, StringComparison.Ordinal);
+        Assert.Contains("-Stage 'process_output_drained'", writerBody, StringComparison.Ordinal);
         Assert.Contains("-Stage 'capture_persisted'", writerBody, StringComparison.Ordinal);
         Assert.Contains("-Stage 'writer_validation_completed'", writerBody, StringComparison.Ordinal);
         Assert.DoesNotContain("$capturedLines", writerBody, StringComparison.Ordinal);
@@ -1438,6 +1446,19 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("operational_log_write_failed", guiText, StringComparison.Ordinal);
         Assert.Contains("Wait-GuiSmokeProcessOutputCaptureDrain", guiText, StringComparison.Ordinal);
         Assert.Contains("-ProcessOutputDrainAction", scenarioBody, StringComparison.Ordinal);
+        var captureIndex = scenarioBody.IndexOf(
+            "Write-FileTransferGuiLogLedgerEvidence",
+            StringComparison.Ordinal);
+        var enrichmentIndex = scenarioBody.IndexOf(
+            "Invoke-TunaGuiFailureClassificationEnrichment",
+            StringComparison.Ordinal);
+        Assert.True(
+            captureIndex >= 0 && enrichmentIndex > captureIndex,
+            "Failure enrichment must run only after immutable capture and writer validation.");
+        Assert.DoesNotContain(
+            "Get-TunaGuiFileTransferSetupFailureClassification",
+            scenarioBody,
+            StringComparison.Ordinal);
         Assert.Contains("consumedIndexSha256", guiText, StringComparison.Ordinal);
         Assert.Contains("cursorIntegrityVerdict", guiText, StringComparison.Ordinal);
         Assert.Contains("[string]$FileName = 'filetransfer-retained-log-slice.log'", wrapperText, StringComparison.Ordinal);
@@ -2601,11 +2622,16 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     public async Task GuiSmokeFailureClassification_ExplicitClassPrecedesHistoricalRepairEvidence()
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var atomicJsonBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Write-GuiSmokeAtomicJson",
+            "New-TunaGuiFileTransferFailureClassificationResult");
         var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
         var resolveBody = ExtractPowerShellFunctionBody(guiText, "Resolve-TunaGuiFailureClassification", "Write-TunaGuiTopLevelFailureSummaryIfMissing");
         var topLevelBody = ExtractPowerShellFunctionBody(guiText, "Write-TunaGuiTopLevelFailureSummaryIfMissing", "Get-TunaGuiFileTransferSetupFailureClassification");
         var scriptText = $$"""
             $ErrorActionPreference = 'Stop'
+            function Write-GuiSmokeAtomicJson { {{atomicJsonBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
             function Resolve-TunaGuiFailureClassification { {{resolveBody}} }
             function Write-TunaGuiTopLevelFailureSummaryIfMissing { {{topLevelBody}} }
@@ -2673,6 +2699,130 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.True(result.ExitCode == 0, $"Failure classification test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("gui-failure-classification-precedence-ok", result.Stdout, StringComparison.Ordinal);
         Assert.Contains("Resolve-TunaGuiFailureClassification", guiText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeFailureClassification_ExplicitClassReadsNoEvidence()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "New-TunaGuiFileTransferFailureClassificationResult",
+            "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiExplicitFailureClassification",
+            "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiFileTransferSetupFailureClassification",
+            "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-explicit-no-read-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $largeEvidence = Join-Path $tempRoot 'large-evidence.log'
+                $writer = [IO.StreamWriter]::new($largeEvidence, $false)
+                try {
+                    for ($index = 0; $index -lt 100000; $index++) {
+                        $writer.WriteLine('event=filetransfer_regular_v4_frontier_repair_settlement_accepted')
+                    }
+                }
+                finally {
+                    $writer.Dispose()
+                }
+                $metrics = [pscustomobject]@{
+                    evidenceLineVisitCount = -1L
+                    evidenceLookupCount = -1L
+                    classificationSource = ''
+                }
+                $result = Get-TunaGuiFileTransferSetupFailureClassification `
+                    -Bookmark 0 `
+                    -ErrorMessage 'failure_class=regular_v4_terminal_before_tuna_activation_commit' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -ImmutableEvidencePaths @($largeEvidence) `
+                    -TestMetrics $metrics
+                if ($result.Phase -ne 'live_route_proof' -or
+                    $result.ClassificationSource -ne 'explicit_error' -or
+                    [long]$result.EvidenceLineVisitCount -ne 0 -or
+                    [long]$metrics.evidenceLineVisitCount -ne 0 -or
+                    [long]$metrics.evidenceLookupCount -ne 0) {
+                    throw "explicit classification touched evidence: result=$($result | ConvertTo-Json -Compress); metrics=$($metrics | ConvertTo-Json -Compress)"
+                }
+                Write-Output 'gui-explicit-classification-no-read-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) {
+                    Remove-Item -LiteralPath $tempRoot -Recurse -Force
+                }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Explicit classification read evidence.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-explicit-classification-no-read-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeFailureClassification_BudgetLeavesHardDeadlineGrace()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var budgetBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiFailureClassificationBudgetMilliseconds",
+            "ConvertTo-GuiSmokeProcessArgument");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiFailureClassificationBudgetMilliseconds { {{budgetBody}} }
+
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-enrichment-budget-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $statePath = Join-Path $tempRoot 'state.json'
+                $env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH = $statePath
+                $env:NLINK_TUNA_GUI_FAILURE_CLASSIFICATION_TIMEOUT_SECONDS_TEST_ONLY = '30'
+                [ordered]@{
+                    deadlineUtc = [DateTimeOffset]::UtcNow.AddSeconds(9).ToString('O')
+                } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8
+                $expiredBudget = Get-TunaGuiFailureClassificationBudgetMilliseconds -ArtifactDir $tempRoot
+                if ([long]$expiredBudget -ne 0L) {
+                    throw "enrichment crossed the reserved hard-deadline grace: $expiredBudget"
+                }
+
+                [ordered]@{
+                    deadlineUtc = [DateTimeOffset]::UtcNow.AddSeconds(25).ToString('O')
+                } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8
+                $boundedBudget = Get-TunaGuiFailureClassificationBudgetMilliseconds -ArtifactDir $tempRoot
+                if ([long]$boundedBudget -le 0L -or [long]$boundedBudget -gt 15000L) {
+                    throw "enrichment budget did not preserve ten-second grace: $boundedBudget"
+                }
+                Write-Output 'gui-enrichment-budget-ok'
+            }
+            finally {
+                Remove-Item Env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH -ErrorAction SilentlyContinue
+                Remove-Item Env:NLINK_TUNA_GUI_FAILURE_CLASSIFICATION_TIMEOUT_SECONDS_TEST_ONLY -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $tempRoot) {
+                    Remove-Item -LiteralPath $tempRoot -Recurse -Force
+                }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Failure-classification budget test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-enrichment-budget-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]

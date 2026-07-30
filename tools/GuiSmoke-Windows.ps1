@@ -1,6 +1,7 @@
 param(
     [string]$ExePath = ".\\artifacts\\portable\\nLink\\win-x64\\nLink.exe",
-    [int]$TimeoutSeconds = 90
+    [int]$TimeoutSeconds = 90,
+    [string]$FailureClassificationRequestPath = ''
 )
 
 Set-StrictMode -Version Latest
@@ -2703,9 +2704,15 @@ function Update-FileTransferGuiEvidenceFinalizationStage {
     $stageOrder = @{
         gui_child_starting = 0
         gui_child_started = 1
-        capture_persisted = 2
-        writer_validation_completed = 3
-        gui_child_exited = 4
+        scenario_summary_persisted = 2
+        failure_record_persisted = 3
+        process_cleanup_started = 4
+        process_output_drained = 5
+        capture_persisted = 6
+        writer_validation_completed = 7
+        failure_classification_started = 8
+        failure_classification_completed = 9
+        gui_child_exited = 10
     }
     if (-not $stageOrder.ContainsKey($Stage)) {
         throw "filetransfer_gui_evidence_finalization_stage_invalid:$Stage"
@@ -2727,16 +2734,61 @@ function Update-FileTransferGuiEvidenceFinalizationStage {
     if ($currentRank -gt [int]$stageOrder[$Stage]) {
         return
     }
+
+    $existingCapturePath = if ($state.PSObject.Properties.Name -contains 'capturePath') {
+        [string]$state.capturePath
+    }
+    else {
+        ''
+    }
+    $existingCaptureSha256 = if ($state.PSObject.Properties.Name -contains 'captureSha256') {
+        [string]$state.captureSha256
+    }
+    else {
+        ''
+    }
+    $existingCaptureLineCount = if ($state.PSObject.Properties.Name -contains 'captureLineCount') {
+        [long]$state.captureLineCount
+    }
+    else {
+        0L
+    }
+    $existingCaptureBound = -not [string]::IsNullOrWhiteSpace($existingCapturePath) -or
+        -not [string]::IsNullOrWhiteSpace($existingCaptureSha256) -or
+        $existingCaptureLineCount -ne 0
+    $requestedCaptureBound = -not [string]::IsNullOrWhiteSpace($CapturePath) -or
+        -not [string]::IsNullOrWhiteSpace($CaptureSha256) -or
+        $CaptureLineCount -ne 0
+    if ($existingCaptureBound -and $requestedCaptureBound -and
+        (
+            -not [string]::Equals(
+                $existingCapturePath,
+                $CapturePath,
+                [System.StringComparison]::Ordinal) -or
+            -not [string]::Equals(
+                $existingCaptureSha256,
+                $CaptureSha256,
+                [System.StringComparison]::OrdinalIgnoreCase) -or
+            $existingCaptureLineCount -ne $CaptureLineCount
+        )) {
+        throw "filetransfer_gui_evidence_finalization_stage_conflict:$Stage"
+    }
+    if ($existingCaptureBound) {
+        $CapturePath = $existingCapturePath
+        $CaptureSha256 = $existingCaptureSha256
+        $CaptureLineCount = $existingCaptureLineCount
+    }
+
     if ($currentRank -eq [int]$stageOrder[$Stage]) {
         $sameCapture = [string]::Equals(
-                [string]$state.capturePath,
+                $existingCapturePath,
                 $CapturePath,
                 [System.StringComparison]::Ordinal) -and
             [string]::Equals(
-                [string]$state.captureSha256,
+                $existingCaptureSha256,
                 $CaptureSha256,
                 [System.StringComparison]::OrdinalIgnoreCase) -and
-            [long]$state.captureLineCount -eq $CaptureLineCount
+            $existingCaptureLineCount -eq $CaptureLineCount
         if (-not $sameCapture) {
             throw "filetransfer_gui_evidence_finalization_stage_conflict:$Stage"
         }
@@ -2950,8 +3002,10 @@ function Write-FileTransferGuiLogLedgerEvidence {
     $processOutputDrainFailure = ''
     if ($null -ne $ProcessOutputDrainAction) {
         try {
+            Update-FileTransferGuiEvidenceFinalizationStage -Stage 'process_cleanup_started'
             [object[]]$drainProcesses = @(& $ProcessOutputDrainAction)
             Wait-GuiSmokeProcessOutputCaptureDrain -Processes $drainProcesses
+            Update-FileTransferGuiEvidenceFinalizationStage -Stage 'process_output_drained'
         }
         catch {
             $processOutputDrainFailure = "process_output_drain_failed:$($_.Exception.Message)"
@@ -4510,6 +4564,103 @@ function Test-TunaGuiBridgeBootstrapNotReadyEvidence {
     return $bridgeConnectFailure -or ($readyNeverEmitted -and $lanesNotReady)
 }
 
+function Write-GuiSmokeAtomicJson {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Value,
+        [int]$Depth = 12
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    [void][System.IO.Directory]::CreateDirectory(
+        [System.IO.Path]::GetDirectoryName($fullPath))
+    $temporaryPath = '{0}.{1}.tmp' -f $fullPath, ([guid]::NewGuid().ToString('N'))
+    $backupPath = '{0}.{1}.bak' -f $fullPath, ([guid]::NewGuid().ToString('N'))
+    $stream = $null
+    try {
+        $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes(
+            ($Value | ConvertTo-Json -Depth $Depth))
+        $stream = [System.IO.FileStream]::new(
+            $temporaryPath,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None)
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+        $stream.Dispose()
+        $stream = $null
+        if (Test-Path -LiteralPath $fullPath -PathType Leaf) {
+            [System.IO.File]::Replace($temporaryPath, $fullPath, $backupPath, $true)
+        }
+        else {
+            [System.IO.File]::Move($temporaryPath, $fullPath)
+        }
+        $temporaryPath = ''
+    }
+    finally {
+        if ($stream) {
+            $stream.Dispose()
+        }
+        foreach ($cleanupPath in @($temporaryPath, $backupPath)) {
+            if (-not [string]::IsNullOrWhiteSpace($cleanupPath) -and
+                (Test-Path -LiteralPath $cleanupPath -PathType Leaf)) {
+                Remove-Item -LiteralPath $cleanupPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
+function New-TunaGuiFileTransferFailureClassificationResult {
+    param(
+        [Parameter(Mandatory = $true)][string]$Phase,
+        [Parameter(Mandatory = $true)][string]$Reason,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$RouteMode,
+        [Parameter(Mandatory = $true)][string]$ClassificationSource,
+        [bool]$ClassificationComplete = $true,
+        [long]$EvidenceLineVisitCount = 0,
+        [long]$EvidenceLookupCount = 0,
+        [long]$ClassificationElapsedMilliseconds = 0
+    )
+
+    return [pscustomobject]@{
+        Phase = $Phase
+        Reason = $Reason
+        RouteMode = $RouteMode
+        ClassificationSource = $ClassificationSource
+        ClassificationComplete = $ClassificationComplete
+        EvidenceLineVisitCount = $EvidenceLineVisitCount
+        EvidenceLookupCount = $EvidenceLookupCount
+        ClassificationElapsedMilliseconds = $ClassificationElapsedMilliseconds
+        ListenerUnavailable = $false
+        ListenerSidecarUnavailable = $false
+        ListenerReady = $false
+        TunaActive = $false
+        RouteSelected = $false
+        ActivationOfferNotObserved = $false
+        ActivationOfferWaitingAnswer = $false
+        RuntimeUnlockDispatchDeferredForRegularV4ReceiveRecovery = $false
+        RuntimeUnlockRetryRegularV4RecoverySettlementMissing = $false
+        RuntimeUnlockRetrySourcePublicationMismatch = $false
+        InitialActivationReceiveRecoveryHoldNotPreserved = $false
+        InitialActivationReceiveRecoveryHoldReleasedOfferExpired = $false
+        RouteTransitionDrainingTransportGraceTerminalization = $false
+        BridgeBootstrapNotReady = $false
+        ActivationOfferSent = $false
+        ActivationOfferReceived = $false
+        FallbackTailLocalYieldBlocked = $false
+        FallbackTailFrontierStateMissing = $false
+        FallbackFrontierRepairAuthorityGranted = $false
+        FallbackFrontierRepairDispatched = $false
+        FallbackFrontierRepairProgressObserved = $false
+        FallbackFrontierRepairStalled = $false
+        MeasuredOfferSent = $false
+        MeasuredOfferReceived = $false
+        OfferSent = $false
+        OfferReceived = $false
+        TerminalObserved = $false
+    }
+}
+
 function Get-TunaGuiExplicitFailureClassification {
     param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$ErrorMessage)
 
@@ -4633,7 +4784,7 @@ function Write-TunaGuiTopLevelFailureSummaryIfMissing {
             error = $ErrorMessage
             failedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
         }
-        $summary | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $errorPath -Encoding UTF8
+        Write-GuiSmokeAtomicJson -Path $errorPath -Value $summary -Depth 4
     }
     catch {
         # Best-effort failure propagation must not replace the original GUI failure.
@@ -4644,23 +4795,73 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     param(
         [Parameter(Mandatory = $true)][int]$Bookmark,
         [Parameter(Mandatory = $true)][string]$ErrorMessage,
-        [Parameter(Mandatory = $true)][string]$RouteMode
+        [Parameter(Mandatory = $true)][string]$RouteMode,
+        [AllowEmptyCollection()][string[]]$ImmutableEvidencePaths = @(),
+        [AllowNull()]$TestMetrics = $null
     )
 
-    $lines = @()
-    try {
-        $lines = @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)
-    }
-    catch {
-        $cursorReadClassification = Get-TunaGuiExplicitFailureClassification -ErrorMessage ([string]$_.Exception.Message)
-        if ($null -eq $cursorReadClassification -or
-            -not [string]::Equals([string]$cursorReadClassification.Phase, 'harness_log_cursor', [System.StringComparison]::Ordinal)) {
-            throw
+    $classificationStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $explicitClassification =
+        Get-TunaGuiExplicitFailureClassification -ErrorMessage $ErrorMessage
+    if ($null -ne $explicitClassification) {
+        if ($null -ne $TestMetrics) {
+            $TestMetrics.evidenceLineVisitCount = 0L
+            $TestMetrics.evidenceLookupCount = 0L
+            $TestMetrics.classificationSource = 'explicit_error'
         }
-
-        $ErrorMessage = "{0}; {1}" -f $ErrorMessage, $_.Exception.Message
+        return New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase ([string]$explicitClassification.Phase) `
+            -Reason ([string]$explicitClassification.Reason) `
+            -RouteMode $RouteMode `
+            -ClassificationSource 'explicit_error' `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
     }
-    $processLines = @(Read-GuiSmokeProcessOutputLinesSnapshot)
+
+    $lines = @()
+    $processLines = @()
+    $classificationSource = 'live_evidence'
+    if ($ImmutableEvidencePaths.Count -gt 0) {
+        $classificationSource = 'immutable_evidence'
+        $immutableLines = New-Object System.Collections.Generic.List[string]
+        foreach ($immutableEvidencePath in @($ImmutableEvidencePaths | Sort-Object -Unique)) {
+            if ([string]::IsNullOrWhiteSpace($immutableEvidencePath) -or
+                -not (Test-Path -LiteralPath $immutableEvidencePath -PathType Leaf)) {
+                continue
+            }
+            $reader = $null
+            try {
+                $reader = [System.IO.StreamReader]::new(
+                    [System.IO.Path]::GetFullPath($immutableEvidencePath),
+                    [System.Text.UTF8Encoding]::new($false, $true),
+                    $true,
+                    65536)
+                while (-not $reader.EndOfStream) {
+                    $immutableLines.Add([string]$reader.ReadLine()) | Out-Null
+                }
+            }
+            finally {
+                if ($reader) {
+                    $reader.Dispose()
+                }
+            }
+        }
+        $lines = @($immutableLines.ToArray())
+    }
+    else {
+        try {
+            $lines = @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)
+        }
+        catch {
+            $cursorReadClassification = Get-TunaGuiExplicitFailureClassification -ErrorMessage ([string]$_.Exception.Message)
+            if ($null -eq $cursorReadClassification -or
+                -not [string]::Equals([string]$cursorReadClassification.Phase, 'harness_log_cursor', [System.StringComparison]::Ordinal)) {
+                throw
+            }
+
+            $ErrorMessage = "{0}; {1}" -f $ErrorMessage, $_.Exception.Message
+        }
+        $processLines = @(Read-GuiSmokeProcessOutputLinesSnapshot)
+    }
     $evidenceLines = @($lines + $processLines)
 
     function Get-TunaGuiLogLineFieldValue {
@@ -8603,10 +8804,22 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $phase = [string]$resolvedClassification.Phase
     $reason = [string]$resolvedClassification.Reason
 
+    if ($null -ne $TestMetrics) {
+        $TestMetrics.evidenceLineVisitCount = [long]$evidenceLines.Count
+        $TestMetrics.evidenceLookupCount = 0L
+        $TestMetrics.classificationSource = $classificationSource
+    }
+
     return [pscustomobject]@{
         Phase = $phase
         Reason = $reason
         RouteMode = $RouteMode
+        ClassificationSource = $classificationSource
+        ClassificationComplete = $true
+        EvidenceLineVisitCount = [long]$evidenceLines.Count
+        EvidenceLookupCount = 0L
+        ClassificationElapsedMilliseconds =
+            [long]$classificationStopwatch.ElapsedMilliseconds
         ListenerUnavailable = [bool]$listenerUnavailable
         ListenerSidecarUnavailable = [bool]$listenerSidecarUnavailable
         ListenerReady = [bool]$listenerReady
@@ -8637,6 +8850,181 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         OfferSent = [bool]$offerSent
         OfferReceived = [bool]$offerReceived
         TerminalObserved = [bool]$terminalObserved
+    }
+}
+
+function Get-TunaGuiFailureClassificationBudgetMilliseconds {
+    param([Parameter(Mandatory = $true)][string]$ArtifactDir)
+
+    $timeoutSeconds = 30
+    $overrideText = [string][Environment]::GetEnvironmentVariable(
+        'NLINK_TUNA_GUI_FAILURE_CLASSIFICATION_TIMEOUT_SECONDS_TEST_ONLY')
+    if (-not [string]::IsNullOrWhiteSpace($overrideText)) {
+        $parsedOverride = 0
+        if (-not [int]::TryParse($overrideText, [ref]$parsedOverride) -or
+            $parsedOverride -le 0) {
+            throw "Invalid NLINK_TUNA_GUI_FAILURE_CLASSIFICATION_TIMEOUT_SECONDS_TEST_ONLY '$overrideText'."
+        }
+        $timeoutSeconds = $parsedOverride
+    }
+
+    $budgetMilliseconds = [long]$timeoutSeconds * 1000L
+    $statePath = [string]$env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH
+    if (-not [string]::IsNullOrWhiteSpace($statePath) -and
+        (Test-Path -LiteralPath $statePath -PathType Leaf)) {
+        try {
+            $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+            if ($state.PSObject.Properties.Name -contains 'deadlineUtc' -and
+                -not [string]::IsNullOrWhiteSpace([string]$state.deadlineUtc)) {
+                $hardDeadlineUtc = [DateTimeOffset]::Parse(
+                    [string]$state.deadlineUtc,
+                    [System.Globalization.CultureInfo]::InvariantCulture)
+                $remainingMilliseconds =
+                    [long][Math]::Floor(
+                        ($hardDeadlineUtc - [DateTimeOffset]::UtcNow).TotalMilliseconds) -
+                    10000L
+                $budgetMilliseconds =
+                    [Math]::Min($budgetMilliseconds, $remainingMilliseconds)
+            }
+        }
+        catch {
+            # The fixed private budget remains fail-closed when journal
+            # diagnostics are unavailable.
+        }
+    }
+
+    return [long][Math]::Max(0L, $budgetMilliseconds)
+}
+
+function ConvertTo-GuiSmokeProcessArgument {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
+
+    return '"{0}"' -f $Value.Replace('"', '\"')
+}
+
+function Invoke-TunaGuiFailureClassificationRequest {
+    param([Parameter(Mandatory = $true)][string]$RequestPath)
+
+    $request = Get-Content -LiteralPath $RequestPath -Raw | ConvertFrom-Json
+    $classification = Get-TunaGuiFileTransferSetupFailureClassification `
+        -Bookmark 0 `
+        -ErrorMessage ([string]$request.errorMessage) `
+        -RouteMode ([string]$request.routeMode) `
+        -ImmutableEvidencePaths @($request.evidencePaths)
+    Write-GuiSmokeAtomicJson `
+        -Path ([string]$request.responsePath) `
+        -Value ([ordered]@{
+            schemaVersion = 1
+            event = 'filetransfer_tuna_gui_failure_classification_response'
+            classification = $classification
+            completedUtc = [DateTimeOffset]::UtcNow.ToString('O')
+        })
+}
+
+function Invoke-TunaGuiFailureClassificationEnrichment {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)][string]$ErrorMessage,
+        [Parameter(Mandatory = $true)][string]$RouteMode
+    )
+
+    $budgetMilliseconds =
+        Get-TunaGuiFailureClassificationBudgetMilliseconds -ArtifactDir $ArtifactDir
+    if ($budgetMilliseconds -le 0) {
+        return New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'harness_failure_classification' `
+            -Reason 'evidence_enrichment_timeout' `
+            -RouteMode $RouteMode `
+            -ClassificationSource 'immutable_evidence_timeout' `
+            -ClassificationComplete $false
+    }
+
+    $evidencePaths = New-Object System.Collections.Generic.List[string]
+    $retainedPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'
+    if (Test-Path -LiteralPath $retainedPath -PathType Leaf) {
+        $evidencePaths.Add([System.IO.Path]::GetFullPath($retainedPath)) | Out-Null
+    }
+    $snapshotRoot =
+        Join-Path $ArtifactDir 'filetransfer-gui-log-writer-output-snapshots'
+    if (Test-Path -LiteralPath $snapshotRoot -PathType Container) {
+        foreach ($snapshot in @(
+                Get-ChildItem -LiteralPath $snapshotRoot -File |
+                    Sort-Object FullName)) {
+            $evidencePaths.Add($snapshot.FullName) | Out-Null
+        }
+    }
+
+    $requestPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-failure-classification-request.json'
+    $responsePath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-failure-classification-response.json'
+    $stdoutPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-failure-classification.stdout.log'
+    $stderrPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-failure-classification.stderr.log'
+    Write-GuiSmokeAtomicJson `
+        -Path $requestPath `
+        -Value ([ordered]@{
+            schemaVersion = 1
+            event = 'filetransfer_tuna_gui_failure_classification_request'
+            errorMessage = $ErrorMessage
+            routeMode = $RouteMode
+            evidencePaths = @($evidencePaths.ToArray())
+            responsePath = $responsePath
+            budgetMilliseconds = $budgetMilliseconds
+            requestedUtc = [DateTimeOffset]::UtcNow.ToString('O')
+        })
+
+    $argumentValues = @(
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', $PSCommandPath,
+        '-FailureClassificationRequestPath', $requestPath)
+    $argumentLine = ($argumentValues | ForEach-Object {
+            ConvertTo-GuiSmokeProcessArgument -Value ([string]$_)
+        }) -join ' '
+    $process = $null
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        $process = Start-Process `
+            -FilePath 'powershell' `
+            -ArgumentList $argumentLine `
+            -WorkingDirectory (Split-Path -Parent $PSScriptRoot) `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath `
+            -WindowStyle Hidden `
+            -PassThru
+        if (-not $process.WaitForExit([int][Math]::Min(
+                    [int]::MaxValue,
+                    $budgetMilliseconds))) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            try {
+                [void]$process.WaitForExit(5000)
+            }
+            catch {
+            }
+            return New-TunaGuiFileTransferFailureClassificationResult `
+                -Phase 'harness_failure_classification' `
+                -Reason 'evidence_enrichment_timeout' `
+                -RouteMode $RouteMode `
+                -ClassificationSource 'immutable_evidence_timeout' `
+                -ClassificationComplete $false `
+                -ClassificationElapsedMilliseconds $stopwatch.ElapsedMilliseconds
+        }
+        if ($process.ExitCode -ne 0 -or
+            -not (Test-Path -LiteralPath $responsePath -PathType Leaf)) {
+            return New-TunaGuiFileTransferFailureClassificationResult `
+                -Phase 'harness_failure_classification' `
+                -Reason 'evidence_enrichment_failed' `
+                -RouteMode $RouteMode `
+                -ClassificationSource 'immutable_evidence_failed' `
+                -ClassificationComplete $false `
+                -ClassificationElapsedMilliseconds $stopwatch.ElapsedMilliseconds
+        }
+
+        $response = Get-Content -LiteralPath $responsePath -Raw | ConvertFrom-Json
+        return $response.classification
+    }
+    finally {
+        if ($process -is [System.IDisposable]) {
+            $process.Dispose()
+        }
     }
 }
 
@@ -9184,6 +9572,7 @@ function Run-FileTransferNknSoakCore {
             $env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT = $previousInboundRoot
         }
     }
+
 }
 
 function Run-ScenarioFileTransferNknSoak {
@@ -12900,6 +13289,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     }
     $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Encoding UTF8
     Write-TunaGuiMilestoneEvidence -ArtifactDir $ArtifactDir -ObservedEvidenceLines $observedEvidenceLines
+    Update-FileTransferGuiEvidenceFinalizationStage -Stage 'scenario_summary_persisted'
 
     if (-not $integrityOk) {
         throw ("Tuna GUI file-transfer cycle failed terminal/integrity check: transfer_id={0}; inbound_state={1}; outbound_state={2}; inbound_error={3}; outbound_error={4}; saved_size={5}; expected_size={6}" -f `
@@ -13384,6 +13774,59 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
 
     $previousInboundRoot = $env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT
     $mixedShareButton = $null
+    $scenarioFailure = $null
+    $failureClassification = $null
+    $newFailureSummary = {
+        param(
+            [Parameter(Mandatory = $true)]$Classification,
+            [Parameter(Mandatory = $true)][string]$ClassificationStatus
+        )
+
+        return [ordered]@{
+            event = 'filetransfer_tuna_gui_handoff_fallback_failure'
+            direction = $direction
+            payerMode = $payerMode
+            faultMode = $faultMode
+            routeMode = $routeMode
+            payloadBytes = $payloadSize
+            completed = $false
+            integrityOk = $false
+            failurePhase = [string]$Classification.Phase
+            failureReason = [string]$Classification.Reason
+            classificationSource = [string]$Classification.ClassificationSource
+            classificationComplete = [bool]$Classification.ClassificationComplete
+            classificationStatus = $ClassificationStatus
+            classificationEvidenceLineVisitCount =
+                [long]$Classification.EvidenceLineVisitCount
+            classificationEvidenceLookupCount =
+                [long]$Classification.EvidenceLookupCount
+            classificationElapsedMilliseconds =
+                [long]$Classification.ClassificationElapsedMilliseconds
+            tunaActive = [bool]$Classification.TunaActive
+            listenerReady = [bool]$Classification.ListenerReady
+            listenerUnavailable = [bool](
+                $Classification.ListenerUnavailable -or
+                $Classification.ListenerSidecarUnavailable)
+            routeSelected = [bool]$Classification.RouteSelected
+            activationOfferNotObserved =
+                [bool]$Classification.ActivationOfferNotObserved
+            activationOfferWaitingAnswer =
+                [bool]$Classification.ActivationOfferWaitingAnswer
+            runtimeUnlockDispatchDeferredForRegularV4ReceiveRecovery =
+                [bool]$Classification.RuntimeUnlockDispatchDeferredForRegularV4ReceiveRecovery
+            bridgeBootstrapNotReady =
+                [bool]$Classification.BridgeBootstrapNotReady
+            activationOfferSent = [bool]$Classification.ActivationOfferSent
+            activationOfferReceived = [bool]$Classification.ActivationOfferReceived
+            measuredOfferSent = [bool]$Classification.MeasuredOfferSent
+            measuredOfferReceived = [bool]$Classification.MeasuredOfferReceived
+            offerSent = [bool]$Classification.OfferSent
+            offerReceived = [bool]$Classification.OfferReceived
+            terminalObserved = [bool]$Classification.TerminalObserved
+            error = [string]$scenarioFailure.Exception.Message
+            failedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
+        }
+    }
     try {
         $env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT = $receivedRoot
 
@@ -13421,43 +13864,36 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
             -WalletPassword $walletPassword
     }
     catch {
-        $failureClassification = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark $runBookmark -ErrorMessage $_.Exception.Message -RouteMode $routeMode
-        $failureSummary = [ordered]@{
-            event = 'filetransfer_tuna_gui_handoff_fallback_failure'
-            direction = $direction
-            payerMode = $payerMode
-            faultMode = $faultMode
-            routeMode = $routeMode
-            payloadBytes = $payloadSize
-            completed = $false
-            integrityOk = $false
-            failurePhase = $failureClassification.Phase
-            failureReason = $failureClassification.Reason
-            tunaActive = [bool]$failureClassification.TunaActive
-            listenerReady = [bool]$failureClassification.ListenerReady
-            listenerUnavailable = [bool]($failureClassification.ListenerUnavailable -or $failureClassification.ListenerSidecarUnavailable)
-            routeSelected = [bool]$failureClassification.RouteSelected
-            activationOfferNotObserved = [bool]$failureClassification.ActivationOfferNotObserved
-            activationOfferWaitingAnswer = [bool]$failureClassification.ActivationOfferWaitingAnswer
-            runtimeUnlockDispatchDeferredForRegularV4ReceiveRecovery = [bool]$failureClassification.RuntimeUnlockDispatchDeferredForRegularV4ReceiveRecovery
-            bridgeBootstrapNotReady = [bool]$failureClassification.BridgeBootstrapNotReady
-            activationOfferSent = [bool]$failureClassification.ActivationOfferSent
-            activationOfferReceived = [bool]$failureClassification.ActivationOfferReceived
-            measuredOfferSent = [bool]$failureClassification.MeasuredOfferSent
-            measuredOfferReceived = [bool]$failureClassification.MeasuredOfferReceived
-            offerSent = [bool]$failureClassification.OfferSent
-            offerReceived = [bool]$failureClassification.OfferReceived
-            terminalObserved = [bool]$failureClassification.TerminalObserved
-            error = $_.Exception.Message
-            failedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
+        $scenarioFailure = $_
+        $explicitClassification =
+            Get-TunaGuiExplicitFailureClassification `
+                -ErrorMessage ([string]$scenarioFailure.Exception.Message)
+        if ($null -ne $explicitClassification) {
+            $failureClassification =
+                New-TunaGuiFileTransferFailureClassificationResult `
+                    -Phase ([string]$explicitClassification.Phase) `
+                    -Reason ([string]$explicitClassification.Reason) `
+                    -RouteMode $routeMode `
+                    -ClassificationSource 'explicit_error'
+        }
+        else {
+            $failureClassification =
+                New-TunaGuiFileTransferFailureClassificationResult `
+                    -Phase 'harness_failure_classification' `
+                    -Reason 'evidence_enrichment_pending' `
+                    -RouteMode $routeMode `
+                    -ClassificationSource 'classification_pending' `
+                    -ClassificationComplete $false
         }
 
         try {
-            $failureSummary | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $artifactDir 'filetransfer-tuna-gui-error.json') -Encoding UTF8
+            Write-GuiSmokeAtomicJson `
+                -Path (Join-Path $artifactDir 'filetransfer-tuna-gui-error.json') `
+                -Value (& $newFailureSummary $failureClassification 'provisional')
+            Update-FileTransferGuiEvidenceFinalizationStage `
+                -Stage 'failure_record_persisted'
         }
         catch {}
-
-        throw
     }
     finally {
         if ($null -ne $mixedShareButton) {
@@ -13485,6 +13921,28 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
         else {
             $env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT = $previousInboundRoot
         }
+    }
+
+    if ($null -ne $scenarioFailure) {
+        if (-not [string]::Equals(
+                [string]$failureClassification.ClassificationSource,
+                'explicit_error',
+                [System.StringComparison]::Ordinal)) {
+            Update-FileTransferGuiEvidenceFinalizationStage `
+                -Stage 'failure_classification_started'
+            $failureClassification =
+                Invoke-TunaGuiFailureClassificationEnrichment `
+                    -ArtifactDir $artifactDir `
+                    -ErrorMessage ([string]$scenarioFailure.Exception.Message) `
+                    -RouteMode $routeMode
+        }
+
+        Write-GuiSmokeAtomicJson `
+            -Path (Join-Path $artifactDir 'filetransfer-tuna-gui-error.json') `
+            -Value (& $newFailureSummary $failureClassification 'completed')
+        Update-FileTransferGuiEvidenceFinalizationStage `
+            -Stage 'failure_classification_completed'
+        throw $scenarioFailure
     }
 }
 
@@ -17429,6 +17887,18 @@ function Run-ScenarioD {
     Click-Element $retryBtn
 
     [void](Wait-ConnectButtonEnabled -Window $Context.HelperWindow -TimeoutMs 10000)
+}
+
+if (-not [string]::IsNullOrWhiteSpace($FailureClassificationRequestPath)) {
+    try {
+        Invoke-TunaGuiFailureClassificationRequest `
+            -RequestPath ([System.IO.Path]::GetFullPath($FailureClassificationRequestPath))
+        exit 0
+    }
+    catch {
+        Write-Error $_
+        exit 1
+    }
 }
 
 $resolvedExe = (Resolve-Path $ExePath).Path
