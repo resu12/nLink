@@ -1810,6 +1810,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             . '{{helperPath}}'
             function Get-GuiSmokeLogWriterChronology { {{chronologyBody}} }
             function Write-FileTransferGuiLogLedgerEvidence { {{writerBody}} }
+            function Update-FileTransferGuiEvidenceFinalizationStage { param([string]$Stage) }
             function Get-FileSha256Hex {
                 param([string]$Path)
                 $sha = [Security.Cryptography.SHA256]::Create()
@@ -3189,6 +3190,78 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             result.ExitCode == 0,
             $"Current-pressure GUI classification test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("gui-current-pressure-cleanup-correlation-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeFailureClassification_SettlementIndexVisitsArtifactScaleEvidenceOnce()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = Regex.Replace(guiText, @"(?m)^ {4}", string.Empty);
+        var fieldValueBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Test-TunaGuiLogLineHasEvent");
+        var hasEventBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineHasEvent",
+            "Test-TunaGuiLogLineFieldMatch");
+        var fieldMatchBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineFieldMatch",
+            "Test-TunaGuiRuntimeUnlockFileTransferOwnerRejectionUnresolved");
+        var settlementClosedBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiRegularV4FrontierRepairSettlementClosed",
+            "Test-TunaGuiRegularV4PredecessorSettlementClosedSuccessor");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
+            function Test-TunaGuiLogLineHasEvent { {{hasEventBody}} }
+            function Test-TunaGuiLogLineFieldMatch { {{fieldMatchBody}} }
+            function Test-TunaGuiRegularV4FrontierRepairSettlementClosed { {{settlementClosedBody}} }
+
+            $lines = [System.Collections.Generic.List[string]]::new(100001)
+            for ($index = 0; $index -lt 95000; $index++) {
+                $lines.Add("event=unrelated_evidence; log_writer_id=writer-a; log_writer_sequence=$($index + 1)") | Out-Null
+            }
+            for ($chain = 0; $chain -lt 1000; $chain++) {
+                $authority = "authority-$chain"
+                $install = $chain + 1
+                $repairKey = "repair-$chain"
+                $baseSequence = 95001 + ($chain * 5)
+                $scope = "session_id=session-a; transfer_id=transfer-a; direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn"
+                $lines.Add("event=filetransfer_regular_v4_frontier_repair_pressure_binding_committed; log_writer_id=writer-a; log_writer_sequence=$baseSequence; authority_id=$authority; predecessor_authority_id=(none); $scope; repair_request_key=$repairKey; install_generation=$install; binding_state=Installed") | Out-Null
+                $lines.Add("event=filetransfer_regular_v4_frontier_repair_settlement_accepted; log_writer_id=writer-a; log_writer_sequence=$($baseSequence + 1); authority_id=$authority; successor_authority_id=(none); successor_install_generation=$install; outcome=ProgressObserved; repair_request_key=$repairKey; $scope") | Out-Null
+                $lines.Add("event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided; log_writer_id=writer-a; log_writer_sequence=$($baseSequence + 2); session_id=session-a; transfer_id=transfer-a; direction=inbound; authority_id=[redacted]; successor_authority_id=(none); current_authority_id=[redacted]; retained_predecessor_authority_id=(none); install_generation=$install; settlement_outcome=ProgressObserved; apply_status=Applied; current_authority_cleared=1; retained_predecessor_cleared=0") | Out-Null
+                $lines.Add("event=filetransfer_regular_v4_frontier_repair_pressure_binding_retired; log_writer_id=writer-a; log_writer_sequence=$($baseSequence + 3); authority_id=$authority; predecessor_authority_id=(none); $scope; repair_request_key=$repairKey; install_generation=$install; binding_state=Installed; install_boundary=settlement") | Out-Null
+                $lines.Add("event=filetransfer_regular_v4_frontier_repair_contract_settled; log_writer_id=writer-a; log_writer_sequence=$($baseSequence + 4); authority_id=$authority; successor_authority_id=(none); repair_request_key=$repairKey; settlement_outcome=ProgressObserved") | Out-Null
+            }
+            $lines.Add($lines[95000]) | Out-Null
+
+            $metrics = [pscustomobject]@{
+                parsedRecordCount = 0L
+                settlementLookupCount = 0L
+            }
+            if (-not (Test-TunaGuiRegularV4FrontierRepairSettlementClosed -Lines $lines.ToArray() -Metrics $metrics)) {
+                throw 'artifact-scale settlement evidence did not close'
+            }
+            if ([long]$metrics.parsedRecordCount -ne 100000L) {
+                throw "writer-copy deduplication or single-pass parsing failed: $($metrics | ConvertTo-Json -Compress)"
+            }
+            if ([long]$metrics.settlementLookupCount -gt 5001L) {
+                throw "settlement correlation exceeded bounded keyed lookups: $($metrics | ConvertTo-Json -Compress)"
+            }
+            Write-Output 'gui-settlement-index-scale-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(
+            scriptText,
+            Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Artifact-scale settlement index test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-settlement-index-scale-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]

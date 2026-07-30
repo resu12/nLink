@@ -4618,6 +4618,7 @@ function New-TunaGuiFileTransferFailureClassificationResult {
         [Parameter(Mandatory = $true)][string]$ClassificationSource,
         [bool]$ClassificationComplete = $true,
         [long]$EvidenceLineVisitCount = 0,
+        [long]$EvidenceParsedRecordCount = 0,
         [long]$EvidenceLookupCount = 0,
         [long]$ClassificationElapsedMilliseconds = 0
     )
@@ -4629,6 +4630,7 @@ function New-TunaGuiFileTransferFailureClassificationResult {
         ClassificationSource = $ClassificationSource
         ClassificationComplete = $ClassificationComplete
         EvidenceLineVisitCount = $EvidenceLineVisitCount
+        EvidenceParsedRecordCount = $EvidenceParsedRecordCount
         EvidenceLookupCount = $EvidenceLookupCount
         ClassificationElapsedMilliseconds = $ClassificationElapsedMilliseconds
         ListenerUnavailable = $false
@@ -4863,6 +4865,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $processLines = @(Read-GuiSmokeProcessOutputLinesSnapshot)
     }
     $evidenceLines = @($lines + $processLines)
+    $guiFailureEvidenceIndexMetrics = [pscustomobject]@{
+        parsedRecordCount = 0L
+        settlementLookupCount = 0L
+    }
 
     function Get-TunaGuiLogLineFieldValue {
         param(
@@ -7175,17 +7181,212 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     function Test-TunaGuiRegularV4FrontierRepairSettlementClosed {
         param(
             [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines,
-            [switch]$RequireRecoveryProof
+            [switch]$RequireRecoveryProof,
+            [AllowNull()]$Metrics = $null
         )
 
-        $indexedLines = @(
-            for ($i = 0; $i -lt $Lines.Count; $i++) {
-                [pscustomobject]@{
-                    Index = $i
-                    Line = [string]$Lines[$i]
+        $eventIndex =
+            [System.Collections.Generic.Dictionary[string, System.Collections.Generic.List[object]]]::new(
+                [System.StringComparer]::OrdinalIgnoreCase)
+        $identityIndex =
+            [System.Collections.Generic.Dictionary[string, System.Collections.Generic.List[object]]]::new(
+                [System.StringComparer]::OrdinalIgnoreCase)
+        $seenWriterRecords =
+            [System.Collections.Generic.HashSet[string]]::new(
+                [System.StringComparer]::Ordinal)
+        $relevantEvents =
+            [System.Collections.Generic.HashSet[string]]::new(
+                [string[]]@(
+                    'filetransfer_regular_v4_frontier_repair_settlement_accepted',
+                    'filetransfer_regular_v4_frontier_repair_pressure_binding_committed',
+                    'filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided',
+                    'filetransfer_regular_v4_frontier_repair_pressure_binding_retired',
+                    'filetransfer_regular_v4_frontier_repair_contract_settled',
+                    'filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_prepared',
+                    'filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_committed',
+                    'filetransfer_receive_recovery_operation_issued',
+                    'filetransfer_receive_recovery_operation_execution_receipt_applied',
+                    'filetransfer_receive_recovery_operation_proof_observed',
+                    'filetransfer_receive_recovery_operation_closure_adopted',
+                    'runtime_unlock_regular_v4_frontier_repair_settlement_released',
+                    'runtime_unlock_regular_v4_frontier_repair_settlement_held',
+                    'runtime_unlock_regular_v4_frontier_repair_settlement_rejected',
+                    'runtime_unlock_regular_v4_frontier_repair_precontract_settlement_consumed',
+                    'regular_v4_receive_recovery_contract_closed_no_deferral'),
+                [System.StringComparer]::OrdinalIgnoreCase)
+        function Add-TunaGuiSettlementIndexRecord {
+            param(
+                [Parameter(Mandatory = $true)]
+                [System.Collections.Generic.Dictionary[string, System.Collections.Generic.List[object]]]$Index,
+                [Parameter(Mandatory = $true)][string]$Key,
+                [Parameter(Mandatory = $true)]$Record
+            )
+
+            if ([string]::IsNullOrWhiteSpace($Key)) {
+                return
+            }
+            $bucket = $null
+            if (-not $Index.TryGetValue($Key, [ref]$bucket)) {
+                $bucket = [System.Collections.Generic.List[object]]::new()
+                $Index.Add($Key, $bucket)
+            }
+            $bucket.Add($Record)
+        }
+
+        function Get-TunaGuiSettlementIdentityKey {
+            param(
+                [Parameter(Mandatory = $true)][string]$Event,
+                [AllowEmptyString()][string]$Authority = '',
+                [AllowEmptyString()][string]$InstallGeneration = '',
+                [AllowEmptyString()][string]$RepairKey = ''
+            )
+
+            return [string]::Join(
+                [char]0x1f,
+                @(
+                    $Event.ToLowerInvariant(),
+                    $Authority.ToLowerInvariant(),
+                    $InstallGeneration.ToLowerInvariant(),
+                    $RepairKey.ToLowerInvariant()))
+        }
+
+        for ($i = 0; $i -lt $Lines.Count; $i++) {
+            $line = [string]$Lines[$i]
+            $fields =
+                [System.Collections.Generic.Dictionary[string, string]]::new(
+                    [System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($segment in $line.Split(';')) {
+                $separator = $segment.IndexOf('=')
+                if ($separator -le 0) {
+                    continue
+                }
+                $fieldName = $segment.Substring(0, $separator).Trim()
+                $lastSpace = $fieldName.LastIndexOf(' ')
+                if ($lastSpace -ge 0) {
+                    $fieldName = $fieldName.Substring($lastSpace + 1)
+                }
+                if ($fieldName -notmatch '^[a-zA-Z][a-zA-Z0-9_]*$') {
+                    continue
+                }
+                if (-not $fields.ContainsKey($fieldName)) {
+                    $fields.Add(
+                        $fieldName,
+                        $segment.Substring($separator + 1).Trim())
                 }
             }
-        )
+
+            $writerId = ''
+            $writerSequence = ''
+            [void]$fields.TryGetValue('log_writer_id', [ref]$writerId)
+            [void]$fields.TryGetValue('log_writer_sequence', [ref]$writerSequence)
+            if (-not [string]::IsNullOrWhiteSpace($writerId) -and
+                -not [string]::IsNullOrWhiteSpace($writerSequence)) {
+                $writerIdentity = '{0}|{1}' -f $writerId, $writerSequence
+                if (-not $seenWriterRecords.Add($writerIdentity)) {
+                    continue
+                }
+            }
+
+            $eventName = ''
+            [void]$fields.TryGetValue('event', [ref]$eventName)
+            if ([string]::IsNullOrWhiteSpace($eventName)) {
+                $eventMatch = [regex]::Match(
+                    $line,
+                    '(?i)(?:^|;\s*|\s)event=([^;\r\n\s]+)')
+                if (-not $eventMatch.Success) {
+                    continue
+                }
+                $eventName = $eventMatch.Groups[1].Value.Trim()
+            }
+            if ($null -ne $Metrics) {
+                $Metrics.parsedRecordCount =
+                    [long]$Metrics.parsedRecordCount + 1L
+            }
+            if (-not $relevantEvents.Contains($eventName)) {
+                continue
+            }
+            $authority = ''
+            $installGeneration = ''
+            $repairKey = ''
+            [void]$fields.TryGetValue('authority_id', [ref]$authority)
+            [void]$fields.TryGetValue(
+                'install_generation',
+                [ref]$installGeneration)
+            [void]$fields.TryGetValue('repair_request_key', [ref]$repairKey)
+            $record = [pscustomobject]@{
+                Index = $i
+                Line = $line
+                Fields = $fields
+                Event = $eventName
+                Authority = $authority
+                InstallGeneration = $installGeneration
+                RepairKey = $repairKey
+            }
+            Add-TunaGuiSettlementIndexRecord `
+                -Index $eventIndex `
+                -Key $eventName `
+                -Record $record
+
+            foreach ($identity in @(
+                    @($authority, $installGeneration, $repairKey),
+                    @($authority, $installGeneration, ''),
+                    @($authority, '', $repairKey),
+                    @('', $installGeneration, $repairKey),
+                    @($authority, '', ''),
+                    @('', $installGeneration, ''),
+                    @('', '', $repairKey))) {
+                if (@($identity | Where-Object {
+                            -not [string]::IsNullOrWhiteSpace([string]$_)
+                        }).Count -eq 0) {
+                    continue
+                }
+                Add-TunaGuiSettlementIndexRecord `
+                    -Index $identityIndex `
+                    -Key (Get-TunaGuiSettlementIdentityKey `
+                        -Event $eventName `
+                        -Authority ([string]$identity[0]) `
+                        -InstallGeneration ([string]$identity[1]) `
+                        -RepairKey ([string]$identity[2])) `
+                    -Record $record
+            }
+        }
+
+        function Get-TunaGuiSettlementIndexRecords {
+            param(
+                [Parameter(Mandatory = $true)][string[]]$Events,
+                [AllowEmptyString()][string]$Authority = '',
+                [AllowEmptyString()][string]$InstallGeneration = '',
+                [AllowEmptyString()][string]$RepairKey = ''
+            )
+
+            $result = [System.Collections.Generic.List[object]]::new()
+            foreach ($eventName in $Events) {
+                if ($null -ne $Metrics) {
+                    $Metrics.settlementLookupCount =
+                        [long]$Metrics.settlementLookupCount + 1L
+                }
+                $bucket = $null
+                $identitySpecified =
+                    -not [string]::IsNullOrWhiteSpace($Authority) -or
+                    -not [string]::IsNullOrWhiteSpace($InstallGeneration) -or
+                    -not [string]::IsNullOrWhiteSpace($RepairKey)
+                if ($identitySpecified) {
+                    $identityKey = Get-TunaGuiSettlementIdentityKey `
+                        -Event $eventName `
+                        -Authority $Authority `
+                        -InstallGeneration $InstallGeneration `
+                        -RepairKey $RepairKey
+                    [void]$identityIndex.TryGetValue($identityKey, [ref]$bucket)
+                }
+                else {
+                    [void]$eventIndex.TryGetValue($eventName, [ref]$bucket)
+                }
+                if ($null -ne $bucket) {
+                    $result.AddRange($bucket)
+                }
+            }
+            return [object[]]$result.ToArray()
+        }
         function Test-TunaGuiRegularV4SupersededScopeMatch {
             param(
                 [Parameter(Mandatory = $true)][string]$SourceLine,
@@ -7214,7 +7415,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 [string]::Equals($Actual, $Expected, [System.StringComparison]::OrdinalIgnoreCase)
         }
 
-        $acceptedSettlements = @($indexedLines | Where-Object {
+        $acceptedSettlements = @(
+            Get-TunaGuiSettlementIndexRecords `
+                -Events @('filetransfer_regular_v4_frontier_repair_settlement_accepted') |
+                Where-Object {
             Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('filetransfer_regular_v4_frontier_repair_settlement_accepted')
         })
         if ($acceptedSettlements.Count -eq 0) {
@@ -7236,7 +7440,12 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     return $false
                 }
 
-                $successorBinding = @($indexedLines | Where-Object {
+                $successorBinding = @(
+                    Get-TunaGuiSettlementIndexRecords `
+                        -Events @('filetransfer_regular_v4_frontier_repair_pressure_binding_committed') `
+                        -Authority $successorAuthority `
+                        -InstallGeneration $successorInstallGeneration |
+                        Where-Object {
                     $_.Index -lt $accepted.Index -and
                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                         'filetransfer_regular_v4_frontier_repair_pressure_binding_committed')) -and
@@ -7254,7 +7463,12 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 }
 
                 $repairKey = Get-TunaGuiLogLineFieldValue -Line $accepted.Line -Name 'repair_request_key'
-                $predecessorBinding = @($indexedLines | Where-Object {
+                $predecessorBinding = @(
+                    Get-TunaGuiSettlementIndexRecords `
+                        -Events @('filetransfer_regular_v4_frontier_repair_pressure_binding_committed') `
+                        -Authority $predecessorAuthority `
+                        -RepairKey $repairKey |
+                        Where-Object {
                     $_.Index -lt $successorBinding[0].Index -and
                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                         'filetransfer_regular_v4_frontier_repair_pressure_binding_committed')) -and
@@ -7272,7 +7486,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     -Line $predecessorBinding[0].Line `
                     -Name 'install_generation'
 
-                $apply = @($indexedLines | Where-Object {
+                $apply = @(
+                    Get-TunaGuiSettlementIndexRecords `
+                        -Events @('filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided') `
+                        -InstallGeneration $successorInstallGeneration |
+                        Where-Object {
                     $_.Index -gt $accepted.Index -and
                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                         'filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided')) -and
@@ -7313,7 +7531,13 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     return $false
                 }
 
-                $bindingRetired = @($indexedLines | Where-Object {
+                $bindingRetired = @(
+                    Get-TunaGuiSettlementIndexRecords `
+                        -Events @('filetransfer_regular_v4_frontier_repair_pressure_binding_retired') `
+                        -Authority $predecessorAuthority `
+                        -InstallGeneration $predecessorInstallGeneration `
+                        -RepairKey $repairKey |
+                        Where-Object {
                     $_.Index -gt $apply[0].Index -and
                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                         'filetransfer_regular_v4_frontier_repair_pressure_binding_retired')) -and
@@ -7331,7 +7555,12 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     return $false
                 }
 
-                $contractSettled = @($indexedLines | Where-Object {
+                $contractSettled = @(
+                    Get-TunaGuiSettlementIndexRecords `
+                        -Events @('filetransfer_regular_v4_frontier_repair_contract_settled') `
+                        -Authority $predecessorAuthority `
+                        -RepairKey $repairKey |
+                        Where-Object {
                     $_.Index -gt $bindingRetired[0].Index -and
                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                         'filetransfer_regular_v4_frontier_repair_contract_settled')) -and
@@ -7366,7 +7595,13 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     return $false
                 }
 
-                $binding = @($indexedLines | Where-Object {
+                $binding = @(
+                    Get-TunaGuiSettlementIndexRecords `
+                        -Events @('filetransfer_regular_v4_frontier_repair_pressure_binding_committed') `
+                        -Authority $authority `
+                        -InstallGeneration $installGeneration `
+                        -RepairKey $repairKey |
+                        Where-Object {
                     $_.Index -lt $accepted.Index -and
                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                         'filetransfer_regular_v4_frontier_repair_pressure_binding_committed')) -and
@@ -7383,7 +7618,12 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 }
 
                 if ($normalizedSettlementOutcome -eq 'stalerejected') {
-                    $prepared = @($indexedLines | Where-Object {
+                    $prepared = @(
+                        Get-TunaGuiSettlementIndexRecords `
+                            -Events @('filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_prepared') `
+                            -Authority $authority `
+                            -InstallGeneration $installGeneration |
+                            Where-Object {
                         $_.Index -lt $accepted.Index -and
                         (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                             'filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_prepared')) -and
@@ -7402,7 +7642,12 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'source_bridge_decision_generation') -eq
                             (Get-TunaGuiLogLineFieldValue -Line $accepted.Line -Name 'bridge_decision_generation')
                     } | Select-Object -Last 1)
-                    $committed = @($indexedLines | Where-Object {
+                    $committed = @(
+                        Get-TunaGuiSettlementIndexRecords `
+                            -Events @('filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_committed') `
+                            -Authority $authority `
+                            -InstallGeneration $installGeneration |
+                            Where-Object {
                         $_.Index -gt $accepted.Index -and
                         (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                             'filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_committed')) -and
@@ -7428,7 +7673,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                             (Get-TunaGuiLogLineFieldValue -Line $accepted.Line -Name 'bridge_decision_generation')
                     } | Select-Object -First 1)
                     if ($prepared.Count -eq 1 -and $committed.Count -eq 1) {
-                        $atomicApply = @($indexedLines | Where-Object {
+                        $atomicApply = @(
+                            Get-TunaGuiSettlementIndexRecords `
+                                -Events @('filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided') `
+                                -InstallGeneration $installGeneration |
+                                Where-Object {
                             $_.Index -gt $accepted.Index -and
                             $_.Index -lt $committed[0].Index -and
                             (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
@@ -7454,7 +7703,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         $leaseGeneration = Get-TunaGuiLogLineFieldValue `
                             -Line $committed[0].Line `
                             -Name 'recovery_liveness_lease_generation'
-                        $operationIssued = @($indexedLines | Where-Object {
+                        $operationIssued = @(
+                            Get-TunaGuiSettlementIndexRecords `
+                                -Events @('filetransfer_receive_recovery_operation_issued') |
+                                Where-Object {
                             $_.Index -gt $committed[0].Index -and
                             (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                                 'filetransfer_receive_recovery_operation_issued')) -and
@@ -7468,7 +7720,12 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                             (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'transfer_id') -and
                             (Test-TunaGuiLogLineFieldMatch -SourceLine $accepted.Line -CandidateLine $_.Line -FieldName 'direction')
                         } | Select-Object -First 1)
-                        $contractSettled = @($indexedLines | Where-Object {
+                        $contractSettled = @(
+                            Get-TunaGuiSettlementIndexRecords `
+                                -Events @('filetransfer_regular_v4_frontier_repair_contract_settled') `
+                                -Authority $authority `
+                                -RepairKey $repairKey |
+                                Where-Object {
                             $_.Index -gt $committed[0].Index -and
                             (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                                 'filetransfer_regular_v4_frontier_repair_contract_settled')) -and
@@ -7488,7 +7745,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                             $operationAuthority = Get-TunaGuiLogLineFieldValue `
                                 -Line $operationIssued[0].Line `
                                 -Name 'receive_recovery_operation_authority_id'
-                            $receipt = @($indexedLines | Where-Object {
+                            $receipt = @(
+                                Get-TunaGuiSettlementIndexRecords `
+                                    -Events @('filetransfer_receive_recovery_operation_execution_receipt_applied') |
+                                    Where-Object {
                                 $_.Index -gt $operationIssued[0].Index -and
                                 (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                                     'filetransfer_receive_recovery_operation_execution_receipt_applied')) -and
@@ -7505,7 +7765,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                                 (Test-TunaGuiLogLineFieldMatch -SourceLine $operationIssued[0].Line -CandidateLine $_.Line -FieldName 'transfer_id') -and
                                 (Test-TunaGuiLogLineFieldMatch -SourceLine $operationIssued[0].Line -CandidateLine $_.Line -FieldName 'direction')
                             } | Select-Object -First 1)
-                            $proof = @($indexedLines | Where-Object {
+                            $proof = @(
+                                Get-TunaGuiSettlementIndexRecords `
+                                    -Events @('filetransfer_receive_recovery_operation_proof_observed') |
+                                    Where-Object {
                                 $_.Index -gt $operationIssued[0].Index -and
                                 (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                                     'filetransfer_receive_recovery_operation_proof_observed')) -and
@@ -7525,7 +7788,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                                 $completionBoundary = [Math]::Max(
                                     [int]$receipt[0].Index,
                                     [int]$proof[0].Index)
-                                $adopted = @($indexedLines | Where-Object {
+                                $adopted = @(
+                                    Get-TunaGuiSettlementIndexRecords `
+                                        -Events @('filetransfer_receive_recovery_operation_closure_adopted') |
+                                        Where-Object {
                                     $_.Index -gt $completionBoundary -and
                                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                                         'filetransfer_receive_recovery_operation_closure_adopted')) -and
@@ -7551,7 +7817,13 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     }
                 }
 
-                $retirement = @($indexedLines | Where-Object {
+                $retirement = @(
+                    Get-TunaGuiSettlementIndexRecords `
+                        -Events @('filetransfer_regular_v4_frontier_repair_pressure_binding_retired') `
+                        -Authority $authority `
+                        -InstallGeneration $installGeneration `
+                        -RepairKey $repairKey |
+                        Where-Object {
                     $_.Index -gt $accepted.Index -and
                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                         'filetransfer_regular_v4_frontier_repair_pressure_binding_retired')) -and
@@ -7568,7 +7840,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     return $false
                 }
 
-                $apply = @($indexedLines | Where-Object {
+                $apply = @(
+                    Get-TunaGuiSettlementIndexRecords `
+                        -Events @('filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided') `
+                        -InstallGeneration $installGeneration |
+                        Where-Object {
                     $_.Index -gt $accepted.Index -and
                     $_.Index -lt $retirement[0].Index -and
                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
@@ -7619,7 +7895,12 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 $acceptedSuccessor = Get-TunaGuiLogLineFieldValue `
                     -Line $accepted.Line `
                     -Name 'successor_authority_id'
-                $contractSettled = @($indexedLines | Where-Object {
+                $contractSettled = @(
+                    Get-TunaGuiSettlementIndexRecords `
+                        -Events @('filetransfer_regular_v4_frontier_repair_contract_settled') `
+                        -Authority $authority `
+                        -RepairKey $repairKey |
+                        Where-Object {
                     $_.Index -gt $retirement[0].Index -and
                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                         'filetransfer_regular_v4_frontier_repair_contract_settled')) -and
@@ -7658,7 +7939,13 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     return $false
                 }
 
-                $binding = @($indexedLines | Where-Object {
+                $binding = @(
+                    Get-TunaGuiSettlementIndexRecords `
+                        -Events @('filetransfer_regular_v4_frontier_repair_pressure_binding_committed') `
+                        -Authority $authority `
+                        -InstallGeneration $installGeneration `
+                        -RepairKey $repairKey |
+                        Where-Object {
                     $_.Index -lt $accepted.Index -and
                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                         'filetransfer_regular_v4_frontier_repair_pressure_binding_committed')) -and
@@ -7674,7 +7961,13 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     return $false
                 }
 
-                $retirement = @($indexedLines | Where-Object {
+                $retirement = @(
+                    Get-TunaGuiSettlementIndexRecords `
+                        -Events @('filetransfer_regular_v4_frontier_repair_pressure_binding_retired') `
+                        -Authority $authority `
+                        -InstallGeneration $installGeneration `
+                        -RepairKey $repairKey |
+                        Where-Object {
                     $_.Index -gt $accepted.Index -and
                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                         'filetransfer_regular_v4_frontier_repair_pressure_binding_retired')) -and
@@ -7688,7 +7981,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         -CandidateLine $_.Line)
                 } | Select-Object -First 1)
                 if ($retirement.Count -eq 1) {
-                    $apply = @($indexedLines | Where-Object {
+                    $apply = @(
+                        Get-TunaGuiSettlementIndexRecords `
+                            -Events @('filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided') `
+                            -InstallGeneration $installGeneration |
+                            Where-Object {
                         $_.Index -gt $accepted.Index -and
                         $_.Index -lt $retirement[0].Index -and
                         (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
@@ -7743,7 +8040,13 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 return $false
             }
 
-            $handoff = @($indexedLines | Where-Object {
+            $handoff = @(
+                Get-TunaGuiSettlementIndexRecords `
+                    -Events @(
+                        'runtime_unlock_regular_v4_frontier_repair_settlement_released',
+                        'runtime_unlock_regular_v4_frontier_repair_settlement_held',
+                        'runtime_unlock_regular_v4_frontier_repair_settlement_rejected') |
+                    Where-Object {
                 $_.Index -gt $accepted.Index -and
                 (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                     'runtime_unlock_regular_v4_frontier_repair_settlement_released',
@@ -7756,12 +8059,18 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             }
 
             $precontractClosure = @(
-                foreach ($consumed in @($indexedLines | Where-Object {
+                foreach ($consumed in @(
+                        Get-TunaGuiSettlementIndexRecords `
+                            -Events @('runtime_unlock_regular_v4_frontier_repair_precontract_settlement_consumed') |
+                            Where-Object {
                     $_.Index -gt $accepted.Index -and
                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('runtime_unlock_regular_v4_frontier_repair_precontract_settlement_consumed')) -and
                     (Test-TunaGuiRegularV4FrontierRepairMatch -SourceLine $accepted.Line -CandidateLine $_.Line)
                 })) {
-                    $closure = @($indexedLines | Where-Object {
+                    $closure = @(
+                        Get-TunaGuiSettlementIndexRecords `
+                            -Events @('regular_v4_receive_recovery_contract_closed_no_deferral') |
+                            Where-Object {
                         (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('regular_v4_receive_recovery_contract_closed_no_deferral')) -and
                         (Test-TunaGuiRegularV4FrontierRepairPrecontractClosureMatch -Accepted $accepted -Consumed $consumed -Closure $_)
                     })
@@ -8422,7 +8731,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $regularV4RecoveryPredecessorSettlementClosedSuccessor =
         Test-TunaGuiRegularV4PredecessorSettlementClosedSuccessor -Lines $regularV4EvidenceLineText
     $regularV4FrontierRepairSettlementClosed =
-        Test-TunaGuiRegularV4FrontierRepairSettlementClosed -Lines $regularV4EvidenceLineText
+        Test-TunaGuiRegularV4FrontierRepairSettlementClosed `
+            -Lines $regularV4EvidenceLineText `
+            -Metrics $guiFailureEvidenceIndexMetrics
     $regularV4FrontierRepairStallUnresolved =
         Test-TunaGuiRegularV4FrontierRepairStallUnresolved -Lines $regularV4EvidenceLineText
     $regularV4FrontierRepairSettledStalledUnclosed = $regularV4FrontierRepairSettledStalledEvent -and (-not $regularV4FrontierRepairSettlementClosed)
@@ -8806,7 +9117,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
 
     if ($null -ne $TestMetrics) {
         $TestMetrics.evidenceLineVisitCount = [long]$evidenceLines.Count
-        $TestMetrics.evidenceLookupCount = 0L
+        $TestMetrics.evidenceLookupCount =
+            [long]$guiFailureEvidenceIndexMetrics.settlementLookupCount
         $TestMetrics.classificationSource = $classificationSource
     }
 
@@ -8817,7 +9129,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         ClassificationSource = $classificationSource
         ClassificationComplete = $true
         EvidenceLineVisitCount = [long]$evidenceLines.Count
-        EvidenceLookupCount = 0L
+        EvidenceParsedRecordCount =
+            [long]$guiFailureEvidenceIndexMetrics.parsedRecordCount
+        EvidenceLookupCount =
+            [long]$guiFailureEvidenceIndexMetrics.settlementLookupCount
         ClassificationElapsedMilliseconds =
             [long]$classificationStopwatch.ElapsedMilliseconds
         ListenerUnavailable = [bool]$listenerUnavailable
@@ -13798,6 +14113,8 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
             classificationStatus = $ClassificationStatus
             classificationEvidenceLineVisitCount =
                 [long]$Classification.EvidenceLineVisitCount
+            classificationEvidenceParsedRecordCount =
+                [long]$Classification.EvidenceParsedRecordCount
             classificationEvidenceLookupCount =
                 [long]$Classification.EvidenceLookupCount
             classificationElapsedMilliseconds =
