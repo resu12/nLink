@@ -149,6 +149,52 @@ public sealed class FileTransferRouteTransitionStructuralTests
             StringComparison.Ordinal);
     }
 
+    [Fact]
+    [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferRuntimeSuite", "FallbackRouteTransition")]
+    public void FileTransferRouteTransitionCompatibilityProjection_IsCoordinatorBoundAndEvidenceOnly()
+    {
+        var sourcePath = Path.Combine(
+            CoreSmokeTestsBase.FindRepoRoot(),
+            "src",
+            "nLink.Core",
+            "FileTransfer",
+            "SessionFileTransferService.RouteTransitionFallback.cs");
+        var source = File.ReadAllText(sourcePath);
+
+        Assert.Contains(
+            "StartedLiveRouteEpoch = routeDecision.StartedLiveRouteEpoch",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "RecoveredLiveRouteEpoch = routeDecision.RecoveredLiveRouteEpoch",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "projection_source=coordinator_route_transition",
+            ReadProductionFileTransferSource(),
+            StringComparison.Ordinal);
+        Assert.Equal(
+            2,
+            System.Text.RegularExpressions.Regex.Matches(
+                source,
+                @"LogLiveRouteEpochRecovered\([\s\S]*?evidenceOnly:\s*true\);")
+                .Count);
+        var projectionStart = source.IndexOf(
+            "EmitOutboundFileTransferRouteTransitionCompatibilityProjectionsLocked",
+            StringComparison.Ordinal);
+        var projectionEnd = source.IndexOf(
+            "TryApplyFileTransferRouteTransitionPressureSettlement",
+            projectionStart,
+            StringComparison.Ordinal);
+        Assert.True(projectionStart >= 0);
+        Assert.True(projectionEnd > projectionStart);
+        Assert.DoesNotContain(
+            "TransitionToRoute(",
+            source[projectionStart..projectionEnd],
+            StringComparison.Ordinal);
+    }
+
     private static string ReadProductionFileTransferSource()
     {
         var sourceRoot = Path.Combine(CoreSmokeTestsBase.FindRepoRoot(), "src");

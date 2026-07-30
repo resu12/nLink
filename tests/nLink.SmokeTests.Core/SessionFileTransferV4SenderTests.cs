@@ -20846,11 +20846,64 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             "event=filetransfer_route_transition_committed;",
             Math.Max(0, drainCompletedIndex + 1),
             StringComparison.Ordinal);
+        var transitionedIndex = transferLog.IndexOf(
+            "event=filetransfer_route_transitioned;",
+            Math.Max(0, routeTransitionIndex + 1),
+            StringComparison.Ordinal);
+        var selectedIndex = transferLog.IndexOf(
+            "event=filetransfer_route_selected;",
+            Math.Max(0, transitionedIndex + 1),
+            StringComparison.Ordinal);
+        var startedIndex = transferLog.IndexOf(
+            "event=filetransfer_live_route_epoch_started;",
+            Math.Max(0, selectedIndex + 1),
+            StringComparison.Ordinal);
+        var dispositionIndex = transferLog.IndexOf(
+            "event=filetransfer_route_transition_disposition_applied;",
+            Math.Max(0, startedIndex + 1),
+            StringComparison.Ordinal);
+        var recoveredIndex = transferLog.IndexOf(
+            "event=filetransfer_live_route_epoch_recovered;",
+            Math.Max(0, dispositionIndex + 1),
+            StringComparison.Ordinal);
         Assert.True(drainStagedIndex >= 0, transferLog);
         Assert.True(probeStartedIndex > drainStagedIndex, transferLog);
         Assert.True(probeSentIndex > probeStartedIndex, transferLog);
         Assert.True(drainCompletedIndex > probeSentIndex, transferLog);
         Assert.True(routeTransitionIndex > drainCompletedIndex, transferLog);
+        Assert.True(transitionedIndex > routeTransitionIndex, transferLog);
+        Assert.True(selectedIndex > transitionedIndex, transferLog);
+        Assert.True(startedIndex > selectedIndex, transferLog);
+        Assert.True(dispositionIndex > startedIndex, transferLog);
+        Assert.True(recoveredIndex > dispositionIndex, transferLog);
+        foreach (var eventName in new[]
+                 {
+                     "filetransfer_route_transitioned",
+                     "filetransfer_route_selected",
+                     "filetransfer_live_route_epoch_started",
+                     "filetransfer_live_route_epoch_recovered",
+                 })
+        {
+            var projection = Assert.Single(
+                transferLog.Split(
+                        Environment.NewLine,
+                        StringSplitOptions.RemoveEmptyEntries)
+                    .Where(line => line.Contains(
+                        $"event={eventName};",
+                        StringComparison.Ordinal)));
+            Assert.Contains(
+                "transition_authority_id=",
+                projection,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "transition_generation=1;",
+                projection,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "projection_source=coordinator_route_transition",
+                projection,
+                StringComparison.Ordinal);
+        }
     }
 
     [Fact]

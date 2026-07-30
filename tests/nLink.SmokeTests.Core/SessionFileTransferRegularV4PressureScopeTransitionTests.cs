@@ -477,6 +477,7 @@ public sealed partial class SessionFileTransferV4SenderTests
     public void RegularV4Pressure_RouteCommitRetiresExactBindingBeforeTunaOwnerInstall()
     {
         const string transferId = "transfer_regular_v4_pressure_route_commit";
+        var logStart = GetOperationalLogLength();
         using var service = new SessionFileTransferService();
         using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
         transport.SeedRuntimeUnlockRouteCommitProofForTests(transferId, "pressure_route_commit");
@@ -518,6 +519,36 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.NotNull(GetPrivatePropertyValue(context, "RuntimeUnlockRouteCommitToken"));
         var settlement = Assert.Single(transport.RegularV4FrontierRepairSettlements);
         Assert.Equal(FileTransferRegularV4FrontierRepairSettlementOutcome.StaleRejected, settlement.Outcome);
+        var transferLog = string.Join(
+            Environment.NewLine,
+            ReadOperationalLogTail(logStart)
+                .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                .Where(line =>
+                    line.Contains(
+                        "direction=inbound;",
+                        StringComparison.Ordinal) &&
+                    line.Contains(
+                        "projection_source=coordinator_route_transition",
+                        StringComparison.Ordinal)));
+        foreach (var eventName in new[]
+                 {
+                     "filetransfer_route_transitioned",
+                     "filetransfer_route_selected",
+                     "filetransfer_live_route_epoch_started",
+                     "filetransfer_live_route_epoch_recovered",
+                 })
+        {
+            var projectionLines = transferLog.Split(
+                    Environment.NewLine,
+                    StringSplitOptions.RemoveEmptyEntries)
+                .Where(line => line.Contains(
+                    $"event={eventName};",
+                    StringComparison.Ordinal))
+                .ToArray();
+            Assert.True(
+                projectionLines.Length == 1,
+                $"event={eventName}{Environment.NewLine}{ReadOperationalLogTail(logStart)}");
+        }
     }
 
     [Fact]

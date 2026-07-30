@@ -8623,7 +8623,8 @@ function New-FileTransferFileTunaV4DataPathCorrelationIndex {
                 'file_transfer_outbound_terminal',
                 'file_transfer_inbound_terminal',
                 'transfer_terminal',
-                'filetransfer_runtime_terminalized')) {
+                'filetransfer_runtime_terminalized') -and
+            -not [string]::IsNullOrWhiteSpace($scopeKey)) {
             Add-FileTransferFileTunaV4DataPathIndexEvent `
                 -Lookup $terminalEventsByScope `
                 -Key $scopeKey `
@@ -8631,7 +8632,8 @@ function New-FileTransferFileTunaV4DataPathCorrelationIndex {
         }
 
         if ($event.EventName -eq 'filetransfer_route_transitioned' -and
-            -not [string]::IsNullOrWhiteSpace($writerId)) {
+            -not [string]::IsNullOrWhiteSpace($writerId) -and
+            -not [string]::IsNullOrWhiteSpace($scopeKey)) {
             $writerScopeKey =
                 "{0}|{1}" -f $writerId.ToLowerInvariant(), $scopeKey
             Add-FileTransferFileTunaV4DataPathIndexEvent `
@@ -35351,8 +35353,6 @@ function Get-FileTransferRecoveryFailureClassification {
             'filetransfer_tuna_data_path_peer_visible',
             'filetransfer_data_path_send_result',
             'filetransfer_route_transition_physical_send_lease_registered',
-            'filetransfer_outbound_physical_send_lease_retired',
-            'filetransfer_route_transition_physical_send_lease_retired',
             'tuna_accelerated_envelope_sent',
             'tuna_accelerated_file_frame_sent',
             'filetransfer_outbound_physical_send_lease_registered'
