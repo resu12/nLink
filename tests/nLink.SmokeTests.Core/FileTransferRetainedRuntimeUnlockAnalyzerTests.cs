@@ -11351,6 +11351,195 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task
+        AnalyzeRetained_InitialActivationCommittedRefreshMustReachPhysicalSubmission(
+            bool compact,
+            bool recovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string sessionId = "sess_hold_refresh_delivery";
+        const string transferId = "transfer_hold_refresh_delivery";
+        const string writerId = "writer_hold_refresh_delivery";
+        const string peerWriterId = "writer_hold_refresh_peer";
+        const string semantic =
+            "offer_nonce=offer-refresh; payer_decision_id=4; offer_generation=1; " +
+            "transaction_generation=1; tuna_path_lease_generation=1; " +
+            "tuna_path_lease_listener_run_id=listener-1; " +
+            "semantic_offer_fingerprint=semantic-1";
+        const string predecessor =
+            "envelope_generation=1; envelope_sent_at_unix_ms=1000; " +
+            "envelope_expires_at_unix_ms=121000; " +
+            "control_envelope_fingerprint=envelope-1";
+        const string successor =
+            "refresh_generation=1; successor_envelope_generation=2; " +
+            "successor_envelope_fingerprint=envelope-2; " +
+            "successor_sent_at_unix_ms=2000; " +
+            "successor_expires_at_unix_ms=122000; message_id=message-2";
+        const string operation =
+            "receive_recovery_operation_authority_id=operation-1; " +
+            "receive_recovery_operation_generation=1; " +
+            "recovery_liveness_lease_generation=1; closure_generation=1";
+        const string sourceScope =
+            "source_route=regular_nkn_v4_fast; source_runtime_generation=1; " +
+            "source_terminal_generation=0; source_leg_generation=1; " +
+            "source_route_publication_generation=1; source_transport_epoch=0; " +
+            "source_bridge_recovery_generation=0; " +
+            "data_session_identity=data-1; data_session_generation=1";
+        var scope =
+            $"session_id={sessionId}; transfer_id={transferId}; direction=outbound; " +
+            $"log_writer_id={writerId}";
+        var lines = new List<string>
+        {
+            LogLine(
+                $"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {scope}; " +
+                $"{semantic}; {predecessor}; {sourceScope}; hold_generation=1; " +
+                "decision_status=Held; receive_recovery_operation_generation=1; " +
+                "closure_generation=0",
+                secondsOffset: 0),
+            LogLine(
+                $"event=filetransfer_receive_recovery_operation_closure_adopted; {scope}; " +
+                $"{operation}; execution_state=Completed; closure_state=Adopted",
+                secondsOffset: 1),
+            LogLine(
+                $"event=runtime_unlock_initial_activation_offer_envelope_refresh_issued; {scope}; " +
+                $"{semantic}; {predecessor}; {sourceScope}; {successor}",
+                secondsOffset: 2),
+            LogLine(
+                $"event=runtime_unlock_initial_activation_offer_envelope_refresh_prepared; {scope}; " +
+                $"{semantic}; {predecessor}; {sourceScope}; {successor}",
+                secondsOffset: 3),
+            LogLine(
+                $"event=runtime_unlock_initial_activation_offer_envelope_refresh_committed; {scope}; " +
+                $"{semantic}; {predecessor}; {sourceScope}; {successor}; " +
+                "decision_status=Accepted",
+                secondsOffset: 4),
+            LogLine(
+                $"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {scope}; " +
+                $"{semantic}; {predecessor}; {sourceScope}; {operation}; " +
+                "hold_generation=1; decision_status=Released; " +
+                "refresh_generation=1; successor_envelope_generation=2",
+                secondsOffset: 5),
+            LogLine(
+                $"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {scope}; " +
+                $"{semantic}; {predecessor}; {sourceScope}; {operation}; " +
+                "hold_generation=1; decision_status=Released; " +
+                "refresh_generation=1; successor_envelope_generation=2",
+                secondsOffset: 6),
+            LogLine(
+                "event=runtime_unlock_offer_authority_boundary_decided; " +
+                $"session_id={sessionId}; transfer_id={transferId}; " +
+                $"log_writer_id={writerId}; boundary=control_send_entry; " +
+                "authority_mode=InitialActivation; decision_status=accepted; " +
+                "offer_generation=1",
+                secondsOffset: 7),
+            LogLine(
+                $"event=runtime_unlock_initial_activation_receive_recovery_hold_send_prevalidated; {scope}; " +
+                $"{semantic}; {predecessor}; {sourceScope}; decision_status=Released; " +
+                "same_generation_resume=1; prevalidation_status=rejected; " +
+                "log_writer_sequence=903",
+                secondsOffset: 8)
+        };
+
+        if (recovered)
+        {
+            lines.AddRange(
+            [
+                LogLine(
+                    $"event=runtime_unlock_initial_activation_receive_recovery_hold_send_prevalidated; {scope}; " +
+                    $"{semantic}; {predecessor}; {sourceScope}; decision_status=Released; " +
+                    "same_generation_resume=1; prevalidation_status=accepted; " +
+                    "boundary_match_mode=committed_refresh_successor; " +
+                    "effective_envelope_generation=2; " +
+                    "effective_envelope_fingerprint=envelope-2; refresh_generation=1",
+                    secondsOffset: 9),
+                LogLine(
+                    $"event=runtime_unlock_initial_activation_receive_recovery_hold_post_prevalidation_submission; {scope}; " +
+                    $"{semantic}; envelope_generation=2; " +
+                    "control_envelope_fingerprint=envelope-2; refresh_generation=1; " +
+                    "message_id=message-2",
+                    secondsOffset: 10),
+                LogLine(
+                    $"event=tuna_acceleration_offer_received_raw; msg_id=message-2; log_writer_id={peerWriterId}",
+                    secondsOffset: 11),
+                LogLine(
+                    $"event=runtime_unlock_transaction_answer_received; session_id={sessionId}; " +
+                    $"transfer_id={transferId}; offer_generation=1; log_writer_id={writerId}",
+                    secondsOffset: 12),
+                LogLine(
+                    $"event=tuna_acceleration_answer_ack_sent; session_id={sessionId}; " +
+                    $"transfer_id={transferId}; log_writer_id={writerId}",
+                    secondsOffset: 13),
+                LogLine(
+                    $"event=filetransfer_route_transition_prepared; session_id={sessionId}; " +
+                    $"transfer_id={transferId}; direction=outbound; log_writer_id={writerId}",
+                    secondsOffset: 14)
+            ]);
+        }
+        else
+        {
+            lines.Add(
+                LogLine(
+                    $"event=file_transfer_outbound_terminal; {scope}; state=Failed; error_code=timeout",
+                    secondsOffset: 9));
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-operator-verdict.txt");
+        Assert.Equal(
+            "1",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_raw_count"]);
+        Assert.Equal(
+            "1",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_distinct_count"]);
+        Assert.Equal(
+            recovered ? "1" : "0",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_recovered_count"]);
+        Assert.Equal(
+            recovered ? "0" : "1",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_unresolved_count"]);
+        Assert.Equal(
+            recovered ? "pass" : "fail",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_verdict"]);
+        if (!recovered)
+        {
+            Assert.Equal(
+                "runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing",
+                verdict["first_proof_chain_failure_class"]);
+            Assert.Equal(
+                "runtime_unlock_initial_activation_receive_recovery_hold_send_prevalidated",
+                verdict["first_proof_chain_failure_event"]);
+            Assert.Equal(
+                "committed_refresh_successor_envelope_not_accepted_by_release_prevalidation",
+                verdict["first_proof_chain_failure_reason"]);
+            Assert.Equal(
+                "903",
+                verdict["first_proof_chain_failure_writer_sequence"]);
+        }
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task AnalyzeRetained_ReleasedInitialActivationExpiredOnPeer(bool compact)

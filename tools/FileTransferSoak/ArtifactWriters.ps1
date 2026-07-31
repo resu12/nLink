@@ -21498,7 +21498,50 @@ function Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleas
             [string]::Equals(
                 $operationAuthority,
                 $candidateAuthority,
-                [System.StringComparison]::OrdinalIgnoreCase)
+            [System.StringComparison]::OrdinalIgnoreCase)
+    }
+
+    function Test-HoldReleaseSemanticTuple {
+        param(
+            [Parameter(Mandatory = $true)]$Left,
+            [Parameter(Mandatory = $true)]$Right
+        )
+
+        foreach ($mapping in @(
+                [pscustomobject]@{ Left = @('log_writer_id'); Right = @('log_writer_id') },
+                [pscustomobject]@{ Left = @('session_id'); Right = @('session_id') },
+                [pscustomobject]@{ Left = @('transfer_id'); Right = @('transfer_id') },
+                [pscustomobject]@{ Left = @('direction'); Right = @('direction') },
+                [pscustomobject]@{ Left = @('offer_nonce'); Right = @('offer_nonce') },
+                [pscustomobject]@{ Left = @('payer_decision_id'); Right = @('payer_decision_id') },
+                [pscustomobject]@{ Left = @('offer_generation'); Right = @('offer_generation') },
+                [pscustomobject]@{ Left = @('transaction_generation'); Right = @('transaction_generation') },
+                [pscustomobject]@{ Left = @('tuna_path_lease_generation'); Right = @('tuna_path_lease_generation') },
+                [pscustomobject]@{ Left = @('tuna_path_lease_listener_run_id'); Right = @('tuna_path_lease_listener_run_id') },
+                [pscustomobject]@{ Left = @('semantic_offer_fingerprint'); Right = @('semantic_offer_fingerprint') },
+                [pscustomobject]@{ Left = @('source_route', 'expected_route', 'route'); Right = @('source_route', 'expected_route', 'route') },
+                [pscustomobject]@{ Left = @('source_runtime_generation', 'expected_runtime_generation', 'runtime_generation'); Right = @('source_runtime_generation', 'expected_runtime_generation', 'runtime_generation') },
+                [pscustomobject]@{ Left = @('source_terminal_generation', 'expected_terminal_generation', 'terminal_generation'); Right = @('source_terminal_generation', 'expected_terminal_generation', 'terminal_generation') },
+                [pscustomobject]@{ Left = @('source_leg_generation', 'expected_leg_generation', 'leg_generation'); Right = @('source_leg_generation', 'expected_leg_generation', 'leg_generation') },
+                [pscustomobject]@{ Left = @('source_route_publication_generation', 'expected_route_publication_generation', 'route_publication_generation'); Right = @('source_route_publication_generation', 'expected_route_publication_generation', 'route_publication_generation') },
+                [pscustomobject]@{ Left = @('source_transport_epoch', 'expected_transport_epoch', 'transport_epoch'); Right = @('source_transport_epoch', 'expected_transport_epoch', 'transport_epoch') },
+                [pscustomobject]@{ Left = @('source_bridge_recovery_generation', 'expected_bridge_recovery_generation', 'bridge_recovery_generation'); Right = @('source_bridge_recovery_generation', 'expected_bridge_recovery_generation', 'bridge_recovery_generation') },
+                [pscustomobject]@{ Left = @('data_session_identity', 'expected_data_session_identity'); Right = @('data_session_identity', 'expected_data_session_identity') },
+                [pscustomobject]@{ Left = @('data_session_generation', 'expected_data_session_generation'); Right = @('data_session_generation', 'expected_data_session_generation') })) {
+            $leftValue = Get-HoldReleaseField -Event $Left -Names $mapping.Left
+            $rightValue = Get-HoldReleaseField -Event $Right -Names $mapping.Right
+            if ([string]::IsNullOrWhiteSpace($leftValue) -or
+                [string]::IsNullOrWhiteSpace($rightValue)) {
+                continue
+            }
+            if (-not [string]::Equals(
+                    $leftValue,
+                    $rightValue,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+        return $true
     }
 
     [object[]]$rejections = @($events | Where-Object {
@@ -21537,6 +21580,58 @@ function Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleas
     [object[]]$resumeEvents = @($events | Where-Object {
         $_.EventName -eq
             'runtime_unlock_initial_activation_receive_recovery_hold_resumed'
+    })
+    [object[]]$refreshIssued = @($events | Where-Object {
+        $_.EventName -eq
+            'runtime_unlock_initial_activation_offer_envelope_refresh_issued'
+    })
+    [object[]]$refreshPrepared = @($events | Where-Object {
+        $_.EventName -eq
+            'runtime_unlock_initial_activation_offer_envelope_refresh_prepared'
+    })
+    [object[]]$refreshCommitted = @($events | Where-Object {
+        $_.EventName -eq
+            'runtime_unlock_initial_activation_offer_envelope_refresh_committed' -and
+        (Get-HoldReleaseField -Event $_ -Names @('decision_status')) -in
+            @('Accepted', 'Idempotent', 'accepted', 'idempotent') -and
+        -not [string]::IsNullOrWhiteSpace(
+            (Get-HoldReleaseField -Event $_ -Names @('offer_nonce')))
+    })
+    [object[]]$rejectedRefreshPrevalidations = @($events | Where-Object {
+        $_.EventName -eq
+            'runtime_unlock_initial_activation_receive_recovery_hold_send_prevalidated' -and
+        (Get-HoldReleaseField -Event $_ -Names @('prevalidation_status')) -eq
+            'rejected' -and
+        (Get-HoldReleaseField -Event $_ -Names @('decision_status')) -eq
+            'Released' -and
+        (Get-HoldReleaseField -Event $_ -Names @('same_generation_resume')) -eq
+            '1'
+    })
+    [object[]]$acceptedControlEntries = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_offer_authority_boundary_decided' -and
+        (Get-HoldReleaseField -Event $_ -Names @('boundary')) -eq
+            'control_send_entry' -and
+        (Get-HoldReleaseField -Event $_ -Names @('decision_status')) -eq
+            'accepted'
+    })
+    [object[]]$postPrevalidationSubmissions = @($events | Where-Object {
+        $_.EventName -eq
+            'runtime_unlock_initial_activation_receive_recovery_hold_post_prevalidation_submission'
+    })
+    [object[]]$rawPeerOffers = @($events | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_offer_received_raw'
+    })
+    [object[]]$transactionAnswers = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_transaction_answer_received'
+    })
+    [object[]]$answerAcks = @($events | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_answer_ack_sent'
+    })
+    [object[]]$precommitOrPrepared = @($events | Where-Object {
+        $_.EventName -in @(
+            'runtime_unlock_precommit_admission_granted',
+            'runtime_unlock_route_commit_precommit_admission_granted',
+            'filetransfer_route_transition_prepared')
     })
 
     $raw = New-Object System.Collections.Generic.List[object]
@@ -21602,6 +21697,134 @@ function Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleas
                 Event = $rejection
                 Misrouted = $misrouted[0]
                 Adoption = $matchingAdoptions[0]
+                Variant = 'invalidation'
+                Refresh = $null
+            }
+        }
+    }
+
+    foreach ($prevalidation in $rejectedRefreshPrevalidations) {
+        $candidateSequence = [int64]$prevalidation.Sequence
+        [object[]]$commits = @($refreshCommitted | Where-Object {
+            [int64]$_.Sequence -lt $candidateSequence -and
+            (Test-HoldReleaseSemanticTuple -Left $_ -Right $prevalidation)
+        } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        if ($commits.Count -ne 1) {
+            continue
+        }
+        $commit = $commits[0]
+        $refreshGeneration =
+            Get-HoldReleaseField -Event $commit -Names @('refresh_generation')
+        $successorEnvelopeGeneration =
+            Get-HoldReleaseField `
+                -Event $commit `
+                -Names @('successor_envelope_generation')
+        $successorFingerprint =
+            Get-HoldReleaseField `
+                -Event $commit `
+                -Names @('successor_envelope_fingerprint')
+        $successorMessageId =
+            Get-HoldReleaseField -Event $commit -Names @('message_id')
+        if ([string]::IsNullOrWhiteSpace($refreshGeneration) -or
+            [string]::IsNullOrWhiteSpace($successorEnvelopeGeneration) -or
+            [string]::IsNullOrWhiteSpace($successorFingerprint) -or
+            [string]::IsNullOrWhiteSpace($successorMessageId)) {
+            continue
+        }
+
+        [object[]]$prepared = @($refreshPrepared | Where-Object {
+            [int64]$_.Sequence -lt [int64]$commit.Sequence -and
+            (Test-HoldReleaseSemanticTuple -Left $_ -Right $commit) -and
+            (Get-HoldReleaseField -Event $_ -Names @('refresh_generation')) -eq
+                $refreshGeneration -and
+            (Get-HoldReleaseField -Event $_ -Names @('successor_envelope_generation')) -eq
+                $successorEnvelopeGeneration -and
+            (Get-HoldReleaseField -Event $_ -Names @('successor_envelope_fingerprint')) -eq
+                $successorFingerprint -and
+            (Get-HoldReleaseField -Event $_ -Names @('message_id')) -eq
+                $successorMessageId
+        } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        [object[]]$issued = @($refreshIssued | Where-Object {
+            $prepared.Count -eq 1 -and
+            [int64]$_.Sequence -lt [int64]$prepared[0].Sequence -and
+            (Test-HoldReleaseSemanticTuple -Left $_ -Right $commit) -and
+            (Get-HoldReleaseField -Event $_ -Names @('refresh_generation')) -eq
+                $refreshGeneration -and
+            (Get-HoldReleaseField -Event $_ -Names @('successor_envelope_generation')) -eq
+                $successorEnvelopeGeneration
+        } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        if ($prepared.Count -ne 1 -or $issued.Count -ne 1) {
+            continue
+        }
+
+        [object[]]$releases = @($normalReleaseEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$commit.Sequence -and
+            [int64]$_.Sequence -lt $candidateSequence -and
+            (Test-HoldReleaseSemanticTuple -Left $_ -Right $prevalidation) -and
+            (Get-HoldReleaseField -Event $_ -Names @('refresh_generation')) -eq
+                $refreshGeneration -and
+            (Get-HoldReleaseField -Event $_ -Names @('successor_envelope_generation')) -eq
+                $successorEnvelopeGeneration
+        } | Sort-Object Sequence, LineNumber)
+        if ($releases.Count -eq 0) {
+            continue
+        }
+        $release = $releases[-1]
+        [object[]]$matchingHolds = @($heldDecisions | Where-Object {
+            [int64]$_.Sequence -lt [int64]$issued[0].Sequence -and
+            (Test-HoldReleaseSemanticTuple -Left $_ -Right $prevalidation)
+        } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        [object[]]$matchingAdoptions = @($adoptions | Where-Object {
+            [int64]$_.Sequence -lt [int64]$issued[0].Sequence -and
+            (Get-HoldReleaseField -Event $_ -Names @('log_writer_id')) -eq
+                (Get-HoldReleaseField -Event $prevalidation -Names @('log_writer_id')) -and
+            (Get-HoldReleaseField -Event $_ -Names @('session_id')) -eq
+                (Get-HoldReleaseField -Event $prevalidation -Names @('session_id')) -and
+            (Get-HoldReleaseField -Event $_ -Names @('transfer_id')) -eq
+                (Get-HoldReleaseField -Event $prevalidation -Names @('transfer_id')) -and
+            (Get-HoldReleaseField -Event $_ -Names @('direction')) -eq
+                (Get-HoldReleaseField -Event $prevalidation -Names @('direction')) -and
+            (Test-HoldReleaseOperationMatch -Operation $_ -Candidate $release)
+        } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        [object[]]$controlEntries = @($acceptedControlEntries | Where-Object {
+            [int64]$_.Sequence -gt [int64]$release.Sequence -and
+            [int64]$_.Sequence -lt $candidateSequence -and
+            (Get-HoldReleaseField -Event $_ -Names @('log_writer_id')) -eq
+                (Get-HoldReleaseField -Event $prevalidation -Names @('log_writer_id')) -and
+            (Get-HoldReleaseField -Event $_ -Names @('session_id')) -eq
+                (Get-HoldReleaseField -Event $prevalidation -Names @('session_id')) -and
+            (Get-HoldReleaseField -Event $_ -Names @('transfer_id')) -eq
+                (Get-HoldReleaseField -Event $prevalidation -Names @('transfer_id')) -and
+            (Get-HoldReleaseField -Event $_ -Names @('offer_generation')) -eq
+                (Get-HoldReleaseField -Event $prevalidation -Names @('offer_generation'))
+        } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        if ($matchingHolds.Count -ne 1 -or
+            $matchingAdoptions.Count -ne 1 -or
+            $controlEntries.Count -ne 1) {
+            continue
+        }
+
+        $raw.Add($prevalidation) | Out-Null
+        $key = (@(
+            Get-HoldReleaseField -Event $prevalidation -Names @('log_writer_id')
+            Get-HoldReleaseField -Event $prevalidation -Names @('session_id')
+            Get-HoldReleaseField -Event $prevalidation -Names @('transfer_id')
+            Get-HoldReleaseField -Event $prevalidation -Names @('direction')
+            Get-HoldReleaseField -Event $prevalidation -Names @('offer_nonce')
+            Get-HoldReleaseField -Event $prevalidation -Names @('payer_decision_id')
+            Get-HoldReleaseField -Event $prevalidation -Names @('offer_generation')
+            Get-HoldReleaseField -Event $prevalidation -Names @('transaction_generation')
+            Get-HoldReleaseField -Event $prevalidation -Names @('tuna_path_lease_generation')
+            Get-HoldReleaseField -Event $prevalidation -Names @('semantic_offer_fingerprint')
+            $refreshGeneration
+        ) | ForEach-Object { ([string]$_).ToLowerInvariant() }) -join '|'
+        if (-not $distinct.Contains($key)) {
+            $distinct[$key] = [pscustomobject]@{
+                Event = $prevalidation
+                Misrouted = $release
+                Adoption = $matchingAdoptions[0]
+                Variant = 'committed_refresh'
+                Refresh = $commit
             }
         }
     }
@@ -21609,6 +21832,99 @@ function Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleas
     $recovered = New-Object System.Collections.Generic.List[object]
     $unresolved = New-Object System.Collections.Generic.List[object]
     foreach ($record in @($distinct.Values)) {
+        if ($record.Variant -eq 'committed_refresh') {
+            $eventSequence = [int64]$record.Event.Sequence
+            $refreshGeneration =
+                Get-HoldReleaseField `
+                    -Event $record.Refresh `
+                    -Names @('refresh_generation')
+            $successorGeneration =
+                Get-HoldReleaseField `
+                    -Event $record.Refresh `
+                    -Names @('successor_envelope_generation')
+            $successorFingerprint =
+                Get-HoldReleaseField `
+                    -Event $record.Refresh `
+                    -Names @('successor_envelope_fingerprint')
+            $messageId =
+                Get-HoldReleaseField `
+                    -Event $record.Refresh `
+                    -Names @('message_id')
+            [object[]]$acceptedPrevalidation = @($events | Where-Object {
+                [int64]$_.Sequence -gt $eventSequence -and
+                $_.EventName -eq
+                    'runtime_unlock_initial_activation_receive_recovery_hold_send_prevalidated' -and
+                (Get-HoldReleaseField -Event $_ -Names @('prevalidation_status')) -eq
+                    'accepted' -and
+                (Get-HoldReleaseField -Event $_ -Names @('boundary_match_mode')) -eq
+                    'committed_refresh_successor' -and
+                (Get-HoldReleaseField -Event $_ -Names @('refresh_generation')) -eq
+                    $refreshGeneration -and
+                (Get-HoldReleaseField -Event $_ -Names @('effective_envelope_generation')) -eq
+                    $successorGeneration -and
+                (Get-HoldReleaseField -Event $_ -Names @('effective_envelope_fingerprint')) -eq
+                    $successorFingerprint -and
+                (Test-HoldReleaseSemanticTuple -Left $_ -Right $record.Event)
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            [object[]]$submission = @($postPrevalidationSubmissions | Where-Object {
+                $acceptedPrevalidation.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$acceptedPrevalidation[0].Sequence -and
+                (Get-HoldReleaseField -Event $_ -Names @('refresh_generation')) -eq
+                    $refreshGeneration -and
+                (Get-HoldReleaseField -Event $_ -Names @('envelope_generation')) -eq
+                    $successorGeneration -and
+                (Get-HoldReleaseField -Event $_ -Names @('control_envelope_fingerprint')) -eq
+                    $successorFingerprint -and
+                (Get-HoldReleaseField -Event $_ -Names @('message_id')) -eq
+                    $messageId -and
+                (Test-HoldReleaseSemanticTuple -Left $_ -Right $record.Event)
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            [object[]]$peerReceipt = @($rawPeerOffers | Where-Object {
+                $submission.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$submission[0].Sequence -and
+                (Get-HoldReleaseField -Event $_ -Names @('message_id', 'msg_id')) -eq
+                    $messageId
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            [object[]]$answer = @($transactionAnswers | Where-Object {
+                $peerReceipt.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$peerReceipt[0].Sequence -and
+                (Get-HoldReleaseField -Event $_ -Names @('session_id')) -eq
+                    (Get-HoldReleaseField -Event $record.Event -Names @('session_id')) -and
+                (Get-HoldReleaseField -Event $_ -Names @('transfer_id')) -eq
+                    (Get-HoldReleaseField -Event $record.Event -Names @('transfer_id')) -and
+                (Get-HoldReleaseField -Event $_ -Names @('offer_generation')) -eq
+                    (Get-HoldReleaseField -Event $record.Event -Names @('offer_generation'))
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            [object[]]$ack = @($answerAcks | Where-Object {
+                $answer.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$answer[0].Sequence -and
+                (Get-HoldReleaseField -Event $_ -Names @('log_writer_id')) -eq
+                    (Get-HoldReleaseField -Event $record.Event -Names @('log_writer_id'))
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            [object[]]$precommit = @($precommitOrPrepared | Where-Object {
+                $ack.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$ack[0].Sequence -and
+                (Get-HoldReleaseField -Event $_ -Names @('session_id')) -eq
+                    (Get-HoldReleaseField -Event $record.Event -Names @('session_id')) -and
+                (Get-HoldReleaseField -Event $_ -Names @('transfer_id')) -eq
+                    (Get-HoldReleaseField -Event $record.Event -Names @('transfer_id')) -and
+                (Get-HoldReleaseField -Event $_ -Names @('direction')) -eq
+                    (Get-HoldReleaseField -Event $record.Event -Names @('direction'))
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            if ($acceptedPrevalidation.Count -eq 1 -and
+                $submission.Count -eq 1 -and
+                $peerReceipt.Count -eq 1 -and
+                $answer.Count -eq 1 -and
+                $ack.Count -eq 1 -and
+                $precommit.Count -eq 1) {
+                $recovered.Add($record.Event) | Out-Null
+            }
+            else {
+                $unresolved.Add($record.Event) | Out-Null
+            }
+            continue
+        }
+
         [object[]]$normalRelease = @($normalReleaseEvents | Where-Object {
             [int64]$_.Sequence -gt [int64]$record.Event.Sequence -and
             (Test-HoldReleaseTuple `
@@ -39972,12 +40288,20 @@ function Get-FileTransferRecoveryFailureClassification {
         -Events @($runtimeUnlockInitialOfferReceiveRecoveryHoldProof.UnresolvedCandidateEvents) `
         -DefaultReason 'initial_activation_retry_exhausted_while_receive_recovery_awaiting_proof' `
         -UseDefaultReason
-    Add-FileTransferProofChainFailureCandidates `
-        -Candidates $proofChainFailureCandidates `
-        -Class 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing' `
-        -Events @($runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.UnresolvedCandidateEvents) `
-        -DefaultReason 'released_hold_routed_through_exact_invalidation_boundary' `
-        -UseDefaultReason
+    foreach ($candidateEvent in @($runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.UnresolvedCandidateEvents)) {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing' `
+            -Events @($candidateEvent) `
+            -DefaultReason $(if ($candidateEvent.EventName -eq
+                    'runtime_unlock_initial_activation_receive_recovery_hold_send_prevalidated') {
+                    'committed_refresh_successor_envelope_not_accepted_by_release_prevalidation'
+                }
+                else {
+                    'released_hold_routed_through_exact_invalidation_boundary'
+                }) `
+            -UseDefaultReason
+    }
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired' `

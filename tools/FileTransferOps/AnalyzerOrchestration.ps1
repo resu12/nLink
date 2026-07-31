@@ -1169,6 +1169,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_receive_recovery_hold_resumed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_receive_recovery_hold_send_prevalidated') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_receive_recovery_hold_post_prevalidation_submission') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_offer_envelope_refresh_issued') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_offer_envelope_refresh_prepared') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_offer_envelope_refresh_committed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_transaction_offer_generation_created') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_offer_received_raw') +
@@ -2076,7 +2079,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing'
             Event = $candidateEvent
-            Reason = 'released_hold_routed_through_exact_invalidation_boundary'
+            Reason = if ($candidateEvent.EventName -eq
+                'runtime_unlock_initial_activation_receive_recovery_hold_send_prevalidated') {
+                'committed_refresh_successor_envelope_not_accepted_by_release_prevalidation'
+            }
+            else {
+                'released_hold_routed_through_exact_invalidation_boundary'
+            }
         }) | Out-Null
     }
     foreach ($candidateEvent in @($runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof.UnresolvedCandidateEvents)) {

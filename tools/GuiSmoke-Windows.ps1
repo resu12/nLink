@@ -4703,7 +4703,14 @@ function Get-TunaGuiExplicitFailureClassification {
             'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing' {
                 return [pscustomobject]@{
                     Phase = 'runtime_unlock_initial_activation'
-                    Reason = 'released_hold_routed_through_exact_invalidation_boundary'
+                    Reason = if ($ErrorMessage.IndexOf(
+                            'runtime_unlock_initial_activation_receive_recovery_hold_send_prevalidated',
+                            [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                        'committed_refresh_successor_envelope_not_accepted_by_release_prevalidation'
+                    }
+                    else {
+                        'released_hold_routed_through_exact_invalidation_boundary'
+                    }
                 }
             }
             'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired' {
@@ -5783,6 +5790,103 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     $payerDecisionId
             } | Select-Object -First 1)
             if ($held.Count -eq 1 -and $prevalidated.Count -eq 1) {
+                return $true
+            }
+        }
+
+        return $false
+    }
+
+    function Test-TunaGuiInitialActivationCommittedRefreshPrevalidationRejected {
+        param(
+            [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+        )
+
+        $indexedLines = @(
+            for ($index = 0; $index -lt $Lines.Count; $index++) {
+                [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
+            }
+        )
+        foreach ($candidate in @($indexedLines | Where-Object {
+            (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                'runtime_unlock_initial_activation_receive_recovery_hold_send_prevalidated')) -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'prevalidation_status') -eq
+                'rejected' -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq
+                'Released' -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'same_generation_resume') -eq
+                '1'
+        })) {
+            $writer =
+                Get-TunaGuiLogLineFieldValue -Line $candidate.Line -Name 'log_writer_id'
+            $session =
+                Get-TunaGuiLogLineFieldValue -Line $candidate.Line -Name 'session_id'
+            $transfer =
+                Get-TunaGuiLogLineFieldValue -Line $candidate.Line -Name 'transfer_id'
+            $offerGeneration =
+                Get-TunaGuiLogLineFieldValue -Line $candidate.Line -Name 'offer_generation'
+            if ([string]::IsNullOrWhiteSpace($writer) -or
+                [string]::IsNullOrWhiteSpace($session) -or
+                [string]::IsNullOrWhiteSpace($transfer) -or
+                [string]::IsNullOrWhiteSpace($offerGeneration)) {
+                continue
+            }
+
+            $commits = @($indexedLines | Where-Object {
+                $_.Index -lt $candidate.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                    'runtime_unlock_initial_activation_offer_envelope_refresh_committed')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -in
+                    @('Accepted', 'Idempotent') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq
+                    $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq
+                    $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq
+                    $transfer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'offer_generation') -eq
+                    $offerGeneration -and
+                -not [string]::IsNullOrWhiteSpace(
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'refresh_generation'))
+            } | Select-Object -Last 1)
+            if ($commits.Count -ne 1) {
+                continue
+            }
+
+            $refreshGeneration =
+                Get-TunaGuiLogLineFieldValue `
+                    -Line $commits[0].Line `
+                    -Name 'refresh_generation'
+            $released = @($indexedLines | Where-Object {
+                $_.Index -gt $commits[0].Index -and
+                $_.Index -lt $candidate.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                    'runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq
+                    'Released' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq
+                    $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq
+                    $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq
+                    $transfer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'refresh_generation') -eq
+                    $refreshGeneration
+            } | Select-Object -Last 1)
+            $submitted = @($indexedLines | Where-Object {
+                $_.Index -gt $candidate.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                    'runtime_unlock_initial_activation_receive_recovery_hold_post_prevalidation_submission')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq
+                    $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq
+                    $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq
+                    $transfer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'refresh_generation') -eq
+                    $refreshGeneration
+            })
+            if ($released.Count -eq 1 -and $submitted.Count -eq 0) {
                 return $true
             }
         }
@@ -9033,6 +9137,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $initialActivationReceiveRecoveryHoldReleasedOfferExpired =
         Test-TunaGuiInitialActivationReceiveRecoveryHoldReleasedOfferExpired `
             -Lines $regularV4EvidenceLineText
+    $initialActivationCommittedRefreshPrevalidationRejected =
+        Test-TunaGuiInitialActivationCommittedRefreshPrevalidationRejected `
+            -Lines $regularV4EvidenceLineText
     $bridgeRecoveryExecutionPayloadHoldMissing =
         Test-TunaGuiBridgeRecoveryExecutionPayloadHoldFailure -Lines $regularV4EvidenceLineText
     $receiveRecoveryCompletedUnprovenPayloadHoldNotPreserved =
@@ -9121,6 +9228,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $runtimeUnlockRetryRegularV4RecoverySettlementMissing -or
         $initialActivationReceiveRecoveryHoldNotPreserved -or
         $initialActivationReceiveRecoveryHoldReleasedOfferExpired -or
+        $initialActivationCommittedRefreshPrevalidationRejected -or
         $bridgeRecoveryExecutionPayloadHoldMissing -or
         $receiveRecoveryCompletedUnprovenPayloadHoldNotPreserved -or
         $receiveRecoveryCompletedRetainedProofStatePublicationMissing -or
@@ -9173,6 +9281,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
 
         $phase = 'preflight_bridge_bootstrap'
         $reason = $bridgeBootstrapSubreason
+    }
+    elseif ($initialActivationCommittedRefreshPrevalidationRejected) {
+        $phase = 'runtime_unlock_initial_activation'
+        $reason =
+            'committed_refresh_successor_envelope_not_accepted_by_release_prevalidation'
     }
     elseif ($initialActivationReceiveRecoveryHoldReleasedOfferExpired) {
         $phase = 'runtime_unlock_initial_activation'
@@ -9486,6 +9599,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             [bool]$initialActivationReceiveRecoveryHoldNotPreserved
         InitialActivationReceiveRecoveryHoldReleasedOfferExpired =
             [bool]$initialActivationReceiveRecoveryHoldReleasedOfferExpired
+        InitialActivationCommittedRefreshPrevalidationRejected =
+            [bool]$initialActivationCommittedRefreshPrevalidationRejected
         RouteTransitionDrainingTransportGraceTerminalization =
             [bool]$routeTransitionDrainingTransportGraceTerminalization
         BridgeBootstrapNotReady = [bool]$bridgeBootstrapNotReady
