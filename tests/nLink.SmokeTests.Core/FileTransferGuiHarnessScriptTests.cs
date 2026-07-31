@@ -3267,6 +3267,104 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task ReceiveRecoveryProofStatePublicationRechecksAfterPostDeliveryHeartbeat()
+    {
+        var guiText = File.ReadAllText(
+            Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = Regex.Replace(
+            guiText,
+            @"(?m)^ {4}",
+            string.Empty);
+        var fieldValueBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Test-TunaGuiLogLineHasEvent");
+        var hasEventBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineHasEvent",
+            "Test-TunaGuiLogLineFieldMatch");
+        var classifierBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiReceiveRecoveryCompletedRetainedProofStatePublicationFailure",
+            "Test-TunaGuiBridgeRecoveryExecutionSubmissionBarrierDrainFailure");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
+            function Test-TunaGuiLogLineHasEvent { {{hasEventBody}} }
+            function Test-TunaGuiReceiveRecoveryCompletedRetainedProofStatePublicationFailure {
+                {{classifierBody}}
+            }
+
+            $shared = 'session_id=session-proof-state; transfer_id=transfer-proof-state; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; route_publication_generation=1; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; data_session_generation=1'
+            $inboundScope = "$shared; direction=inbound; log_writer_id=writer-inbound"
+            $outboundScope = "$shared; direction=outbound; log_writer_id=writer-outbound"
+            $inboundOperation = 'receive_recovery_operation_generation=1; receive_recovery_operation_authority_id=operation-inbound; bridge_decision_generation=1'
+            $outboundOperation = 'receive_recovery_operation_generation=1; receive_recovery_operation_authority_id=operation-outbound; bridge_decision_generation=1'
+            $lines = @(
+                "event=filetransfer_receive_recovery_operation_issued; $outboundOperation; $outboundScope",
+                "event=filetransfer_receive_recovery_operation_issued; $inboundOperation; $inboundScope",
+                "event=filetransfer_receive_recovery_operation_execution_receipt_applied; $inboundOperation; $inboundScope; execution_outcome=Completed; closure_state=Retained; closure_generation=1; proof_identity=(none)",
+                "event=filetransfer_receive_recovery_operation_closure_retained; $inboundOperation; $inboundScope; execution_outcome=Completed; closure_state=Retained; closure_generation=1; proof_identity=(none)",
+                'event=bridge_ready; pid=42; session_id=session-proof-state; log_writer_id=writer-inbound',
+                'event=session_liveness_proof_received; session_id=session-proof-state; generation=1; sequence=18; proof_kind=heartbeat_received; lane=bulk; log_writer_id=writer-inbound',
+                'event=filetransfer_bridge_recovery_lifecycle_diagnostic_only; lifecycle=receivestallrecoveryreceiveresumed; reason=coordinator_operation_receipt_or_proof_required; bridge_decision_generation=1; log_writer_id=writer-inbound',
+                "event=filetransfer_receive_recovery_proof_state_publication_decided; session_id=session-proof-state; transfer_id=transfer-proof-state; direction=inbound; recovery_operation_generation=1; recovery_operation_authority_id=operation-inbound; closure_generation=1; publication_generation=1; decision_status=Accepted; log_writer_id=writer-inbound",
+                "event=filetransfer_v4_state_sent; $inboundOperation; $inboundScope; closure_generation=1; repair_publication_kind=receive_recovery_proof_state; publication_generation=1; epoch=225; v4_state_wire_fingerprint=wire-state-1",
+                'event=filetransfer_receive_recovery_proof_state_publication_receipt_applied; session_id=session-proof-state; transfer_id=transfer-proof-state; direction=inbound; recovery_operation_generation=1; recovery_operation_authority_id=operation-inbound; closure_generation=1; publication_generation=1; v4_state_wire_fingerprint=wire-state-1; publication_outcome=Delivered; decision_status=Accepted; log_writer_id=writer-inbound',
+                "event=filetransfer_receive_recovery_operation_execution_receipt_applied; $outboundOperation; $outboundScope; execution_outcome=Completed; closure_state=Retained; closure_generation=1; proof_identity=(none)",
+                "event=filetransfer_receive_recovery_operation_closure_retained; $outboundOperation; $outboundScope; execution_outcome=Completed; closure_state=Retained; closure_generation=1; proof_identity=(none)",
+                'event=session_liveness_heartbeat_received; session_id=session-proof-state; generation=1; sequence=19; lane=control; log_writer_id=writer-inbound',
+                'event=session_liveness_proof_received; session_id=session-proof-state; generation=1; sequence=19; proof_kind=heartbeat_received; lane=control; log_writer_id=writer-inbound'
+            )
+            if (-not (Test-TunaGuiReceiveRecoveryCompletedRetainedProofStatePublicationFailure -Lines $lines)) {
+                throw 'post-delivery heartbeat recheck failure was not classified'
+            }
+
+            $naturallyProven = @($lines[0..11])
+            $naturallyProven += "event=filetransfer_receive_recovery_operation_proof_observed; $outboundOperation; $outboundScope; closure_generation=1; closure_state=Adopted; proof_identity=file_transfer_v4_state:225"
+            $naturallyProven += "event=filetransfer_receive_recovery_operation_closure_adopted; $outboundOperation; $outboundScope; closure_generation=1; closure_state=Adopted; proof_identity=file_transfer_v4_state:225"
+            $naturallyProven += $lines[12..13]
+            if (Test-TunaGuiReceiveRecoveryCompletedRetainedProofStatePublicationFailure -Lines $naturallyProven) {
+                throw 'naturally proven operation was classified as missing a recheck'
+            }
+
+            $recovered = @($lines)
+            $recovered += 'event=filetransfer_receive_recovery_proof_state_publication_recheck_decided; session_id=session-proof-state; transfer_id=transfer-proof-state; direction=inbound; recovery_operation_generation=1; recovery_operation_authority_id=operation-inbound; closure_generation=1; predecessor_publication_generation=1; predecessor_frame_fingerprint=wire-state-1; heartbeat_generation=1; heartbeat_sequence=19; proof_kind=heartbeat_received; lane=control; publication_generation=2; decision_status=Accepted; log_writer_id=writer-inbound'
+            $recovered += "event=filetransfer_v4_state_sent; $inboundOperation; $inboundScope; closure_generation=1; repair_publication_kind=receive_recovery_proof_state; publication_generation=2; receive_recovery_publication_attempt=post_delivery_recheck; receive_recovery_predecessor_publication_generation=1; epoch=226; v4_state_wire_fingerprint=wire-state-2"
+            $recovered += 'event=filetransfer_receive_recovery_proof_state_publication_receipt_applied; session_id=session-proof-state; transfer_id=transfer-proof-state; direction=inbound; recovery_operation_generation=1; recovery_operation_authority_id=operation-inbound; closure_generation=1; publication_generation=2; publication_attempt=post_delivery_recheck; predecessor_publication_generation=1; v4_state_wire_fingerprint=wire-state-2; publication_outcome=Delivered; decision_status=Accepted; log_writer_id=writer-inbound'
+            $recovered += "event=filetransfer_v4_state_received; $outboundScope; epoch=226; v4_state_wire_fingerprint=wire-state-2; applied=1"
+            $recovered += "event=filetransfer_receive_recovery_operation_proof_observed; $outboundOperation; $outboundScope; closure_generation=1; closure_state=Adopted; proof_identity=file_transfer_v4_state:226"
+            $recovered += "event=filetransfer_receive_recovery_operation_closure_adopted; $outboundOperation; $outboundScope; closure_generation=1; closure_state=Adopted; proof_identity=file_transfer_v4_state:226"
+            $recovered += "event=filetransfer_bridge_recovery_payload_submission_resumed; $outboundOperation; $outboundScope; closure_generation=1; closure_state=Adopted; proof_identity=file_transfer_v4_state:226"
+            if (Test-TunaGuiReceiveRecoveryCompletedRetainedProofStatePublicationFailure -Lines $recovered) {
+                throw 'exact generation-2 publication and peer receipt did not recover the boundary'
+            }
+
+            $missingPeerReceipt = @($recovered | Where-Object {
+                $_ -notmatch 'event=filetransfer_v4_state_received'
+            })
+            if (-not (Test-TunaGuiReceiveRecoveryCompletedRetainedProofStatePublicationFailure -Lines $missingPeerReceipt)) {
+                throw 'recovery without the exact peer state receipt was accepted'
+            }
+
+            Write-Output 'gui-receive-recovery-proof-state-recheck-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(
+            scriptText,
+            Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Receive-recovery proof-state GUI classification failed.{Environment.NewLine}" +
+            $"{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "gui-receive-recovery-proof-state-recheck-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RouteTransitionTransportGraceRequiresExactCoordinatorInvalidation()
     {
         var guiText = File.ReadAllText(

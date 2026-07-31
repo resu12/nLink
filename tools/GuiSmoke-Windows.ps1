@@ -7224,6 +7224,361 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
             }
         )
+
+        function Get-ProofStateFieldValue {
+            param(
+                [Parameter(Mandatory = $true)][string]$Line,
+                [Parameter(Mandatory = $true)][string[]]$Names
+            )
+
+            foreach ($name in $Names) {
+                $value =
+                    Get-TunaGuiLogLineFieldValue -Line $Line -Name $name
+                if (-not [string]::IsNullOrWhiteSpace($value) -and
+                    $value -notin @('(missing)', '__missing__')) {
+                    return $value
+                }
+            }
+            return ''
+        }
+
+        function Test-ProofStateVisibleValue {
+            param([AllowNull()][string]$Value)
+
+            return -not [string]::IsNullOrWhiteSpace($Value) -and
+                $Value -notmatch 'redacted|missing|none'
+        }
+
+        function Get-ProofStatePublicationGeneration {
+            param([Parameter(Mandatory = $true)]$Event)
+
+            return Get-ProofStateFieldValue `
+                -Line $Event.Line `
+                -Names @(
+                    'publication_generation',
+                    'receive_recovery_publication_generation')
+        }
+
+        function Get-ProofStateFrameFingerprint {
+            param([Parameter(Mandatory = $true)]$Event)
+
+            return Get-ProofStateFieldValue `
+                -Line $Event.Line `
+                -Names @(
+                    'v4_state_wire_fingerprint',
+                    'wire_state_fingerprint',
+                    'receive_recovery_wire_state_fingerprint',
+                    'frame_fingerprint',
+                    'receive_recovery_frame_fingerprint')
+        }
+
+        function Test-ProofStateOperationMatch {
+            param(
+                [Parameter(Mandatory = $true)]$Issued,
+                [Parameter(Mandatory = $true)]$Candidate
+            )
+
+            foreach ($field in @(
+                    'log_writer_id',
+                    'session_id',
+                    'transfer_id',
+                    'direction',
+                    'route',
+                    'protocol_version',
+                    'live_route_epoch',
+                    'route_publication_generation',
+                    'runtime_generation',
+                    'terminal_generation',
+                    'leg_generation',
+                    'transport_epoch',
+                    'bridge_recovery_generation',
+                    'data_session_generation')) {
+                $left =
+                    Get-TunaGuiLogLineFieldValue -Line $Issued.Line -Name $field
+                $right =
+                    Get-TunaGuiLogLineFieldValue -Line $Candidate.Line -Name $field
+                if ([string]::IsNullOrWhiteSpace($left) -or
+                    [string]::IsNullOrWhiteSpace($right) -or
+                    $left -ne $right) {
+                    return $false
+                }
+            }
+
+            $leftGeneration = Get-ProofStateFieldValue `
+                -Line $Issued.Line `
+                -Names @(
+                    'receive_recovery_operation_generation',
+                    'recovery_operation_generation')
+            $rightGeneration = Get-ProofStateFieldValue `
+                -Line $Candidate.Line `
+                -Names @(
+                    'receive_recovery_operation_generation',
+                    'recovery_operation_generation')
+            if ([string]::IsNullOrWhiteSpace($leftGeneration) -or
+                $leftGeneration -ne $rightGeneration) {
+                return $false
+            }
+
+            $leftAuthority = Get-ProofStateFieldValue `
+                -Line $Issued.Line `
+                -Names @(
+                    'receive_recovery_operation_authority_id',
+                    'recovery_operation_authority_id')
+            $rightAuthority = Get-ProofStateFieldValue `
+                -Line $Candidate.Line `
+                -Names @(
+                    'receive_recovery_operation_authority_id',
+                    'recovery_operation_authority_id')
+            if ((Test-ProofStateVisibleValue $leftAuthority) -and
+                (Test-ProofStateVisibleValue $rightAuthority) -and
+                $leftAuthority -ne $rightAuthority) {
+                return $false
+            }
+            return $true
+        }
+
+        function Test-ProofStateOppositeScopeMatch {
+            param(
+                [Parameter(Mandatory = $true)]$Publisher,
+                [Parameter(Mandatory = $true)]$Target
+            )
+
+            if ((Get-TunaGuiLogLineFieldValue `
+                        -Line $Publisher.Line `
+                        -Name 'direction') -ne 'inbound' -or
+                (Get-TunaGuiLogLineFieldValue `
+                        -Line $Target.Line `
+                        -Name 'direction') -ne 'outbound') {
+                return $false
+            }
+
+            $publisherWriter =
+                Get-TunaGuiLogLineFieldValue `
+                    -Line $Publisher.Line `
+                    -Name 'log_writer_id'
+            $targetWriter =
+                Get-TunaGuiLogLineFieldValue `
+                    -Line $Target.Line `
+                    -Name 'log_writer_id'
+            if ([string]::IsNullOrWhiteSpace($publisherWriter) -or
+                [string]::IsNullOrWhiteSpace($targetWriter) -or
+                $publisherWriter -eq $targetWriter) {
+                return $false
+            }
+
+            foreach ($field in @(
+                    'session_id',
+                    'transfer_id',
+                    'route',
+                    'protocol_version',
+                    'live_route_epoch',
+                    'route_publication_generation',
+                    'runtime_generation',
+                    'terminal_generation',
+                    'leg_generation',
+                    'transport_epoch',
+                    'bridge_recovery_generation',
+                    'data_session_generation')) {
+                $left =
+                    Get-TunaGuiLogLineFieldValue `
+                        -Line $Publisher.Line `
+                        -Name $field
+                $right =
+                    Get-TunaGuiLogLineFieldValue `
+                        -Line $Target.Line `
+                        -Name $field
+                if ([string]::IsNullOrWhiteSpace($left) -or
+                    [string]::IsNullOrWhiteSpace($right) -or
+                    $left -ne $right) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        function Test-ProofStatePublicationMatch {
+            param(
+                [Parameter(Mandatory = $true)]$Issued,
+                [Parameter(Mandatory = $true)]$Retained,
+                [Parameter(Mandatory = $true)]$Candidate
+            )
+
+            foreach ($field in @('session_id', 'transfer_id', 'direction')) {
+                $left =
+                    Get-TunaGuiLogLineFieldValue -Line $Issued.Line -Name $field
+                $right =
+                    Get-TunaGuiLogLineFieldValue -Line $Candidate.Line -Name $field
+                if ([string]::IsNullOrWhiteSpace($left) -or
+                    [string]::IsNullOrWhiteSpace($right) -or
+                    $left -ne $right) {
+                    return $false
+                }
+            }
+
+            $issuedGeneration = Get-ProofStateFieldValue `
+                -Line $Issued.Line `
+                -Names @(
+                    'receive_recovery_operation_generation',
+                    'recovery_operation_generation')
+            $candidateGeneration = Get-ProofStateFieldValue `
+                -Line $Candidate.Line `
+                -Names @(
+                    'receive_recovery_operation_generation',
+                    'recovery_operation_generation')
+            if ([string]::IsNullOrWhiteSpace($issuedGeneration) -or
+                $issuedGeneration -ne $candidateGeneration) {
+                return $false
+            }
+
+            $issuedAuthority = Get-ProofStateFieldValue `
+                -Line $Issued.Line `
+                -Names @(
+                    'receive_recovery_operation_authority_id',
+                    'recovery_operation_authority_id')
+            $candidateAuthority = Get-ProofStateFieldValue `
+                -Line $Candidate.Line `
+                -Names @(
+                    'receive_recovery_operation_authority_id',
+                    'recovery_operation_authority_id')
+            if ((Test-ProofStateVisibleValue $issuedAuthority) -and
+                (Test-ProofStateVisibleValue $candidateAuthority) -and
+                $issuedAuthority -ne $candidateAuthority) {
+                return $false
+            }
+
+            $candidateClosure =
+                Get-ProofStateFieldValue `
+                    -Line $Candidate.Line `
+                    -Names @(
+                        'closure_generation',
+                        'receive_recovery_closure_generation')
+            return [string]::IsNullOrWhiteSpace($candidateClosure) -or
+                $candidateClosure -eq
+                    (Get-ProofStateFieldValue `
+                        -Line $Retained.Line `
+                        -Names @('closure_generation'))
+        }
+
+        function Test-ProofStatePeerReceiptMatch {
+            param(
+                [Parameter(Mandatory = $true)]$StateSend,
+                [Parameter(Mandatory = $true)]$TargetIssued,
+                [Parameter(Mandatory = $true)]$Candidate
+            )
+
+            if (-not (Test-TunaGuiLogLineHasEvent `
+                        -Line $Candidate.Line `
+                        -Events @('filetransfer_v4_state_received')) -or
+                (Get-TunaGuiLogLineFieldValue `
+                        -Line $Candidate.Line `
+                        -Name 'direction') -ne 'outbound') {
+                return $false
+            }
+
+            foreach ($field in @(
+                    'log_writer_id',
+                    'session_id',
+                    'transfer_id',
+                    'route',
+                    'protocol_version',
+                    'live_route_epoch',
+                    'route_publication_generation',
+                    'runtime_generation',
+                    'terminal_generation',
+                    'leg_generation',
+                    'transport_epoch',
+                    'bridge_recovery_generation',
+                    'data_session_generation')) {
+                $left = Get-TunaGuiLogLineFieldValue `
+                    -Line $TargetIssued.Line `
+                    -Name $field
+                $right = Get-TunaGuiLogLineFieldValue `
+                    -Line $Candidate.Line `
+                    -Name $field
+                if ([string]::IsNullOrWhiteSpace($left) -or
+                    [string]::IsNullOrWhiteSpace($right) -or
+                    $left -ne $right) {
+                    return $false
+                }
+            }
+
+            $sentEpoch =
+                Get-TunaGuiLogLineFieldValue -Line $StateSend.Line -Name 'epoch'
+            $receivedEpoch =
+                Get-TunaGuiLogLineFieldValue -Line $Candidate.Line -Name 'epoch'
+            if ([string]::IsNullOrWhiteSpace($sentEpoch) -or
+                $sentEpoch -ne $receivedEpoch) {
+                return $false
+            }
+
+            $sentFingerprint =
+                Get-ProofStateFrameFingerprint -Event $StateSend
+            $receivedFingerprint =
+                Get-ProofStateFrameFingerprint -Event $Candidate
+            if ((Test-ProofStateVisibleValue $sentFingerprint) -or
+                (Test-ProofStateVisibleValue $receivedFingerprint)) {
+                return (Test-ProofStateVisibleValue $sentFingerprint) -and
+                    (Test-ProofStateVisibleValue $receivedFingerprint) -and
+                    $sentFingerprint -eq $receivedFingerprint
+            }
+            return $true
+        }
+
+        function Test-ProofStateHeartbeatPair {
+            param(
+                [Parameter(Mandatory = $true)]$Heartbeat,
+                [Parameter(Mandatory = $true)]$Proof,
+                [Parameter(Mandatory = $true)]$Publisher
+            )
+
+            if (-not (Test-TunaGuiLogLineHasEvent `
+                        -Line $Heartbeat.Line `
+                        -Events @('session_liveness_heartbeat_received')) -or
+                -not (Test-TunaGuiLogLineHasEvent `
+                        -Line $Proof.Line `
+                        -Events @('session_liveness_proof_received')) -or
+                (Get-TunaGuiLogLineFieldValue `
+                        -Line $Proof.Line `
+                        -Name 'proof_kind') -ne 'heartbeat_received' -or
+                $Proof.Index -le $Heartbeat.Index) {
+                return $false
+            }
+
+            foreach ($event in @($Heartbeat, $Proof)) {
+                if ((Get-TunaGuiLogLineFieldValue `
+                            -Line $event.Line `
+                            -Name 'log_writer_id') -ne
+                        (Get-TunaGuiLogLineFieldValue `
+                            -Line $Publisher.Line `
+                            -Name 'log_writer_id') -or
+                    (Get-TunaGuiLogLineFieldValue `
+                            -Line $event.Line `
+                            -Name 'session_id') -ne
+                        (Get-TunaGuiLogLineFieldValue `
+                            -Line $Publisher.Line `
+                            -Name 'session_id')) {
+                    return $false
+                }
+            }
+
+            foreach ($field in @('generation', 'sequence', 'lane')) {
+                $left =
+                    Get-TunaGuiLogLineFieldValue `
+                        -Line $Heartbeat.Line `
+                        -Name $field
+                $right =
+                    Get-TunaGuiLogLineFieldValue `
+                        -Line $Proof.Line `
+                        -Name $field
+                if ([string]::IsNullOrWhiteSpace($left) -or
+                    [string]::IsNullOrWhiteSpace($right) -or
+                    $left -ne $right) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
         $issuedEvents = @($indexedLines | Where-Object {
             (Test-TunaGuiLogLineHasEvent `
                 -Line $_.Line `
@@ -7299,9 +7654,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                             -Line $_.Line `
                             -Events @(
                                 'filetransfer_receive_recovery_proof_state_publication_decided')) -and
-                        (Get-TunaGuiLogLineFieldValue `
+                        (Get-ProofStateFieldValue `
                             -Line $_.Line `
-                            -Name 'receive_recovery_operation_generation') -eq
+                            -Names @(
+                                'receive_recovery_operation_generation',
+                                'recovery_operation_generation')) -eq
                             $operationGeneration
                     ) -or
                     (
@@ -7313,14 +7670,404 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         (Get-TunaGuiLogLineFieldValue `
                             -Line $_.Line `
                             -Name 'log_writer_id') -eq $writer -and
-                        (Get-TunaGuiLogLineFieldValue `
+                        (Get-ProofStateFieldValue `
                             -Line $_.Line `
-                            -Name 'receive_recovery_operation_generation') -eq
+                            -Names @(
+                                'receive_recovery_operation_generation',
+                                'recovery_operation_generation')) -eq
                             $operationGeneration
                     )
                 )
             } | Select-Object -First 1)
             if ($resolved.Count -eq 0) {
+                return $true
+            }
+        }
+
+        # Detect the arrival-order hole where a proof-state frame was submitted
+        # before the opposite recovery process became reachable.  The
+        # Core-facing heartbeat proof is the first publisher-visible recheck
+        # boundary; the raw heartbeat must carry the same immutable identity.
+        foreach ($issued in $issuedEvents) {
+            $retained = @($indexedLines | Where-Object {
+                $_.Index -gt $issued.Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @(
+                        'filetransfer_receive_recovery_operation_closure_retained')) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'closure_state') -eq 'Retained' -and
+                (Test-ProofStateOperationMatch `
+                    -Issued $issued `
+                    -Candidate $_)
+            } | Select-Object -First 1)
+            if ($retained.Count -ne 1) {
+                continue
+            }
+
+            $publicationDecision = @($indexedLines | Where-Object {
+                $_.Index -gt $retained[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @(
+                        'filetransfer_receive_recovery_proof_state_publication_decided')) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'decision_status') -in @(
+                        'Accepted',
+                        'Started',
+                        'Idempotent') -and
+                (Test-ProofStatePublicationMatch `
+                    -Issued $issued `
+                    -Retained $retained[0] `
+                    -Candidate $_)
+            } | Select-Object -First 1)
+            $stateSend = @($indexedLines | Where-Object {
+                $publicationDecision.Count -eq 1 -and
+                $_.Index -gt $publicationDecision[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @('filetransfer_v4_state_sent')) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'repair_publication_kind') -eq
+                        'receive_recovery_proof_state' -and
+                (Test-ProofStatePublicationMatch `
+                    -Issued $issued `
+                    -Retained $retained[0] `
+                    -Candidate $_)
+            } | Select-Object -First 1)
+            $publicationReceipt = @($indexedLines | Where-Object {
+                $stateSend.Count -eq 1 -and
+                $_.Index -gt $stateSend[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @(
+                        'filetransfer_receive_recovery_proof_state_publication_receipt_applied')) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'publication_outcome') -eq 'Delivered' -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'decision_status') -in @(
+                        'Accepted',
+                        'Idempotent') -and
+                (Test-ProofStatePublicationMatch `
+                    -Issued $issued `
+                    -Retained $retained[0] `
+                    -Candidate $_)
+            } | Select-Object -First 1)
+            if ($publicationReceipt.Count -ne 1) {
+                continue
+            }
+            if ((Get-ProofStatePublicationGeneration `
+                    -Event $publicationDecision[0]) -ne '1' -or
+                (Get-ProofStatePublicationGeneration -Event $stateSend[0]) -ne
+                    '1' -or
+                (Get-ProofStatePublicationGeneration `
+                    -Event $publicationReceipt[0]) -ne '1') {
+                continue
+            }
+
+            $targetBoundaries = @()
+            foreach ($targetIssued in @($indexedLines | Where-Object {
+                        (Test-TunaGuiLogLineHasEvent `
+                            -Line $_.Line `
+                            -Events @(
+                                'filetransfer_receive_recovery_operation_issued')) -and
+                        (Test-ProofStateOppositeScopeMatch `
+                            -Publisher $issued `
+                            -Target $_)
+                    })) {
+                $targetReceipt = @($indexedLines | Where-Object {
+                    $_.Index -gt $publicationReceipt[0].Index -and
+                    (Test-TunaGuiLogLineHasEvent `
+                        -Line $_.Line `
+                        -Events @(
+                            'filetransfer_receive_recovery_operation_execution_receipt_applied')) -and
+                    (Get-TunaGuiLogLineFieldValue `
+                        -Line $_.Line `
+                        -Name 'execution_outcome') -eq 'Completed' -and
+                    (Get-TunaGuiLogLineFieldValue `
+                        -Line $_.Line `
+                        -Name 'closure_state') -eq 'Retained' -and
+                    (Test-ProofStateOperationMatch `
+                        -Issued $targetIssued `
+                        -Candidate $_)
+                } | Select-Object -First 1)
+                $targetRetained = @($indexedLines | Where-Object {
+                    $targetReceipt.Count -eq 1 -and
+                    $_.Index -ge $targetReceipt[0].Index -and
+                    (Test-TunaGuiLogLineHasEvent `
+                        -Line $_.Line `
+                        -Events @(
+                            'filetransfer_receive_recovery_operation_closure_retained')) -and
+                    (Get-TunaGuiLogLineFieldValue `
+                        -Line $_.Line `
+                        -Name 'closure_state') -eq 'Retained' -and
+                    (Test-ProofStateOperationMatch `
+                        -Issued $targetIssued `
+                        -Candidate $_)
+                } | Select-Object -First 1)
+                if ($targetRetained.Count -ne 1) {
+                    continue
+                }
+
+                $heartbeatPair = $null
+                foreach ($proof in @($indexedLines | Where-Object {
+                            $_.Index -gt $targetRetained[0].Index -and
+                            (Test-TunaGuiLogLineHasEvent `
+                                -Line $_.Line `
+                                -Events @(
+                                    'session_liveness_proof_received')) -and
+                            (Get-TunaGuiLogLineFieldValue `
+                                -Line $_.Line `
+                                -Name 'proof_kind') -eq
+                                    'heartbeat_received'
+                        })) {
+                    $heartbeat = @($indexedLines | Where-Object {
+                        $_.Index -gt $targetRetained[0].Index -and
+                        $_.Index -lt $proof.Index -and
+                        (Test-ProofStateHeartbeatPair `
+                            -Heartbeat $_ `
+                            -Proof $proof `
+                            -Publisher $issued)
+                    } | Select-Object -Last 1)
+                    if ($heartbeat.Count -eq 1) {
+                        $heartbeatPair = [pscustomobject]@{
+                            Heartbeat = $heartbeat[0]
+                            Proof = $proof
+                        }
+                        break
+                    }
+                }
+                if ($null -ne $heartbeatPair) {
+                    $naturalProof = @($indexedLines | Where-Object {
+                        $_.Index -gt $publicationReceipt[0].Index -and
+                        $_.Index -le $heartbeatPair.Proof.Index -and
+                        (Test-TunaGuiLogLineHasEvent `
+                            -Line $_.Line `
+                            -Events @(
+                                'filetransfer_receive_recovery_operation_proof_observed',
+                                'filetransfer_receive_recovery_operation_receive_proof_observed',
+                                'filetransfer_receive_recovery_operation_closure_adopted')) -and
+                        (
+                            (Test-ProofStateOperationMatch `
+                                -Issued $issued `
+                                -Candidate $_) -or
+                            (Test-ProofStateOperationMatch `
+                                -Issued $targetIssued `
+                                -Candidate $_)
+                        )
+                    })
+                    $postReadyReceipt = @($indexedLines | Where-Object {
+                        $_.Index -gt $targetRetained[0].Index -and
+                        $_.Index -le $heartbeatPair.Proof.Index -and
+                        (Test-TunaGuiLogLineHasEvent `
+                            -Line $_.Line `
+                            -Events @(
+                                'filetransfer_receive_recovery_proof_state_publication_receipt_applied')) -and
+                        (Test-ProofStatePublicationMatch `
+                            -Issued $issued `
+                            -Retained $retained[0] `
+                            -Candidate $_)
+                    })
+                    if ($naturalProof.Count -gt 0 -or
+                        $postReadyReceipt.Count -gt 0) {
+                        continue
+                    }
+
+                    $targetBoundaries += [pscustomobject]@{
+                        Issued = $targetIssued
+                        Retained = $targetRetained[0]
+                        HeartbeatPair = $heartbeatPair
+                    }
+                }
+            }
+            if ($targetBoundaries.Count -ne 1) {
+                continue
+            }
+
+            $boundary = $targetBoundaries[0].HeartbeatPair.Proof
+            $initialFingerprint =
+                Get-ProofStateFrameFingerprint -Event $publicationReceipt[0]
+            $recheck = @($indexedLines | Where-Object {
+                $_.Index -gt $boundary.Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @(
+                        'filetransfer_receive_recovery_proof_state_publication_recheck_decided')) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'decision_status') -in @(
+                        'Accepted',
+                        'Started',
+                        'Idempotent') -and
+                (Test-ProofStatePublicationMatch `
+                    -Issued $issued `
+                    -Retained $retained[0] `
+                    -Candidate $_) -and
+                (Get-ProofStatePublicationGeneration -Event $_) -eq '2' -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'predecessor_publication_generation') -eq '1' -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'heartbeat_generation') -eq
+                    (Get-TunaGuiLogLineFieldValue `
+                        -Line $boundary.Line `
+                        -Name 'generation') -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'heartbeat_sequence') -eq
+                    (Get-TunaGuiLogLineFieldValue `
+                        -Line $boundary.Line `
+                        -Name 'sequence') -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'proof_kind') -eq 'heartbeat_received' -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'lane') -eq
+                    (Get-TunaGuiLogLineFieldValue `
+                        -Line $boundary.Line `
+                        -Name 'lane')
+            } | Select-Object -First 1)
+            $recheckSend = @($indexedLines | Where-Object {
+                $recheck.Count -eq 1 -and
+                $_.Index -gt $recheck[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @('filetransfer_v4_state_sent')) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'repair_publication_kind') -eq
+                        'receive_recovery_proof_state' -and
+                (Test-ProofStatePublicationMatch `
+                    -Issued $issued `
+                    -Retained $retained[0] `
+                    -Candidate $_) -and
+                (Get-ProofStatePublicationGeneration -Event $_) -eq '2' -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'receive_recovery_publication_attempt') -eq
+                        'post_delivery_recheck' -and
+                (Get-ProofStateFieldValue `
+                    -Line $_.Line `
+                    -Names @(
+                        'receive_recovery_predecessor_publication_generation',
+                        'predecessor_publication_generation')) -eq '1'
+            } | Select-Object -First 1)
+            $recheckReceipt = @($indexedLines | Where-Object {
+                $recheckSend.Count -eq 1 -and
+                $_.Index -gt $recheckSend[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @(
+                        'filetransfer_receive_recovery_proof_state_publication_receipt_applied')) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'publication_outcome') -eq 'Delivered' -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'decision_status') -in @(
+                        'Accepted',
+                        'Idempotent') -and
+                (Test-ProofStatePublicationMatch `
+                    -Issued $issued `
+                    -Retained $retained[0] `
+                    -Candidate $_) -and
+                (Get-ProofStatePublicationGeneration -Event $_) -eq '2' -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'publication_attempt') -eq
+                        'post_delivery_recheck' -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'predecessor_publication_generation') -eq '1'
+            } | Select-Object -First 1)
+            $predecessorFingerprintMatch =
+                -not (Test-ProofStateVisibleValue $initialFingerprint) -or
+                (
+                    $recheck.Count -eq 1 -and
+                    (Get-TunaGuiLogLineFieldValue `
+                        -Line $recheck[0].Line `
+                        -Name 'predecessor_frame_fingerprint') -eq
+                            $initialFingerprint
+                )
+            $recheckSendFingerprint = if ($recheckSend.Count -eq 1) {
+                Get-ProofStateFrameFingerprint -Event $recheckSend[0]
+            }
+            else {
+                ''
+            }
+            $recheckReceiptFingerprint = if ($recheckReceipt.Count -eq 1) {
+                Get-ProofStateFrameFingerprint -Event $recheckReceipt[0]
+            }
+            else {
+                ''
+            }
+            $recheckFingerprintMatch =
+                (Test-ProofStateVisibleValue $recheckSendFingerprint) -and
+                (Test-ProofStateVisibleValue $recheckReceiptFingerprint) -and
+                $recheckSendFingerprint -eq $recheckReceiptFingerprint
+            $peerReceiptCandidates = @($indexedLines | Where-Object {
+                $recheckReceipt.Count -eq 1 -and
+                $_.Index -gt $recheckReceipt[0].Index -and
+                (Test-ProofStatePeerReceiptMatch `
+                    -StateSend $recheckSend[0] `
+                    -TargetIssued $targetBoundaries[0].Issued `
+                    -Candidate $_)
+            })
+            $peerReceipt = @()
+            if ($peerReceiptCandidates.Count -eq 1) {
+                $peerReceipt = @($peerReceiptCandidates[0])
+            }
+            $targetProof = @($indexedLines | Where-Object {
+                $peerReceipt.Count -eq 1 -and
+                $_.Index -gt $peerReceipt[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @(
+                        'filetransfer_receive_recovery_operation_proof_observed',
+                        'filetransfer_receive_recovery_operation_receive_proof_observed')) -and
+                (Test-ProofStateOperationMatch `
+                    -Issued $targetBoundaries[0].Issued `
+                    -Candidate $_)
+            } | Select-Object -First 1)
+            $targetAdopted = @($indexedLines | Where-Object {
+                $targetProof.Count -eq 1 -and
+                $_.Index -gt $targetProof[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @(
+                        'filetransfer_receive_recovery_operation_closure_adopted')) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'closure_state') -eq 'Adopted' -and
+                (Test-ProofStateOperationMatch `
+                    -Issued $targetBoundaries[0].Issued `
+                    -Candidate $_)
+            } | Select-Object -First 1)
+            $payloadResume = @($indexedLines | Where-Object {
+                $targetAdopted.Count -eq 1 -and
+                $_.Index -gt $targetAdopted[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @(
+                        'filetransfer_bridge_recovery_payload_submission_resumed')) -and
+                (Test-ProofStateOperationMatch `
+                    -Issued $targetBoundaries[0].Issued `
+                    -Candidate $_)
+            } | Select-Object -First 2)
+            if ($recheckReceipt.Count -ne 1 -or
+                -not $predecessorFingerprintMatch -or
+                -not $recheckFingerprintMatch -or
+                $peerReceipt.Count -ne 1 -or
+                $targetProof.Count -ne 1 -or
+                $targetAdopted.Count -ne 1 -or
+                $payloadResume.Count -ne 1) {
                 return $true
             }
         }

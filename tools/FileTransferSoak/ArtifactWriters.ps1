@@ -28582,9 +28582,223 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
             $candidateClosureGeneration -eq $retainedClosureGeneration
     }
 
+    function Test-ProofStateOppositeOperationScopeMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Publisher,
+            [Parameter(Mandatory = $true)]$Target
+        )
+
+        if ((Get-ProofStateField -Event $Publisher -Names @('direction')) -ne
+                'inbound' -or
+            (Get-ProofStateField -Event $Target -Names @('direction')) -ne
+                'outbound') {
+            return $false
+        }
+
+        $publisherWriter =
+            Get-ProofStateField -Event $Publisher -Names @('log_writer_id')
+        $targetWriter =
+            Get-ProofStateField -Event $Target -Names @('log_writer_id')
+        if ([string]::IsNullOrWhiteSpace($publisherWriter) -or
+            [string]::IsNullOrWhiteSpace($targetWriter) -or
+            [string]::Equals(
+                $publisherWriter,
+                $targetWriter,
+                [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+
+        foreach ($field in @(
+                'session_id',
+                'transfer_id',
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'route_publication_generation',
+                'runtime_generation',
+                'terminal_generation',
+                'leg_generation',
+                'transport_epoch',
+                'bridge_recovery_generation',
+                'data_session_generation')) {
+            $left = Get-ProofStateField -Event $Publisher -Names @($field)
+            $right = Get-ProofStateField -Event $Target -Names @($field)
+            if ([string]::IsNullOrWhiteSpace($left) -or
+                [string]::IsNullOrWhiteSpace($right) -or
+                -not [string]::Equals(
+                    $left,
+                    $right,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-ProofStateHeartbeatPair {
+        param(
+            [Parameter(Mandatory = $true)]$Heartbeat,
+            [Parameter(Mandatory = $true)]$Proof,
+            [Parameter(Mandatory = $true)]$Publisher
+        )
+
+        if ($Heartbeat.EventName -ne 'session_liveness_heartbeat_received' -or
+            $Proof.EventName -ne 'session_liveness_proof_received' -or
+            (Get-ProofStateField -Event $Proof -Names @('proof_kind')) -ne
+                'heartbeat_received' -or
+            [int64]$Proof.Sequence -le [int64]$Heartbeat.Sequence) {
+            return $false
+        }
+
+        $publisherWriter =
+            Get-ProofStateField -Event $Publisher -Names @('log_writer_id')
+        foreach ($event in @($Heartbeat, $Proof)) {
+            if ((Get-ProofStateField -Event $event -Names @('log_writer_id')) -ne
+                    $publisherWriter -or
+                (Get-ProofStateField -Event $event -Names @('session_id')) -ne
+                    (Get-ProofStateField -Event $Publisher -Names @('session_id'))) {
+                return $false
+            }
+        }
+
+        foreach ($field in @('generation', 'sequence', 'lane')) {
+            $left = Get-ProofStateField -Event $Heartbeat -Names @($field)
+            $right = Get-ProofStateField -Event $Proof -Names @($field)
+            if ([string]::IsNullOrWhiteSpace($left) -or
+                [string]::IsNullOrWhiteSpace($right) -or
+                $left -ne $right) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Get-ProofStatePublicationGeneration {
+        param([Parameter(Mandatory = $true)]$Event)
+
+        return Get-ProofStateField `
+            -Event $Event `
+            -Names @(
+                'publication_generation',
+                'receive_recovery_publication_generation')
+    }
+
+    function Get-ProofStateFrameFingerprint {
+        param([Parameter(Mandatory = $true)]$Event)
+
+        return Get-ProofStateField `
+            -Event $Event `
+            -Names @(
+                'v4_state_wire_fingerprint',
+                'wire_state_fingerprint',
+                'receive_recovery_wire_state_fingerprint',
+                'frame_fingerprint',
+                'receive_recovery_frame_fingerprint')
+    }
+
+    function Get-ProofStateOperationKey {
+        param(
+            [Parameter(Mandatory = $true)]$Issued,
+            [Parameter(Mandatory = $true)]$Retained
+        )
+
+        return [string]::Join('|', @(
+            (Get-ProofStateField -Event $Issued -Names @('log_writer_id')),
+            (Get-ProofStateField -Event $Issued -Names @('session_id')),
+            (Get-ProofStateField -Event $Issued -Names @('transfer_id')),
+            (Get-ProofStateField -Event $Issued -Names @('direction')),
+            (Get-ProofStateField `
+                -Event $Issued `
+                -Names @(
+                    'receive_recovery_operation_authority_id',
+                    'recovery_operation_authority_id')),
+            (Get-ProofStateField `
+                -Event $Issued `
+                -Names @(
+                    'receive_recovery_operation_generation',
+                    'recovery_operation_generation')),
+            (Get-ProofStateField `
+                -Event $Retained `
+                -Names @('closure_generation')),
+            (Get-ProofStateField `
+                -Event $Issued `
+                -Names @('bridge_decision_generation'))))
+    }
+
+    function Test-ProofStatePeerReceiptMatch {
+        param(
+            [Parameter(Mandatory = $true)]$StateSend,
+            [Parameter(Mandatory = $true)]$TargetIssued,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        if ($Candidate.EventName -ne 'filetransfer_v4_state_received' -or
+            (Get-ProofStateField -Event $Candidate -Names @('direction')) -ne
+                'outbound') {
+            return $false
+        }
+
+        foreach ($field in @(
+                'log_writer_id',
+                'session_id',
+                'transfer_id',
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'route_publication_generation',
+                'runtime_generation',
+                'terminal_generation',
+                'leg_generation',
+                'transport_epoch',
+                'bridge_recovery_generation',
+                'data_session_generation')) {
+            $left = Get-ProofStateField -Event $TargetIssued -Names @($field)
+            $right = Get-ProofStateField -Event $Candidate -Names @($field)
+            if ([string]::IsNullOrWhiteSpace($left) -or
+                [string]::IsNullOrWhiteSpace($right) -or
+                -not [string]::Equals(
+                    $left,
+                    $right,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        $sentEpoch = Get-ProofStateField -Event $StateSend -Names @('epoch')
+        $receivedEpoch =
+            Get-ProofStateField -Event $Candidate -Names @('epoch')
+        if ([string]::IsNullOrWhiteSpace($sentEpoch) -or
+            $sentEpoch -ne $receivedEpoch) {
+            return $false
+        }
+
+        $sentFingerprint = Get-ProofStateFrameFingerprint -Event $StateSend
+        $receivedFingerprint =
+            Get-ProofStateFrameFingerprint -Event $Candidate
+        if ((Test-ProofStateVisible $sentFingerprint) -or
+            (Test-ProofStateVisible $receivedFingerprint)) {
+            return (Test-ProofStateVisible $sentFingerprint) -and
+                (Test-ProofStateVisible $receivedFingerprint) -and
+                [string]::Equals(
+                    $sentFingerprint,
+                    $receivedFingerprint,
+                    [System.StringComparison]::OrdinalIgnoreCase)
+        }
+
+        return $true
+    }
+
     [object[]]$issuedEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_receive_recovery_operation_issued' -and
         (Get-ProofStateField -Event $_ -Names @('direction')) -eq 'inbound' -and
+        (Get-ProofStateField -Event $_ -Names @('route')) -eq
+            'regular_nkn_v4_fast'
+    })
+    [object[]]$outboundIssuedEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_receive_recovery_operation_issued' -and
+        (Get-ProofStateField -Event $_ -Names @('direction')) -eq 'outbound' -and
         (Get-ProofStateField -Event $_ -Names @('route')) -eq
             'regular_nkn_v4_fast'
     })
@@ -28620,6 +28834,9 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
         $_.EventName -eq 'session_liveness_proof_received' -and
         (Get-ProofStateField -Event $_ -Names @('proof_kind')) -eq
             'heartbeat_received'
+    })
+    [object[]]$heartbeatReceivedEvents = @($events | Where-Object {
+        $_.EventName -eq 'session_liveness_heartbeat_received'
     })
     [object[]]$decisions = @($events | Where-Object {
         $_.EventName -eq
@@ -28664,6 +28881,19 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
     [object[]]$resumedEvents = @($events | Where-Object {
         $_.EventName -eq
             'filetransfer_bridge_recovery_payload_submission_resumed'
+    })
+    [object[]]$recheckDecisions = @($events | Where-Object {
+        $_.EventName -eq
+            'filetransfer_receive_recovery_proof_state_publication_recheck_decided' -and
+        (Get-ProofStateField `
+            -Event $_ `
+            -Names @('decision_status', 'status')) -in @(
+                'Started',
+                'Idempotent',
+                'Accepted')
+    })
+    [object[]]$stateReceivedEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_v4_state_received'
     })
 
     $raw = New-Object System.Collections.Generic.List[object]
@@ -28729,6 +28959,10 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
             Event = $diagnostic
             Issued = $issued
             Retained = $retained[0]
+            BoundaryKind = 'initial_peer_reachability'
+            OperationKey = Get-ProofStateOperationKey `
+                -Issued $issued `
+                -Retained $retained[0]
             Key = [string]::Join('|', @(
                 $writerId,
                 (Get-ProofStateField -Event $issued -Names @('session_id')),
@@ -28743,6 +28977,260 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
         }) | Out-Null
     }
 
+    # A locally delivered proof-state publication is only submission evidence.
+    # When the opposite recovery operation becomes ready after that delivery,
+    # the first authenticated heartbeat observed by the publisher is the
+    # boundary at which the retained proof state must be reconsidered.
+    foreach ($issued in $issuedEvents) {
+        $receipt = @($receiptEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$issued.Sequence -and
+            (Test-ProofStateOperationMatch -Issued $issued -Candidate $_)
+        } | Select-Object -First 1)
+        if ($receipt.Count -ne 1) {
+            continue
+        }
+        $retained = @($retainedEvents | Where-Object {
+            [int64]$_.Sequence -ge [int64]$receipt[0].Sequence -and
+            (Test-ProofStateOperationMatch -Issued $issued -Candidate $_)
+        } | Select-Object -First 1)
+        if ($retained.Count -ne 1) {
+            continue
+        }
+
+        $decision = @($decisions | Where-Object {
+            [int64]$_.Sequence -gt [int64]$retained[0].Sequence -and
+            (Test-ProofStatePublicationCommandMatch `
+                -Issued $issued `
+                -Retained $retained[0] `
+                -Candidate $_)
+        } | Select-Object -First 1)
+        $stateSend = @($stateSends | Where-Object {
+            $decision.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$decision[0].Sequence -and
+            (Test-ProofStatePublicationCommandMatch `
+                -Issued $issued `
+                -Retained $retained[0] `
+                -Candidate $_)
+        } | Select-Object -First 1)
+        $publicationReceipt = @($publicationReceipts | Where-Object {
+            $stateSend.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$stateSend[0].Sequence -and
+            (Test-ProofStatePublicationCommandMatch `
+                -Issued $issued `
+                -Retained $retained[0] `
+                -Candidate $_)
+        } | Select-Object -First 1)
+        if ($publicationReceipt.Count -ne 1) {
+            continue
+        }
+        if ((Get-ProofStatePublicationGeneration -Event $decision[0]) -ne '1' -or
+            (Get-ProofStatePublicationGeneration -Event $stateSend[0]) -ne '1' -or
+            (Get-ProofStatePublicationGeneration `
+                -Event $publicationReceipt[0]) -ne '1') {
+            continue
+        }
+
+        $sentFingerprint =
+            Get-ProofStateFrameFingerprint -Event $stateSend[0]
+        $receiptFingerprint =
+            Get-ProofStateFrameFingerprint -Event $publicationReceipt[0]
+        if ((Test-ProofStateVisible $sentFingerprint) -and
+            (Test-ProofStateVisible $receiptFingerprint) -and
+            -not [string]::Equals(
+                $sentFingerprint,
+                $receiptFingerprint,
+                [System.StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+
+        $targetBoundaries =
+            New-Object System.Collections.Generic.List[object]
+        foreach ($targetIssued in @($outboundIssuedEvents | Where-Object {
+                    Test-ProofStateOppositeOperationScopeMatch `
+                        -Publisher $issued `
+                        -Target $_
+                })) {
+            $targetReceipt = @($receiptEvents | Where-Object {
+                [int64]$_.Sequence -gt
+                    [int64]$publicationReceipt[0].Sequence -and
+                (Test-ProofStateOperationMatch `
+                    -Issued $targetIssued `
+                    -Candidate $_)
+            } | Select-Object -First 1)
+            if ($targetReceipt.Count -ne 1) {
+                continue
+            }
+            $targetRetained = @($retainedEvents | Where-Object {
+                [int64]$_.Sequence -ge [int64]$targetReceipt[0].Sequence -and
+                (Test-ProofStateOperationMatch `
+                    -Issued $targetIssued `
+                    -Candidate $_)
+            } | Select-Object -First 1)
+            if ($targetRetained.Count -ne 1) {
+                continue
+            }
+
+            $publisherWriter =
+                Get-ProofStateField -Event $issued -Names @('log_writer_id')
+            $publisherSession =
+                Get-ProofStateField -Event $issued -Names @('session_id')
+            $heartbeatPair = $null
+            foreach ($proof in @($heartbeatEvents | Where-Object {
+                        [int64]$_.Sequence -gt
+                            [int64]$targetRetained[0].Sequence -and
+                        (Get-ProofStateField `
+                            -Event $_ `
+                            -Names @('log_writer_id')) -eq
+                                $publisherWriter -and
+                        (Get-ProofStateField `
+                            -Event $_ `
+                            -Names @('session_id')) -eq
+                                $publisherSession
+                    })) {
+                $matchingHeartbeats = @($heartbeatReceivedEvents |
+                    Where-Object {
+                        [int64]$_.Sequence -gt
+                            [int64]$targetRetained[0].Sequence -and
+                        [int64]$_.Sequence -lt [int64]$proof.Sequence -and
+                        (Test-ProofStateHeartbeatPair `
+                            -Heartbeat $_ `
+                            -Proof $proof `
+                            -Publisher $issued)
+                    } |
+                    Select-Object -Last 1)
+                if ($matchingHeartbeats.Count -eq 1) {
+                    $heartbeatPair = [pscustomobject]@{
+                        Heartbeat = $matchingHeartbeats[0]
+                        Proof = $proof
+                    }
+                    break
+                }
+            }
+            if ($null -eq $heartbeatPair) {
+                continue
+            }
+
+            $proofBeforeBoundary = @($proofEvents | Where-Object {
+                [int64]$_.Sequence -gt
+                    [int64]$publicationReceipt[0].Sequence -and
+                [int64]$_.Sequence -le
+                    [int64]$heartbeatPair.Proof.Sequence -and
+                (
+                    (Test-ProofStateOperationMatch `
+                        -Issued $issued `
+                        -Candidate $_) -or
+                    (Test-ProofStateOperationMatch `
+                        -Issued $targetIssued `
+                        -Candidate $_)
+                )
+            }).Count -gt 0
+            $adoptionBeforeBoundary = @($adoptedEvents | Where-Object {
+                [int64]$_.Sequence -gt
+                    [int64]$publicationReceipt[0].Sequence -and
+                [int64]$_.Sequence -le
+                    [int64]$heartbeatPair.Proof.Sequence -and
+                (
+                    (Test-ProofStateOperationMatch `
+                        -Issued $issued `
+                        -Candidate $_) -or
+                    (Test-ProofStateOperationMatch `
+                        -Issued $targetIssued `
+                        -Candidate $_)
+                )
+            }).Count -gt 0
+            $postReadyPublication = @($publicationReceipts | Where-Object {
+                [int64]$_.Sequence -gt
+                    [int64]$targetRetained[0].Sequence -and
+                [int64]$_.Sequence -le
+                    [int64]$heartbeatPair.Proof.Sequence -and
+                (Test-ProofStatePublicationCommandMatch `
+                    -Issued $issued `
+                    -Retained $retained[0] `
+                    -Candidate $_)
+            }).Count -gt 0
+            if ($proofBeforeBoundary -or
+                $adoptionBeforeBoundary -or
+                $postReadyPublication) {
+                continue
+            }
+
+            $targetBoundaries.Add([pscustomobject]@{
+                TargetIssued = $targetIssued
+                TargetRetained = $targetRetained[0]
+                Heartbeat = $heartbeatPair.Heartbeat
+                Proof = $heartbeatPair.Proof
+            }) | Out-Null
+        }
+        if ($targetBoundaries.Count -ne 1) {
+            continue
+        }
+
+        $target = $targetBoundaries[0]
+        $raw.Add([pscustomobject]@{
+            Event = $target.Proof
+            Issued = $issued
+            Retained = $retained[0]
+            BoundaryKind = 'post_delivery_peer_reachability'
+            OperationKey = Get-ProofStateOperationKey `
+                -Issued $issued `
+                -Retained $retained[0]
+            InitialDecision = $decision[0]
+            InitialStateSend = $stateSend[0]
+            InitialPublicationReceipt = $publicationReceipt[0]
+            TargetIssued = $target.TargetIssued
+            TargetRetained = $target.TargetRetained
+            Key = [string]::Join('|', @(
+                'post_delivery_peer_reachability',
+                (Get-ProofStateField `
+                    -Event $issued `
+                    -Names @('log_writer_id')),
+                (Get-ProofStateField `
+                    -Event $issued `
+                    -Names @('session_id')),
+                (Get-ProofStateField `
+                    -Event $issued `
+                    -Names @('transfer_id')),
+                (Get-ProofStateField `
+                    -Event $issued `
+                    -Names @('receive_recovery_operation_generation')),
+                (Get-ProofStateField `
+                    -Event $retained[0] `
+                    -Names @('closure_generation')),
+                (Get-ProofStateField `
+                    -Event $publicationReceipt[0] `
+                    -Names @('publication_generation')),
+                (Get-ProofStateField `
+                    -Event $target.TargetIssued `
+                    -Names @('log_writer_id')),
+                (Get-ProofStateField `
+                    -Event $target.TargetIssued `
+                    -Names @('receive_recovery_operation_generation')),
+                (Get-ProofStateField `
+                    -Event $target.TargetRetained `
+                    -Names @('closure_generation'))))
+        }) | Out-Null
+    }
+
+    $postDeliveryOperationKeys =
+        New-Object 'System.Collections.Generic.HashSet[string]' `
+            ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($record in @($raw | Where-Object {
+                $_.BoundaryKind -eq 'post_delivery_peer_reachability'
+            })) {
+        [void]$postDeliveryOperationKeys.Add($record.OperationKey)
+    }
+    if ($postDeliveryOperationKeys.Count -gt 0) {
+        $filteredRaw = New-Object System.Collections.Generic.List[object]
+        foreach ($record in $raw) {
+            if ($record.BoundaryKind -eq 'initial_peer_reachability' -and
+                $postDeliveryOperationKeys.Contains($record.OperationKey)) {
+                continue
+            }
+            $filteredRaw.Add($record) | Out-Null
+        }
+        $raw = $filteredRaw
+    }
+
     $distinct = [ordered]@{}
     foreach ($record in $raw) {
         if (-not $distinct.Contains($record.Key)) {
@@ -28753,6 +29241,166 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
     $recovered = New-Object System.Collections.Generic.List[object]
     $unresolved = New-Object System.Collections.Generic.List[object]
     foreach ($record in @($distinct.Values)) {
+        if ($record.BoundaryKind -eq 'post_delivery_peer_reachability') {
+            $initialGeneration = Get-ProofStatePublicationGeneration `
+                -Event $record.InitialPublicationReceipt
+            $initialFingerprint = Get-ProofStateFrameFingerprint `
+                -Event $record.InitialPublicationReceipt
+            $heartbeatGeneration = Get-ProofStateField `
+                -Event $record.Event `
+                -Names @('generation')
+            $heartbeatSequence = Get-ProofStateField `
+                -Event $record.Event `
+                -Names @('sequence')
+            $heartbeatLane = Get-ProofStateField `
+                -Event $record.Event `
+                -Names @('lane')
+
+            $decision = @($recheckDecisions | Where-Object {
+                [int64]$_.Sequence -gt [int64]$record.Event.Sequence -and
+                (Test-ProofStatePublicationCommandMatch `
+                    -Issued $record.Issued `
+                    -Retained $record.Retained `
+                    -Candidate $_) -and
+                (Get-ProofStatePublicationGeneration -Event $_) -eq '2' -and
+                (Get-ProofStateField `
+                    -Event $_ `
+                    -Names @('predecessor_publication_generation')) -eq
+                        $initialGeneration -and
+                (Get-ProofStateField `
+                    -Event $_ `
+                    -Names @('heartbeat_generation')) -eq
+                        $heartbeatGeneration -and
+                (Get-ProofStateField `
+                    -Event $_ `
+                    -Names @('heartbeat_sequence')) -eq
+                        $heartbeatSequence -and
+                (Get-ProofStateField -Event $_ -Names @('proof_kind')) -eq
+                    'heartbeat_received' -and
+                (Get-ProofStateField -Event $_ -Names @('lane')) -eq
+                    $heartbeatLane
+            } | Select-Object -First 1)
+            $stateSend = @($stateSends | Where-Object {
+                $decision.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$decision[0].Sequence -and
+                (Test-ProofStatePublicationCommandMatch `
+                    -Issued $record.Issued `
+                    -Retained $record.Retained `
+                    -Candidate $_) -and
+                (Get-ProofStatePublicationGeneration -Event $_) -eq '2' -and
+                (Get-ProofStateField `
+                    -Event $_ `
+                    -Names @('receive_recovery_publication_attempt')) -eq
+                        'post_delivery_recheck' -and
+                (Get-ProofStateField `
+                    -Event $_ `
+                    -Names @(
+                        'receive_recovery_predecessor_publication_generation',
+                        'predecessor_publication_generation')) -eq
+                        $initialGeneration
+            } | Select-Object -First 1)
+            $publicationReceipt = @($publicationReceipts | Where-Object {
+                $stateSend.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$stateSend[0].Sequence -and
+                (Test-ProofStatePublicationCommandMatch `
+                    -Issued $record.Issued `
+                    -Retained $record.Retained `
+                    -Candidate $_) -and
+                (Get-ProofStatePublicationGeneration -Event $_) -eq '2' -and
+                (Get-ProofStateField `
+                    -Event $_ `
+                    -Names @('publication_attempt')) -eq
+                        'post_delivery_recheck' -and
+                (Get-ProofStateField `
+                    -Event $_ `
+                    -Names @('predecessor_publication_generation')) -eq
+                        $initialGeneration
+            } | Select-Object -First 1)
+
+            $recheckFingerprint = if ($stateSend.Count -eq 1) {
+                Get-ProofStateFrameFingerprint -Event $stateSend[0]
+            }
+            else {
+                ''
+            }
+            $recheckReceiptFingerprint = if ($publicationReceipt.Count -eq 1) {
+                Get-ProofStateFrameFingerprint -Event $publicationReceipt[0]
+            }
+            else {
+                ''
+            }
+            $predecessorFingerprintMatch =
+                -not (Test-ProofStateVisible $initialFingerprint) -or
+                (
+                    $decision.Count -eq 1 -and
+                    [string]::Equals(
+                        (Get-ProofStateField `
+                            -Event $decision[0] `
+                            -Names @('predecessor_frame_fingerprint')),
+                        $initialFingerprint,
+                        [System.StringComparison]::OrdinalIgnoreCase)
+                )
+            $recheckFingerprintMatch =
+                (Test-ProofStateVisible $recheckFingerprint) -and
+                (Test-ProofStateVisible $recheckReceiptFingerprint) -and
+                [string]::Equals(
+                    $recheckFingerprint,
+                    $recheckReceiptFingerprint,
+                    [System.StringComparison]::OrdinalIgnoreCase)
+
+            $peerReceiptCandidates = @($stateReceivedEvents | Where-Object {
+                $publicationReceipt.Count -eq 1 -and
+                [int64]$_.Sequence -gt
+                    [int64]$publicationReceipt[0].Sequence -and
+                (Test-ProofStatePeerReceiptMatch `
+                    -StateSend $stateSend[0] `
+                    -TargetIssued $record.TargetIssued `
+                    -Candidate $_)
+            })
+            $peerReceipt = @()
+            if ($peerReceiptCandidates.Count -eq 1) {
+                $peerReceipt = @($peerReceiptCandidates[0])
+            }
+
+            $proof = @($proofEvents | Where-Object {
+                $peerReceipt.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$peerReceipt[0].Sequence -and
+                (Test-ProofStateOperationMatch `
+                    -Issued $record.TargetIssued `
+                    -Candidate $_)
+            } | Select-Object -First 1)
+            $adopted = @($adoptedEvents | Where-Object {
+                $proof.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$proof[0].Sequence -and
+                (Test-ProofStateOperationMatch `
+                    -Issued $record.TargetIssued `
+                    -Candidate $_)
+            } | Select-Object -First 1)
+            $resumed = @($resumedEvents | Where-Object {
+                $adopted.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$adopted[0].Sequence -and
+                (Test-ProofStateOperationMatch `
+                    -Issued $record.TargetIssued `
+                    -Candidate $_)
+            } | Select-Object -First 2)
+
+            if ($decision.Count -eq 1 -and
+                $stateSend.Count -eq 1 -and
+                $publicationReceipt.Count -eq 1 -and
+                $predecessorFingerprintMatch -and
+                $recheckFingerprintMatch -and
+                $peerReceipt.Count -eq 1 -and
+                $proof.Count -eq 1 -and
+                $adopted.Count -eq 1 -and
+                $resumed.Count -eq 1) {
+                $recovered.Add($record.Event) | Out-Null
+            }
+            else {
+                $unresolved.Add($record.Event) | Out-Null
+            }
+            continue
+        }
+
         $decision = @($decisions | Where-Object {
             [int64]$_.Sequence -gt [int64]$record.Event.Sequence -and
             (Test-ProofStatePublicationCommandMatch `

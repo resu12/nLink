@@ -1215,9 +1215,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_bridge_recovery_payload_submission_resumed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_peer_reachability_observed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_proof_state_publication_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_proof_state_publication_recheck_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_proof_state_publication_receipt_applied') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_proof_state_publication_invalidated') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v4_state_sent') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v4_state_received') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v4_repair_delivery_both_failed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v4_sender_failed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_frontier_repair_settlement_handoff_adopted') +

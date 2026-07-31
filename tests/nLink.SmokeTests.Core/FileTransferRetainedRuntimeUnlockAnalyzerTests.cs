@@ -197,6 +197,169 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task AnalyzeRetained_ReceiveRecoveryProofStateDeliveredBeforePeerReady_RechecksAtAuthenticatedHeartbeat(
+        bool compact,
+        bool recovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string sharedScope =
+            "session_id=sess_proof_state_timing; transfer_id=transfer_proof_state_timing; " +
+            "route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; " +
+            "route_publication_generation=1; runtime_generation=1; terminal_generation=0; " +
+            "leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; " +
+            "data_session_generation=1";
+        const string inboundScope =
+            sharedScope + "; direction=inbound; log_writer_id=writer_inbound";
+        const string outboundScope =
+            sharedScope + "; direction=outbound; log_writer_id=writer_outbound";
+        const string inboundOperation =
+            "receive_recovery_operation_generation=1; " +
+            "receive_recovery_operation_authority_id=fta2-proof-state-inbound-timing; " +
+            "bridge_decision_generation=1";
+        const string outboundOperation =
+            "receive_recovery_operation_generation=1; " +
+            "receive_recovery_operation_authority_id=fta2-proof-state-outbound-timing; " +
+            "bridge_decision_generation=1";
+        List<string> messages =
+        [
+            $"event=filetransfer_receive_recovery_operation_issued; {outboundOperation}; {outboundScope}",
+            $"event=filetransfer_receive_recovery_operation_issued; {inboundOperation}; {inboundScope}",
+            $"event=filetransfer_receive_recovery_operation_execution_receipt_applied; {inboundOperation}; {inboundScope}; " +
+                "execution_outcome=Completed; closure_state=Retained; closure_generation=1; proof_identity=(none)",
+            $"event=filetransfer_receive_recovery_operation_closure_retained; {inboundOperation}; {inboundScope}; " +
+                "execution_outcome=Completed; closure_state=Retained; closure_generation=1; proof_identity=(none)",
+            "event=bridge_ready; pid=42; start_mode=cold; " +
+                "session_id=sess_proof_state_timing; log_writer_id=writer_inbound",
+            "event=session_liveness_proof_received; session_id=sess_proof_state_timing; " +
+                "generation=1; sequence=18; proof_kind=heartbeat_received; lane=bulk; " +
+                "log_writer_id=writer_inbound",
+            "event=filetransfer_bridge_recovery_lifecycle_diagnostic_only; " +
+                "lifecycle=receivestallrecoveryreceiveresumed; " +
+                "reason=coordinator_operation_receipt_or_proof_required; " +
+                "bridge_decision_generation=1; log_writer_id=writer_inbound",
+            $"event=filetransfer_receive_recovery_proof_state_publication_decided; {inboundOperation}; {inboundScope}; " +
+                "closure_generation=1; decision_status=Accepted; publication_generation=1",
+            $"event=filetransfer_v4_state_sent; {inboundOperation}; {inboundScope}; " +
+                "closure_generation=1; repair_publication_kind=receive_recovery_proof_state; " +
+                "publication_generation=1; epoch=225; " +
+                "v4_state_wire_fingerprint=wire-state-1; missing_range_count=0",
+            "event=filetransfer_receive_recovery_proof_state_publication_receipt_applied; " +
+                "session_id=sess_proof_state_timing; transfer_id=transfer_proof_state_timing; " +
+                "direction=inbound; receive_recovery_operation_generation=1; " +
+                "receive_recovery_operation_authority_id=fta2-proof-state-inbound-timing; " +
+                "closure_generation=1; publication_generation=1; publication_outcome=Delivered; " +
+                "decision_status=Accepted; frame_fingerprint=proof-state-frame-1; " +
+                "v4_state_wire_fingerprint=wire-state-1; " +
+                "log_writer_id=writer_inbound",
+            $"event=filetransfer_receive_recovery_operation_execution_receipt_applied; {outboundOperation}; {outboundScope}; " +
+                "execution_outcome=Completed; closure_state=Retained; closure_generation=1; proof_identity=(none)",
+            $"event=filetransfer_receive_recovery_operation_closure_retained; {outboundOperation}; {outboundScope}; " +
+                "execution_outcome=Completed; closure_state=Retained; closure_generation=1; proof_identity=(none)",
+            "event=session_liveness_heartbeat_received; session_id=sess_proof_state_timing; " +
+                "generation=1; sequence=19; lane=control; source=peer.nkn; role=helpee; " +
+                "log_writer_id=writer_inbound; log_writer_sequence=1726",
+            "event=session_liveness_proof_received; session_id=sess_proof_state_timing; " +
+                "generation=1; sequence=19; proof_kind=heartbeat_received; lane=control; " +
+                "observed_utc_ms=1785480336876; log_writer_id=writer_inbound; " +
+                "log_writer_sequence=1727"
+        ];
+        if (recovered)
+        {
+            messages.AddRange(
+            [
+                "event=filetransfer_receive_recovery_proof_state_publication_recheck_decided; " +
+                    "session_id=sess_proof_state_timing; transfer_id=transfer_proof_state_timing; " +
+                    "direction=inbound; recovery_operation_generation=1; " +
+                    "recovery_operation_authority_id=fta2-proof-state-inbound-timing; " +
+                    "closure_generation=1; predecessor_publication_generation=1; " +
+                    "predecessor_frame_fingerprint=wire-state-1; heartbeat_generation=1; " +
+                    "heartbeat_sequence=19; proof_kind=heartbeat_received; lane=control; " +
+                    "publication_generation=2; decision_status=Accepted; " +
+                    "log_writer_id=writer_inbound",
+                $"event=filetransfer_v4_state_sent; {inboundOperation}; {inboundScope}; " +
+                    "closure_generation=1; repair_publication_kind=receive_recovery_proof_state; " +
+                    "publication_generation=2; receive_recovery_publication_attempt=post_delivery_recheck; " +
+                    "receive_recovery_predecessor_publication_generation=1; " +
+                    "receive_recovery_predecessor_frame_fingerprint=wire-state-1; " +
+                    "receive_recovery_recheck_heartbeat_generation=1; " +
+                    "receive_recovery_recheck_heartbeat_sequence=19; " +
+                    "receive_recovery_recheck_proof_kind=heartbeat_received; " +
+                    "receive_recovery_recheck_lane=control; epoch=226; " +
+                    "v4_state_wire_fingerprint=wire-state-2; missing_range_count=0",
+                "event=filetransfer_receive_recovery_proof_state_publication_receipt_applied; " +
+                    "session_id=sess_proof_state_timing; transfer_id=transfer_proof_state_timing; " +
+                    "direction=inbound; recovery_operation_generation=1; " +
+                    "recovery_operation_authority_id=fta2-proof-state-inbound-timing; " +
+                    "closure_generation=1; publication_generation=2; " +
+                    "publication_attempt=post_delivery_recheck; predecessor_publication_generation=1; " +
+                    "predecessor_frame_fingerprint=wire-state-1; " +
+                    "v4_state_wire_fingerprint=wire-state-2; publication_outcome=Delivered; " +
+                    "decision_status=Accepted; log_writer_id=writer_inbound",
+                $"event=filetransfer_v4_state_received; {outboundScope}; epoch=226; " +
+                    "v4_state_wire_fingerprint=wire-state-2; applied=1",
+                $"event=filetransfer_receive_recovery_operation_proof_observed; {outboundOperation}; {outboundScope}; " +
+                    "closure_generation=1; closure_state=Adopted; proof_identity=file_transfer_v4_state:226",
+                $"event=filetransfer_receive_recovery_operation_closure_adopted; {outboundOperation}; {outboundScope}; " +
+                    "closure_generation=1; closure_state=Adopted; proof_identity=file_transfer_v4_state:226",
+                $"event=filetransfer_bridge_recovery_payload_submission_resumed; {outboundOperation}; {outboundScope}; " +
+                    "closure_generation=1; closure_state=Adopted; proof_identity=file_transfer_v4_state:226"
+            ]);
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            messages.Select(message => LogLine(message)).ToArray(),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-operator-verdict.txt");
+        Assert.Equal(
+            "1",
+            verdict[
+                "filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_raw_count"]);
+        Assert.Equal(
+            "1",
+            verdict[
+                "filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_distinct_count"]);
+        Assert.Equal(
+            recovered ? "1" : "0",
+            verdict[
+                "filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_recovered_count"]);
+        Assert.Equal(
+            recovered ? "0" : "1",
+            verdict[
+                "filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_unresolved_count"]);
+        if (!recovered)
+        {
+            Assert.Equal(
+                "filetransfer_receive_recovery_completed_retained_proof_state_publication_missing",
+                verdict["first_proof_chain_failure_class"]);
+            Assert.Equal(
+                "session_liveness_proof_received",
+                verdict["first_proof_chain_failure_event"]);
+            Assert.Equal("14", verdict["first_proof_chain_failure_sequence"]);
+            Assert.Equal("1727", verdict["first_proof_chain_failure_writer_sequence"]);
+        }
+    }
+
+    [Theory]
     [InlineData(false, false, "valid")]
     [InlineData(false, true, "valid")]
     [InlineData(true, false, "valid")]
