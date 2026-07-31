@@ -1253,6 +1253,8 @@ public sealed partial class SessionRuntime
             activeProgressTransfer.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
             !TryGetReceiveRecoveryLivenessSnapshotForHeartbeat(
                 sessionIdSnapshot,
+                activeProgressTransfer.TransferId,
+                activeProgressTransfer.Direction,
                 out var candidate) ||
             !string.Equals(candidate.TransferId, activeProgressTransfer.TransferId, StringComparison.Ordinal) ||
             !IsValidFileTransferRecoveryLivenessSnapshot(sessionIdSnapshot, candidate) ||
@@ -1281,6 +1283,8 @@ public sealed partial class SessionRuntime
 
     private bool TryGetReceiveRecoveryLivenessSnapshotForHeartbeat(
         string sessionIdSnapshot,
+        string transferId,
+        FileTransferDirection direction,
         out FileTransferRecoveryLivenessSnapshot snapshot)
     {
         if (FileTransferRecoveryLivenessSnapshotOverrideForTests?.Invoke(
@@ -1292,6 +1296,8 @@ public sealed partial class SessionRuntime
 
         return fileTransferService.TryGetActiveFileTransferRecoveryLivenessSnapshot(
             sessionIdSnapshot,
+            transferId,
+            direction,
             out snapshot);
     }
 

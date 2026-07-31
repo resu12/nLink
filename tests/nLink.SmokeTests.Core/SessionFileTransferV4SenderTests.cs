@@ -2743,7 +2743,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
-    public void RegularNknV4ReceiveRecoveryRequest_DoesNotArmReplayForInboundOrFreshPeer()
+    public async Task RegularNknV4ReceiveRecoveryRequest_DoesNotArmReplayForInboundOrFreshPeer()
     {
         const string transferId = "transfer_regular_v4_receive_recovery_no_replay";
         var logStart = GetOperationalLogLength();
@@ -2833,6 +2833,53 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 .Authority
                 .RecoveryLivenessLease);
         Assert.Empty(GetQueuedV4RepairSends(context));
+
+        foreach (var recoveryRequest in transport.ReceiveRecoveryRequests)
+        {
+            transport.CompleteBridgeRecoveryExecution(
+                Assert.IsType<FileTransferBridgeRecoveryExecutionCommand>(
+                    recoveryRequest.BridgeRecoveryExecutionCommand),
+                FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                "loopback_bridge_recovery_completed");
+        }
+
+        await WaitUntilAsync(
+            () =>
+                service.TryGetActiveFileTransferRecoveryLivenessSnapshot(
+                    $"session_{transferId}",
+                    transferId,
+                    FileTransferDirection.Outbound,
+                    out var outboundSnapshot) &&
+                outboundSnapshot.State ==
+                    FileTransferRecoveryLivenessState
+                        .BridgeRecoveryCompletedAwaitingProof &&
+                service.TryGetActiveFileTransferRecoveryLivenessSnapshot(
+                    $"session_{transferId}",
+                    transferId,
+                    FileTransferDirection.Inbound,
+                    out var inboundSnapshot) &&
+                inboundSnapshot.State ==
+                    FileTransferRecoveryLivenessState
+                        .BridgeRecoveryCompletedAwaitingProof);
+
+        Assert.False(
+            service.TryGetActiveFileTransferRecoveryLivenessSnapshot(
+                $"session_{transferId}",
+                out _));
+        Assert.True(
+            service.TryGetActiveFileTransferRecoveryLivenessSnapshot(
+                $"session_{transferId}",
+                transferId,
+                FileTransferDirection.Outbound,
+                out var exactOutboundSnapshot));
+        Assert.Equal(transferId, exactOutboundSnapshot.TransferId);
+        Assert.True(
+            service.TryGetActiveFileTransferRecoveryLivenessSnapshot(
+                $"session_{transferId}",
+                transferId,
+                FileTransferDirection.Inbound,
+                out var exactInboundSnapshot));
+        Assert.Equal(transferId, exactInboundSnapshot.TransferId);
 
         var log = ReadOperationalLogTail(logStart);
         Assert.DoesNotContain("event=filetransfer_regular_v4_receive_recovery_peer_silence_replay_armed;", log, StringComparison.Ordinal);

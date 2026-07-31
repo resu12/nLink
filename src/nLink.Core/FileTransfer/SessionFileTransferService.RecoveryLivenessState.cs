@@ -45,6 +45,54 @@ public sealed partial class SessionFileTransferService
         }
     }
 
+    internal bool TryGetActiveFileTransferRecoveryLivenessSnapshot(
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction,
+        out FileTransferRecoveryLivenessSnapshot snapshot)
+    {
+        snapshot = default!;
+        if (string.IsNullOrWhiteSpace(sessionId) ||
+            string.IsNullOrWhiteSpace(transferId))
+        {
+            return false;
+        }
+
+        var normalizedSessionId = sessionId.Trim();
+        var normalizedTransferId = transferId.Trim();
+        lock (gate)
+        {
+            if (direction == FileTransferDirection.Outbound)
+            {
+                return outboundTransfer is { IsTerminal: false } outbound &&
+                       string.Equals(
+                           outbound.SessionId,
+                           normalizedSessionId,
+                           StringComparison.Ordinal) &&
+                       string.Equals(
+                           outbound.TransferId,
+                           normalizedTransferId,
+                           StringComparison.Ordinal) &&
+                       TryCreateReceiveRecoveryLivenessSnapshot(
+                           CreateCoordinatorStateLocked(outbound),
+                           out snapshot);
+            }
+
+            return inboundTransfer is { IsTerminal: false } inbound &&
+                   string.Equals(
+                       inbound.SessionId,
+                       normalizedSessionId,
+                       StringComparison.Ordinal) &&
+                   string.Equals(
+                       inbound.TransferId,
+                       normalizedTransferId,
+                       StringComparison.Ordinal) &&
+                   TryCreateReceiveRecoveryLivenessSnapshot(
+                       CreateCoordinatorStateLocked(inbound),
+                       out snapshot);
+        }
+    }
+
     internal static bool TryCreateReceiveRecoveryLivenessSnapshot(
         FileTransferCoordinatorState state,
         out FileTransferRecoveryLivenessSnapshot snapshot)
