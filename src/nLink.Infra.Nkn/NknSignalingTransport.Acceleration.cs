@@ -141,6 +141,8 @@ public sealed partial class NknSignalingTransport
         runtimeUnlockInitialActivationEnvelopeState;
     private RuntimeUnlockInitialActivationOfferEnvelopeRefreshReceipt?
         lastRuntimeUnlockInitialActivationEnvelopeRefreshReceipt;
+    private string? runtimeUnlockInitialActivationRefreshReplayIdentity;
+    private Task<bool>? runtimeUnlockInitialActivationRefreshReplayTask;
     private event EventHandler<
         RuntimeUnlockInitialActivationReceiveRecoveryHoldRequestedEventArgs>?
         runtimeUnlockInitialActivationReceiveRecoveryHoldRequested;
@@ -10983,7 +10985,31 @@ public sealed partial class NknSignalingTransport
                 $"event=filetransfer_tuna_activation_negotiation_regular_nkn_pause_deferred; session_id={SanitizeLogToken(sessionId)}; reason=runtime_unlock_listener_starting; trigger={SanitizeLogToken(reason)}");
         }
 
-        if (!await tunaSession.EnsureListenerSidecarConnectedAsync(remoteEndpoint, ct).ConfigureAwait(false) ||
+        var listenerStartRequest =
+            isRuntimeUnlockActivation &&
+            offerAuthorityMode == RuntimeUnlockOfferAuthorityMode.InitialActivation &&
+            runtimeUnlockFileTransferOwnerAuthority is { } listenerOwner
+                ? new NknTunaListenerStartRequest(
+                    remoteEndpoint,
+                    preflightLanes,
+                    NknTunaListenerLifetimePolicy
+                        .CoordinatorScopedInitialActivation,
+                    string.Join(
+                        "|",
+                        sessionId,
+                        listenerOwner.TransferId,
+                        listenerOwner.Direction,
+                        listenerOwner.RuntimeGeneration,
+                        listenerOwner.RoutePublicationGeneration,
+                        payerDecisionId,
+                        runtimeUnlockTunaPathLease.LeaseGeneration,
+                        runtimeUnlockTunaPathLease.ListenerRunId))
+                : new NknTunaListenerStartRequest(
+                    remoteEndpoint,
+                    preflightLanes);
+        if (!await tunaSession.EnsureListenerSidecarConnectedAsync(
+                listenerStartRequest,
+                ct).ConfigureAwait(false) ||
             string.IsNullOrWhiteSpace(tunaSession.LocalTunaAddress))
         {
             NotifyTransportAccelerationStateChanged("listener_sidecar_unavailable");
@@ -13820,6 +13846,195 @@ public sealed partial class NknSignalingTransport
                 : RuntimeUnlockInitialActivationReceiveRecoveryHoldAwaitResult
                     .Rejected;
         }
+    }
+
+    private Task<bool>
+        ReplayCommittedRuntimeUnlockInitialActivationEnvelopeAfterHoldAsync(
+            RuntimeUnlockOfferAuthorityBoundary predecessorBoundary,
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldAwaitResult
+                holdResult,
+            string timeoutBoundary)
+    {
+        RuntimeUnlockInitialActivationEnvelopeState envelopeState;
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldPrevalidation
+            prevalidation;
+        string replayIdentity;
+        lock (accelerationGate)
+        {
+            if (!ShouldResumeRuntimeUnlockInitialActivationSameGeneration(
+                    holdResult) ||
+                runtimeUnlockInitialActivationEnvelopeState is not
+                    { } currentEnvelopeState ||
+                lastRuntimeUnlockInitialActivationEnvelopeRefreshReceipt is not
+                    { } refreshReceipt ||
+                lastRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision is not
+                    { } releasedDecision ||
+                releasedDecision.Status !=
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                        .Released ||
+                releasedDecision.Request.IsDefault ||
+                !RuntimeUnlockInitialActivationHoldRequestMatchesOfferBoundary(
+                    releasedDecision.Request,
+                    predecessorBoundary) ||
+                releasedDecision.EnvelopeRefreshCommand is not { } refreshCommand ||
+                refreshReceipt.Command != refreshCommand ||
+                currentEnvelopeState.Boundary.Mode !=
+                    RuntimeUnlockOfferAuthorityMode.InitialActivation ||
+                currentEnvelopeState.Boundary.OfferGeneration !=
+                    predecessorBoundary.OfferGeneration ||
+                currentEnvelopeState.Boundary.TransactionGeneration !=
+                    predecessorBoundary.TransactionGeneration ||
+                currentEnvelopeState.Boundary.TunaPathLeaseGeneration !=
+                    predecessorBoundary.TunaPathLeaseGeneration ||
+                !string.Equals(
+                    currentEnvelopeState.Boundary.SemanticOfferFingerprint,
+                    predecessorBoundary.SemanticOfferFingerprint,
+                    StringComparison.Ordinal) ||
+                currentEnvelopeState.Boundary.EnvelopeGeneration !=
+                    refreshCommand.SuccessorEnvelopeGeneration ||
+                !string.Equals(
+                    currentEnvelopeState.Boundary.ControlEnvelopeFingerprint,
+                    refreshReceipt.SuccessorEnvelopeFingerprint,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    currentEnvelopeState.Envelope.MessageId,
+                    refreshReceipt.MessageId,
+                    StringComparison.Ordinal))
+            {
+                return Task.FromResult(false);
+            }
+
+            replayIdentity = string.Join(
+                "|",
+                refreshCommand.RefreshGeneration,
+                refreshReceipt.SuccessorEnvelopeFingerprint,
+                refreshReceipt.MessageId);
+            if (string.Equals(
+                    runtimeUnlockInitialActivationRefreshReplayIdentity,
+                    replayIdentity,
+                    StringComparison.Ordinal) &&
+                runtimeUnlockInitialActivationRefreshReplayTask is { } existing)
+            {
+                return existing.IsCompleted
+                    ? Task.FromResult(true)
+                    : AwaitJoinedRuntimeUnlockInitialActivationRefreshReplayAsync(
+                        existing);
+            }
+
+            envelopeState = currentEnvelopeState;
+            prevalidation = new(
+                releasedDecision.Request,
+                releasedDecision,
+                holdResult);
+            runtimeUnlockInitialActivationRefreshReplayIdentity = replayIdentity;
+            runtimeUnlockInitialActivationRefreshReplayTask =
+                ReplayCommittedRuntimeUnlockInitialActivationEnvelopeCoreAsync(
+                    envelopeState,
+                    prevalidation,
+                    timeoutBoundary,
+                    refreshCommand.RefreshGeneration);
+            return runtimeUnlockInitialActivationRefreshReplayTask;
+        }
+    }
+
+    private bool IsRuntimeUnlockInitialActivationEnvelopeRefreshReplayRequired()
+    {
+        lock (accelerationGate)
+        {
+            return lastRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision is
+                {
+                    Status: RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                        .Released,
+                    EnvelopeRefreshCommand: not null,
+                };
+        }
+    }
+
+    private static async Task<bool>
+        AwaitJoinedRuntimeUnlockInitialActivationRefreshReplayAsync(
+            Task<bool> replayTask)
+    {
+        await replayTask.ConfigureAwait(false);
+        return true;
+    }
+
+    private async Task<bool>
+        ReplayCommittedRuntimeUnlockInitialActivationEnvelopeCoreAsync(
+            RuntimeUnlockInitialActivationEnvelopeState envelopeState,
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldPrevalidation
+                prevalidation,
+            string timeoutBoundary,
+            long refreshGeneration)
+    {
+        var boundary = envelopeState.Boundary;
+        var target = remoteEndpoint;
+        if (string.IsNullOrWhiteSpace(target))
+        {
+            return true;
+        }
+
+        var send = await SendAccelerationControlEnvelopeWithBulkBypassAsync(
+                target,
+                envelopeState.Envelope,
+                "offer",
+                CancellationToken.None,
+                requireObservedSend: true,
+                activationSessionId: boundary.SessionId,
+                onBeforeSend: () =>
+                    PauseRegularNknV4FileTransferForRuntimeUnlockMakeBeforeBreak(
+                        boundary.SessionId,
+                        "runtime_unlock_initial_activation_refresh_replay",
+                        timeoutBoundary),
+                expectedOfferAuthorityBoundary: boundary,
+                initialActivationHoldPrevalidation: prevalidation)
+            .ConfigureAwait(false);
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_initial_activation_offer_envelope_refresh_replay_completed; session_id={SanitizeLogToken(boundary.SessionId)}; transfer_id={SanitizeLogToken(boundary.TransferId ?? "(none)")}; direction={SanitizeLogToken(boundary.Direction.ToString().ToLowerInvariant())}; offer_nonce={SanitizeLogToken(boundary.Nonce)}; payer_decision_id={boundary.PayerDecisionId}; offer_generation={boundary.OfferGeneration}; transaction_generation={boundary.TransactionGeneration}; tuna_path_lease_generation={boundary.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={SanitizeLogToken(boundary.TunaPathLeaseListenerRunId ?? "(none)")}; envelope_generation={boundary.EnvelopeGeneration}; control_envelope_fingerprint={SanitizeLogToken(boundary.ControlEnvelopeFingerprint)}; refresh_generation={refreshGeneration}; send_succeeded={(send.Succeeded ? 1 : 0)}; stale_callback_ignored={(send.StaleCallbackIgnored ? 1 : 0)}; timeout_boundary={SanitizeLogToken(timeoutBoundary)}; decision_reason=committed_refresh_replay_terminal");
+        if (!send.Succeeded)
+        {
+            return true;
+        }
+
+        MarkRuntimeUnlockOfferObservedSendIfCurrent(
+            boundary.Nonce,
+            boundary.PayerDecisionId,
+            boundary.OfferGeneration,
+            send.ObservedLane);
+        ApplyRuntimeUnlockTransaction(
+            RuntimeUnlockTransactionEventKind.ObservedSend,
+            boundary.SessionId,
+            boundary.OfferGeneration,
+            "refreshed_offer_observed_send",
+            observedLane: send.ObservedLane);
+        NotifyTransportAccelerationStateChanged("waiting_for_answer");
+        ScheduleAccelerationOfferReplay(
+            target,
+            envelopeState.Envelope,
+            boundary.SessionId,
+            boundary.Nonce,
+            boundary.PayerDecisionId,
+            boundary.OfferGeneration,
+            pauseOnQueueAccepted: false,
+            pauseAfterObservedSendOnly: false);
+        MarkRuntimeUnlockOfferAnswerTimeoutScheduledIfCurrent(
+            boundary.Nonce,
+            boundary.PayerDecisionId,
+            boundary.OfferGeneration);
+        ScheduleAccelerationOfferAnswerTimeout(
+            boundary.Nonce,
+            expectedInstallReceipt: null,
+            requireRuntimeUnlockRetryDispatchInstall: false);
+        ScheduleRuntimeUnlockOfferPeerResponseTimeout(
+            boundary.Nonce,
+            boundary.PayerDecisionId,
+            boundary.OfferGeneration,
+            boundary.SessionId,
+            send.ObservedLane,
+            expectedInstallReceipt: null,
+            resumedAfterReceiveRecoveryHold: true);
+        return true;
     }
 
     private static bool
@@ -23392,6 +23607,16 @@ public sealed partial class NknSignalingTransport
                     if (ShouldResumeRuntimeUnlockInitialActivationSameGeneration(
                             holdResult))
                     {
+                        if (IsRuntimeUnlockInitialActivationEnvelopeRefreshReplayRequired())
+                        {
+                            await ReplayCommittedRuntimeUnlockInitialActivationEnvelopeAfterHoldAsync(
+                                offerAuthorityBoundary,
+                                holdResult,
+                                "peer_response_timeout")
+                                .ConfigureAwait(false);
+                            return;
+                        }
+
                         ScheduleRuntimeUnlockOfferPeerResponseTimeout(
                             nonce,
                             payerDecisionId,
@@ -27837,6 +28062,16 @@ public sealed partial class NknSignalingTransport
                         if (ShouldResumeRuntimeUnlockInitialActivationSameGeneration(
                                 holdResult))
                         {
+                            if (IsRuntimeUnlockInitialActivationEnvelopeRefreshReplayRequired())
+                            {
+                                await ReplayCommittedRuntimeUnlockInitialActivationEnvelopeAfterHoldAsync(
+                                    timeoutBoundary,
+                                    holdResult,
+                                    "answer_timeout")
+                                    .ConfigureAwait(false);
+                                return;
+                            }
+
                             ScheduleAccelerationOfferAnswerTimeout(
                                 nonce,
                                 expectedInstallReceipt,

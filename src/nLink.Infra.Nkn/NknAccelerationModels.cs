@@ -96,14 +96,28 @@ internal interface INknTunaAccelerationSession : INknAccelerationLane
 
     Task<bool> EnsureListenerSidecarConnectedAsync(string expectedRemotePeer, CancellationToken ct);
 
+    Task<bool> EnsureListenerSidecarConnectedAsync(
+        NknTunaListenerStartRequest request,
+        CancellationToken ct)
+        => EnsureListenerSidecarConnectedAsync(request.ExpectedRemotePeer, ct);
+
     Task<bool> StartDialerSidecarAsync(string tunaAddress, string expectedRemotePeer, CancellationToken ct);
 
     Task StopAsync(string reason, CancellationToken ct);
 }
 
+internal enum NknTunaListenerLifetimePolicy
+{
+    GenericBounded = 0,
+    CoordinatorScopedInitialActivation = 1,
+}
+
 internal sealed record NknTunaListenerStartRequest(
     string ExpectedRemotePeer,
-    NknAccelerationLaneKind Lanes);
+    NknAccelerationLaneKind Lanes,
+    NknTunaListenerLifetimePolicy LifetimePolicy =
+        NknTunaListenerLifetimePolicy.GenericBounded,
+    string ExecutionIdentity = "");
 
 internal sealed record NknTunaListenerSidecarEndpoint(
     string LocalIpc,

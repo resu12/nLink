@@ -20,6 +20,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
     private readonly INknTunaListenerSidecarSupervisor? listenerSupervisor;
     private NknTunaSidecarClient? client;
     private ClientRole clientRole;
+    private NknTunaListenerStartRequest? listenerRequest;
     private NknTunaSidecarProcessOwner? dialerProcessOwner;
     private Task<bool>? dialerStartTask;
     private NknAccelerationLaneDiagnostics lastDiagnostics = NknAccelerationLaneDiagnostics.Empty;
@@ -104,6 +105,18 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
     }
 
     public async Task<bool> EnsureListenerSidecarConnectedAsync(string expectedRemotePeer, CancellationToken ct)
+        => await EnsureListenerSidecarConnectedAsync(
+                new NknTunaListenerStartRequest(
+                    string.IsNullOrWhiteSpace(expectedRemotePeer)
+                        ? string.Empty
+                        : expectedRemotePeer.Trim(),
+                    options.Lanes),
+                ct)
+            .ConfigureAwait(false);
+
+    public async Task<bool> EnsureListenerSidecarConnectedAsync(
+        NknTunaListenerStartRequest request,
+        CancellationToken ct)
     {
         if (!options.Enabled)
         {
@@ -112,7 +125,9 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
 
         lock (gate)
         {
-            if (client?.IsAvailable == true && clientRole == ClientRole.Listener)
+            if (client?.IsAvailable == true &&
+                clientRole == ClientRole.Listener &&
+                listenerRequest == request)
             {
                 return true;
             }
@@ -122,9 +137,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         if (string.IsNullOrWhiteSpace(endpoint) && listenerSupervisor is not null)
         {
             var started = await listenerSupervisor.EnsureStartedAsync(
-                    new NknTunaListenerStartRequest(
-                        string.IsNullOrWhiteSpace(expectedRemotePeer) ? string.Empty : expectedRemotePeer.Trim(),
-                        options.Lanes),
+                    request,
                     ct)
                 .ConfigureAwait(false);
             endpoint = started?.LocalIpc;
@@ -157,6 +170,15 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         if (!ReplaceClient(nextClient, ClientRole.Listener, null))
         {
             return false;
+        }
+
+        lock (gate)
+        {
+            if (ReferenceEquals(client, nextClient) &&
+                clientRole == ClientRole.Listener)
+            {
+                listenerRequest = request;
+            }
         }
 
         ForwardCurrentClientReadyIfAvailable(nextClient, "ready");
@@ -449,6 +471,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
 
             client = null;
             clientRole = ClientRole.None;
+            listenerRequest = null;
             dialerProcessOwner = null;
             dialerStartTask = null;
         }
@@ -487,6 +510,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
 
             client = null;
             clientRole = ClientRole.None;
+            listenerRequest = null;
             dialerProcessOwner = null;
             dialerStartTask = null;
         }
@@ -521,6 +545,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
                     {
                         client = null;
                         clientRole = ClientRole.None;
+                        listenerRequest = null;
                         dialerStartTask = null;
                         processToStop = dialerProcessOwner;
                         dialerProcessOwner = null;
@@ -594,6 +619,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
 
             client = null;
             clientRole = ClientRole.None;
+            listenerRequest = null;
         }
 
         clientToDispose?.Dispose();
@@ -641,6 +667,10 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
 
                 client = nextClient;
                 clientRole = nextRole;
+                if (nextRole != ClientRole.Listener)
+                {
+                    listenerRequest = null;
+                }
                 dialerProcessOwner = nextRole == ClientRole.Dialer ? nextDialerOwner : null;
             }
         }

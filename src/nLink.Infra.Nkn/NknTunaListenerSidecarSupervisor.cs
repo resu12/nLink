@@ -64,6 +64,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
     private NknTunaSidecarProcessOwner? processOwner;
     private NknTunaListenerSidecarEndpoint? endpoint;
     private string? expectedRemotePeer;
+    private NknTunaListenerStartRequest? currentRequest;
     private bool summaryObserved;
     private bool disposed;
     private string? lastStartFailureReason;
@@ -130,7 +131,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
             ThrowIfDisposed();
             if (endpoint is not null &&
                 processOwner?.IsRunning == true &&
-                string.Equals(expectedRemotePeer, request.ExpectedRemotePeer, StringComparison.Ordinal))
+                currentRequest == request)
             {
                 return endpoint;
             }
@@ -144,7 +145,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
                 ThrowIfDisposed();
                 if (endpoint is not null &&
                     processOwner?.IsRunning == true &&
-                    string.Equals(expectedRemotePeer, request.ExpectedRemotePeer, StringComparison.Ordinal))
+                    currentRequest == request)
                 {
                     return endpoint;
                 }
@@ -249,7 +250,11 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         nextProcess.StartInfo.ArgumentList.Add("--max-duration-sec");
         nextProcess.StartInfo.ArgumentList.Add(options.MaxDurationSec.ToString(CultureInfo.InvariantCulture));
         nextProcess.StartInfo.ArgumentList.Add("--accept-timeout-sec");
-        nextProcess.StartInfo.ArgumentList.Add(options.AcceptTimeoutSec.ToString(CultureInfo.InvariantCulture));
+        var acceptTimeoutSec = request.LifetimePolicy ==
+            NknTunaListenerLifetimePolicy.CoordinatorScopedInitialActivation
+                ? 0
+                : options.AcceptTimeoutSec;
+        nextProcess.StartInfo.ArgumentList.Add(acceptTimeoutSec.ToString(CultureInfo.InvariantCulture));
         nextProcess.StartInfo.ArgumentList.Add("--listen-start-timeout-sec");
         nextProcess.StartInfo.ArgumentList.Add(Math.Clamp(options.ListenStartTimeoutSec, 5, 300).ToString(CultureInfo.InvariantCulture));
         nextProcess.StartInfo.ArgumentList.Add("--local-ipc");
@@ -280,7 +285,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
                 return;
             }
 
-            HandleStdoutLine(e.Data, ready, startupStopwatch);
+            HandleOwnedStdoutLine(owner, nextProcess, e.Data, ready, startupStopwatch);
         };
         nextProcess.ErrorDataReceived += (_, e) =>
         {
@@ -312,6 +317,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
                 replacedOwner = DetachProcessForStop_NoLock("listener_replaced");
                 endpoint = null;
                 expectedRemotePeer = request.ExpectedRemotePeer.Trim();
+                currentRequest = request;
                 summaryObserved = false;
                 providerPathsDegradedAcceptedCount = 0;
                 providerPathsRecoveredCount = 0;
@@ -352,6 +358,11 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
             lock (gate)
             {
                 ThrowIfDisposed();
+                if (!ReferenceEquals(processOwner, owner) ||
+                    currentRequest != request)
+                {
+                    return null;
+                }
                 endpoint = startedEndpoint;
             }
 
@@ -384,6 +395,24 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
             StopOwnerIfCurrent(owner, "listener_canceled");
             throw;
         }
+    }
+
+    private void HandleOwnedStdoutLine(
+        NknTunaSidecarProcessOwner? owner,
+        Process process,
+        string line,
+        TaskCompletionSource<NknTunaListenerSidecarEndpoint> ready,
+        Stopwatch startupStopwatch)
+    {
+        if (!IsCurrentProcessOwner(owner, process))
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=tuna_listener_sidecar_stale_output_ignored; line_len={line.Length}; decision_reason=process_owner_replaced");
+            return;
+        }
+
+        HandleStdoutLine(line, ready, startupStopwatch);
     }
 
     private void HandleStdoutLine(
@@ -670,6 +699,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         {
             ownerToStop = DetachProcessForStop_NoLock("disposed");
             endpoint = null;
+            currentRequest = null;
         }
 
         ownerToStop?.Stop("disposed");
@@ -684,6 +714,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
             ownerToStop = DetachProcessForStop_NoLock(normalizedReason);
             endpoint = null;
             expectedRemotePeer = null;
+            currentRequest = null;
         }
 
         ownerToStop?.Stop(normalizedReason);
@@ -831,6 +862,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
             {
                 processOwner = null;
                 endpoint = null;
+                currentRequest = null;
                 shouldStop = true;
             }
         }

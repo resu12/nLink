@@ -16208,16 +16208,20 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 "host.tuna.initial-hold-expired.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
             var helperClient = new FakeNknClient(
                 "helper.tuna.initial-hold-expired.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            var allowOfferDelivery = false;
             hostClient.ShouldDeliverSendAsync = (_, payload, _) =>
             {
                 if (EnvelopeCodec.TryDeserialize(payload, out var envelope) &&
                     envelope.Type == MsgType.TransportAccelerationOffer)
                 {
-                    return Task.FromResult(false);
+                    return Task.FromResult(allowOfferDelivery);
                 }
 
                 return Task.FromResult(true);
             };
+            var hostTunaSession = new RetryableTunaAccelerationSession(
+                canListen: true,
+                failedDialAttemptsBeforeSuccess: 0);
             using var host = new NknSignalingTransport(
                 hostClient,
                 options,
@@ -16225,9 +16229,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     "host-tuna-initial-hold-expired-id",
                     hostClient.Address),
                 NknTunaAccelerationOptions.Disabled,
-                new RetryableTunaAccelerationSession(
-                    canListen: true,
-                    failedDialAttemptsBeforeSuccess: 0));
+                hostTunaSession);
             using var helper = new NknSignalingTransport(
                 helperClient,
                 options,
@@ -16317,6 +16319,12 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 .RequestAccelerationNegotiationAsync("runtime_unlock", cts.Token)
                 .WaitAsync(TimeSpan.FromSeconds(5));
             var held = await timeoutHold.Task.WaitAsync(cts.Token);
+            var listenerRequest = Assert.IsType<NknTunaListenerStartRequest>(
+                hostTunaSession.LastListenerRequest);
+            Assert.Equal(
+                NknTunaListenerLifetimePolicy.CoordinatorScopedInitialActivation,
+                listenerRequest.LifetimePolicy);
+            Assert.False(string.IsNullOrWhiteSpace(listenerRequest.ExecutionIdentity));
             Assert.True(held.Request.PeerVisibleDispatchObserved);
 
             var proof =
@@ -16368,6 +16376,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     SuccessorSentAtUnixMs: refreshSentAtUnixMs,
                     SuccessorExpiresAtUnixMs:
                         refreshSentAtUnixMs + envelopeLifetimeMs);
+            allowOfferDelivery = true;
+            NknSignalingTransport
+                    .RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests =
+                TimeSpan.FromSeconds(30);
             Assert.True(
                 bridge
                     .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
@@ -16383,6 +16395,15 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                         }));
             await WaitUntilAsync(
                 () => preparedRefreshReceipt is not null,
+                TimeSpan.FromSeconds(2));
+            await WaitUntilAsync(
+                () =>
+                    ReadOperationalLogTail(logStart).Contains(
+                        "event=runtime_unlock_initial_activation_receive_recovery_hold_post_prevalidation_submission;",
+                        StringComparison.Ordinal) &&
+                    ReadOperationalLogTail(logStart).Contains(
+                        "event=runtime_unlock_initial_activation_offer_envelope_refresh_replay_completed;",
+                        StringComparison.Ordinal),
                 TimeSpan.FromSeconds(2));
 
             var tail = ReadOperationalLogTail(logStart);
@@ -16404,22 +16425,22 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 "event=runtime_unlock_initial_activation_offer_envelope_refresh_physical_resume;",
                 tail,
                 StringComparison.Ordinal);
-            Assert.DoesNotContain(
-                "event=tuna_acceleration_runtime_unlock_offer_peer_response_timeout;",
+            Assert.Contains(
+                "event=runtime_unlock_initial_activation_receive_recovery_hold_post_prevalidation_submission;",
                 tail,
                 StringComparison.Ordinal);
-            Assert.DoesNotContain(
-                "event=tuna_acceleration_activation_offer_not_observed;",
+            Assert.Contains(
+                $"envelope_generation={refreshCommand.SuccessorEnvelopeGeneration};",
                 tail,
                 StringComparison.Ordinal);
-            Assert.DoesNotContain(
-                "event=runtime_unlock_offer_peer_response_timeout_pending_answer_preserved;",
+            Assert.Contains(
+                $"refresh_generation={refreshCommand.RefreshGeneration};",
                 tail,
                 StringComparison.Ordinal);
-            Assert.Equal(
-                heldOfferNonce,
-                Assert.IsType<string>(
-                    GetPrivateField(host, "outboundAccelerationOfferNonce")));
+            Assert.Contains(
+                "send_succeeded=1;",
+                tail,
+                StringComparison.Ordinal);
             Assert.Equal(
                 heldOfferGeneration,
                 GetPrivatePropertyValue<long>(proof, "Generation"));
@@ -16429,8 +16450,6 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     GetPrivateField(
                         host,
                         "accelerationNegotiationRetryAttempts")));
-            Assert.False(
-                GetPrivatePropertyValue<bool>(proof, "Retired"));
         }
         finally
         {
@@ -29158,6 +29177,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
         public string? LastStopReason => Volatile.Read(ref lastStopReason);
 
+        public NknTunaListenerStartRequest? LastListenerRequest { get; private set; }
+
         public void SetCanListen(bool value)
             => Volatile.Write(ref canListen, value ? 1 : 0);
 
@@ -29179,8 +29200,25 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         public NknAccelerationLaneDiagnostics GetDiagnosticsSnapshot()
             => new(IsAvailable, string.Empty, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, string.Empty, 0);
 
-        public async Task<bool> EnsureListenerSidecarConnectedAsync(string expectedRemotePeer, CancellationToken ct)
+        public Task<bool> EnsureListenerSidecarConnectedAsync(
+            string expectedRemotePeer,
+            CancellationToken ct)
+            => EnsureListenerSidecarConnectedCoreAsync(
+                new NknTunaListenerStartRequest(
+                    expectedRemotePeer,
+                    supportedLanes),
+                ct);
+
+        public Task<bool> EnsureListenerSidecarConnectedAsync(
+            NknTunaListenerStartRequest request,
+            CancellationToken ct)
+            => EnsureListenerSidecarConnectedCoreAsync(request, ct);
+
+        private async Task<bool> EnsureListenerSidecarConnectedCoreAsync(
+            NknTunaListenerStartRequest request,
+            CancellationToken ct)
         {
+            LastListenerRequest = request;
             var calls = Interlocked.Increment(ref ensureListenerCalls);
             if ((!CanOfferListener && !allowListenerStartWhenCanListenFalse) || ct.IsCancellationRequested)
             {
