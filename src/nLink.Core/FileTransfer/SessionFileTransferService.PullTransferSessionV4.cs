@@ -21762,6 +21762,23 @@ public sealed partial class SessionFileTransferService
             "filetransfer_receive_recovery_proof_state_not_sent";
     }
 
+    private static void HoldReceiveRecoveryProofStatePublicationForTunaActivationPause(
+        InboundTransferContext context,
+        FileTransferReceiveRecoveryProofStatePublicationCommand command,
+        ReceiveRecoveryProofStateSendCapture capture,
+        string pauseReason,
+        string holdBoundary)
+    {
+        capture.Outcome =
+            FileTransferReceiveRecoveryProofStatePublicationOutcome.Held;
+        capture.Reason =
+            "filetransfer_receive_recovery_proof_state_held_for_tuna_activation_pause";
+        var observation = command.Authority.Observation;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_receive_recovery_proof_state_publication_held; session_id={FormatProtocolLogValue(observation.SessionId)}; transfer_id={FormatProtocolLogValue(observation.TransferId)}; direction={observation.Direction.ToString().ToLowerInvariant()}; {FormatReceiveRecoveryObservationScopeFields(observation)}; recovery_operation_authority_id={FormatProtocolLogValue(command.Authority.AuthorityId.ToString())}; recovery_operation_generation={command.Authority.OperationGeneration}; closure_generation={command.ClosureGeneration}; publication_generation={command.PublicationGeneration}; data_session_generation={context.DataSessionGeneration}; submission_epoch={command.Observation.SubmissionEpoch}; process_epoch={command.Observation.ProcessEpoch}; pause_reason={FormatProtocolLogValue(pauseReason)}; hold_boundary={FormatProtocolLogValue(holdBoundary)}; outcome=Held; in_flight=1; decision_reason={capture.Reason}");
+    }
+
     private async Task<ReceiveRecoveryProofStateSendResult>
         SendInboundReceiveRecoveryProofStateAsync(
             InboundTransferContext context,
@@ -21867,6 +21884,18 @@ public sealed partial class SessionFileTransferService
                     LocalOperationalLog.Info(
                         "FileTransferService",
                         $"event=filetransfer_v4_state_send_suppressed_for_tuna_activation_barrier; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; state_reason={FormatProtocolLogValue(reason)}; pause_reason={FormatProtocolLogValue(context.PullTransportPauseReason)}; suppressed_count={context.TunaActivationBarrierStateSendSuppressedCount}; committed_chunk={context.NextChunkIndex}; highest_received_chunk={context.PullHighestReceivedChunkIndex}; bytes_transferred={context.BytesTransferred}");
+                }
+
+                if (proofStatePublicationCommand is { } pausedCommand &&
+                    proofStateSendCapture is { } pausedCapture)
+                {
+                    HoldReceiveRecoveryProofStatePublicationForTunaActivationPause(
+                        context,
+                        pausedCommand,
+                        pausedCapture,
+                        context.PullTransportPauseReason ??
+                            "tuna_activation_negotiating",
+                        "state_construction");
                 }
 
                 return false;
@@ -22083,6 +22112,22 @@ public sealed partial class SessionFileTransferService
                             "filetransfer_receive_recovery_proof_state_command_rejected_before_delivery";
                     }
 
+                    return false;
+                }
+
+                if (proofStatePublicationCommand is { } pausedProofCommand &&
+                    proofStateSendCapture is { } pausedProofCapture &&
+                    context.PullTransportPaused &&
+                    IsTunaActivationNegotiationTransportPauseReason(
+                        context.PullTransportPauseReason))
+                {
+                    HoldReceiveRecoveryProofStatePublicationForTunaActivationPause(
+                        context,
+                        pausedProofCommand,
+                        pausedProofCapture,
+                        context.PullTransportPauseReason ??
+                            "tuna_activation_negotiating",
+                        "pre_physical_submission");
                     return false;
                 }
 
@@ -22389,6 +22434,36 @@ public sealed partial class SessionFileTransferService
         {
             if (proofStateSendCapture is not null)
             {
+                var proofActivationUnavailable =
+                    IsTunaActivationNegotiationDataSessionUnavailableException(
+                        ex);
+                lock (gate)
+                {
+                    if (proofStatePublicationCommand is { } command &&
+                        ReferenceEquals(inboundTransfer, context) &&
+                        !context.IsTerminal &&
+                        FileTransferCoordinator
+                            .IsReceiveRecoveryProofStatePublicationCommandCurrent(
+                                CreateCoordinatorStateLocked(context),
+                                command) &&
+                        ((context.PullTransportPaused &&
+                          IsTunaActivationNegotiationTransportPauseReason(
+                              context.PullTransportPauseReason)) ||
+                         proofActivationUnavailable))
+                    {
+                        HoldReceiveRecoveryProofStatePublicationForTunaActivationPause(
+                            context,
+                            command,
+                            proofStateSendCapture,
+                            context.PullTransportPaused
+                                ? context.PullTransportPauseReason ??
+                                  "tuna_activation_negotiating"
+                                : "tuna_activation_negotiating",
+                            "physical_submission_race");
+                        return false;
+                    }
+                }
+
                 proofStateSendCapture.Outcome =
                     FileTransferReceiveRecoveryProofStatePublicationOutcome
                         .Rejected;

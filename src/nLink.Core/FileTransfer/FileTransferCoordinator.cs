@@ -1633,6 +1633,8 @@ internal sealed record FileTransferReceiveRecoveryProofStatePublicationSubstate(
         PendingCommand = null,
     FileTransferReceiveRecoveryProofStatePublicationReceipt?
         LastReceipt = null,
+    FileTransferReceiveRecoveryProofStatePublicationReceipt?
+        LastHeldReceipt = null,
     long LastGeneration = 0,
     FileTransferReceiveRecoveryProofStatePublicationRecheckArm?
         PendingRecheckArm = null,
@@ -16461,6 +16463,23 @@ internal static class FileTransferCoordinator
         var proofPublication =
             recovery.ProofStatePublication ??
             FileTransferReceiveRecoveryProofStatePublicationSubstate.Empty;
+        if (proofPublication.LastHeldReceipt is { } priorHeld &&
+            priorHeld == receipt)
+        {
+            return Decision(
+                FileTransferReceiveRecoveryTransitionStatus.Idempotent,
+                "filetransfer_receive_recovery_proof_state_publication_held_receipt_duplicate");
+        }
+        if (proofPublication.LastHeldReceipt is { } conflictingHeld &&
+            conflictingHeld.Command == receipt.Command &&
+            receipt.Outcome ==
+                FileTransferReceiveRecoveryProofStatePublicationOutcome.Held)
+        {
+            return Decision(
+                FileTransferReceiveRecoveryTransitionStatus.Rejected,
+                "filetransfer_receive_recovery_proof_state_publication_held_receipt_conflict");
+        }
+
         if (proofPublication.LastReceipt is { } prior)
         {
             if (prior == receipt)
@@ -16497,6 +16516,28 @@ internal static class FileTransferCoordinator
                 "filetransfer_receive_recovery_proof_state_publication_command_stale");
         }
 
+        if (receipt.Outcome ==
+            FileTransferReceiveRecoveryProofStatePublicationOutcome.Held)
+        {
+            var heldState = state with
+            {
+                PersistentState = state.PersistentState with
+                {
+                    FileTransferReceiveRecovery = recovery with
+                    {
+                        ProofStatePublication = proofPublication with
+                        {
+                            LastHeldReceipt = receipt,
+                        },
+                    },
+                },
+            };
+            return Decision(
+                FileTransferReceiveRecoveryTransitionStatus.Accepted,
+                "filetransfer_receive_recovery_proof_state_publication_held",
+                heldState);
+        }
+
         FileTransferReceiveRecoveryProofStatePublicationRecheckArm? recheckArm =
             null;
         if (receipt.Outcome ==
@@ -16524,6 +16565,7 @@ internal static class FileTransferCoordinator
                         PendingObservation = null,
                         PendingCommand = null,
                         LastReceipt = receipt,
+                        LastHeldReceipt = null,
                         PendingRecheckArm = recheckArm,
                     },
                 },
@@ -16772,6 +16814,29 @@ internal static class FileTransferCoordinator
             current.Authority.Observation,
             current.Authority.ExecutionCommand.CheckpointRequestId,
             out _);
+    }
+
+    internal static FileTransferReceiveRecoveryProofStatePublicationCommand?
+        GetCurrentHeldReceiveRecoveryProofStatePublicationCommand(
+            FileTransferCoordinatorState state)
+    {
+        var proofPublication = state.PersistentState
+            .FileTransferReceiveRecovery.ProofStatePublication;
+        if (proofPublication?.LastHeldReceipt is not
+            {
+                Outcome:
+                    FileTransferReceiveRecoveryProofStatePublicationOutcome
+                        .Held,
+            } heldReceipt ||
+            proofPublication.PendingCommand != heldReceipt.Command ||
+            !IsReceiveRecoveryProofStatePublicationCommandCurrent(
+                state,
+                heldReceipt.Command))
+        {
+            return null;
+        }
+
+        return heldReceipt.Command;
     }
 
     private static bool

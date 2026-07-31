@@ -3527,6 +3527,9 @@ public sealed partial class SessionFileTransferService :
         bool inboundEpochStartedWhileUnavailable = false;
         bool outboundFallbackTailReauthorizationResumed = false;
         bool inboundFallbackTailReauthorizationResumed = false;
+        InboundTransferContext? heldProofStatePublicationContext = null;
+        FileTransferReceiveRecoveryProofStatePublicationCommand?
+            heldProofStatePublicationCommand = null;
 
         lock (gate)
         {
@@ -3774,6 +3777,18 @@ public sealed partial class SessionFileTransferService :
                                 wasNormalToTunaActivation &&
                                 inbound.RouteRuntime.UsesFileTunaV4Runtime &&
                                 inbound.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV4;
+                            if (inboundActivationPauseResumed &&
+                                inbound.ReceiveRecoveryProofStatePublicationInFlightCommand is null &&
+                                FileTransferCoordinator
+                                    .GetCurrentHeldReceiveRecoveryProofStatePublicationCommand(
+                                        CreateCoordinatorStateLocked(inbound)) is
+                                    { } heldCommand)
+                            {
+                                inbound.ReceiveRecoveryProofStatePublicationInFlightCommand =
+                                    heldCommand;
+                                heldProofStatePublicationContext = inbound;
+                                heldProofStatePublicationCommand = heldCommand;
+                            }
                         }
 
                         RetryInboundFallbackTailLocalYieldProofIfPendingLocked(inbound, effectiveReason);
@@ -3962,6 +3977,21 @@ public sealed partial class SessionFileTransferService :
         if (inboundResumed && inboundToResume is not null)
         {
             LogTransportResumed(FileTransferDirection.Inbound, inboundToResume.TransferId, inboundToResume.SessionId, effectiveReason, effectiveRequiresResumeRequest);
+            if (ReferenceEquals(
+                    heldProofStatePublicationContext,
+                    inboundToResume) &&
+                heldProofStatePublicationCommand is { } heldCommand)
+            {
+                var observation = heldCommand.Authority.Observation;
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_receive_recovery_proof_state_publication_resume_decided; session_id={FormatProtocolLogValue(observation.SessionId)}; transfer_id={FormatProtocolLogValue(observation.TransferId)}; direction={observation.Direction.ToString().ToLowerInvariant()}; {FormatReceiveRecoveryObservationScopeFields(observation)}; recovery_operation_authority_id={FormatProtocolLogValue(heldCommand.Authority.AuthorityId.ToString())}; recovery_operation_generation={heldCommand.Authority.OperationGeneration}; closure_generation={heldCommand.ClosureGeneration}; publication_generation={heldCommand.PublicationGeneration}; data_session_generation={inboundToResume.DataSessionGeneration}; submission_epoch={heldCommand.Observation.SubmissionEpoch}; process_epoch={heldCommand.Observation.ProcessEpoch}; pause_reason=tuna_activation_negotiating; release_reason={FormatProtocolLogValue(effectiveReason)}; outcome=Accepted; in_flight=1; decision_status=Accepted; decision_reason=filetransfer_receive_recovery_proof_state_held_command_resumed");
+                await PublishReceiveRecoveryProofStateAsync(
+                        inboundToResume,
+                        heldCommand)
+                    .ConfigureAwait(false);
+            }
+
             if (inboundActivationPauseResumed)
             {
                 ScheduleInboundV4TransportPauseControlRetry(
