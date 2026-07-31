@@ -11,6 +11,9 @@ namespace NLink.App.Services;
 
 public sealed partial class SessionRuntime
 {
+    internal Func<string, FileTransferRecoveryLivenessSnapshot?>?
+        FileTransferRecoveryLivenessSnapshotOverrideForTests { get; set; }
+
     private static readonly TimeSpan SessionLivenessActiveFileTransferRecoveryDeferral = TimeSpan.FromSeconds(10);
     private const int SessionLivenessActiveFileTransferRecoveryDeferralLimit = 1;
     private static readonly TimeSpan SessionLivenessActiveFileTransferLongBridgeRecoveryDeferral = TimeSpan.FromSeconds(35);
@@ -461,16 +464,31 @@ public sealed partial class SessionRuntime
         {
             if (activeProgressTransfer.Direction == FileTransferDirection.Outbound)
             {
+                if (TryGetReceiveRecoveryProofStateRecheckHeartbeatSnapshot(
+                        sessionIdSnapshot,
+                        activeProgressTransfer,
+                        out var recoverySnapshot))
+                {
+                    heartbeatTrigger = "receive_recovery_completed_awaiting_proof";
+                    LocalOperationalLog.Info(
+                        "Session",
+                        $"event=session_liveness_heartbeat_required_for_receive_recovery_proof_state_recheck; session_id={sessionIdSnapshot}; generation={generation}; transfer_id={activeProgressTransfer.TransferId}; direction={activeProgressTransfer.Direction.ToString().ToLowerInvariant()}; progress_bytes={activeProgressBytes}; silence_ms={(long)silence.TotalMilliseconds}; route={recoverySnapshot.RouteToken}; protocol_version={recoverySnapshot.ProtocolVersion}; live_route_epoch={recoverySnapshot.LiveRouteEpoch}; recovery_state={recoverySnapshot.State}; leg_generation={recoverySnapshot.TransferLegGeneration}; transport_epoch={recoverySnapshot.TransportEpoch}; bridge_recovery_generation={recoverySnapshot.BridgeRecoveryGeneration}; checkpoint_request_id={SanitizeSessionLivenessReason(recoverySnapshot.CheckpointRequestId)}; trigger={heartbeatTrigger}; reason=coordinator_receive_recovery_completed_awaiting_proof; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+                }
+                else
+                {
+                    LocalOperationalLog.Info(
+                        "Session",
+                        $"event=session_liveness_heartbeat_skipped_for_active_filetransfer_progress; session_id={sessionIdSnapshot}; generation={generation}; transfer_id={activeProgressTransfer.TransferId}; direction={activeProgressTransfer.Direction.ToString().ToLowerInvariant()}; progress_bytes={activeProgressBytes}; silence_ms={(long)silence.TotalMilliseconds}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+                    return false;
+                }
+            }
+            else
+            {
+                heartbeatTrigger = "active_inbound_filetransfer_progress";
                 LocalOperationalLog.Info(
                     "Session",
-                    $"event=session_liveness_heartbeat_skipped_for_active_filetransfer_progress; session_id={sessionIdSnapshot}; generation={generation}; transfer_id={activeProgressTransfer.TransferId}; direction={activeProgressTransfer.Direction.ToString().ToLowerInvariant()}; progress_bytes={activeProgressBytes}; silence_ms={(long)silence.TotalMilliseconds}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
-                return false;
+                    $"event=session_liveness_heartbeat_required_for_active_inbound_filetransfer_progress; session_id={sessionIdSnapshot}; generation={generation}; transfer_id={activeProgressTransfer.TransferId}; direction={activeProgressTransfer.Direction.ToString().ToLowerInvariant()}; progress_bytes={activeProgressBytes}; silence_ms={(long)silence.TotalMilliseconds}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
             }
-
-            heartbeatTrigger = "active_inbound_filetransfer_progress";
-            LocalOperationalLog.Info(
-                "Session",
-                $"event=session_liveness_heartbeat_required_for_active_inbound_filetransfer_progress; session_id={sessionIdSnapshot}; generation={generation}; transfer_id={activeProgressTransfer.TransferId}; direction={activeProgressTransfer.Direction.ToString().ToLowerInvariant()}; progress_bytes={activeProgressBytes}; silence_ms={(long)silence.TotalMilliseconds}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
         }
 
         await TrySendSessionLivenessHeartbeatAsync(
@@ -1216,6 +1234,65 @@ public sealed partial class SessionRuntime
 
         snapshot = candidate;
         return true;
+    }
+
+    private bool TryGetReceiveRecoveryProofStateRecheckHeartbeatSnapshot(
+        string sessionIdSnapshot,
+        FileTransferTransferSnapshot activeProgressTransfer,
+        out FileTransferRecoveryLivenessSnapshot snapshot)
+    {
+        snapshot = default!;
+        if (activeProgressTransfer.Direction != FileTransferDirection.Outbound ||
+            activeProgressTransfer.IsTerminal ||
+            string.IsNullOrWhiteSpace(activeProgressTransfer.TransferId) ||
+            !string.Equals(activeProgressTransfer.SessionId, sessionIdSnapshot, StringComparison.Ordinal) ||
+            !string.Equals(
+                activeProgressTransfer.RouteToken,
+                FileTransferRouteResolver.RegularNknV4FastToken,
+                StringComparison.Ordinal) ||
+            activeProgressTransfer.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            !TryGetReceiveRecoveryLivenessSnapshotForHeartbeat(
+                sessionIdSnapshot,
+                out var candidate) ||
+            !string.Equals(candidate.TransferId, activeProgressTransfer.TransferId, StringComparison.Ordinal) ||
+            !IsValidFileTransferRecoveryLivenessSnapshot(sessionIdSnapshot, candidate) ||
+            !IsCurrentFileTransferRecoveryLivenessSnapshot(
+                sessionIdSnapshot,
+                candidate,
+                out _,
+                out _,
+                out _) ||
+            candidate.State !=
+                FileTransferRecoveryLivenessState.BridgeRecoveryCompletedAwaitingProof ||
+            !candidate.BridgeRecoveryRequested ||
+            !candidate.BridgeRecoveryStarted ||
+            !candidate.BridgeRecoveryCompleted ||
+            candidate.ReceiveProofObserved ||
+            candidate.RecoveryExhausted ||
+            candidate.AuthorityCompleted ||
+            candidate.TerminalRecommended)
+        {
+            return false;
+        }
+
+        snapshot = candidate;
+        return true;
+    }
+
+    private bool TryGetReceiveRecoveryLivenessSnapshotForHeartbeat(
+        string sessionIdSnapshot,
+        out FileTransferRecoveryLivenessSnapshot snapshot)
+    {
+        if (FileTransferRecoveryLivenessSnapshotOverrideForTests?.Invoke(
+                sessionIdSnapshot) is { } overridden)
+        {
+            snapshot = overridden;
+            return true;
+        }
+
+        return fileTransferService.TryGetActiveFileTransferRecoveryLivenessSnapshot(
+            sessionIdSnapshot,
+            out snapshot);
     }
 
     private static bool IsValidFileTransferRecoveryLivenessSnapshot(

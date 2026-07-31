@@ -1879,6 +1879,94 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
     }
 
     [Fact]
+    public async Task SessionRuntime_SessionLivenessHeartbeat_BypassesFrozenOutboundProgressForCompletedRecoveryAwaitingProof()
+    {
+        var delay = new ControlledDelayScheduler();
+        var now = DateTimeOffset.UtcNow;
+        var heartbeatCount = 0;
+        var scripted = new ScriptedSignalingTransport(
+            onSendSessionHeartbeatAsync: (_, _) =>
+            {
+                Interlocked.Increment(ref heartbeatCount);
+                return Task.CompletedTask;
+            });
+        var options = SessionRuntimeWatchdogOptions.Default with
+        {
+            SessionLivenessHeartbeatInterval = TimeSpan.FromSeconds(1),
+            SessionLivenessSuspectTimeout = TimeSpan.FromSeconds(3),
+            SessionLivenessTimeout = TimeSpan.FromSeconds(9),
+        };
+        using var runtime = new SessionRuntime(
+            () => scripted,
+            options,
+            delay.DelayAsync,
+            nowProvider: () => now);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helpee);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        var securityState = CreateApprovedSecurityState(
+            new PeerAddress(scripted.LocalPeerAddress),
+            new PeerAddress("scripted.helper.liveness-recovery-proof-recheck"));
+        var sessionId = securityState.SessionId!.Value.Value;
+        scripted.SetSessionSecurityStateForTests(securityState);
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+
+        const string transferId = "ft_liveness_recovery_proof_recheck";
+        var transfer = new FileTransferTransferSnapshot(
+            sessionId,
+            transferId,
+            FileTransferDirection.Outbound,
+            FileTransferTransferState.Sending,
+            "recovery-proof-recheck.bin",
+            64 * 1024,
+            Sha256Base64: null,
+            BytesTransferred: 1024,
+            ChunksTransferred: 1,
+            ChunkCount: 64,
+            ChunkSizeBytes: 1024,
+            ErrorCode: null,
+            StatusMessage: null,
+            BytesAcknowledgedByReceiver: 1024,
+            RouteToken: FileTransferRouteResolver.RegularNknV4FastToken,
+            ProtocolVersion: FileTransferProtocol.ProtocolVersionV4);
+        InvokePrivateMethod(
+            runtime,
+            "OnFileTransferChanged",
+            runtime,
+            new SessionFileTransferSnapshotChangedEventArgs(
+                new SessionFileTransferSnapshot(Outbound: transfer, Inbound: null)));
+        runtime.FileTransferRecoveryLivenessSnapshotOverrideForTests = _ =>
+            new FileTransferRecoveryLivenessSnapshot(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.RegularNknV4FastToken,
+                FileTransferProtocol.ProtocolVersionV4,
+                LiveRouteEpoch: 0,
+                TransferLegGeneration: 1,
+                BridgeRecoveryGeneration: 1,
+                TransportEpoch: 0,
+                CheckpointRequestId: null,
+                AuthorityReason: "receive_stall",
+                State: FileTransferRecoveryLivenessState.BridgeRecoveryCompletedAwaitingProof,
+                CreatedUtc: now.AddMinutes(-3),
+                LivenessDeferralDeadlineUtc: now.AddMinutes(-1),
+                BridgeRecoveryRequested: true,
+                BridgeRecoveryStarted: true,
+                BridgeRecoveryCompleted: true,
+                ReceiveProofObserved: false,
+                RecoveryExhausted: false,
+                AuthorityCompleted: false,
+                TerminalRecommended: false);
+
+        now = now.AddSeconds(1);
+        delay.CompleteLatest();
+        await WaitUntilAsync(() => Volatile.Read(ref heartbeatCount) == 1, TimeSpan.FromSeconds(1));
+
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+    }
+
+    [Fact]
     public async Task SessionRuntime_SessionLivenessHeartbeat_SendsDuringInboundFileTransferProgress()
     {
         var delay = new ControlledDelayScheduler();
