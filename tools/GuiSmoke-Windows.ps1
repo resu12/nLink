@@ -7661,6 +7661,282 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'route') -eq
                 'regular_nkn_v4_fast'
         })
+
+        # A proof-state command observed while the exact regular-V4 Tuna
+        # activation barrier is active must remain Held until that barrier is
+        # released.  This path does not require another bridge-ready event
+        # because a successor recovery may reuse the ready process.
+        foreach ($issued in $issuedEvents) {
+            $retained = @($indexedLines | Where-Object {
+                $_.Index -gt $issued.Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @(
+                        'filetransfer_receive_recovery_operation_closure_retained')) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'closure_state') -eq 'Retained' -and
+                (Test-ProofStateOperationMatch `
+                    -Issued $issued `
+                    -Candidate $_)
+            } | Select-Object -First 1)
+            if ($retained.Count -ne 1) {
+                continue
+            }
+
+            $decision = @($indexedLines | Where-Object {
+                $_.Index -gt $retained[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @(
+                        'filetransfer_receive_recovery_proof_state_publication_decided')) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'decision_status') -in @(
+                        'Accepted',
+                        'Started',
+                        'Idempotent') -and
+                (Test-ProofStatePublicationMatch `
+                    -Issued $issued `
+                    -Retained $retained[0] `
+                    -Candidate $_)
+            } | Select-Object -First 1)
+            if ($decision.Count -ne 1) {
+                continue
+            }
+
+            $disposition = @($indexedLines | Where-Object {
+                $_.Index -gt $decision[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @(
+                        'filetransfer_receive_recovery_proof_state_publication_receipt_applied')) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'publication_outcome') -in @('Held', 'Rejected') -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'decision_status') -in @('Accepted', 'Idempotent') -and
+                (Test-ProofStatePublicationMatch `
+                    -Issued $issued `
+                    -Retained $retained[0] `
+                    -Candidate $_)
+            } | Select-Object -First 1)
+            if ($disposition.Count -ne 1) {
+                continue
+            }
+
+            $outcome = Get-TunaGuiLogLineFieldValue `
+                -Line $disposition[0].Line `
+                -Name 'publication_outcome'
+            $reason = Get-ProofStateFieldValue `
+                -Line $disposition[0].Line `
+                -Names @('publication_reason', 'reason')
+            if (($outcome -eq 'Rejected' -and
+                 $reason -ne
+                    'filetransfer_receive_recovery_proof_state_not_sent') -or
+                ($outcome -eq 'Held' -and
+                 $reason -ne
+                    'filetransfer_receive_recovery_proof_state_held_for_tuna_activation_pause')) {
+                continue
+            }
+
+            $writer = Get-TunaGuiLogLineFieldValue `
+                -Line $issued.Line `
+                -Name 'log_writer_id'
+            $session = Get-TunaGuiLogLineFieldValue `
+                -Line $issued.Line `
+                -Name 'session_id'
+            $transfer = Get-TunaGuiLogLineFieldValue `
+                -Line $issued.Line `
+                -Name 'transfer_id'
+            $pause = @($indexedLines | Where-Object {
+                $_.Index -lt $disposition[0].Index -and
+                (
+                    (
+                        (Test-TunaGuiLogLineHasEvent `
+                            -Line $_.Line `
+                            -Events @(
+                                'filetransfer_tuna_activation_transport_pause_control_suppressed')) -and
+                        (Get-TunaGuiLogLineFieldValue `
+                            -Line $_.Line `
+                            -Name 'paused') -eq '1'
+                    ) -or
+                    (Test-TunaGuiLogLineHasEvent `
+                        -Line $_.Line `
+                        -Events @('filetransfer_transport_paused'))
+                ) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'reason') -eq 'tuna_activation_negotiating' -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'transfer_id') -eq $transfer -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'direction') -eq 'inbound'
+            } | Select-Object -Last 1)
+            if ($pause.Count -ne 1) {
+                continue
+            }
+
+            $releasedBeforeDisposition = @($indexedLines | Where-Object {
+                $_.Index -gt $pause[0].Index -and
+                $_.Index -le $disposition[0].Index -and
+                (
+                    (Test-TunaGuiLogLineHasEvent `
+                        -Line $_.Line `
+                        -Events @(
+                            'filetransfer_tuna_activation_local_barrier_released',
+                            'filetransfer_transport_resumed')) -or
+                    (
+                        (Test-TunaGuiLogLineHasEvent `
+                            -Line $_.Line `
+                            -Events @(
+                                'filetransfer_tuna_activation_transport_pause_control_suppressed')) -and
+                        (Get-TunaGuiLogLineFieldValue `
+                            -Line $_.Line `
+                            -Name 'paused') -eq '0'
+                    )
+                ) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'transfer_id') -eq $transfer
+            }).Count -gt 0
+            $attemptedBeforeDisposition = @($indexedLines | Where-Object {
+                $_.Index -gt $decision[0].Index -and
+                $_.Index -le $disposition[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @(
+                        'filetransfer_receive_recovery_proof_state_publication_attempted',
+                        'filetransfer_v4_state_sent')) -and
+                (Test-ProofStatePublicationMatch `
+                    -Issued $issued `
+                    -Retained $retained[0] `
+                    -Candidate $_)
+            }).Count -gt 0
+            if ($releasedBeforeDisposition -or $attemptedBeforeDisposition) {
+                continue
+            }
+
+            $resume = @($indexedLines | Where-Object {
+                $_.Index -gt $disposition[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @(
+                        'filetransfer_receive_recovery_proof_state_publication_resume_decided')) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'decision_status') -in @(
+                        'Accepted',
+                        'Started',
+                        'Idempotent') -and
+                (Test-ProofStatePublicationMatch `
+                    -Issued $issued `
+                    -Retained $retained[0] `
+                    -Candidate $_)
+            } | Select-Object -First 1)
+            $stateSend = @($indexedLines | Where-Object {
+                $resume.Count -eq 1 -and
+                $_.Index -gt $resume[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @('filetransfer_v4_state_sent')) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'repair_publication_kind') -eq
+                        'receive_recovery_proof_state' -and
+                (Test-ProofStatePublicationMatch `
+                    -Issued $issued `
+                    -Retained $retained[0] `
+                    -Candidate $_)
+            } | Select-Object -First 1)
+            $delivered = @($indexedLines | Where-Object {
+                $stateSend.Count -eq 1 -and
+                $_.Index -gt $stateSend[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @(
+                        'filetransfer_receive_recovery_proof_state_publication_receipt_applied')) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'publication_outcome') -eq 'Delivered' -and
+                (Test-ProofStatePublicationMatch `
+                    -Issued $issued `
+                    -Retained $retained[0] `
+                    -Candidate $_)
+            } | Select-Object -First 1)
+            $peerReceipt = @($indexedLines | Where-Object {
+                $stateSend.Count -eq 1 -and
+                $_.Index -gt $stateSend[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @('filetransfer_v4_state_received')) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'transfer_id') -eq $transfer -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'direction') -eq 'outbound' -and
+                (Get-ProofStateFrameFingerprint -Event $_) -eq
+                    (Get-ProofStateFrameFingerprint -Event $stateSend[0])
+            } | Select-Object -First 1)
+            $adopted = @($indexedLines | Where-Object {
+                $peerReceipt.Count -eq 1 -and
+                $_.Index -gt $peerReceipt[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @(
+                        'filetransfer_receive_recovery_operation_closure_adopted')) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'transfer_id') -eq $transfer -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'direction') -eq 'outbound'
+            } | Select-Object -First 1)
+            $resumed = @($indexedLines | Where-Object {
+                $adopted.Count -eq 1 -and
+                $_.Index -gt $adopted[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @(
+                        'filetransfer_bridge_recovery_payload_submission_resumed')) -and
+                (Test-ProofStateOperationMatch `
+                    -Issued $adopted[0] `
+                    -Candidate $_)
+            } | Select-Object -First 2)
+            if ($resume.Count -eq 1 -and
+                $stateSend.Count -eq 1 -and
+                $delivered.Count -eq 1 -and
+                $peerReceipt.Count -eq 1 -and
+                $adopted.Count -eq 1 -and
+                $resumed.Count -eq 1) {
+                continue
+            }
+
+            return $true
+        }
+
         foreach ($issued in $issuedEvents) {
             $writer = Get-TunaGuiLogLineFieldValue `
                 -Line $issued.Line `

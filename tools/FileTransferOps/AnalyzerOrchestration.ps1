@@ -1224,11 +1224,18 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_bridge_recovery_payload_submission_resumed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_peer_reachability_observed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_proof_state_publication_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_proof_state_publication_attempted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_proof_state_publication_held') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_proof_state_publication_resume_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_proof_state_publication_recheck_armed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_proof_state_publication_recheck_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_proof_state_publication_recheck_invalidated') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_proof_state_publication_receipt_applied') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_proof_state_publication_invalidated') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_transport_paused') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_transport_resumed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_tuna_activation_transport_pause_control_suppressed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_tuna_activation_local_barrier_released') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v4_state_sent') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v4_state_received') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v4_repair_delivery_both_failed') +
@@ -2039,11 +2046,25 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         }) | Out-Null
     }
     foreach ($candidateEvent in @($fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.UnresolvedCandidateEvents)) {
+        $publicationReason = Get-FileTransferEventField `
+            -Event $candidateEvent `
+            -Name 'publication_reason' `
+            -Default ''
+        $failureReason = if (
+            $candidateEvent.EventName -eq
+                'filetransfer_receive_recovery_proof_state_publication_receipt_applied' -and
+            $publicationReason -in @(
+                'filetransfer_receive_recovery_proof_state_not_sent',
+                'filetransfer_receive_recovery_proof_state_held_for_tuna_activation_pause')) {
+            'coordinator_authorized_receive_recovery_proof_state_not_held_during_tuna_activation_pause'
+        }
+        else {
+            'completed_retained_receive_recovery_peer_reachability_not_rechecked_for_v4_state_publication'
+        }
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing'
             Event = $candidateEvent
-            Reason =
-                'completed_retained_receive_recovery_peer_reachability_not_rechecked_for_v4_state_publication'
+            Reason = $failureReason
         }) | Out-Null
     }
     foreach ($candidateEvent in @($fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressionProof.UnresolvedCandidateEvents)) {

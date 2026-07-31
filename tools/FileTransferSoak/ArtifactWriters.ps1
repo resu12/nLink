@@ -29078,8 +29078,9 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
         $_.EventName -eq 'session_liveness_heartbeat_received'
     })
     [object[]]$decisions = @($events | Where-Object {
-        $_.EventName -eq
-            'filetransfer_receive_recovery_proof_state_publication_decided' -and
+        $_.EventName -in @(
+            'filetransfer_receive_recovery_proof_state_publication_decided',
+            'filetransfer_receive_recovery_proof_state_publication_resume_decided') -and
         (Get-ProofStateField `
             -Event $_ `
             -Names @('decision_status', 'status')) -in @(
@@ -29105,6 +29106,41 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
             -Names @('decision_status', 'status')) -in @(
                 'Accepted',
                 'Idempotent')
+    })
+    [object[]]$publicationDispositionReceipts = @($events | Where-Object {
+        $_.EventName -eq
+            'filetransfer_receive_recovery_proof_state_publication_receipt_applied' -and
+        (Get-ProofStateField `
+            -Event $_ `
+            -Names @('publication_outcome', 'outcome')) -in @(
+                'Held',
+                'Rejected') -and
+        (Get-ProofStateField `
+            -Event $_ `
+            -Names @('decision_status', 'status')) -in @(
+                'Accepted',
+                'Idempotent')
+    })
+    [object[]]$publicationAttempts = @($events | Where-Object {
+        $_.EventName -eq
+            'filetransfer_receive_recovery_proof_state_publication_attempted'
+    })
+    [object[]]$activationPauseEvents = @($events | Where-Object {
+        ($_.EventName -eq
+            'filetransfer_tuna_activation_transport_pause_control_suppressed' -and
+         (Get-ProofStateField -Event $_ -Names @('paused')) -eq '1' -and
+         (Get-ProofStateField -Event $_ -Names @('reason')) -eq
+            'tuna_activation_negotiating') -or
+        ($_.EventName -eq 'filetransfer_transport_paused' -and
+         (Get-ProofStateField -Event $_ -Names @('reason')) -eq
+            'tuna_activation_negotiating')
+    })
+    [object[]]$activationReleaseEvents = @($events | Where-Object {
+        ($_.EventName -eq
+            'filetransfer_tuna_activation_transport_pause_control_suppressed' -and
+         (Get-ProofStateField -Event $_ -Names @('paused')) -eq '0') -or
+        $_.EventName -eq 'filetransfer_tuna_activation_local_barrier_released' -or
+        $_.EventName -eq 'filetransfer_transport_resumed'
     })
     [object[]]$proofEvents = @($events | Where-Object {
         $_.EventName -in @(
@@ -29231,6 +29267,150 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
                     -Event $retained[0] `
                     -Names @('closure_generation')),
                 $bridgeDecisionGeneration))
+        }) | Out-Null
+    }
+
+    # A coordinator-issued proof-state command may be observed while the
+    # regular-V4 data session is intentionally paused for Tuna negotiation.
+    # The command must be retained as Held.  Treat a terminal not-sent receipt
+    # (or an unrecovered Held receipt in new evidence) as the same semantic
+    # boundary without requiring another bridge-ready event.
+    foreach ($issued in $issuedEvents) {
+        $receipt = @($receiptEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$issued.Sequence -and
+            (Test-ProofStateOperationMatch -Issued $issued -Candidate $_)
+        } | Select-Object -First 1)
+        if ($receipt.Count -ne 1) {
+            continue
+        }
+        $retained = @($retainedEvents | Where-Object {
+            [int64]$_.Sequence -ge [int64]$receipt[0].Sequence -and
+            (Test-ProofStateOperationMatch -Issued $issued -Candidate $_)
+        } | Select-Object -First 1)
+        if ($retained.Count -ne 1) {
+            continue
+        }
+
+        $decision = @($decisions | Where-Object {
+            $_.EventName -eq
+                'filetransfer_receive_recovery_proof_state_publication_decided' -and
+            [int64]$_.Sequence -gt [int64]$retained[0].Sequence -and
+            (Test-ProofStatePublicationCommandMatch `
+                -Issued $issued `
+                -Retained $retained[0] `
+                -Candidate $_)
+        } | Select-Object -First 1)
+        if ($decision.Count -ne 1) {
+            continue
+        }
+
+        $disposition = @($publicationDispositionReceipts | Where-Object {
+            [int64]$_.Sequence -gt [int64]$decision[0].Sequence -and
+            (Test-ProofStatePublicationCommandMatch `
+                -Issued $issued `
+                -Retained $retained[0] `
+                -Candidate $_)
+        } | Select-Object -First 1)
+        if ($disposition.Count -ne 1) {
+            continue
+        }
+
+        $outcome = Get-ProofStateField `
+            -Event $disposition[0] `
+            -Names @('publication_outcome', 'outcome')
+        $reason = Get-ProofStateField `
+            -Event $disposition[0] `
+            -Names @('publication_reason', 'reason')
+        if (($outcome -eq 'Rejected' -and
+             $reason -ne
+                'filetransfer_receive_recovery_proof_state_not_sent') -or
+            ($outcome -eq 'Held' -and
+             $reason -ne
+                'filetransfer_receive_recovery_proof_state_held_for_tuna_activation_pause')) {
+            continue
+        }
+
+        $writerId = Get-ProofStateField -Event $issued -Names @('log_writer_id')
+        $sessionId = Get-ProofStateField -Event $issued -Names @('session_id')
+        $transferId = Get-ProofStateField -Event $issued -Names @('transfer_id')
+        $pause = @($activationPauseEvents | Where-Object {
+            [int64]$_.Sequence -lt [int64]$disposition[0].Sequence -and
+            (Get-ProofStateField -Event $_ -Names @('log_writer_id')) -eq
+                $writerId -and
+            (Get-ProofStateField -Event $_ -Names @('session_id')) -eq
+                $sessionId -and
+            (Get-ProofStateField -Event $_ -Names @('transfer_id')) -eq
+                $transferId -and
+            (Get-ProofStateField -Event $_ -Names @('direction')) -eq
+                'inbound'
+        } | Select-Object -Last 1)
+        if ($pause.Count -ne 1) {
+            continue
+        }
+
+        $releasedBeforeDisposition = @($activationReleaseEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$pause[0].Sequence -and
+            [int64]$_.Sequence -le [int64]$disposition[0].Sequence -and
+            (Get-ProofStateField -Event $_ -Names @('log_writer_id')) -eq
+                $writerId -and
+            (Get-ProofStateField -Event $_ -Names @('session_id')) -eq
+                $sessionId -and
+            (Get-ProofStateField -Event $_ -Names @('transfer_id')) -eq
+                $transferId -and
+            (Get-ProofStateField -Event $_ -Names @('direction')) -eq
+                'inbound'
+        }).Count -gt 0
+        $attemptedBeforeDisposition = @($publicationAttempts | Where-Object {
+            [int64]$_.Sequence -gt [int64]$decision[0].Sequence -and
+            [int64]$_.Sequence -le [int64]$disposition[0].Sequence -and
+            (Test-ProofStatePublicationCommandMatch `
+                -Issued $issued `
+                -Retained $retained[0] `
+                -Candidate $_)
+        }).Count -gt 0
+        $stateSentBeforeDisposition = @($stateSends | Where-Object {
+            [int64]$_.Sequence -gt [int64]$decision[0].Sequence -and
+            [int64]$_.Sequence -le [int64]$disposition[0].Sequence -and
+            (Test-ProofStatePublicationCommandMatch `
+                -Issued $issued `
+                -Retained $retained[0] `
+                -Candidate $_)
+        }).Count -gt 0
+        $proofBeforeDisposition = @($proofEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$retained[0].Sequence -and
+            [int64]$_.Sequence -le [int64]$disposition[0].Sequence -and
+            (Test-ProofStateOperationMatch -Issued $issued -Candidate $_)
+        }).Count -gt 0
+        if ($releasedBeforeDisposition -or
+            $attemptedBeforeDisposition -or
+            $stateSentBeforeDisposition -or
+            $proofBeforeDisposition) {
+            continue
+        }
+
+        $raw.Add([pscustomobject]@{
+            Event = $disposition[0]
+            Issued = $issued
+            Retained = $retained[0]
+            BoundaryKind = 'activation_pause_submission_hold'
+            OperationKey = Get-ProofStateOperationKey `
+                -Issued $issued `
+                -Retained $retained[0]
+            Key = [string]::Join('|', @(
+                'activation_pause_submission_hold',
+                $writerId,
+                $sessionId,
+                $transferId,
+                (Get-ProofStateField `
+                    -Event $issued `
+                    -Names @('receive_recovery_operation_authority_id')),
+                (Get-ProofStateField `
+                    -Event $issued `
+                    -Names @('receive_recovery_operation_generation')),
+                (Get-ProofStateField `
+                    -Event $retained[0] `
+                    -Names @('closure_generation')),
+                (Get-ProofStatePublicationGeneration -Event $disposition[0])))
         }) | Out-Null
     }
 
@@ -29497,7 +29677,9 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
         New-Object 'System.Collections.Generic.HashSet[string]' `
             ([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($record in @($raw | Where-Object {
-                $_.BoundaryKind -eq 'post_delivery_peer_reachability'
+                $_.BoundaryKind -in @(
+                    'post_delivery_peer_reachability',
+                    'activation_pause_submission_hold')
             })) {
         [void]$postDeliveryOperationKeys.Add($record.OperationKey)
     }
@@ -41620,7 +41802,31 @@ function Get-FileTransferRecoveryFailureClassification {
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
         -Class 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing' `
-        -Events @($fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.UnresolvedCandidateEvents) `
+        -Events @($fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.UnresolvedCandidateEvents | Where-Object {
+            $_.EventName -eq
+                'filetransfer_receive_recovery_proof_state_publication_receipt_applied' -and
+            (Get-FileTransferEventField `
+                -Event $_ `
+                -Name 'publication_reason' `
+                -Default '') -in @(
+                    'filetransfer_receive_recovery_proof_state_not_sent',
+                    'filetransfer_receive_recovery_proof_state_held_for_tuna_activation_pause')
+        }) `
+        -DefaultReason 'coordinator_authorized_receive_recovery_proof_state_not_held_during_tuna_activation_pause' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing' `
+        -Events @($fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof.UnresolvedCandidateEvents | Where-Object {
+            -not ($_.EventName -eq
+                    'filetransfer_receive_recovery_proof_state_publication_receipt_applied' -and
+                (Get-FileTransferEventField `
+                    -Event $_ `
+                    -Name 'publication_reason' `
+                    -Default '') -in @(
+                        'filetransfer_receive_recovery_proof_state_not_sent',
+                        'filetransfer_receive_recovery_proof_state_held_for_tuna_activation_pause'))
+        }) `
         -DefaultReason 'completed_retained_receive_recovery_peer_reachability_not_rechecked_for_v4_state_publication' `
         -UseDefaultReason
     Add-FileTransferProofChainFailureCandidates `

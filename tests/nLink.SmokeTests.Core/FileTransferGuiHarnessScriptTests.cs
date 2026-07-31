@@ -3367,6 +3367,75 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task ReceiveRecoveryProofStatePublicationActivationPauseRequiresHeldResume()
+    {
+        var guiText = File.ReadAllText(
+            Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = Regex.Replace(guiText, @"(?m)^ {4}", string.Empty);
+        var fieldValueBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Test-TunaGuiLogLineHasEvent");
+        var hasEventBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineHasEvent",
+            "Test-TunaGuiLogLineFieldMatch");
+        var classifierBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiReceiveRecoveryCompletedRetainedProofStatePublicationFailure",
+            "Test-TunaGuiReceiveRecoveryProofStateRecheckHeartbeatSuppressionFailure");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
+            function Test-TunaGuiLogLineHasEvent { {{hasEventBody}} }
+            function Test-TunaGuiReceiveRecoveryCompletedRetainedProofStatePublicationFailure {
+                {{classifierBody}}
+            }
+
+            $shared = 'session_id=session-pause; transfer_id=transfer-pause; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; route_publication_generation=1; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; checkpoint_generation=1; data_session_generation=1'
+            $inbound = "$shared; direction=inbound; log_writer_id=writer-inbound"
+            $outbound = "$shared; direction=outbound; log_writer_id=writer-outbound"
+            $inboundOperation = 'receive_recovery_operation_generation=2; receive_recovery_operation_authority_id=pause-inbound; bridge_decision_generation=2'
+            $outboundOperation = 'receive_recovery_operation_generation=2; receive_recovery_operation_authority_id=pause-outbound; bridge_decision_generation=2'
+            $rejected = @(
+                "event=filetransfer_receive_recovery_operation_issued; $outboundOperation; $outbound",
+                "event=filetransfer_receive_recovery_operation_issued; $inboundOperation; $inbound",
+                "event=filetransfer_receive_recovery_operation_closure_retained; $inboundOperation; $inbound; closure_generation=2; closure_state=Retained",
+                "event=filetransfer_tuna_activation_transport_pause_control_suppressed; $inbound; paused=1; reason=tuna_activation_negotiating",
+                "event=filetransfer_receive_recovery_proof_state_publication_decided; $inboundOperation; $inbound; closure_generation=2; publication_generation=1; decision_status=Accepted",
+                "event=filetransfer_receive_recovery_proof_state_publication_receipt_applied; $inboundOperation; $inbound; closure_generation=2; publication_generation=1; publication_outcome=Rejected; publication_reason=filetransfer_receive_recovery_proof_state_not_sent; decision_status=Accepted"
+            )
+            if (-not (Test-TunaGuiReceiveRecoveryCompletedRetainedProofStatePublicationFailure -Lines $rejected)) {
+                throw 'activation-pause rejection was not classified'
+            }
+
+            $recovered = @($rejected[0..4])
+            $recovered += "event=filetransfer_receive_recovery_proof_state_publication_receipt_applied; $inboundOperation; $inbound; closure_generation=2; publication_generation=1; publication_outcome=Held; publication_reason=filetransfer_receive_recovery_proof_state_held_for_tuna_activation_pause; decision_status=Accepted"
+            $recovered += "event=filetransfer_tuna_activation_local_barrier_released; $inbound; paused=0; reason=tuna_activation_answer_ack_timeout"
+            $recovered += "event=filetransfer_receive_recovery_proof_state_publication_resume_decided; $inboundOperation; $inbound; closure_generation=2; publication_generation=1; decision_status=Accepted"
+            $recovered += "event=filetransfer_v4_state_sent; $inboundOperation; $inbound; closure_generation=2; publication_generation=1; repair_publication_kind=receive_recovery_proof_state; epoch=44; v4_state_wire_fingerprint=pause-state-1"
+            $recovered += "event=filetransfer_receive_recovery_proof_state_publication_receipt_applied; $inboundOperation; $inbound; closure_generation=2; publication_generation=1; publication_outcome=Delivered; decision_status=Accepted; v4_state_wire_fingerprint=pause-state-1"
+            $recovered += "event=filetransfer_v4_state_received; $outbound; epoch=44; v4_state_wire_fingerprint=pause-state-1; applied=1"
+            $recovered += "event=filetransfer_receive_recovery_operation_proof_observed; $outboundOperation; $outbound; closure_generation=2; closure_state=Adopted; proof_identity=file_transfer_v4_state:44"
+            $recovered += "event=filetransfer_receive_recovery_operation_closure_adopted; $outboundOperation; $outbound; closure_generation=2; closure_state=Adopted; proof_identity=file_transfer_v4_state:44"
+            $recovered += "event=filetransfer_bridge_recovery_payload_submission_resumed; $outboundOperation; $outbound; closure_generation=2; closure_state=Adopted; proof_identity=file_transfer_v4_state:44"
+            if (Test-TunaGuiReceiveRecoveryCompletedRetainedProofStatePublicationFailure -Lines $recovered) {
+                throw 'exact held/resume chain did not recover the activation-pause boundary'
+            }
+
+            Write-Output 'gui-proof-state-activation-pause-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Activation-pause proof-state GUI classification failed.{Environment.NewLine}" +
+            $"{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-proof-state-activation-pause-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ReceiveRecoveryProofStateRecheckHeartbeatSuppressionRequiresPreterminalRecoveryChain()
     {
         var guiText = File.ReadAllText(

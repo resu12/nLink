@@ -14,6 +14,99 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransferOpsScriptsTestBase
 {
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task AnalyzeRetained_ReceiveRecoveryProofStateActivationPauseRequiresHeldResume(
+        bool compact,
+        bool recovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string sharedScope =
+            "session_id=sess_pause_hold; transfer_id=transfer_pause_hold; " +
+            "route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; " +
+            "route_publication_generation=1; runtime_generation=1; terminal_generation=0; " +
+            "leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; " +
+            "checkpoint_generation=1; data_session_generation=1";
+        const string inboundScope =
+            sharedScope + "; direction=inbound; log_writer_id=writer_inbound";
+        const string outboundScope =
+            sharedScope + "; direction=outbound; log_writer_id=writer_outbound";
+        const string inboundOperation =
+            "receive_recovery_operation_generation=2; " +
+            "receive_recovery_operation_authority_id=pause-hold-inbound; " +
+            "bridge_decision_generation=2";
+        const string outboundOperation =
+            "receive_recovery_operation_generation=2; " +
+            "receive_recovery_operation_authority_id=pause-hold-outbound; " +
+            "bridge_decision_generation=2";
+
+        List<string> messages =
+        [
+            $"event=filetransfer_receive_recovery_operation_issued; {outboundOperation}; {outboundScope}",
+            $"event=filetransfer_receive_recovery_operation_issued; {inboundOperation}; {inboundScope}",
+            $"event=filetransfer_receive_recovery_operation_execution_receipt_applied; {inboundOperation}; {inboundScope}; " +
+                "execution_outcome=Completed; closure_state=Retained; closure_generation=2; proof_identity=(none)",
+            $"event=filetransfer_receive_recovery_operation_closure_retained; {inboundOperation}; {inboundScope}; " +
+                "execution_outcome=Completed; closure_state=Retained; closure_generation=2; proof_identity=(none)",
+            $"event=filetransfer_tuna_activation_transport_pause_control_suppressed; {inboundScope}; " +
+                "paused=1; reason=tuna_activation_negotiating",
+            $"event=filetransfer_receive_recovery_proof_state_publication_decided; {inboundOperation}; {inboundScope}; " +
+                "closure_generation=2; publication_generation=1; decision_status=Accepted",
+            $"event=filetransfer_receive_recovery_proof_state_publication_receipt_applied; {inboundOperation}; {inboundScope}; " +
+                "closure_generation=2; publication_generation=1; publication_outcome=" +
+                (recovered ? "Held" : "Rejected") + "; publication_reason=" +
+                (recovered
+                    ? "filetransfer_receive_recovery_proof_state_held_for_tuna_activation_pause"
+                    : "filetransfer_receive_recovery_proof_state_not_sent") +
+                "; decision_status=Accepted"
+        ];
+
+        if (recovered)
+        {
+            messages.AddRange(
+            [
+                $"event=filetransfer_tuna_activation_local_barrier_released; {inboundScope}; paused=0; reason=tuna_activation_answer_ack_timeout",
+                $"event=filetransfer_receive_recovery_proof_state_publication_resume_decided; {inboundOperation}; {inboundScope}; closure_generation=2; publication_generation=1; decision_status=Accepted",
+                $"event=filetransfer_v4_state_sent; {inboundOperation}; {inboundScope}; closure_generation=2; publication_generation=1; repair_publication_kind=receive_recovery_proof_state; epoch=44; v4_state_wire_fingerprint=pause-state-1; missing_range_count=0",
+                $"event=filetransfer_receive_recovery_proof_state_publication_receipt_applied; {inboundOperation}; {inboundScope}; closure_generation=2; publication_generation=1; publication_outcome=Delivered; decision_status=Accepted; v4_state_wire_fingerprint=pause-state-1",
+                $"event=filetransfer_v4_state_received; {outboundScope}; epoch=44; v4_state_wire_fingerprint=pause-state-1; applied=1",
+                $"event=filetransfer_receive_recovery_operation_proof_observed; {outboundOperation}; {outboundScope}; closure_generation=2; closure_state=Adopted; proof_identity=file_transfer_v4_state:44",
+                $"event=filetransfer_receive_recovery_operation_closure_adopted; {outboundOperation}; {outboundScope}; closure_generation=2; closure_state=Adopted; proof_identity=file_transfer_v4_state:44",
+                $"event=filetransfer_bridge_recovery_payload_submission_resumed; {outboundOperation}; {outboundScope}; closure_generation=2; closure_state=Adopted; proof_identity=file_transfer_v4_state:44"
+            ]);
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            messages.Select(message => LogLine(message)).ToArray(),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_raw_count"]);
+        Assert.Equal("1", verdict["filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_distinct_count"]);
+        Assert.Equal(recovered ? "1" : "0", verdict["filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_recovered_count"]);
+        Assert.Equal(recovered ? "0" : "1", verdict["filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_unresolved_count"]);
+        if (!recovered)
+        {
+            Assert.Equal("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing", verdict["first_proof_chain_failure_class"]);
+            Assert.Equal("filetransfer_receive_recovery_proof_state_publication_receipt_applied", verdict["first_proof_chain_failure_event"]);
+            Assert.Equal("coordinator_authorized_receive_recovery_proof_state_not_held_during_tuna_activation_pause", verdict["first_proof_chain_failure_reason"]);
+        }
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task AnalyzeRetained_ReceiveRecoveryCompletedRetainedProofStatePublicationMissing_HasFullCompactParity(
