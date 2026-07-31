@@ -15303,6 +15303,19 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 Assert.IsAssignableFrom<
                     IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge>(
                     host);
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshReceipt?
+                preparedRefreshReceipt = null;
+            bridge.RuntimeUnlockInitialActivationOfferEnvelopeRefreshPrepared +=
+                (_, args) =>
+                {
+                    preparedRefreshReceipt = args.Receipt;
+                    args.Decision =
+                        new RuntimeUnlockInitialActivationOfferEnvelopeRefreshDecision(
+                            args.Receipt,
+                            RuntimeUnlockInitialActivationOfferEnvelopeRefreshStatus
+                                .Accepted,
+                            "test_refresh_receipt_committed");
+                };
             var logStart = GetOperationalLogLength();
             var holdRequests =
                 new ConcurrentQueue<(
@@ -15403,7 +15416,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     FileTransferReceiveRecoveryOperation Operation) hold,
                 string reason,
                 bool duplicate = false,
-                long? holdGeneration = null)
+                long? holdGeneration = null,
+                RuntimeUnlockInitialActivationOfferEnvelopeRefreshCommand?
+                    refreshCommand = null)
             {
                 var decision =
                     new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
@@ -15413,7 +15428,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                         reason,
                         holdGeneration ??
                             hold.Operation.Authority.OperationGeneration,
-                        hold.Operation);
+                        hold.Operation)
+                    {
+                        EnvelopeRefreshCommand = refreshCommand,
+                    };
                 Assert.True(
                     bridge
                         .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
@@ -15527,13 +15545,32 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     FileTransferReceiveRecoveryClosureState.Adopted,
                 ClosureGeneration = 2,
             };
+            var refreshSentAtUnixMs =
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var envelopeLifetimeMs =
+                failedSendHeld.Request.EnvelopeExpiresAtUnixMs -
+                failedSendHeld.Request.EnvelopeSentAtUnixMs;
+            var refreshCommand =
+                new RuntimeUnlockInitialActivationOfferEnvelopeRefreshCommand(
+                    failedSendHeld.Request,
+                    HoldGeneration:
+                        failedSendHeld.Operation.Authority.OperationGeneration,
+                    ReceiveRecoveryAuthority: adoptedSuccessor.Authority,
+                    ClosureGeneration: adoptedSuccessor.ClosureGeneration,
+                    RefreshGeneration: 1,
+                    SuccessorEnvelopeGeneration:
+                        failedSendHeld.Request.EnvelopeGeneration + 1,
+                    SuccessorSentAtUnixMs: refreshSentAtUnixMs,
+                    SuccessorExpiresAtUnixMs:
+                        refreshSentAtUnixMs + envelopeLifetimeMs);
             ReleaseHold(
                 (
                     failedSendHeld.Request,
                     adoptedSuccessor),
                 "test_receive_recovery_operation_completed_after_send_failure",
                 holdGeneration:
-                    failedSendHeld.Operation.Authority.OperationGeneration);
+                    failedSendHeld.Operation.Authority.OperationGeneration,
+                refreshCommand: refreshCommand);
 
             await negotiation.WaitAsync(TimeSpan.FromSeconds(5));
             await WaitUntilAsync(
@@ -15542,13 +15579,24 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     offerSubmissionAttemptsBeforeRelease,
                 TimeSpan.FromSeconds(5));
 
-            Assert.NotEmpty(sentOfferFingerprints);
-            Assert.All(
-                sentOfferFingerprints,
+            var refreshReceipt = Assert.IsType<
+                RuntimeUnlockInitialActivationOfferEnvelopeRefreshReceipt>(
+                preparedRefreshReceipt);
+            Assert.Equal(refreshCommand, refreshReceipt.Command);
+            Assert.Contains(
+                payerIntentHeld.Request.ControlEnvelopeFingerprint,
+                sentOfferFingerprints);
+            Assert.Contains(
+                refreshReceipt.SuccessorEnvelopeFingerprint,
+                sentOfferFingerprints);
+            Assert.DoesNotContain(
+                sentOfferFingerprints.Skip(
+                    offerSubmissionAttemptsBeforeRelease),
                 sentFingerprint =>
-                    Assert.Equal(
+                    string.Equals(
+                        sentFingerprint,
                         payerIntentHeld.Request.ControlEnvelopeFingerprint,
-                        sentFingerprint));
+                        StringComparison.Ordinal));
             Assert.Equal(
                 retryAttemptsBeforeRelease,
                 Assert.IsType<int>(
@@ -15556,6 +15604,30 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                         host,
                         "accelerationNegotiationRetryAttempts")));
             var resumedTail = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=runtime_unlock_initial_activation_receive_recovery_hold_send_prevalidated;",
+                resumedTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "boundary_match_mode=committed_refresh_successor;",
+                resumedTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "prevalidation_status=accepted;",
+                resumedTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=runtime_unlock_initial_activation_receive_recovery_hold_post_prevalidation_submission;",
+                resumedTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                $"envelope_generation={refreshCommand.SuccessorEnvelopeGeneration};",
+                resumedTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                $"refresh_generation={refreshCommand.RefreshGeneration};",
+                resumedTail,
+                StringComparison.Ordinal);
             Assert.Equal(
                 2,
                 resumedTail

@@ -12791,11 +12791,21 @@ public sealed partial class NknSignalingTransport
     {
         legacyBlockerReason =
             CaptureRuntimeUnlockInitialActivationLegacyReceiveStallBlocker();
+        var boundaryMatchMode = "none";
+        var refreshGeneration = 0L;
+        var refreshReceiptCurrent = false;
+        var prevalidationReason = "hold_prevalidation_not_released";
+        var requestMatchesBoundary =
+            TryMatchRuntimeUnlockInitialActivationReceiveRecoveryHoldPrevalidationBoundary(
+                prevalidation,
+                boundary,
+                out boundaryMatchMode,
+                out refreshGeneration,
+                out refreshReceiptCurrent,
+                out prevalidationReason);
         var accepted =
             prevalidation.IsReleased &&
-            RuntimeUnlockInitialActivationHoldRequestMatchesOfferBoundary(
-                prevalidation.Request,
-                boundary) &&
+            requestMatchesBoundary &&
             RuntimeUnlockInitialActivationReceiveRecoveryHoldDecisionMatchesRequest(
                 prevalidation.Decision) &&
             ValidateRuntimeUnlockOfferAuthorityBoundary(
@@ -12811,14 +12821,152 @@ public sealed partial class NknSignalingTransport
                 lastRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision ==
                     prevalidation.Decision;
         }
+        if (accepted)
+        {
+            prevalidationReason =
+                boundaryMatchMode == "committed_refresh_successor"
+                    ? "committed_refresh_successor_current"
+                    : "direct_request_boundary_current";
+        }
+        else if (requestMatchesBoundary &&
+                 prevalidation.IsReleased)
+        {
+            prevalidationReason =
+                "released_hold_or_offer_authority_not_current";
+        }
 
         if (emitTelemetry)
         {
             LocalOperationalLog.Info(
                 "NKN.Tuna",
-                $"event=runtime_unlock_initial_activation_receive_recovery_hold_send_prevalidated; {FormatRuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(prevalidation.Request)}; send_path={SanitizeLogToken(purpose)}; one_call_prevalidated=1; prevalidation_status={(accepted ? "accepted" : "rejected")}; decision_status={SanitizeLogToken(prevalidation.Decision.Status.ToString())}; same_generation_resume={(ShouldResumeRuntimeUnlockInitialActivationSameGeneration(prevalidation.Result) ? 1 : 0)}; legacy_receive_stall_blocker_observed={(IsReceiveStallActivationSendBlocker(legacyBlockerReason) ? 1 : 0)}; legacy_receive_stall_blocker={SanitizeLogToken(legacyBlockerReason ?? "(none)")}; decision_reason={SanitizeLogToken(prevalidation.Decision.Reason)}");
+                $"event=runtime_unlock_initial_activation_receive_recovery_hold_send_prevalidated; {FormatRuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(prevalidation.Request)}; send_path={SanitizeLogToken(purpose)}; one_call_prevalidated=1; prevalidation_status={(accepted ? "accepted" : "rejected")}; decision_status={SanitizeLogToken(prevalidation.Decision.Status.ToString())}; same_generation_resume={(ShouldResumeRuntimeUnlockInitialActivationSameGeneration(prevalidation.Result) ? 1 : 0)}; boundary_match_mode={SanitizeLogToken(boundaryMatchMode)}; effective_envelope_generation={boundary.EnvelopeGeneration}; effective_envelope_fingerprint={SanitizeLogToken(boundary.ControlEnvelopeFingerprint)}; refresh_generation={refreshGeneration}; refresh_receipt_current={(refreshReceiptCurrent ? 1 : 0)}; legacy_receive_stall_blocker_observed={(IsReceiveStallActivationSendBlocker(legacyBlockerReason) ? 1 : 0)}; legacy_receive_stall_blocker={SanitizeLogToken(legacyBlockerReason ?? "(none)")}; prevalidation_reason={SanitizeLogToken(prevalidationReason)}; decision_reason={SanitizeLogToken(prevalidation.Decision.Reason)}");
         }
         return accepted;
+    }
+
+    private bool
+        TryMatchRuntimeUnlockInitialActivationReceiveRecoveryHoldPrevalidationBoundary(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldPrevalidation
+                prevalidation,
+            RuntimeUnlockOfferAuthorityBoundary boundary,
+            out string matchMode,
+            out long refreshGeneration,
+            out bool refreshReceiptCurrent,
+            out string rejectionReason)
+    {
+        matchMode = "none";
+        refreshGeneration = 0;
+        refreshReceiptCurrent = false;
+        rejectionReason = "hold_request_boundary_mismatch";
+        if (!prevalidation.IsReleased)
+        {
+            return false;
+        }
+
+        if (RuntimeUnlockInitialActivationHoldRequestMatchesOfferBoundary(
+                prevalidation.Request,
+                boundary))
+        {
+            matchMode = "direct";
+            rejectionReason = "direct_request_boundary_current";
+            return true;
+        }
+
+        lock (accelerationGate)
+        {
+            if (prevalidation.Decision.EnvelopeRefreshCommand is not
+                    { } command ||
+                command.HoldRequest != prevalidation.Request)
+            {
+                rejectionReason =
+                    "committed_refresh_command_not_bound_to_hold_request";
+                return false;
+            }
+
+            refreshGeneration = command.RefreshGeneration;
+            if (lastRuntimeUnlockInitialActivationEnvelopeRefreshReceipt is not
+                    { } receipt ||
+                receipt.Command != command)
+            {
+                rejectionReason =
+                    "committed_refresh_receipt_not_current";
+                return false;
+            }
+
+            refreshReceiptCurrent = true;
+            if (runtimeUnlockInitialActivationEnvelopeState is not
+                    { } envelopeState ||
+                envelopeState.Boundary != boundary ||
+                outboundRuntimeUnlockOfferAuthorityBoundary != boundary)
+            {
+                rejectionReason =
+                    "committed_refresh_successor_boundary_not_current";
+                return false;
+            }
+
+            var request = command.HoldRequest;
+            if (boundary.Mode !=
+                    RuntimeUnlockOfferAuthorityMode.InitialActivation ||
+                !string.Equals(
+                    request.SessionId,
+                    boundary.SessionId,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    request.TransferId,
+                    boundary.TransferId,
+                    StringComparison.Ordinal) ||
+                request.Direction != boundary.Direction ||
+                !string.Equals(
+                    request.OfferNonce,
+                    boundary.Nonce,
+                    StringComparison.Ordinal) ||
+                request.PayerDecisionId != boundary.PayerDecisionId ||
+                request.OfferGeneration != boundary.OfferGeneration ||
+                request.TransactionGeneration !=
+                    boundary.TransactionGeneration ||
+                request.TunaPathLeaseGeneration !=
+                    boundary.TunaPathLeaseGeneration ||
+                !string.Equals(
+                    request.TunaPathLeaseListenerRunId,
+                    boundary.TunaPathLeaseListenerRunId,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    request.SemanticOfferFingerprint,
+                    boundary.SemanticOfferFingerprint,
+                    StringComparison.Ordinal) ||
+                !RuntimeUnlockInitialActivationExpectedSourceScopeMatches(
+                    request.ExpectedScope,
+                    boundary.InitialActivationExpectedScope))
+            {
+                rejectionReason =
+                    "committed_refresh_semantic_or_scope_mismatch";
+                return false;
+            }
+
+            if (boundary.EnvelopeGeneration !=
+                    command.SuccessorEnvelopeGeneration ||
+                boundary.EnvelopeSentAtUnixMs !=
+                    command.SuccessorSentAtUnixMs ||
+                boundary.EnvelopeExpiresAtUnixMs !=
+                    command.SuccessorExpiresAtUnixMs ||
+                !string.Equals(
+                    boundary.ControlEnvelopeFingerprint,
+                    receipt.SuccessorEnvelopeFingerprint,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    envelopeState.Envelope.MessageId,
+                    receipt.MessageId,
+                    StringComparison.Ordinal))
+            {
+                rejectionReason =
+                    "committed_refresh_successor_envelope_mismatch";
+                return false;
+            }
+        }
+
+        matchMode = "committed_refresh_successor";
+        rejectionReason = "committed_refresh_successor_current";
+        return true;
     }
 
     private string?
@@ -24269,6 +24417,8 @@ public sealed partial class NknSignalingTransport
             ? () => GetRuntimeUnlockBulkQueueFallbackObservedProofFailureReason(activationSessionId, purpose)
             : null;
 
+        RuntimeUnlockOfferAuthorityBoundary?
+            initialActivationSubmissionBoundary = null;
         if (expectedOfferAuthorityBoundary is
             {
                 Mode: RuntimeUnlockOfferAuthorityMode.InitialActivation,
@@ -24288,6 +24438,7 @@ public sealed partial class NknSignalingTransport
                 return AccelerationControlSendResult.StaleCallback;
             }
 
+            initialActivationSubmissionBoundary = initialActivationBoundary;
             if (latestSubmissionUtcMs > 0 &&
                 ShouldResumeRuntimeUnlockInitialActivationSameGeneration(
                     exactInitialActivationHoldPrevalidation.Result))
@@ -24312,6 +24463,41 @@ public sealed partial class NknSignalingTransport
                 "NKN.Tuna",
                 $"event=tuna_acceleration_control_submission_rejected; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(envelope.Type)}; submission_deadline_utc_ms={latestSubmissionUtcMs}; decision_reason=offer_answer_deadline_elapsed");
             return AccelerationControlSendResult.StaleCallback;
+        }
+
+        if (initialActivationSubmissionBoundary is { } submittedBoundary)
+        {
+            var refreshGeneration =
+                exactInitialActivationHoldPrevalidation.Decision
+                    .EnvelopeRefreshCommand?.RefreshGeneration ?? 0;
+            if (refreshGeneration <= 0)
+            {
+                lock (accelerationGate)
+                {
+                    if (lastRuntimeUnlockInitialActivationEnvelopeRefreshReceipt is
+                            { } committedRefresh &&
+                        runtimeUnlockInitialActivationEnvelopeState is
+                            { } currentEnvelope &&
+                        currentEnvelope.Boundary == submittedBoundary &&
+                        committedRefresh.Command.SuccessorEnvelopeGeneration ==
+                            submittedBoundary.EnvelopeGeneration &&
+                        string.Equals(
+                            committedRefresh.SuccessorEnvelopeFingerprint,
+                            submittedBoundary.ControlEnvelopeFingerprint,
+                            StringComparison.Ordinal) &&
+                        string.Equals(
+                            committedRefresh.MessageId,
+                            currentEnvelope.Envelope.MessageId,
+                            StringComparison.Ordinal))
+                    {
+                        refreshGeneration =
+                            committedRefresh.Command.RefreshGeneration;
+                    }
+                }
+            }
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=runtime_unlock_initial_activation_receive_recovery_hold_post_prevalidation_submission; session_id={SanitizeLogToken(submittedBoundary.SessionId)}; transfer_id={SanitizeLogToken(submittedBoundary.TransferId)}; direction={SanitizeLogToken(submittedBoundary.Direction.ToString().ToLowerInvariant())}; offer_nonce={SanitizeLogToken(submittedBoundary.Nonce)}; payer_decision_id={submittedBoundary.PayerDecisionId}; offer_generation={submittedBoundary.OfferGeneration}; transaction_generation={submittedBoundary.TransactionGeneration}; tuna_path_lease_generation={submittedBoundary.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={SanitizeLogToken(submittedBoundary.TunaPathLeaseListenerRunId)}; semantic_offer_fingerprint={SanitizeLogToken(submittedBoundary.SemanticOfferFingerprint)}; envelope_generation={submittedBoundary.EnvelopeGeneration}; control_envelope_fingerprint={SanitizeLogToken(submittedBoundary.ControlEnvelopeFingerprint)}; envelope_sent_at_unix_ms={submittedBoundary.EnvelopeSentAtUnixMs}; envelope_expires_at_unix_ms={submittedBoundary.EnvelopeExpiresAtUnixMs}; refresh_generation={refreshGeneration}; message_id={SanitizeLogToken(envelope.MessageId)}; send_path={SanitizeLogToken(purpose)}; decision_reason=exact_prevalidated_envelope_submitted");
         }
 
         var bytes = EnvelopeCodec.Serialize(envelope);
