@@ -1382,6 +1382,13 @@ public sealed partial class SessionFileTransferService
                         .ReceiveRecoveryPeerReachabilityObserved -=
                     OnReceiveRecoveryPeerReachabilityObserved;
             }
+
+            if (previousTransport is
+                ISessionLivenessSignalingTransport sessionLivenessTransport)
+            {
+                sessionLivenessTransport.SessionLivenessProofReceived -=
+                    OnReceiveRecoveryProofStatePublicationRecheckEvidence;
+            }
         }
 
         if (previousLifecycle is not null)

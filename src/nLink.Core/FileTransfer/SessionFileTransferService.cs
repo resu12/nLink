@@ -475,6 +475,12 @@ public sealed partial class SessionFileTransferService :
     internal static Func<string, string, Task>? OutboundSparsePostInstallBarrierForTests { get; set; }
     internal static Func<string, string, Task>? OutboundSparseStateApplyBarrierForTests { get; set; }
     internal static Func<string, string, Task>? OutboundRegularV4PhysicalSendPreReservationBarrierForTests { get; set; }
+    internal static Func<string, string, Task>?
+        InboundReceiveRecoveryProofStatePreTransportDeliveryBarrierForTests
+        { get; set; }
+    internal static bool
+        InboundReceiveRecoveryProofStateControlPlaneOverrideForTests
+        { get; set; }
     public SessionFileTransferService(Func<string>? transferIdFactory = null)
     {
         this.transferIdFactory = transferIdFactory ?? (() => Guid.NewGuid().ToString("N"));
@@ -766,6 +772,12 @@ public sealed partial class SessionFileTransferService :
             bridgeRecoveryExecutionBridge
                     .ReceiveRecoveryPeerReachabilityObserved +=
                 OnReceiveRecoveryPeerReachabilityObserved;
+        }
+
+        if (transport is ISessionLivenessSignalingTransport sessionLivenessTransport)
+        {
+            sessionLivenessTransport.SessionLivenessProofReceived +=
+                OnReceiveRecoveryProofStatePublicationRecheckEvidence;
         }
 
         if (transport is ISignalingTransport lifecycleTransport)
@@ -7687,18 +7699,55 @@ public sealed partial class SessionFileTransferService :
         FileTransferReceiveRecoverySubstate current,
         string reason)
     {
-        if (previous.ProofStatePublication?.PendingCommand is
+        var previousProofPublication = previous.ProofStatePublication;
+        var currentProofPublication = current.ProofStatePublication;
+        if (currentProofPublication?.PendingRecheckArm is { } currentArm &&
+            previousProofPublication?.PendingRecheckArm != currentArm)
+        {
+            var predecessor = currentArm.PredecessorReceipt;
+            var command = predecessor.Command;
+            var observation = command.Authority.Observation;
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_receive_recovery_proof_state_publication_recheck_armed; session_id={FormatProtocolLogValue(observation.SessionId)}; transfer_id={FormatProtocolLogValue(observation.TransferId)}; direction={observation.Direction.ToString().ToLowerInvariant()}; {FormatReceiveRecoveryObservationScopeFields(observation)}; recovery_operation_authority_id={FormatProtocolLogValue(command.Authority.AuthorityId.ToString())}; recovery_operation_generation={command.Authority.OperationGeneration}; closure_generation={command.ClosureGeneration}; closure_state={current.CurrentOperation?.ClosureState.ToString() ?? "none"}; predecessor_publication_generation={command.PublicationGeneration}; predecessor_frame_fingerprint={FormatProtocolLogValue(predecessor.FrameFingerprint)}; predecessor_publication_outcome={predecessor.Outcome}; submission_epoch={command.Observation.SubmissionEpoch}; process_epoch={command.Observation.ProcessEpoch}; recheck_armed_utc_ms={currentArm.ArmedUtcMs}; decision_reason=filetransfer_receive_recovery_proof_state_initial_delivery_armed_recheck");
+        }
+
+        if (previousProofPublication?.PendingRecheckArm is { } previousArm &&
+            currentProofPublication?.PendingRecheckArm != previousArm &&
+            !(currentProofPublication?.PendingCommand is
+              {
+                  PredecessorReceipt: { } pendingPredecessor,
+              } &&
+              pendingPredecessor == previousArm.PredecessorReceipt))
+        {
+            var predecessor = previousArm.PredecessorReceipt;
+            var command = predecessor.Command;
+            var observation = command.Authority.Observation;
+            var invalidationReason =
+                current.CurrentOperation?.ReceiveProof is not null
+                    ? "receive_recovery_proof_observed"
+                    : current.LastTerminalOperation?.InvalidationReason ??
+                      reason;
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_receive_recovery_proof_state_publication_recheck_invalidated; session_id={FormatProtocolLogValue(observation.SessionId)}; transfer_id={FormatProtocolLogValue(observation.TransferId)}; direction={observation.Direction.ToString().ToLowerInvariant()}; {FormatReceiveRecoveryObservationScopeFields(observation)}; recovery_operation_authority_id={FormatProtocolLogValue(command.Authority.AuthorityId.ToString())}; recovery_operation_generation={command.Authority.OperationGeneration}; closure_generation={command.ClosureGeneration}; predecessor_publication_generation={command.PublicationGeneration}; predecessor_frame_fingerprint={FormatProtocolLogValue(predecessor.FrameFingerprint)}; predecessor_publication_outcome={predecessor.Outcome}; submission_epoch={command.Observation.SubmissionEpoch}; process_epoch={command.Observation.ProcessEpoch}; recheck_armed_utc_ms={previousArm.ArmedUtcMs}; invalidation_target=recheck_arm; decision_reason={FormatProtocolLogValue(invalidationReason)}");
+        }
+
+        if (previousProofPublication?.PendingCommand is
                 { } previousPublication &&
-            current.ProofStatePublication?.PendingCommand !=
+            currentProofPublication?.PendingCommand !=
                 previousPublication &&
-            current.ProofStatePublication?.LastReceipt?.Command !=
+            currentProofPublication?.LastReceipt?.Command !=
                 previousPublication)
         {
             var publicationObservation =
                 previousPublication.Authority.Observation;
+            var predecessorReceipt =
+                previousPublication.PredecessorReceipt;
+            var recheckEvidence = previousPublication.RecheckEvidence;
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_receive_recovery_proof_state_publication_invalidated; session_id={FormatProtocolLogValue(publicationObservation.SessionId)}; transfer_id={FormatProtocolLogValue(publicationObservation.TransferId)}; direction={publicationObservation.Direction.ToString().ToLowerInvariant()}; recovery_operation_authority_id={FormatProtocolLogValue(previousPublication.Authority.AuthorityId.ToString())}; recovery_operation_generation={previousPublication.Authority.OperationGeneration}; closure_generation={previousPublication.ClosureGeneration}; publication_generation={previousPublication.PublicationGeneration}; submission_epoch={previousPublication.Observation.SubmissionEpoch}; process_epoch={previousPublication.Observation.ProcessEpoch}; decision_reason={FormatProtocolLogValue(reason)}");
+                $"event=filetransfer_receive_recovery_proof_state_publication_invalidated; session_id={FormatProtocolLogValue(publicationObservation.SessionId)}; transfer_id={FormatProtocolLogValue(publicationObservation.TransferId)}; direction={publicationObservation.Direction.ToString().ToLowerInvariant()}; {FormatReceiveRecoveryObservationScopeFields(publicationObservation)}; recovery_operation_authority_id={FormatProtocolLogValue(previousPublication.Authority.AuthorityId.ToString())}; recovery_operation_generation={previousPublication.Authority.OperationGeneration}; closure_generation={previousPublication.ClosureGeneration}; publication_generation={previousPublication.PublicationGeneration}; publication_attempt={(predecessorReceipt is null ? "initial" : "post_delivery_recheck")}; predecessor_publication_generation={predecessorReceipt?.Command.PublicationGeneration ?? 0}; predecessor_frame_fingerprint={FormatProtocolLogValue(predecessorReceipt?.FrameFingerprint ?? "(none)")}; predecessor_receipt_observed_utc_ms={previousPublication.PredecessorReceiptObservedUtcMs}; recheck_heartbeat_generation={recheckEvidence?.HeartbeatGeneration ?? 0}; recheck_heartbeat_sequence={recheckEvidence?.HeartbeatSequence ?? 0}; recheck_proof_kind={FormatProtocolLogValue(recheckEvidence?.ProofKind ?? "(none)")}; recheck_lane={FormatProtocolLogValue(recheckEvidence?.Lane ?? "(none)")}; submission_epoch={previousPublication.Observation.SubmissionEpoch}; process_epoch={previousPublication.Observation.ProcessEpoch}; invalidation_target=pending_command; decision_reason={FormatProtocolLogValue(reason)}");
         }
 
         if (previous.CurrentOperation is { } supersededPredecessor &&
@@ -7808,6 +7857,36 @@ public sealed partial class SessionFileTransferService :
                     reason);
             }
         }
+    }
+
+    private static string FormatReceiveRecoveryObservationScopeFields(
+        FileTransferReceiveRecoveryObservation? observation)
+    {
+        if (observation is not { } scope)
+        {
+            return
+                "route=(none); protocol_version=0; live_route_epoch=0; " +
+                "route_publication_generation=0; route_commit_generation=0; " +
+                "runtime_generation=0; terminal_generation=0; " +
+                "leg_generation=0; transport_epoch=0; " +
+                "bridge_recovery_generation=0; checkpoint_request_id=(none); " +
+                "data_session_identity=(none); data_session_generation=0";
+        }
+
+        return
+            $"route={FormatProtocolLogValue(scope.RouteToken)}; " +
+            $"protocol_version={scope.ProtocolVersion}; " +
+            $"live_route_epoch={scope.LiveRouteEpoch}; " +
+            $"route_publication_generation={scope.RoutePublication.PublicationGeneration}; " +
+            $"route_commit_generation={scope.RouteCommit?.CommitGeneration ?? 0}; " +
+            $"runtime_generation={scope.RuntimeOwner.RuntimeGeneration}; " +
+            $"terminal_generation={scope.TerminalGeneration}; " +
+            $"leg_generation={scope.LegGeneration}; " +
+            $"transport_epoch={scope.TransportEpoch}; " +
+            $"bridge_recovery_generation={scope.BridgeRecoveryGeneration}; " +
+            $"checkpoint_request_id={FormatProtocolLogValue(scope.CheckpointRequestId ?? "(none)")}; " +
+            $"data_session_identity={FormatProtocolLogValue(scope.DataSessionIdentity)}; " +
+            $"data_session_generation={scope.DataSessionGeneration}";
     }
 
     private static void LogReceiveRecoveryOperationEvent(

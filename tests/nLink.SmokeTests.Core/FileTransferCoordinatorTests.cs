@@ -6755,7 +6755,7 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
-    public void FileTransferReceiveRecoveryProofStatePublication_DeliveredReceiptIsEvidenceOnlyAndProofInvalidatesPendingCommand()
+    public void FileTransferReceiveRecoveryProofStatePublication_DeliveredReceiptArmsOneHeartbeatRecheckAndProofInvalidatesPendingCommand()
     {
         var fixture =
             CreateReceiveRecoveryOperationFixture(
@@ -6803,7 +6803,8 @@ public sealed class FileTransferCoordinatorTests
                         FileTransferReceiveRecoveryProofStatePublicationOutcome
                             .Delivered,
                         "frame-fingerprint",
-                        "delivered"));
+                        "delivered"),
+                    observedUtcMs: 350);
         Assert.True(delivered.Accepted, delivered.Reason);
         var retained = Assert.IsType<FileTransferReceiveRecoveryOperation>(
             delivered.State.PersistentState.FileTransferReceiveRecovery
@@ -6812,6 +6813,18 @@ public sealed class FileTransferCoordinatorTests
             FileTransferReceiveRecoveryClosureState.Retained,
             retained.ClosureState);
         Assert.Null(retained.ReceiveProof);
+        var deliveredReceipt =
+            Assert.IsType<
+                FileTransferReceiveRecoveryProofStatePublicationReceipt>(
+                delivered.State.PersistentState.FileTransferReceiveRecovery
+                    .ProofStatePublication?.LastReceipt);
+        var arm =
+            Assert.IsType<
+                FileTransferReceiveRecoveryProofStatePublicationRecheckArm>(
+                delivered.State.PersistentState.FileTransferReceiveRecovery
+                    .ProofStatePublication?.PendingRecheckArm);
+        Assert.Equal(deliveredReceipt, arm.PredecessorReceipt);
+        Assert.Equal(350, arm.ArmedUtcMs);
         var duplicate =
             FileTransferCoordinator.ObserveReceiveRecoveryPeerReachability(
                 delivered.State,
@@ -6830,6 +6843,159 @@ public sealed class FileTransferCoordinatorTests
                     observedUtcMs: 400));
         Assert.False(reissued.Accepted);
         Assert.Null(reissued.ProofStatePublicationCommand);
+
+        var heartbeatEvidence =
+            CreateReceiveRecoveryProofStatePublicationRecheckEvidence(
+                delivered.State.SessionId,
+                heartbeatSequence: 19,
+                observedUtcMs: 400);
+        var staleHeartbeat =
+            FileTransferCoordinator
+                .ObserveReceiveRecoveryProofStatePublicationRecheckEvidence(
+                    delivered.State,
+                    heartbeatEvidence with { ObservedUtcMs = 350 });
+        Assert.False(staleHeartbeat.Accepted);
+        Assert.Equal(delivered.State, staleHeartbeat.State);
+        var heartbeatAck =
+            FileTransferCoordinator
+                .ObserveReceiveRecoveryProofStatePublicationRecheckEvidence(
+                    delivered.State,
+                    heartbeatEvidence with
+                    {
+                        ProofKind = "heartbeat_ack",
+                        Lane = "control_ack",
+                    });
+        Assert.False(heartbeatAck.Accepted);
+        Assert.Equal(delivered.State, heartbeatAck.State);
+
+        var recheck =
+            FileTransferCoordinator
+                .ObserveReceiveRecoveryProofStatePublicationRecheckEvidence(
+                    delivered.State,
+                    heartbeatEvidence);
+        Assert.True(recheck.Accepted, recheck.Reason);
+        var recheckCommand =
+            Assert.IsType<
+                FileTransferReceiveRecoveryProofStatePublicationCommand>(
+                recheck.ProofStatePublicationCommand);
+        Assert.Equal(2, recheckCommand.PublicationGeneration);
+        Assert.Equal(command.Authority, recheckCommand.Authority);
+        Assert.Equal(command.ClosureGeneration, recheckCommand.ClosureGeneration);
+        Assert.Equal(command.Observation, recheckCommand.Observation);
+        Assert.Equal(deliveredReceipt, recheckCommand.PredecessorReceipt);
+        Assert.Equal(
+            arm.ArmedUtcMs,
+            recheckCommand.PredecessorReceiptObservedUtcMs);
+        Assert.Equal(heartbeatEvidence, recheckCommand.RecheckEvidence);
+        Assert.Null(
+            recheck.State.PersistentState.FileTransferReceiveRecovery
+                .ProofStatePublication?.PendingRecheckArm);
+        Assert.True(
+            FileTransferCoordinator
+                .IsReceiveRecoveryProofStatePublicationCommandCurrent(
+                    recheck.State,
+                    recheckCommand));
+
+        var duplicateHeartbeat =
+            FileTransferCoordinator
+                .ObserveReceiveRecoveryProofStatePublicationRecheckEvidence(
+                    recheck.State,
+                    heartbeatEvidence);
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Idempotent,
+            duplicateHeartbeat.Status);
+        Assert.Equal(recheckCommand, duplicateHeartbeat.ProofStatePublicationCommand);
+        Assert.Equal(recheck.State, duplicateHeartbeat.State);
+        var duplicateHeartbeatWithLaterLocalTimestamp =
+            FileTransferCoordinator
+                .ObserveReceiveRecoveryProofStatePublicationRecheckEvidence(
+                    recheck.State,
+                    heartbeatEvidence with
+                    {
+                        ObservedUtcMs = heartbeatEvidence.ObservedUtcMs + 1,
+                    });
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Idempotent,
+            duplicateHeartbeatWithLaterLocalTimestamp.Status);
+        Assert.Equal(
+            recheckCommand,
+            duplicateHeartbeatWithLaterLocalTimestamp
+                .ProofStatePublicationCommand);
+        Assert.Equal(
+            recheck.State,
+            duplicateHeartbeatWithLaterLocalTimestamp.State);
+        var laterHeartbeat =
+            FileTransferCoordinator
+                .ObserveReceiveRecoveryProofStatePublicationRecheckEvidence(
+                    recheck.State,
+                    heartbeatEvidence with
+                    {
+                        HeartbeatSequence = 20,
+                        ObservedUtcMs = 450,
+                    });
+        Assert.False(laterHeartbeat.Accepted);
+        Assert.Null(laterHeartbeat.ProofStatePublicationCommand);
+        Assert.Equal(recheck.State, laterHeartbeat.State);
+
+        var proofWinsRecheckRace =
+            FileTransferCoordinator.ObserveReceiveRecoveryProof(
+                recheck.State,
+                new FileTransferReceiveRecoveryProof(
+                    authority,
+                    "peer-v4-state-proof-after-recheck",
+                    "file_transfer_data_frame",
+                    475));
+        Assert.True(proofWinsRecheckRace.Accepted, proofWinsRecheckRace.Reason);
+        Assert.Null(
+            proofWinsRecheckRace.State.PersistentState
+                .FileTransferReceiveRecovery.ProofStatePublication);
+        Assert.False(
+            FileTransferCoordinator
+                .IsReceiveRecoveryProofStatePublicationCommandCurrent(
+                    proofWinsRecheckRace.State,
+                    recheckCommand));
+
+        var recheckDeliveredReceipt =
+            new FileTransferReceiveRecoveryProofStatePublicationReceipt(
+                recheckCommand,
+                FileTransferReceiveRecoveryProofStatePublicationOutcome
+                    .Delivered,
+                "recheck-frame-fingerprint",
+                "delivered");
+        var recheckDelivered =
+            FileTransferCoordinator
+                .ApplyReceiveRecoveryProofStatePublicationReceipt(
+                    recheck.State,
+                    recheckDeliveredReceipt,
+                    observedUtcMs: 500);
+        Assert.True(recheckDelivered.Accepted, recheckDelivered.Reason);
+        Assert.Null(
+            recheckDelivered.State.PersistentState.FileTransferReceiveRecovery
+                .ProofStatePublication?.PendingRecheckArm);
+        var noThirdPublication =
+            FileTransferCoordinator
+                .ObserveReceiveRecoveryProofStatePublicationRecheckEvidence(
+                    recheckDelivered.State,
+                    heartbeatEvidence with
+                    {
+                        HeartbeatSequence = 21,
+                        ObservedUtcMs = 550,
+                    });
+        Assert.False(noThirdPublication.Accepted);
+        Assert.Null(noThirdPublication.ProofStatePublicationCommand);
+        Assert.Equal(recheckDelivered.State, noThirdPublication.State);
+        var duplicatePredecessorReceipt =
+            FileTransferCoordinator
+                .ApplyReceiveRecoveryProofStatePublicationReceipt(
+                    recheckDelivered.State,
+                    deliveredReceipt,
+                    observedUtcMs: 600);
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Idempotent,
+            duplicatePredecessorReceipt.Status);
+        Assert.Equal(
+            recheckDelivered.State,
+            duplicatePredecessorReceipt.State);
 
         var pendingFixture =
             CreateReceiveRecoveryOperationFixture(
@@ -6887,6 +7053,83 @@ public sealed class FileTransferCoordinatorTests
                 .IsReceiveRecoveryProofStatePublicationCommandCurrent(
                     proved.State,
                     pending));
+    }
+
+    [Fact]
+    public void FileTransferReceiveRecoveryProofStatePublication_RecheckArmIsClearedByExactOperationInvalidation()
+    {
+        var fixture =
+            CreateReceiveRecoveryOperationFixture(
+                FileTransferDirection.Inbound);
+        var authority =
+            Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+                fixture.Decision.Authority);
+        var executionReceipt =
+            new FileTransferBridgeRecoveryExecutionReceipt(
+                authority.ExecutionCommand,
+                FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                "hard",
+                "bridge_recovery_completed");
+        var started =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(
+                fixture.Decision.State,
+                new FileTransferBridgeRecoveryExecutionStartResult(
+                    authority.ExecutionCommand,
+                    FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                    "bridge_recovery_execution_started",
+                    Task.FromResult(executionReceipt)),
+                observedUtcMs: 100);
+        var completed =
+            FileTransferCoordinator.ObserveReceiveRecoveryExecutionReceipt(
+                started.State,
+                executionReceipt,
+                observedUtcMs: 200);
+        var issued =
+            FileTransferCoordinator.ObserveReceiveRecoveryPeerReachability(
+                completed.State,
+                CreateReceiveRecoveryPeerReachabilityObservation(
+                    authority.ExecutionCommand,
+                    observedUtcMs: 300));
+        var command =
+            Assert.IsType<
+                FileTransferReceiveRecoveryProofStatePublicationCommand>(
+                issued.ProofStatePublicationCommand);
+        var delivered =
+            FileTransferCoordinator
+                .ApplyReceiveRecoveryProofStatePublicationReceipt(
+                    issued.State,
+                    new FileTransferReceiveRecoveryProofStatePublicationReceipt(
+                        command,
+                        FileTransferReceiveRecoveryProofStatePublicationOutcome
+                            .Delivered,
+                        "frame-fingerprint",
+                        "delivered"),
+                    observedUtcMs: 350);
+        Assert.NotNull(
+            delivered.State.PersistentState.FileTransferReceiveRecovery
+                .ProofStatePublication?.PendingRecheckArm);
+
+        var invalidated =
+            FileTransferCoordinator.InvalidateReceiveRecoveryOperation(
+                delivered.State,
+                authority,
+                "scope_replaced");
+        Assert.True(invalidated.Accepted, invalidated.Reason);
+        Assert.Null(
+            invalidated.State.PersistentState.FileTransferReceiveRecovery
+                .ProofStatePublication);
+
+        var staleEvidence =
+            FileTransferCoordinator
+                .ObserveReceiveRecoveryProofStatePublicationRecheckEvidence(
+                    invalidated.State,
+                    CreateReceiveRecoveryProofStatePublicationRecheckEvidence(
+                        invalidated.State.SessionId,
+                        heartbeatSequence: 19,
+                        observedUtcMs: 400));
+        Assert.False(staleEvidence.Accepted);
+        Assert.Null(staleEvidence.ProofStatePublicationCommand);
+        Assert.Equal(invalidated.State, staleEvidence.State);
     }
 
     [Fact]
@@ -17316,6 +17559,20 @@ public sealed class FileTransferCoordinatorTests
             ReceiveResumedIdentity: $"receive-resumed:{observedUtcMs}",
             ObservedUtcMs: observedUtcMs,
             Source: "authenticated_expected_source_receive_resumed");
+
+    private static
+        FileTransferReceiveRecoveryProofStatePublicationRecheckEvidence
+        CreateReceiveRecoveryProofStatePublicationRecheckEvidence(
+            string sessionId,
+            long heartbeatSequence,
+            long observedUtcMs)
+        => new(
+            sessionId,
+            HeartbeatGeneration: 1,
+            heartbeatSequence,
+            observedUtcMs,
+            ProofKind: "heartbeat_received",
+            Lane: "control");
 
     private static
         RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest

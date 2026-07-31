@@ -834,7 +834,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                     .FileTransferReceiveRecovery
                     .CurrentOperation?
                     .ClosureState ==
-                FileTransferReceiveRecoveryClosureState.Retained);
+                FileTransferReceiveRecoveryClosureState.Retained,
+            timeoutMs: 10_000);
         Assert.True(
             service.TryGetActiveFileTransferRecoveryLivenessSnapshot(
                 recoveryRequest.SessionId,
@@ -896,10 +897,11 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "ReceiveRecoveryOperation")]
-    public async Task FileTransferReceiveRecoveryProofStatePublication_ReachabilitySendsOneEmptyRepairState()
+    public async Task FileTransferReceiveRecoveryProofStatePublication_NewerHeartbeatSendsOnePostDeliveryRecheck()
     {
         const string transferId =
             "transfer_receive_recovery_proof_state_publication";
+        var logStart = GetOperationalLogLength();
         using var service = new SessionFileTransferService();
         using var transport =
             new LoopbackFileTransferTransport($"session_{transferId}");
@@ -953,6 +955,16 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                     .ClosureState ==
                 FileTransferReceiveRecoveryClosureState.Retained);
 
+        var receiptObservedUtcMs =
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                    context,
+                    "CoordinatorPersistentState")
+                .FileTransferReceiveRecovery
+                .CurrentOperation?
+                .ExecutionReceiptObservedUtcMs ?? 0;
+        var reachabilityObservedUtcMs = Math.Max(
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            receiptObservedUtcMs + 1);
         transport.RaiseReceiveRecoveryPeerReachability(
             new FileTransferReceiveRecoveryPeerReachabilityObservation(
                 command,
@@ -962,8 +974,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 ProcessSpawnTicks: DateTime.UtcNow.Ticks,
                 HeartbeatIdentity: "heartbeat-2",
                 ReceiveResumedIdentity: "receive-resumed-2",
-                ObservedUtcMs:
-                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                ObservedUtcMs: reachabilityObservedUtcMs,
                 Source: "loopback_expected_source_heartbeat"));
 
         await WaitUntilAsync(
@@ -973,10 +984,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                         "CoordinatorPersistentState")
                     .FileTransferReceiveRecovery
                     .ProofStatePublication?
-                    .LastReceipt?
-                    .Outcome ==
-                FileTransferReceiveRecoveryProofStatePublicationOutcome
-                    .Delivered);
+                    .LastReceipt is not null,
+            timeoutMs: 10_000);
 
         var state = Assert.IsType<FileTransferStateFrameV4>(
             Assert.Single(dataSession.SentFrames));
@@ -994,6 +1003,357 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Equal(
             FileTransferReceiveRecoveryProofStatePublicationOutcome.Delivered,
             recovery.ProofStatePublication?.LastReceipt?.Outcome);
+        var initialReceipt =
+            Assert.IsType<
+                FileTransferReceiveRecoveryProofStatePublicationReceipt>(
+                recovery.ProofStatePublication?.LastReceipt);
+        var recheckArm =
+            Assert.IsType<
+                FileTransferReceiveRecoveryProofStatePublicationRecheckArm>(
+                recovery.ProofStatePublication?.PendingRecheckArm);
+        var fingerprintMethod = typeof(SessionFileTransferService)
+            .GetMethod(
+                "CreateFileTransferV4StateWireFingerprint",
+                BindingFlags.Static | BindingFlags.NonPublic)!;
+        var initialWireFingerprint = Assert.IsType<string>(
+            fingerprintMethod.Invoke(null, [state]));
+        Assert.Equal(initialWireFingerprint, initialReceipt.FrameFingerprint);
+
+        var recheckObservedUtcMs =
+            DateTimeOffset.UtcNow.AddSeconds(5).ToUnixTimeMilliseconds();
+        transport.RaiseSessionLivenessProof(
+            generation: 0,
+            sequence: 19,
+            observedUtcMs: recheckObservedUtcMs);
+        transport.RaiseSessionLivenessProof(
+            generation: 1,
+            sequence: 0,
+            observedUtcMs: recheckObservedUtcMs);
+        transport.RaiseSessionLivenessProof(
+            generation: 1,
+            sequence: 19,
+            observedUtcMs: recheckObservedUtcMs,
+            proofKind: "heartbeat_ack");
+        transport.RaiseSessionLivenessProof(
+            generation: 1,
+            sequence: 19,
+            observedUtcMs: recheckObservedUtcMs,
+            lane: "media");
+        Assert.Single(dataSession.SentFrames);
+
+        transport.RaiseSessionLivenessProof(
+            generation: 1,
+            sequence: 19,
+            observedUtcMs: recheckObservedUtcMs);
+        await WaitUntilAsync(
+            () => dataSession.SentFrames.Count == 2,
+            timeoutMs: 10_000);
+        await WaitUntilAsync(
+            () =>
+                GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                        context,
+                        "CoordinatorPersistentState")
+                    .FileTransferReceiveRecovery
+                    .ProofStatePublication?
+                    .LastReceipt?
+                    .Command.PublicationGeneration == 2,
+            timeoutMs: 10_000);
+
+        var recheckedState = Assert.IsType<FileTransferStateFrameV4>(
+            dataSession.SentFrames[1]);
+        Assert.Empty(recheckedState.MissingRanges);
+        Assert.True(recheckedState.Epoch > state.Epoch);
+        Assert.Empty(transport.RegularV4PressureInstallReceipts);
+        recovery =
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                    context,
+                    "CoordinatorPersistentState")
+                .FileTransferReceiveRecovery;
+        var recheckReceipt =
+            Assert.IsType<
+                FileTransferReceiveRecoveryProofStatePublicationReceipt>(
+                recovery.ProofStatePublication?.LastReceipt);
+        Assert.Equal(2, recheckReceipt.Command.PublicationGeneration);
+        Assert.Equal(
+            initialReceipt,
+            recheckReceipt.Command.PredecessorReceipt);
+        Assert.Equal(
+            recheckArm.ArmedUtcMs,
+            recheckReceipt.Command.PredecessorReceiptObservedUtcMs);
+        Assert.True(
+            recheckReceipt.Command.RecheckEvidence?.ObservedUtcMs >
+            recheckReceipt.Command.PredecessorReceiptObservedUtcMs);
+        Assert.Equal(
+            1,
+            recheckReceipt.Command.RecheckEvidence?.HeartbeatGeneration);
+        Assert.Equal(
+            19,
+            recheckReceipt.Command.RecheckEvidence?.HeartbeatSequence);
+        Assert.Equal(
+            FileTransferReceiveRecoveryClosureState.Retained,
+            recovery.CurrentOperation?.ClosureState);
+        Assert.Null(recovery.CurrentOperation?.ReceiveProof);
+        var recheckWireFingerprint = Assert.IsType<string>(
+            fingerprintMethod.Invoke(null, [recheckedState]));
+        Assert.Equal(recheckWireFingerprint, recheckReceipt.FrameFingerprint);
+
+        transport.RaiseSessionLivenessProof(
+            generation: 1,
+            sequence: 19,
+            observedUtcMs: recheckObservedUtcMs + 100);
+        transport.RaiseSessionLivenessProof(
+            generation: 1,
+            sequence: 20,
+            observedUtcMs: recheckObservedUtcMs + 1);
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains(
+                "event=filetransfer_receive_recovery_proof_state_publication_recheck_decided;",
+                StringComparison.Ordinal) &&
+                ReadOperationalLogTail(logStart).Contains(
+                    "decision_status=Idempotent",
+                    StringComparison.Ordinal),
+            timeoutMs: 10_000);
+        Assert.Equal(2, dataSession.SentFrames.Count);
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains(
+            "event=filetransfer_receive_recovery_proof_state_publication_recheck_armed;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "event=filetransfer_receive_recovery_proof_state_publication_attempted;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "publication_attempt=post_delivery_recheck",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"predecessor_receipt_observed_utc_ms={recheckArm.ArmedUtcMs}",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"v4_state_wire_fingerprint={recheckWireFingerprint}",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "route=regular_nkn_v4_fast; protocol_version=4;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "data_session_identity=",
+            log,
+            StringComparison.Ordinal);
+
+        transport.RaiseReceiveRecoveryProof(
+            command,
+            proofIdentity: "loopback_rechecked_v4_state_received");
+        await WaitUntilAsync(
+            () =>
+                GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                        context,
+                        "CoordinatorPersistentState")
+                    .FileTransferReceiveRecovery
+                    .CurrentOperation?
+                    .ClosureState ==
+                FileTransferReceiveRecoveryClosureState.Adopted,
+            timeoutMs: 10_000);
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains(
+                "event=filetransfer_receive_recovery_operation_closure_adopted;",
+                StringComparison.Ordinal),
+            timeoutMs: 10_000);
+        log = ReadOperationalLogTail(logStart);
+        Assert.Contains(
+            "event=filetransfer_receive_recovery_operation_proof_observed;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "event=filetransfer_receive_recovery_operation_closure_adopted;",
+            log,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "ReceiveRecoveryOperation")]
+    public async Task FileTransferReceiveRecoveryProofStatePublication_ProofWinningPreTransportBarrierSuppressesStaleRecheck()
+    {
+        const string transferId =
+            "transfer_receive_recovery_proof_state_pretransport_race";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport =
+            new PeerVisibleControlPlaneLoopbackTransport(
+                $"session_{transferId}",
+                deliverFrames: false);
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4InboundContext(
+            transferId,
+            chunkCount: 256,
+            nextChunkIndex: 9,
+            durableHighestChunkIndex: 8,
+            creditUntilChunkIndexExclusive: 64);
+        using var dataSession =
+            new RecordingDataSession($"session_{transferId}", transferId);
+        SetPrivateProperty(context, "DataSession", dataSession);
+        SetPrivateProperty(context, "DataSessionGeneration", 1L);
+        SeedCurrentRuntimeOwnerForTest(
+            context,
+            FileTransferDirection.Inbound,
+            "receive_recovery_proof_state_pretransport_race");
+        typeof(SessionFileTransferService)
+            .GetField(
+                "inboundTransfer",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        Assert.True((bool)typeof(SessionFileTransferService)
+            .GetMethod(
+                "TryRequestFileTransferReceiveRecovery",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    new FileTransferReceiveRecoveryRequest(
+                        $"session_{transferId}",
+                        transferId,
+                        FileTransferDirection.Inbound,
+                        "session_liveness_timeout_pending"),
+                ])!);
+        var command = Assert.Single(
+            transport.BridgeRecoveryExecutionCommands);
+        transport.CompleteBridgeRecoveryExecution(
+            command,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            "loopback_bridge_recovery_completed");
+        await WaitUntilAsync(
+            () =>
+                GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                        context,
+                        "CoordinatorPersistentState")
+                    .FileTransferReceiveRecovery
+                    .CurrentOperation?
+                    .ClosureState ==
+                FileTransferReceiveRecoveryClosureState.Retained);
+
+        var receiptObservedUtcMs =
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                    context,
+                    "CoordinatorPersistentState")
+                .FileTransferReceiveRecovery
+                .CurrentOperation?
+                .ExecutionReceiptObservedUtcMs ?? 0;
+        transport.RaiseReceiveRecoveryPeerReachability(
+            new FileTransferReceiveRecoveryPeerReachabilityObservation(
+                command,
+                SubmissionEpoch: 2,
+                ProcessEpoch: 2,
+                ProcessId: 1234,
+                ProcessSpawnTicks: DateTime.UtcNow.Ticks,
+                HeartbeatIdentity: "heartbeat-2",
+                ReceiveResumedIdentity: "receive-resumed-2",
+                ObservedUtcMs: Math.Max(
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    receiptObservedUtcMs + 1),
+                Source: "loopback_expected_source_heartbeat"));
+        await WaitUntilAsync(
+            () =>
+                GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                        context,
+                        "CoordinatorPersistentState")
+                    .FileTransferReceiveRecovery
+                    .ProofStatePublication?
+                    .LastReceipt is not null,
+            timeoutMs: 10_000);
+        Assert.False(transport.LastValidationAccepted);
+        Assert.Equal(0, transport.SendCount);
+        Assert.Single(dataSession.SentFrames);
+
+        var barrierEntered =
+            new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+        SessionFileTransferService
+            .InboundReceiveRecoveryProofStatePreTransportDeliveryBarrierForTests =
+            async (observedTransferId, _) =>
+            {
+                if (!string.Equals(
+                        observedTransferId,
+                        transferId,
+                        StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                barrierEntered.TrySetResult(true);
+                transport.RaiseReceiveRecoveryProof(
+                    command,
+                    proofIdentity:
+                        "loopback_receive_proof_before_transport_delivery");
+                await WaitUntilAsync(
+                    () =>
+                        GetPrivateProperty<
+                                FileTransferCoordinatorPersistentState>(
+                                context,
+                                "CoordinatorPersistentState")
+                            .FileTransferReceiveRecovery
+                            .CurrentOperation?
+                            .ClosureState ==
+                        FileTransferReceiveRecoveryClosureState.Adopted,
+                    timeoutMs: 10_000);
+            };
+        SessionFileTransferService
+            .InboundReceiveRecoveryProofStateControlPlaneOverrideForTests =
+            true;
+        try
+        {
+            var recheckObservedUtcMs =
+                DateTimeOffset.UtcNow.AddSeconds(5)
+                    .ToUnixTimeMilliseconds();
+            transport.RaiseSessionLivenessProof(
+                generation: 1,
+                sequence: 19,
+                observedUtcMs: recheckObservedUtcMs);
+            await barrierEntered.Task.WaitAsync(
+                TimeSpan.FromSeconds(10));
+            await WaitUntilAsync(
+                () =>
+                    ReadOperationalLogTail(logStart).Contains(
+                        "publication_reason=filetransfer_receive_recovery_proof_state_command_rejected_at_transport_delivery",
+                        StringComparison.Ordinal),
+                timeoutMs: 10_000);
+        }
+        finally
+        {
+            SessionFileTransferService
+                .InboundReceiveRecoveryProofStatePreTransportDeliveryBarrierForTests =
+                null;
+            SessionFileTransferService
+                .InboundReceiveRecoveryProofStateControlPlaneOverrideForTests =
+                false;
+        }
+
+        await Task.Delay(100);
+        Assert.False(transport.LastValidationAccepted);
+        Assert.Equal(0, transport.SendCount);
+        Assert.Single(dataSession.SentFrames);
+        var recovery =
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                    context,
+                    "CoordinatorPersistentState")
+                .FileTransferReceiveRecovery;
+        Assert.Equal(
+            FileTransferReceiveRecoveryClosureState.Adopted,
+            recovery.CurrentOperation?.ClosureState);
+        Assert.Null(recovery.ProofStatePublication?.PendingCommand);
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains(
+            "event=filetransfer_receive_recovery_proof_state_publication_invalidated;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "publication_attempt=post_delivery_recheck",
+            log,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -27014,6 +27374,10 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     {
         public FileTransferControlPlaneDeliveryRequest? LastRequest { get; private set; }
 
+        public bool LastValidationAccepted { get; private set; }
+
+        public int SendCount { get; private set; }
+
         public async Task<FileTransferControlPlaneDeliveryResult> SendFileTransferControlPlaneFrameAsync(
             FileTransferControlPlaneDeliveryRequest request,
             CancellationToken ct)
@@ -27021,6 +27385,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             ct.ThrowIfCancellationRequested();
             LastRequest = request;
             var accepted = request.PreTransportDeliveryValidator?.Invoke() ?? true;
+            LastValidationAccepted = accepted;
+            SendCount++;
             if (accepted && deliverFrames)
             {
                 var dataSession = await OpenFileTransferDataSessionAsync(

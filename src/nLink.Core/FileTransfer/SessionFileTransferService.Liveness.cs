@@ -189,6 +189,137 @@ public sealed partial class SessionFileTransferService
                 observation));
     }
 
+    private void OnReceiveRecoveryProofStatePublicationRecheckEvidence(
+        object? sender,
+        SessionLivenessProofEventArgs args)
+    {
+        if (sender is not ISessionLivenessSignalingTransport livenessTransport ||
+            args.Generation <= 0 ||
+            args.Sequence <= 0 ||
+            args.ObservedUtcMs <= 0 ||
+            !string.Equals(
+                args.ProofKind,
+                "heartbeat_received",
+                StringComparison.Ordinal) ||
+            args.Lane is not ("control" or "bulk"))
+        {
+            return;
+        }
+
+        var evidence =
+            new FileTransferReceiveRecoveryProofStatePublicationRecheckEvidence(
+                args.SessionId,
+                args.Generation,
+                args.Sequence,
+                args.ObservedUtcMs,
+                args.ProofKind,
+                args.Lane);
+        _ = Task.Run(() =>
+            ProcessReceiveRecoveryProofStatePublicationRecheckEvidence(
+                livenessTransport,
+                evidence));
+    }
+
+    private void ProcessReceiveRecoveryProofStatePublicationRecheckEvidence(
+        ISessionLivenessSignalingTransport livenessTransport,
+        FileTransferReceiveRecoveryProofStatePublicationRecheckEvidence evidence)
+    {
+        FileTransferReceiveRecoveryDecision? decision = null;
+        FileTransferReceiveRecoveryOperation? operation = null;
+        FileTransferReceiveRecoveryProofStatePublicationCommand? command = null;
+        InboundTransferContext? publicationContext = null;
+        lock (gate)
+        {
+            if (evidence.IsDefault ||
+                transport is not
+                    ISessionLivenessSignalingTransport currentLivenessTransport ||
+                !ReferenceEquals(currentLivenessTransport, livenessTransport) ||
+                inboundTransfer is not { IsTerminal: false } inbound ||
+                !string.Equals(
+                    inbound.SessionId,
+                    evidence.SessionId,
+                    StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            var recovery =
+                inbound.CoordinatorPersistentState.FileTransferReceiveRecovery;
+            var proofPublication = recovery.ProofStatePublication;
+            var exactDuplicateEvidence =
+                proofPublication?.LastRecheckEvidence is
+                    { } lastRecheckEvidence &&
+                FileTransferCoordinator
+                    .IsSameReceiveRecoveryProofStatePublicationRecheckEvidenceIdentity(
+                        lastRecheckEvidence,
+                        evidence) &&
+                ((proofPublication.PendingCommand?.RecheckEvidence is
+                      { } pendingRecheckEvidence &&
+                  FileTransferCoordinator
+                      .IsSameReceiveRecoveryProofStatePublicationRecheckEvidenceIdentity(
+                          pendingRecheckEvidence,
+                          evidence)) ||
+                 (proofPublication.LastReceipt?.Command.RecheckEvidence is
+                      { } completedRecheckEvidence &&
+                  FileTransferCoordinator
+                      .IsSameReceiveRecoveryProofStatePublicationRecheckEvidenceIdentity(
+                          completedRecheckEvidence,
+                          evidence)));
+            if (recovery.CurrentOperation is not
+                {
+                    ExecutionState:
+                        FileTransferReceiveRecoveryExecutionState.Completed,
+                    ClosureState:
+                        FileTransferReceiveRecoveryClosureState.Retained,
+                    ReceiveProof: null,
+                } ||
+                proofPublication?.LastReceipt is not
+                {
+                    Outcome:
+                        FileTransferReceiveRecoveryProofStatePublicationOutcome
+                            .Delivered,
+                } ||
+                (proofPublication.PendingRecheckArm is null &&
+                 !exactDuplicateEvidence))
+            {
+                return;
+            }
+
+            decision = FileTransferCoordinator
+                .ObserveReceiveRecoveryProofStatePublicationRecheckEvidence(
+                    CreateCoordinatorStateLocked(inbound),
+                    evidence);
+            ApplyReceiveRecoveryStateLocked(inbound, decision.Value.State);
+            operation =
+                inbound.CoordinatorPersistentState.FileTransferReceiveRecovery
+                    .CurrentOperation;
+            command = decision.Value.ProofStatePublicationCommand;
+            if (command is { } exactCommand &&
+                inbound.ReceiveRecoveryProofStatePublicationInFlightCommand is
+                    null)
+            {
+                inbound.ReceiveRecoveryProofStatePublicationInFlightCommand =
+                    exactCommand;
+                publicationContext = inbound;
+            }
+        }
+
+        var authority = operation?.Authority;
+        var scope = authority?.Observation;
+        var predecessorReceipt = command?.PredecessorReceipt;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_receive_recovery_proof_state_publication_recheck_decided; session_id={FormatProtocolLogValue(scope?.SessionId ?? evidence.SessionId)}; transfer_id={FormatProtocolLogValue(scope?.TransferId ?? "(none)")}; direction={scope?.Direction.ToString().ToLowerInvariant() ?? "inbound"}; {FormatReceiveRecoveryObservationScopeFields(scope)}; recovery_operation_authority_id={FormatProtocolLogValue(authority?.AuthorityId.ToString() ?? "(none)")}; recovery_operation_generation={authority?.OperationGeneration ?? 0}; closure_generation={operation?.ClosureGeneration ?? 0}; closure_state={operation?.ClosureState.ToString() ?? "none"}; predecessor_publication_generation={predecessorReceipt?.Command.PublicationGeneration ?? 0}; predecessor_frame_fingerprint={FormatProtocolLogValue(predecessorReceipt?.FrameFingerprint ?? "(none)")}; predecessor_receipt_observed_utc_ms={command?.PredecessorReceiptObservedUtcMs ?? 0}; heartbeat_generation={evidence.HeartbeatGeneration}; heartbeat_sequence={evidence.HeartbeatSequence}; proof_kind={FormatProtocolLogValue(evidence.ProofKind)}; lane={FormatProtocolLogValue(evidence.Lane)}; observed_utc_ms={evidence.ObservedUtcMs}; publication_generation={command?.PublicationGeneration ?? 0}; decision_status={decision?.Status.ToString() ?? "Rejected"}; decision_reason={FormatProtocolLogValue(decision?.Reason ?? "filetransfer_receive_recovery_inbound_operation_missing")}");
+
+        if (publicationContext is not null &&
+            command is { } publicationCommand)
+        {
+            _ = PublishReceiveRecoveryProofStateAsync(
+                publicationContext,
+                publicationCommand);
+        }
+    }
+
     private void ProcessReceiveRecoveryPeerReachabilityObserved(
         IFileTransferBridgeRecoveryExecutionBridge executionBridge,
         FileTransferReceiveRecoveryPeerReachabilityObservation observation)
@@ -274,6 +405,8 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
+            var receiptObservedUtcMs =
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var receipt =
                 new FileTransferReceiveRecoveryProofStatePublicationReceipt(
                     command,
@@ -284,7 +417,8 @@ public sealed partial class SessionFileTransferService
                 FileTransferCoordinator
                     .ApplyReceiveRecoveryProofStatePublicationReceipt(
                         CreateCoordinatorStateLocked(context),
-                        receipt);
+                        receipt,
+                        receiptObservedUtcMs);
             ApplyReceiveRecoveryStateLocked(context, decision.Value.State);
             operation =
                 context.CoordinatorPersistentState.FileTransferReceiveRecovery
@@ -292,9 +426,11 @@ public sealed partial class SessionFileTransferService
         }
 
         var observation = command.Authority.Observation;
+        var predecessorReceipt = command.PredecessorReceipt;
+        var recheckEvidence = command.RecheckEvidence;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_receive_recovery_proof_state_publication_receipt_applied; session_id={FormatProtocolLogValue(observation.SessionId)}; transfer_id={FormatProtocolLogValue(observation.TransferId)}; direction={observation.Direction.ToString().ToLowerInvariant()}; recovery_operation_authority_id={FormatProtocolLogValue(command.Authority.AuthorityId.ToString())}; recovery_operation_generation={command.Authority.OperationGeneration}; closure_generation={command.ClosureGeneration}; closure_state={operation?.ClosureState.ToString() ?? "none"}; publication_generation={command.PublicationGeneration}; submission_epoch={command.Observation.SubmissionEpoch}; process_epoch={command.Observation.ProcessEpoch}; frame_fingerprint={FormatProtocolLogValue(sendResult.FrameFingerprint)}; publication_outcome={sendResult.Outcome}; decision_status={decision?.Status.ToString() ?? "Rejected"}; decision_reason={FormatProtocolLogValue(decision?.Reason ?? "filetransfer_receive_recovery_transfer_replaced")}");
+            $"event=filetransfer_receive_recovery_proof_state_publication_receipt_applied; session_id={FormatProtocolLogValue(observation.SessionId)}; transfer_id={FormatProtocolLogValue(observation.TransferId)}; direction={observation.Direction.ToString().ToLowerInvariant()}; {FormatReceiveRecoveryObservationScopeFields(observation)}; recovery_operation_authority_id={FormatProtocolLogValue(command.Authority.AuthorityId.ToString())}; recovery_operation_generation={command.Authority.OperationGeneration}; closure_generation={command.ClosureGeneration}; closure_state={operation?.ClosureState.ToString() ?? "none"}; publication_generation={command.PublicationGeneration}; publication_attempt={(predecessorReceipt is null ? "initial" : "post_delivery_recheck")}; predecessor_publication_generation={predecessorReceipt?.Command.PublicationGeneration ?? 0}; predecessor_frame_fingerprint={FormatProtocolLogValue(predecessorReceipt?.FrameFingerprint ?? "(none)")}; predecessor_receipt_observed_utc_ms={command.PredecessorReceiptObservedUtcMs}; recheck_heartbeat_generation={recheckEvidence?.HeartbeatGeneration ?? 0}; recheck_heartbeat_sequence={recheckEvidence?.HeartbeatSequence ?? 0}; recheck_proof_kind={FormatProtocolLogValue(recheckEvidence?.ProofKind ?? "(none)")}; recheck_lane={FormatProtocolLogValue(recheckEvidence?.Lane ?? "(none)")}; submission_epoch={command.Observation.SubmissionEpoch}; process_epoch={command.Observation.ProcessEpoch}; frame_fingerprint={FormatProtocolLogValue(sendResult.FrameFingerprint)}; v4_state_wire_fingerprint={FormatProtocolLogValue(sendResult.FrameFingerprint)}; publication_outcome={sendResult.Outcome}; publication_reason={FormatProtocolLogValue(sendResult.Reason)}; decision_status={decision?.Status.ToString() ?? "Rejected"}; decision_reason={FormatProtocolLogValue(decision?.Reason ?? "filetransfer_receive_recovery_transfer_replaced")}");
     }
 
     private void ProcessReceiveRecoveryProofObserved(

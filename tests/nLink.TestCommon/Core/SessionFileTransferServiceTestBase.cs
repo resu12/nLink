@@ -153,7 +153,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         return builder.ToString();
     }
 
-    protected class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferBridgeRecoveryExecutionBridge, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRegularV4FrontierRepairPressureInstallBridge, IFileTransferRegularV4FrontierRepairSettlementObserver, IFileTransferRouteCompletionObserver, IFileTransferRouteHintObserver, ITransportAccelerationStatus, IFileTransferSessionContextProvider, IFileTransferInitialTunaReadinessProvider, IRuntimeUnlockRouteCommitProofProvider, IFileTransferRouteTransitionBridge
+    protected class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, ISessionLivenessSignalingTransport, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferBridgeRecoveryExecutionBridge, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRegularV4FrontierRepairPressureInstallBridge, IFileTransferRegularV4FrontierRepairSettlementObserver, IFileTransferRouteCompletionObserver, IFileTransferRouteHintObserver, ITransportAccelerationStatus, IFileTransferSessionContextProvider, IFileTransferInitialTunaReadinessProvider, IRuntimeUnlockRouteCommitProofProvider, IFileTransferRouteTransitionBridge
     {
         private readonly string sessionId;
         private readonly ConcurrentDictionary<string, LoopbackDataSession> dataSessions = new(StringComparer.Ordinal);
@@ -339,6 +339,8 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public event EventHandler? Approved;
         public event EventHandler? Rejected;
         public event EventHandler? Disconnected;
+        public event EventHandler<SessionLivenessProofEventArgs>?
+            SessionLivenessProofReceived;
         public event EventHandler<FileTransferOfferReceivedEventArgs>? FileTransferOfferReceived;
         public event EventHandler<FileTransferAcceptReceivedEventArgs>? FileTransferAcceptReceived;
         public event EventHandler<FileTransferDeclineReceivedEventArgs>? FileTransferDeclineReceived;
@@ -582,6 +584,27 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                 this,
                 new FileTransferReceiveRecoveryPeerReachabilityObservedEventArgs(
                     observation));
+
+        internal void RaiseSessionLivenessProof(
+            long generation,
+            long sequence,
+            long observedUtcMs,
+            string proofKind = "heartbeat_received",
+            string lane = "control")
+            => SessionLivenessProofReceived?.Invoke(
+                this,
+                new SessionLivenessProofEventArgs(
+                    sessionId,
+                    generation,
+                    sequence,
+                    observedUtcMs,
+                    proofKind,
+                    lane));
+
+        public Task SendSessionHeartbeatAsync(
+            SessionHeartbeatMessage message,
+            CancellationToken ct)
+            => Task.CompletedTask;
 
         void IFileTransferBridgeRecoveryExecutionBridge.ObserveBridgeRecoveryExecutionReceiptDecision(
             FileTransferBridgeRecoveryExecutionReceipt receipt,
