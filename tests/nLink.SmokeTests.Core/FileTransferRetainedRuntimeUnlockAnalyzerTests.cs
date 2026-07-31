@@ -360,13 +360,16 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(true, false)]
-    [InlineData(false, true)]
-    [InlineData(true, true)]
+    [InlineData(false, false, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, true, false)]
+    [InlineData(false, false, true)]
+    [InlineData(true, false, true)]
     public async Task AnalyzeRetained_ReceiveRecoveryProofStateRecheckHeartbeatSuppressed_DeduplicatesAndRecovers(
         bool compact,
-        bool recovered)
+        bool recovered,
+        bool proofBeforeSkip)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -398,11 +401,19 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             $"event=filetransfer_receive_recovery_proof_state_publication_recheck_armed; {inboundOperation}; {inboundScope}; closure_generation=1; closure_state=Retained; predecessor_publication_generation=1; predecessor_frame_fingerprint=wire-1",
             $"event=filetransfer_receive_recovery_operation_issued; {outboundOperation}; {outboundScope}",
             $"event=filetransfer_receive_recovery_operation_execution_receipt_applied; {outboundOperation}; {outboundScope}; execution_outcome=Completed; closure_state=Retained; closure_generation=1",
-            $"event=filetransfer_receive_recovery_operation_closure_retained; {outboundOperation}; {outboundScope}; execution_outcome=Completed; closure_state=Retained; closure_generation=1",
+            $"event=filetransfer_receive_recovery_operation_closure_retained; {outboundOperation}; {outboundScope}; execution_outcome=Completed; closure_state=Retained; closure_generation=1"
+        ];
+        if (proofBeforeSkip)
+        {
+            messages.Add(
+                $"event=filetransfer_receive_recovery_operation_proof_observed; {outboundOperation}; {outboundScope}; closure_generation=1; closure_state=Adopted; proof_identity=file_transfer_v4_state:225");
+        }
+        messages.AddRange(
+        [
             "event=session_liveness_heartbeat_skipped_for_active_filetransfer_progress; session_id=sess_recheck_suppressed; transfer_id=transfer_recheck_suppressed; direction=outbound; progress_bytes=1677312; log_writer_id=writer_outbound; log_writer_sequence=2772",
             "event=session_liveness_heartbeat_skipped_for_active_filetransfer_progress; session_id=sess_recheck_suppressed; transfer_id=transfer_recheck_suppressed; direction=outbound; progress_bytes=1677312; log_writer_id=writer_outbound; log_writer_sequence=2773",
             "event=session_liveness_heartbeat_skipped_for_active_filetransfer_progress; session_id=sess_recheck_suppressed; transfer_id=transfer_recheck_suppressed; direction=outbound; progress_bytes=1677312; log_writer_id=writer_outbound; log_writer_sequence=2774"
-        ];
+        ]);
         if (recovered)
         {
             messages.AddRange(
@@ -433,11 +444,11 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
         Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
-        Assert.Equal("3", verdict["filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_raw_count"]);
-        Assert.Equal("1", verdict["filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_distinct_count"]);
-        Assert.Equal(recovered ? "1" : "0", verdict["filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_recovered_count"]);
-        Assert.Equal(recovered ? "0" : "1", verdict["filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_unresolved_count"]);
-        if (!recovered)
+        Assert.Equal(proofBeforeSkip ? "0" : "3", verdict["filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_raw_count"]);
+        Assert.Equal(proofBeforeSkip ? "0" : "1", verdict["filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_distinct_count"]);
+        Assert.Equal(!proofBeforeSkip && recovered ? "1" : "0", verdict["filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_recovered_count"]);
+        Assert.Equal(!proofBeforeSkip && !recovered ? "1" : "0", verdict["filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_unresolved_count"]);
+        if (!proofBeforeSkip && !recovered)
         {
             Assert.Equal(
                 "filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed",

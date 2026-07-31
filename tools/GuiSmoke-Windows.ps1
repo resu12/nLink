@@ -8258,6 +8258,19 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             if ($terminal.Count -eq 1) {
                 $endIndex = $terminal[0].Index
             }
+            $proofBoundary = @($indexedLines | Where-Object {
+                $_.Index -gt $outboundRetained[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @('filetransfer_receive_recovery_operation_proof_observed')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $outboundWriter -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -eq 'outbound'
+            } | Select-Object -First 1)
+            if ($proofBoundary.Count -eq 1) {
+                $endIndex = [Math]::Min($endIndex, $proofBoundary[0].Index)
+            }
 
             $skip = @($indexedLines | Where-Object {
                 $_.Index -gt $outboundRetained[0].Index -and

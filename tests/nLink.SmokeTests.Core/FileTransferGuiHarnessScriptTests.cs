@@ -3411,6 +3411,13 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 throw 'postterminal heartbeat incorrectly recovered the suppression boundary'
             }
 
+            $proofBeforeSkip = @($lines[0], $lines[1])
+            $proofBeforeSkip += "event=filetransfer_receive_recovery_operation_proof_observed; $outbound; receive_recovery_operation_generation=1; receive_recovery_operation_authority_id=outbound-operation; closure_generation=1; closure_state=Adopted"
+            $proofBeforeSkip += $lines[2]
+            if (Test-TunaGuiReceiveRecoveryProofStateRecheckHeartbeatSuppressionFailure -Lines $proofBeforeSkip) {
+                throw 'heartbeat skip after exact receive proof was classified as suppression'
+            }
+
             $recovered = @($lines)
             $recovered += "event=session_liveness_heartbeat_required_for_receive_recovery_proof_state_recheck; $outbound"
             $recovered += "event=session_liveness_heartbeat_sent; $outbound; generation=1; sequence=9"

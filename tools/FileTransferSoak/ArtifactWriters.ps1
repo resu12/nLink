@@ -30092,6 +30092,13 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartb
             if ($outboundTerminal.Count -eq 1) {
                 $endSequence = [Math]::Min($endSequence, [int64]$outboundTerminal[0].Sequence)
             }
+            $outboundProof = @($proofs | Where-Object {
+                [int64]$_.Sequence -gt [int64]$outboundRetained[0].Sequence -and
+                (Test-RecheckOperationMatch -Issued $outbound -Candidate $_)
+            } | Select-Object -First 1)
+            if ($outboundProof.Count -eq 1) {
+                $endSequence = [Math]::Min($endSequence, [int64]$outboundProof[0].Sequence)
+            }
 
             $operationKey = Get-RecheckOperationKey -Inbound $inbound -Outbound $outbound -Arm $arm[0]
             foreach ($skip in @($skips | Where-Object {
