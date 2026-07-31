@@ -1208,6 +1208,10 @@ function New-RouteAcceptanceRunResult {
         fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingDistinctCount = 0
         fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRecoveredCount = 0
         fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingUnresolvedCount = 0
+        fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRawCount = 0
+        fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedDistinctCount = 0
+        fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRecoveredCount = 0
+        fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedUnresolvedCount = 0
         fileTransferBridgeRecoveryExecutionPayloadHoldVerdict = 'none'
         fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount = 0
         fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingDistinctCount = 0
@@ -2898,6 +2902,10 @@ function Assert-Phase4OperatorVerdict {
     $Result.fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_distinct_count' -DefaultValue '0')
     $Result.fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_recovered_count' -DefaultValue '0')
     $Result.fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_unresolved_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_raw_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_distinct_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_recovered_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_unresolved_count' -DefaultValue '0')
     $Result.fileTransferBridgeRecoveryExecutionPayloadHoldVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_bridge_recovery_execution_payload_hold_verdict' -DefaultValue 'none'
     $Result.fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_raw_count' -DefaultValue '0')
     $Result.fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_distinct_count' -DefaultValue '0')
@@ -6898,6 +6906,10 @@ function Write-Phase5PreflightFailureSummaryFiles {
         fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingDistinctCount = 0
         fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRecoveredCount = 0
         fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingUnresolvedCount = 0
+        fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRawCount = 0
+        fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedDistinctCount = 0
+        fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRecoveredCount = 0
+        fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedUnresolvedCount = 0
         fileTransferRouteTransitionDrainingTransportGraceTerminalizationRawCount = 0
         fileTransferRouteTransitionDrainingTransportGraceTerminalizationDistinctCount = 0
         fileTransferRouteTransitionDrainingTransportGraceTerminalizationRecoveredCount = 0
@@ -8666,6 +8678,10 @@ function New-RouteAcceptanceSummaryRunDto {
         fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingDistinctCount = [int]$Result.fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingDistinctCount
         fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRecoveredCount = [int]$Result.fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRecoveredCount
         fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingUnresolvedCount = [int]$Result.fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingUnresolvedCount
+        fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRawCount = [int]$Result.fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRawCount
+        fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedDistinctCount = [int]$Result.fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedDistinctCount
+        fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRecoveredCount = [int]$Result.fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRecoveredCount
+        fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedUnresolvedCount = [int]$Result.fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedUnresolvedCount
         fileTransferBridgeRecoveryExecutionPayloadHoldVerdict = [string]$Result.fileTransferBridgeRecoveryExecutionPayloadHoldVerdict
         fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount = [int]$Result.fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount
         fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingDistinctCount = [int]$Result.fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingDistinctCount
@@ -8959,6 +8975,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingDistinctCount = 0
     $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRecoveredCount = 0
     $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingUnresolvedCount = 0
+    $fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRawCount = 0
+    $fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedDistinctCount = 0
+    $fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRecoveredCount = 0
+    $fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedUnresolvedCount = 0
     $fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount = 0
     $fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingDistinctCount = 0
     $fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRecoveredCount = 0
@@ -9149,6 +9169,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingDistinctCount += [int]$runDto.fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingDistinctCount
         $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRecoveredCount += [int]$runDto.fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRecoveredCount
         $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingUnresolvedCount += [int]$runDto.fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingUnresolvedCount
+        $fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRawCount += [int]$runDto.fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRawCount
+        $fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedDistinctCount += [int]$runDto.fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedDistinctCount
+        $fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRecoveredCount += [int]$runDto.fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRecoveredCount
+        $fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedUnresolvedCount += [int]$runDto.fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedUnresolvedCount
         $fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount += [int]$runDto.fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount
         $fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingDistinctCount += [int]$runDto.fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingDistinctCount
         $fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRecoveredCount += [int]$runDto.fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRecoveredCount
@@ -9646,6 +9670,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRecoveredCount),
         ("filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_unresolved_count={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingUnresolvedCount),
         ("filetransfer_receive_recovery_completed_retained_proof_state_publication_verdict={0}" -f ($(if ($fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingUnresolvedCount -gt 0) { 'fail' } elseif ($fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingDistinctCount -gt 0) { 'pass' } else { 'none' }))),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_raw_count={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRawCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_distinct_count={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedDistinctCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRecoveredCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_unresolved_count={0}" -f $fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedUnresolvedCount),
+        ("filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppression_verdict={0}" -f ($(if ($fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedUnresolvedCount -gt 0) { 'fail' } elseif ($fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedDistinctCount -gt 0) { 'pass' } else { 'none' }))),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_raw_count={0}" -f $fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_distinct_count={0}" -f $fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingDistinctCount),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_recovered_count={0}" -f $fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRecoveredCount),
@@ -9967,6 +9996,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_distinct_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedDistinctCount)
         $textLines += ("{0}.filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_recovered_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount)
         $textLines += ("{0}.filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_unresolved_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedUnresolvedCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_raw_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRawCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_distinct_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedDistinctCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_recovered_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRecoveredCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_unresolved_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedUnresolvedCount)
         $textLines += ("{0}.filetransfer_bridge_recovery_execution_payload_hold_verdict={1}" -f $prefix, $result.fileTransferBridgeRecoveryExecutionPayloadHoldVerdict)
         $textLines += ("{0}.filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_raw_count={1}" -f $prefix, $result.fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount)
         $textLines += ("{0}.filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_distinct_count={1}" -f $prefix, $result.fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingDistinctCount)
@@ -10269,6 +10302,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRecoveredCount = $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingRecoveredCount
         fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingUnresolvedCount = $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingUnresolvedCount
         fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationVerdict = if ($fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingUnresolvedCount -gt 0) { 'fail' } elseif ($fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingDistinctCount -gt 0) { 'pass' } else { 'none' }
+        fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRawCount = $fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRawCount
+        fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedDistinctCount = $fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedDistinctCount
+        fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRecoveredCount = $fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRecoveredCount
+        fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedUnresolvedCount = $fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedUnresolvedCount
+        fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressionVerdict = if ($fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedUnresolvedCount -gt 0) { 'fail' } elseif ($fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedDistinctCount -gt 0) { 'pass' } else { 'none' }
         fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount = $fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRawCount
         fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingDistinctCount = $fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingDistinctCount
         fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRecoveredCount = $fileTransferBridgeRecoveryExecutionSubmissionBarrierDrainMissingRecoveredCount

@@ -7887,9 +7887,44 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     continue
                 }
 
+                $terminalIndex = [int]::MaxValue
+                $operationInvalidation = @($indexedLines | Where-Object {
+                    $_.Index -gt $targetRetained[0].Index -and
+                    (Test-TunaGuiLogLineHasEvent `
+                        -Line $_.Line `
+                        -Events @('filetransfer_receive_recovery_operation_invalidated')) -and
+                    (Test-ProofStateOperationMatch -Issued $issued -Candidate $_)
+                } | Select-Object -First 1)
+                if ($operationInvalidation.Count -eq 1) {
+                    $terminalIndex = [Math]::Min(
+                        $terminalIndex,
+                        [int]$operationInvalidation[0].Index)
+                }
+                $transferTerminal = @($indexedLines | Where-Object {
+                    $_.Index -gt $targetRetained[0].Index -and
+                    (Test-TunaGuiLogLineHasEvent `
+                        -Line $_.Line `
+                        -Events @(
+                            'transfer_terminal',
+                            'file_transfer_inbound_terminal',
+                            'file_transfer_outbound_terminal',
+                            'filetransfer_runtime_terminalized')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq
+                        (Get-TunaGuiLogLineFieldValue -Line $issued.Line -Name 'log_writer_id') -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq
+                        (Get-TunaGuiLogLineFieldValue -Line $issued.Line -Name 'session_id') -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq
+                        (Get-TunaGuiLogLineFieldValue -Line $issued.Line -Name 'transfer_id')
+                } | Select-Object -First 1)
+                if ($transferTerminal.Count -eq 1) {
+                    $terminalIndex = [Math]::Min(
+                        $terminalIndex,
+                        [int]$transferTerminal[0].Index)
+                }
                 $heartbeatPair = $null
                 foreach ($proof in @($indexedLines | Where-Object {
                             $_.Index -gt $targetRetained[0].Index -and
+                            $_.Index -lt $terminalIndex -and
                             (Test-TunaGuiLogLineHasEvent `
                                 -Line $_.Line `
                                 -Events @(
@@ -8164,6 +8199,189 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 $targetProof.Count -ne 1 -or
                 $targetAdopted.Count -ne 1 -or
                 $payloadResume.Count -ne 1) {
+                return $true
+            }
+        }
+        return $false
+    }
+
+    function Test-TunaGuiReceiveRecoveryProofStateRecheckHeartbeatSuppressionFailure {
+        param(
+            [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+        )
+
+        $indexedLines = @(
+            for ($index = 0; $index -lt $Lines.Count; $index++) {
+                [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
+            }
+        )
+        $arms = @($indexedLines | Where-Object {
+            (Test-TunaGuiLogLineHasEvent `
+                -Line $_.Line `
+                -Events @('filetransfer_receive_recovery_proof_state_publication_recheck_armed')) -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -eq 'inbound' -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'predecessor_publication_generation') -eq '1'
+        })
+        foreach ($arm in $arms) {
+            $session = Get-TunaGuiLogLineFieldValue -Line $arm.Line -Name 'session_id'
+            $transfer = Get-TunaGuiLogLineFieldValue -Line $arm.Line -Name 'transfer_id'
+            $outboundRetained = @($indexedLines | Where-Object {
+                $_.Index -gt $arm.Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @('filetransfer_receive_recovery_operation_closure_retained')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -eq 'outbound' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'route') -eq 'regular_nkn_v4_fast' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'closure_state') -eq 'Retained'
+            } | Select-Object -First 1)
+            if ($outboundRetained.Count -ne 1) {
+                continue
+            }
+
+            $outboundWriter = Get-TunaGuiLogLineFieldValue -Line $outboundRetained[0].Line -Name 'log_writer_id'
+            $endIndex = [int]::MaxValue
+            $terminal = @($indexedLines | Where-Object {
+                $_.Index -gt $outboundRetained[0].Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $outboundWriter -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @(
+                        'filetransfer_receive_recovery_operation_invalidated',
+                        'transfer_terminal',
+                        'file_transfer_outbound_terminal',
+                        'filetransfer_runtime_terminalized'))
+            } | Select-Object -First 1)
+            if ($terminal.Count -eq 1) {
+                $endIndex = $terminal[0].Index
+            }
+
+            $skip = @($indexedLines | Where-Object {
+                $_.Index -gt $outboundRetained[0].Index -and
+                $_.Index -lt $endIndex -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @('session_liveness_heartbeat_skipped_for_active_filetransfer_progress')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $outboundWriter -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -eq 'outbound'
+            } | Select-Object -First 1)
+            if ($skip.Count -ne 1) {
+                continue
+            }
+
+            $required = @($indexedLines | Where-Object {
+                $_.Index -ge $skip[0].Index -and
+                $_.Index -lt $endIndex -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @('session_liveness_heartbeat_required_for_receive_recovery_proof_state_recheck')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $outboundWriter
+            } | Select-Object -First 1)
+            $heartbeatSent = @($indexedLines | Where-Object {
+                $required.Count -eq 1 -and
+                $_.Index -gt $required[0].Index -and
+                $_.Index -lt $endIndex -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @('session_liveness_heartbeat_sent')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $outboundWriter -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session
+            } | Select-Object -First 1)
+            $publisherWriter = Get-TunaGuiLogLineFieldValue -Line $arm.Line -Name 'log_writer_id'
+            $heartbeatReceived = @($indexedLines | Where-Object {
+                $heartbeatSent.Count -eq 1 -and
+                $_.Index -gt $heartbeatSent[0].Index -and
+                $_.Index -lt $endIndex -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @('session_liveness_heartbeat_received')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $publisherWriter -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session
+            } | Select-Object -First 1)
+            $recheck = @($indexedLines | Where-Object {
+                $heartbeatReceived.Count -eq 1 -and
+                $_.Index -gt $heartbeatReceived[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @('filetransfer_receive_recovery_proof_state_publication_recheck_decided')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'publication_generation') -eq '2' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -in @('Accepted', 'Idempotent', 'Started')
+            } | Select-Object -First 1)
+            $stateSent = @($indexedLines | Where-Object {
+                $recheck.Count -eq 1 -and
+                $_.Index -gt $recheck[0].Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('filetransfer_v4_state_sent')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $publisherWriter -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'publication_generation') -eq '2' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'repair_publication_kind') -eq 'receive_recovery_proof_state'
+            } | Select-Object -First 1)
+            $stateReceipt = @($indexedLines | Where-Object {
+                $stateSent.Count -eq 1 -and
+                $_.Index -gt $stateSent[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @('filetransfer_receive_recovery_proof_state_publication_receipt_applied')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $publisherWriter -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'publication_generation') -eq '2' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'publication_outcome') -eq 'Delivered'
+            } | Select-Object -First 1)
+            $peerReceipt = @($indexedLines | Where-Object {
+                $stateReceipt.Count -eq 1 -and
+                $_.Index -gt $stateReceipt[0].Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('filetransfer_v4_state_received')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $outboundWriter -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer
+            } | Select-Object -First 1)
+            $proof = @($indexedLines | Where-Object {
+                $peerReceipt.Count -eq 1 -and
+                $_.Index -gt $peerReceipt[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @('filetransfer_receive_recovery_operation_proof_observed')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $outboundWriter -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -eq 'outbound'
+            } | Select-Object -First 1)
+            $adopted = @($indexedLines | Where-Object {
+                $proof.Count -eq 1 -and
+                $_.Index -gt $proof[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @('filetransfer_receive_recovery_operation_closure_adopted')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -eq 'outbound' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'closure_state') -eq 'Adopted'
+            } | Select-Object -First 1)
+            $resumed = @($indexedLines | Where-Object {
+                $adopted.Count -eq 1 -and
+                $_.Index -gt $adopted[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @('filetransfer_bridge_recovery_payload_submission_resumed')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -eq 'outbound'
+            } | Select-Object -First 2)
+            if ($required.Count -ne 1 -or
+                $heartbeatSent.Count -ne 1 -or
+                $heartbeatReceived.Count -ne 1 -or
+                $recheck.Count -ne 1 -or
+                $stateSent.Count -ne 1 -or
+                $stateReceipt.Count -ne 1 -or
+                $peerReceipt.Count -ne 1 -or
+                $proof.Count -ne 1 -or
+                $adopted.Count -ne 1 -or
+                $resumed.Count -ne 1) {
                 return $true
             }
         }
@@ -9994,6 +10212,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $receiveRecoveryCompletedRetainedProofStatePublicationMissing =
         Test-TunaGuiReceiveRecoveryCompletedRetainedProofStatePublicationFailure `
             -Lines $regularV4EvidenceLineText
+    $receiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressed =
+        Test-TunaGuiReceiveRecoveryProofStateRecheckHeartbeatSuppressionFailure `
+            -Lines $regularV4EvidenceLineText
     $bridgeRecoveryExecutionSubmissionBarrierDrainMissing =
         Test-TunaGuiBridgeRecoveryExecutionSubmissionBarrierDrainFailure `
             -Lines $regularV4EvidenceLineText
@@ -10079,6 +10300,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $bridgeRecoveryExecutionPayloadHoldMissing -or
         $receiveRecoveryCompletedUnprovenPayloadHoldNotPreserved -or
         $receiveRecoveryCompletedRetainedProofStatePublicationMissing -or
+        $receiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressed -or
         $bridgeRecoveryExecutionSubmissionBarrierDrainMissing -or
         $receiveRecoveryCompletedUnprovenSuccessorMissing -or
         $receiveRecoveryCompletedProvenSuccessorMissing -or
@@ -10159,6 +10381,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $phase = 'receive_recovery'
         $reason =
             'completed_unproven_receive_recovery_payload_resumed_before_proof'
+    }
+    elseif ($receiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressed) {
+        $phase = 'receive_recovery'
+        $reason =
+            'completed_retained_receive_recovery_peer_heartbeat_suppressed_by_outbound_progress'
     }
     elseif ($receiveRecoveryCompletedRetainedProofStatePublicationMissing) {
         $phase = 'receive_recovery'

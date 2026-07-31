@@ -360,6 +360,96 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task AnalyzeRetained_ReceiveRecoveryProofStateRecheckHeartbeatSuppressed_DeduplicatesAndRecovers(
+        bool compact,
+        bool recovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string sharedScope =
+            "session_id=sess_recheck_suppressed; transfer_id=transfer_recheck_suppressed; " +
+            "route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; " +
+            "route_publication_generation=1; runtime_generation=1; terminal_generation=0; " +
+            "leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; " +
+            "data_session_generation=1";
+        const string inboundScope = sharedScope + "; direction=inbound; log_writer_id=writer_inbound";
+        const string outboundScope = sharedScope + "; direction=outbound; log_writer_id=writer_outbound";
+        const string inboundOperation =
+            "receive_recovery_operation_generation=1; " +
+            "receive_recovery_operation_authority_id=operation-inbound; bridge_decision_generation=1";
+        const string outboundOperation =
+            "receive_recovery_operation_generation=1; " +
+            "receive_recovery_operation_authority_id=operation-outbound; bridge_decision_generation=1";
+        List<string> messages =
+        [
+            $"event=filetransfer_receive_recovery_operation_issued; {inboundOperation}; {inboundScope}",
+            $"event=filetransfer_receive_recovery_operation_execution_receipt_applied; {inboundOperation}; {inboundScope}; execution_outcome=Completed; closure_state=Retained; closure_generation=1",
+            $"event=filetransfer_receive_recovery_operation_closure_retained; {inboundOperation}; {inboundScope}; execution_outcome=Completed; closure_state=Retained; closure_generation=1",
+            $"event=filetransfer_receive_recovery_proof_state_publication_decided; {inboundOperation}; {inboundScope}; closure_generation=1; publication_generation=1; decision_status=Accepted",
+            $"event=filetransfer_v4_state_sent; {inboundOperation}; {inboundScope}; closure_generation=1; repair_publication_kind=receive_recovery_proof_state; receive_recovery_publication_generation=1; epoch=225; v4_state_wire_fingerprint=wire-1",
+            $"event=filetransfer_receive_recovery_proof_state_publication_receipt_applied; {inboundOperation}; {inboundScope}; closure_generation=1; publication_generation=1; publication_outcome=Delivered; decision_status=Accepted; v4_state_wire_fingerprint=wire-1",
+            $"event=filetransfer_receive_recovery_proof_state_publication_recheck_armed; {inboundOperation}; {inboundScope}; closure_generation=1; closure_state=Retained; predecessor_publication_generation=1; predecessor_frame_fingerprint=wire-1",
+            $"event=filetransfer_receive_recovery_operation_issued; {outboundOperation}; {outboundScope}",
+            $"event=filetransfer_receive_recovery_operation_execution_receipt_applied; {outboundOperation}; {outboundScope}; execution_outcome=Completed; closure_state=Retained; closure_generation=1",
+            $"event=filetransfer_receive_recovery_operation_closure_retained; {outboundOperation}; {outboundScope}; execution_outcome=Completed; closure_state=Retained; closure_generation=1",
+            "event=session_liveness_heartbeat_skipped_for_active_filetransfer_progress; session_id=sess_recheck_suppressed; transfer_id=transfer_recheck_suppressed; direction=outbound; progress_bytes=1677312; log_writer_id=writer_outbound; log_writer_sequence=2772",
+            "event=session_liveness_heartbeat_skipped_for_active_filetransfer_progress; session_id=sess_recheck_suppressed; transfer_id=transfer_recheck_suppressed; direction=outbound; progress_bytes=1677312; log_writer_id=writer_outbound; log_writer_sequence=2773",
+            "event=session_liveness_heartbeat_skipped_for_active_filetransfer_progress; session_id=sess_recheck_suppressed; transfer_id=transfer_recheck_suppressed; direction=outbound; progress_bytes=1677312; log_writer_id=writer_outbound; log_writer_sequence=2774"
+        ];
+        if (recovered)
+        {
+            messages.AddRange(
+            [
+                $"event=session_liveness_heartbeat_required_for_receive_recovery_proof_state_recheck; {outboundScope}; recovery_state=BridgeRecoveryCompletedAwaitingProof; trigger=receive_recovery_completed_awaiting_proof; progress_bytes=1677312",
+                "event=session_liveness_heartbeat_sent; session_id=sess_recheck_suppressed; generation=1; sequence=19; delivered_any=1; log_writer_id=writer_outbound",
+                "event=session_liveness_heartbeat_received; session_id=sess_recheck_suppressed; generation=1; sequence=19; lane=control; log_writer_id=writer_inbound",
+                "event=session_liveness_proof_received; session_id=sess_recheck_suppressed; generation=1; sequence=19; proof_kind=heartbeat_received; lane=control; log_writer_id=writer_inbound",
+                $"event=filetransfer_receive_recovery_proof_state_publication_recheck_decided; {inboundOperation}; {inboundScope}; closure_generation=1; predecessor_publication_generation=1; heartbeat_generation=1; heartbeat_sequence=19; proof_kind=heartbeat_received; lane=control; publication_generation=2; decision_status=Accepted",
+                $"event=filetransfer_v4_state_sent; {inboundOperation}; {inboundScope}; closure_generation=1; repair_publication_kind=receive_recovery_proof_state; receive_recovery_publication_generation=2; receive_recovery_publication_attempt=post_delivery_recheck; epoch=226; v4_state_wire_fingerprint=wire-2",
+                $"event=filetransfer_receive_recovery_proof_state_publication_receipt_applied; {inboundOperation}; {inboundScope}; closure_generation=1; publication_generation=2; publication_outcome=Delivered; decision_status=Accepted; v4_state_wire_fingerprint=wire-2",
+                $"event=filetransfer_v4_state_received; {outboundScope}; epoch=226; v4_state_wire_fingerprint=wire-2; applied=1",
+                $"event=filetransfer_receive_recovery_operation_proof_observed; {outboundOperation}; {outboundScope}; closure_generation=1; closure_state=Adopted; proof_identity=file_transfer_v4_state:226",
+                $"event=filetransfer_receive_recovery_operation_closure_adopted; {outboundOperation}; {outboundScope}; closure_generation=1; closure_state=Adopted; proof_identity=file_transfer_v4_state:226",
+                $"event=filetransfer_bridge_recovery_payload_submission_resumed; {outboundOperation}; {outboundScope}; closure_generation=1; closure_state=Adopted; proof_identity=file_transfer_v4_state:226"
+            ]);
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            messages.Select(message => LogLine(message)).ToArray(),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("3", verdict["filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_raw_count"]);
+        Assert.Equal("1", verdict["filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_distinct_count"]);
+        Assert.Equal(recovered ? "1" : "0", verdict["filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_recovered_count"]);
+        Assert.Equal(recovered ? "0" : "1", verdict["filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_unresolved_count"]);
+        if (!recovered)
+        {
+            Assert.Equal(
+                "filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed",
+                verdict["first_proof_chain_failure_class"]);
+            Assert.Equal(
+                "session_liveness_heartbeat_skipped_for_active_filetransfer_progress",
+                verdict["first_proof_chain_failure_event"]);
+            Assert.Equal("2772", verdict["first_proof_chain_failure_writer_sequence"]);
+        }
+    }
+
+    [Theory]
     [InlineData(false, false, "valid")]
     [InlineData(false, true, "valid")]
     [InlineData(true, false, "valid")]

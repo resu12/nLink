@@ -3288,7 +3288,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var classifierBody = ExtractPowerShellFunctionBody(
             nestedFunctionText,
             "Test-TunaGuiReceiveRecoveryCompletedRetainedProofStatePublicationFailure",
-            "Test-TunaGuiBridgeRecoveryExecutionSubmissionBarrierDrainFailure");
+            "Test-TunaGuiReceiveRecoveryProofStateRecheckHeartbeatSuppressionFailure");
         var scriptText = $$"""
             $ErrorActionPreference = 'Stop'
             function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
@@ -3364,6 +3364,78 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             "gui-receive-recovery-proof-state-recheck-ok",
             result.Stdout,
             StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ReceiveRecoveryProofStateRecheckHeartbeatSuppressionRequiresPreterminalRecoveryChain()
+    {
+        var guiText = File.ReadAllText(
+            Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = Regex.Replace(guiText, @"(?m)^ {4}", string.Empty);
+        var fieldValueBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Test-TunaGuiLogLineHasEvent");
+        var hasEventBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineHasEvent",
+            "Test-TunaGuiLogLineFieldMatch");
+        var classifierBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiReceiveRecoveryProofStateRecheckHeartbeatSuppressionFailure",
+            "Test-TunaGuiBridgeRecoveryExecutionSubmissionBarrierDrainFailure");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
+            function Test-TunaGuiLogLineHasEvent { {{hasEventBody}} }
+            function Test-TunaGuiReceiveRecoveryProofStateRecheckHeartbeatSuppressionFailure {
+                {{classifierBody}}
+            }
+
+            $scope = 'session_id=session-a; transfer_id=transfer-a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; route_publication_generation=1; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; data_session_generation=1'
+            $inbound = "$scope; direction=inbound; log_writer_id=writer-inbound"
+            $outbound = "$scope; direction=outbound; log_writer_id=writer-outbound"
+            $lines = @(
+                "event=filetransfer_receive_recovery_proof_state_publication_recheck_armed; $inbound; recovery_operation_generation=1; recovery_operation_authority_id=inbound-operation; closure_generation=1; predecessor_publication_generation=1; predecessor_frame_fingerprint=state-1",
+                "event=filetransfer_receive_recovery_operation_closure_retained; $outbound; receive_recovery_operation_generation=1; receive_recovery_operation_authority_id=outbound-operation; closure_generation=1; closure_state=Retained",
+                "event=session_liveness_heartbeat_skipped_for_active_filetransfer_progress; $outbound; log_writer_sequence=2772; outbound_progress=1024"
+            )
+            if (-not (Test-TunaGuiReceiveRecoveryProofStateRecheckHeartbeatSuppressionFailure -Lines $lines)) {
+                throw 'heartbeat suppression was not classified'
+            }
+
+            $postterminal = @($lines)
+            $postterminal += "event=file_transfer_outbound_terminal; $outbound; state=Completed"
+            $postterminal += "event=session_liveness_heartbeat_required_for_receive_recovery_proof_state_recheck; $outbound"
+            if (-not (Test-TunaGuiReceiveRecoveryProofStateRecheckHeartbeatSuppressionFailure -Lines $postterminal)) {
+                throw 'postterminal heartbeat incorrectly recovered the suppression boundary'
+            }
+
+            $recovered = @($lines)
+            $recovered += "event=session_liveness_heartbeat_required_for_receive_recovery_proof_state_recheck; $outbound"
+            $recovered += "event=session_liveness_heartbeat_sent; $outbound; generation=1; sequence=9"
+            $recovered += "event=session_liveness_heartbeat_received; $inbound; generation=1; sequence=9"
+            $recovered += "event=filetransfer_receive_recovery_proof_state_publication_recheck_decided; $inbound; publication_generation=2; decision_status=Accepted"
+            $recovered += "event=filetransfer_v4_state_sent; $inbound; publication_generation=2; repair_publication_kind=receive_recovery_proof_state; v4_state_wire_fingerprint=state-2"
+            $recovered += "event=filetransfer_receive_recovery_proof_state_publication_receipt_applied; $inbound; publication_generation=2; publication_outcome=Delivered; v4_state_wire_fingerprint=state-2"
+            $recovered += "event=filetransfer_v4_state_received; $outbound; publication_generation=2; v4_state_wire_fingerprint=state-2"
+            $recovered += "event=filetransfer_receive_recovery_operation_proof_observed; $outbound; closure_generation=1; closure_state=Adopted"
+            $recovered += "event=filetransfer_receive_recovery_operation_closure_adopted; $outbound; closure_generation=1; closure_state=Adopted"
+            $recovered += "event=filetransfer_bridge_recovery_payload_submission_resumed; $outbound; closure_generation=1; closure_state=Adopted"
+            if (Test-TunaGuiReceiveRecoveryProofStateRecheckHeartbeatSuppressionFailure -Lines $recovered) {
+                throw 'exact preterminal recovery chain did not recover the boundary'
+            }
+
+            Write-Output 'gui-recovery-heartbeat-suppression-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Recovery-heartbeat suppression GUI classification failed.{Environment.NewLine}" +
+            $"{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-recovery-heartbeat-suppression-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]

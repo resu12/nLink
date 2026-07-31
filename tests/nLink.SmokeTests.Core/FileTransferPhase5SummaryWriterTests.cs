@@ -49,6 +49,43 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             "fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationMissingUnresolvedCount = 0",
             constructor,
             StringComparison.Ordinal);
+        Assert.Contains(
+            "fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRawCount = 0",
+            constructor,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedUnresolvedCount = 0",
+            constructor,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunFileTransferRouteAcceptance_ProofStateRecheckHeartbeatSuppressionCountersReachScenarioAndRootSummaries()
+    {
+        var repoRoot = FindRepoRoot();
+        var script = await File.ReadAllTextAsync(
+            Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"));
+
+        Assert.Contains(
+            "$Result.fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRawCount = ConvertTo-RouteAcceptanceInt",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRawCount = [int]$Result.fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRawCount",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRawCount += [int]$runDto.fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedRawCount",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "{0}.filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed_unresolved_count={1}",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressionVerdict = if ($fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressedUnresolvedCount -gt 0)",
+            script,
+            StringComparison.Ordinal);
     }
 
     [Fact]
