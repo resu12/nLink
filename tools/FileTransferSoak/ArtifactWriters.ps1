@@ -13020,6 +13020,11 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_recovered_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredRecoveredCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_unresolved_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredUnresolvedCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_verdict={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredVerdict)) | Out-Null
+    $lines.Add(("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_raw_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRawCount)) | Out-Null
+    $lines.Add(("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_distinct_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredDistinctCount)) | Out-Null
+    $lines.Add(("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_recovered_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRecoveredCount)) | Out-Null
+    $lines.Add(("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_unresolved_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredUnresolvedCount)) | Out-Null
+    $lines.Add(("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_verdict={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredVerdict)) | Out-Null
     $lines.Add(("runtime_unlock_retry_dispatch_authority_granted_raw_count={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedRawCount)) | Out-Null
     $lines.Add(("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedCount)) | Out-Null
     $lines.Add(("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount)) | Out-Null
@@ -15065,6 +15070,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredRecoveredCount),
         ("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredUnresolvedCount),
         ("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_verdict={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredVerdict),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_raw_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRawCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredDistinctCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRecoveredCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredUnresolvedCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_verdict={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredVerdict),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount),
@@ -21968,6 +21978,225 @@ function Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleas
         RawCandidateEvents = @($raw.ToArray())
         RecoveredCandidateEvents = @($recovered.ToArray())
         UnresolvedCandidateEvents = @($unresolved.ToArray())
+    }
+}
+
+function Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredCorrelation {
+    param(
+        [AllowEmptyCollection()][object[]]$Events = @()
+    )
+
+    [object[]]$events = @(
+        $Events |
+            Where-Object { $null -ne $_ } |
+            Sort-Object Sequence, LineNumber
+    )
+
+    function Get-PathLeaseExpiryField {
+        param(
+            [Parameter(Mandatory = $true)]$Event,
+            [Parameter(Mandatory = $true)][string[]]$Names,
+            [string]$Default = ''
+        )
+
+        foreach ($name in $Names) {
+            $value = Get-FileTransferEventField -Event $Event -Name $name -Default ''
+            if (-not [string]::IsNullOrWhiteSpace($value) -and
+                $value -notin @('(none)', 'none', '(missing)', '__missing__')) {
+                return $value
+            }
+        }
+        return $Default
+    }
+
+    function Test-PathLeaseExpiryTuple {
+        param(
+            [Parameter(Mandatory = $true)]$Left,
+            [Parameter(Mandatory = $true)]$Right,
+            [switch]$AllowMissingRight
+        )
+
+        foreach ($mapping in @(
+                [pscustomobject]@{ Left = @('log_writer_id'); Right = @('log_writer_id') },
+                [pscustomobject]@{ Left = @('session_id'); Right = @('session_id') },
+                [pscustomobject]@{ Left = @('transfer_id'); Right = @('transfer_id') },
+                [pscustomobject]@{ Left = @('direction'); Right = @('direction') },
+                [pscustomobject]@{ Left = @('offer_nonce'); Right = @('offer_nonce') },
+                [pscustomobject]@{ Left = @('payer_decision_id'); Right = @('payer_decision_id') },
+                [pscustomobject]@{ Left = @('offer_generation'); Right = @('offer_generation') },
+                [pscustomobject]@{ Left = @('transaction_generation'); Right = @('transaction_generation') },
+                [pscustomobject]@{ Left = @('tuna_path_lease_generation'); Right = @('tuna_path_lease_generation', 'lease_generation') },
+                [pscustomobject]@{ Left = @('tuna_path_lease_listener_run_id'); Right = @('tuna_path_lease_listener_run_id', 'listener_run_id') })) {
+            $leftValue = Get-PathLeaseExpiryField -Event $Left -Names $mapping.Left
+            $rightValue = Get-PathLeaseExpiryField -Event $Right -Names $mapping.Right
+            if ($AllowMissingRight -and [string]::IsNullOrWhiteSpace($rightValue)) {
+                continue
+            }
+            if ([string]::IsNullOrWhiteSpace($leftValue) -or
+                [string]::IsNullOrWhiteSpace($rightValue) -or
+                -not [string]::Equals(
+                    $leftValue,
+                    $rightValue,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    [object[]]$physicalResumes = @($events | Where-Object {
+        $_.EventName -eq
+            'runtime_unlock_initial_activation_offer_envelope_refresh_physical_resume' -and
+        (Get-PathLeaseExpiryField -Event $_ -Names @('boundary')) -in
+            @('PeerResponseTimeout', 'AnswerTimeout') -and
+        [int64](Get-PathLeaseExpiryField -Event $_ -Names @('refresh_generation') -Default '0') -gt 0
+    })
+    [object[]]$refreshCommitted = @($events | Where-Object {
+        $_.EventName -eq
+            'runtime_unlock_initial_activation_offer_envelope_refresh_committed' -and
+        (Get-PathLeaseExpiryField -Event $_ -Names @('decision_status')) -in
+            @('Accepted', 'Idempotent', 'accepted', 'idempotent')
+    })
+    [object[]]$held = @($events | Where-Object {
+        $_.EventName -eq
+            'runtime_unlock_initial_activation_receive_recovery_hold_decided' -and
+        (Get-PathLeaseExpiryField -Event $_ -Names @('decision_status')) -eq 'Held'
+    })
+    [object[]]$adopted = @($events | Where-Object {
+        $_.EventName -eq
+            'filetransfer_receive_recovery_operation_closure_adopted' -and
+        (Get-PathLeaseExpiryField -Event $_ -Names @('execution_state')) -eq 'Completed' -and
+        (Get-PathLeaseExpiryField -Event $_ -Names @('closure_state')) -eq 'Adopted'
+    })
+    [object[]]$resumed = @($events | Where-Object {
+        $_.EventName -eq
+            'runtime_unlock_initial_activation_receive_recovery_hold_resumed' -and
+        (Get-PathLeaseExpiryField -Event $_ -Names @('decision_status')) -eq 'Released'
+    })
+    [object[]]$sidecarTimeouts = @($events | Where-Object {
+        $_.EventName -eq 'tuna_listener_sidecar_event' -and
+        (Get-PathLeaseExpiryField -Event $_ -Names @('sidecar_event')) -eq 'error' -and
+        (Get-PathLeaseExpiryField -Event $_ -Names @('sidecar_reason')) -match
+            'Tuna accept failed: accept timed out'
+    })
+    [object[]]$leaseFailures = @($events | Where-Object {
+        $_.EventName -in @('tuna_path_lease_failed', 'tuna_path_lease_sidecar_unavailable') -and
+        [int64](Get-PathLeaseExpiryField -Event $_ -Names @('offer_generation') -Default '0') -gt 0 -and
+        [int64](Get-PathLeaseExpiryField -Event $_ -Names @('transaction_generation') -Default '0') -gt 0 -and
+        [int64](Get-PathLeaseExpiryField -Event $_ -Names @('lease_generation') -Default '0') -gt 0
+    })
+    [object[]]$prevalidations = @($events | Where-Object {
+        $_.EventName -eq
+            'runtime_unlock_initial_activation_receive_recovery_hold_send_prevalidated' -and
+        (Get-PathLeaseExpiryField -Event $_ -Names @('prevalidation_status')) -eq 'accepted'
+    })
+    [object[]]$submissions = @($events | Where-Object {
+        $_.EventName -eq
+            'runtime_unlock_initial_activation_receive_recovery_hold_post_prevalidation_submission'
+    })
+    [object[]]$answers = @($events | Where-Object {
+        $_.EventName -in @(
+            'tuna_acceleration_offer_received_raw',
+            'runtime_unlock_transaction_answer_received',
+            'tuna_acceleration_answer_ack_sent',
+            'runtime_unlock_precommit_admission_granted',
+            'runtime_unlock_route_commit_precommit_admission_granted',
+            'filetransfer_route_transition_prepared')
+    })
+
+    $raw = New-Object System.Collections.Generic.List[object]
+    $distinct = [ordered]@{}
+    foreach ($timeout in $sidecarTimeouts) {
+        $writerId = Get-PathLeaseExpiryField -Event $timeout -Names @('log_writer_id')
+        [object[]]$matchingFailures = @($leaseFailures | Where-Object {
+            [int64]$_.Sequence -gt [int64]$timeout.Sequence -and
+            (Get-PathLeaseExpiryField -Event $_ -Names @('log_writer_id')) -eq
+                $writerId
+        } | Select-Object -First 1)
+        if ($matchingFailures.Count -eq 0) {
+            continue
+        }
+        $failure = $matchingFailures[0]
+
+        [object[]]$matchingResumes = @($physicalResumes | Where-Object {
+            [int64]$_.Sequence -lt [int64]$timeout.Sequence -and
+            (Test-PathLeaseExpiryTuple -Left $_ -Right $failure -AllowMissingRight)
+        } | Select-Object -Last 2)
+        if ($matchingResumes.Count -ne 1) {
+            continue
+        }
+        $resume = $matchingResumes[0]
+
+        $refreshGeneration = Get-PathLeaseExpiryField -Event $resume -Names @('refresh_generation')
+        [object[]]$refreshes = @($refreshCommitted | Where-Object {
+            [int64]$_.Sequence -lt [int64]$resume.Sequence -and
+            (Get-PathLeaseExpiryField -Event $_ -Names @('refresh_generation')) -eq
+                $refreshGeneration -and
+            (Test-PathLeaseExpiryTuple -Left $resume -Right $_)
+        } | Select-Object -Last 1)
+        [object[]]$matchingHolds = @($held | Where-Object {
+            [int64]$_.Sequence -lt [int64]$resume.Sequence -and
+            (Test-PathLeaseExpiryTuple -Left $resume -Right $_ -AllowMissingRight)
+        } | Select-Object -Last 1)
+        [object[]]$matchingAdoptions = @($adopted | Where-Object {
+            [int64]$_.Sequence -lt [int64]$resume.Sequence -and
+            (Get-PathLeaseExpiryField -Event $_ -Names @('log_writer_id')) -eq $writerId -and
+            (Get-PathLeaseExpiryField -Event $_ -Names @('session_id')) -eq
+                (Get-PathLeaseExpiryField -Event $resume -Names @('session_id')) -and
+            (Get-PathLeaseExpiryField -Event $_ -Names @('transfer_id')) -eq
+                (Get-PathLeaseExpiryField -Event $resume -Names @('transfer_id'))
+        } | Select-Object -Last 1)
+        [object[]]$matchingRelease = @($resumed | Where-Object {
+            [int64]$_.Sequence -le [int64]$resume.Sequence -and
+            (Test-PathLeaseExpiryTuple -Left $resume -Right $_)
+        } | Select-Object -Last 1)
+        if ($refreshes.Count -ne 1 -or
+            $matchingHolds.Count -ne 1 -or
+            $matchingAdoptions.Count -ne 1 -or
+            $matchingRelease.Count -ne 1) {
+            continue
+        }
+
+        $sendObserved = @(@($prevalidations) + @($submissions) | Where-Object {
+            [int64]$_.Sequence -gt [int64]$resume.Sequence -and
+            [int64]$_.Sequence -lt [int64]$timeout.Sequence -and
+            (Test-PathLeaseExpiryTuple -Left $resume -Right $_ -AllowMissingRight)
+        }).Count -gt 0
+        $progressObserved = @($answers | Where-Object {
+            [int64]$_.Sequence -gt [int64]$resume.Sequence -and
+            [int64]$_.Sequence -lt [int64]$timeout.Sequence
+        }).Count -gt 0
+        if ($sendObserved -or $progressObserved) {
+            continue
+        }
+
+        $raw.Add($timeout) | Out-Null
+        $key = [string]::Join('|', @(
+            $writerId,
+            (Get-PathLeaseExpiryField -Event $resume -Names @('session_id')),
+            (Get-PathLeaseExpiryField -Event $resume -Names @('transfer_id')),
+            (Get-PathLeaseExpiryField -Event $resume -Names @('direction')),
+            (Get-PathLeaseExpiryField -Event $resume -Names @('payer_decision_id')),
+            (Get-PathLeaseExpiryField -Event $resume -Names @('offer_generation')),
+            (Get-PathLeaseExpiryField -Event $resume -Names @('transaction_generation')),
+            (Get-PathLeaseExpiryField -Event $resume -Names @('tuna_path_lease_generation')),
+            (Get-PathLeaseExpiryField -Event $resume -Names @('tuna_path_lease_listener_run_id')),
+            $refreshGeneration))
+        if (-not $distinct.Contains($key)) {
+            $distinct[$key] = $timeout
+        }
+    }
+
+    $unresolved = @($distinct.Values)
+    return [pscustomobject]@{
+        RawCount = $raw.Count
+        DistinctCount = $distinct.Count
+        RecoveredCount = 0
+        UnresolvedCount = $unresolved.Count
+        Verdict = if ($unresolved.Count -gt 0) { 'fail' } elseif ($distinct.Count -gt 0) { 'pass' } else { 'none' }
+        RawCandidateEvents = @($raw.ToArray())
+        RecoveredCandidateEvents = @()
+        UnresolvedCandidateEvents = @($unresolved)
     }
 }
 
@@ -28892,6 +29121,14 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
                 'Idempotent',
                 'Accepted')
     })
+    [object[]]$recheckInvalidatedEvents = @($events | Where-Object {
+        $_.EventName -eq
+            'filetransfer_receive_recovery_proof_state_publication_recheck_invalidated' -and
+        (Get-ProofStateField -Event $_ -Names @('invalidation_target')) -eq
+            'recheck_arm' -and
+        (Get-ProofStateField -Event $_ -Names @('decision_reason')) -eq
+            'receive_recovery_proof_observed'
+    })
     [object[]]$stateReceivedEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_v4_state_received'
     })
@@ -29466,9 +29703,29 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
                 -Issued $returnProof[0] `
                 -Candidate $_)
         } | Select-Object -First 1)
+        $proofOwnedRecheckInvalidation = @($recheckInvalidatedEvents | Where-Object {
+            $publicationReceipt.Count -eq 1 -and
+            $proof.Count -eq 1 -and
+            $adopted.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$publicationReceipt[0].Sequence -and
+            [int64]$_.Sequence -le [int64]$adopted[0].Sequence -and
+            (Test-ProofStatePublicationCommandMatch `
+                -Issued $record.Issued `
+                -Retained $record.Retained `
+                -Candidate $_) -and
+            (Get-ProofStateField `
+                -Event $_ `
+                -Names @('predecessor_publication_generation')) -eq
+                    (Get-ProofStatePublicationGeneration -Event $publicationReceipt[0]) -and
+            (Get-ProofStateField `
+                -Event $_ `
+                -Names @('predecessor_frame_fingerprint')) -eq
+                    (Get-ProofStateFrameFingerprint -Event $publicationReceipt[0])
+        } | Select-Object -First 1)
         $coordinatorReleaseObserved =
             $resumed.Count -eq 1 -or
-            ($returnProof.Count -eq 1 -and $returnAdopted.Count -eq 1)
+            ($returnProof.Count -eq 1 -and $returnAdopted.Count -eq 1) -or
+            $proofOwnedRecheckInvalidation.Count -eq 1
 
         if ($decision.Count -eq 1 -and
             $stateSend.Count -eq 1 -and
@@ -37643,6 +37900,9 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof =
         Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryCorrelation `
             -Events $events
+    $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof =
+        Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredCorrelation `
+            -Events $events
     $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof =
         Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredCorrelation `
             -Events $events
@@ -40952,6 +41212,12 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired' `
+        -Events @($runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.UnresolvedCandidateEvents) `
+        -DefaultReason 'initial_activation_path_lease_listener_expired_during_receive_recovery_hold' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired' `
         -Events @($runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof.UnresolvedCandidateEvents) `
         -DefaultReason 'initial_activation_offer_expired_during_receive_recovery_hold' `
@@ -41340,6 +41606,9 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.UnresolvedCount -gt 0) {
         $class = 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing'
+    }
+    elseif ($runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.UnresolvedCount -gt 0) {
+        $class = 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired'
     }
     elseif ($runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof.UnresolvedCount -gt 0) {
         $class = 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired'
@@ -41808,6 +42077,7 @@ function Get-FileTransferRecoveryFailureClassification {
                 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing',
                 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved',
                 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing',
+                'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired',
                 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired',
                 'runtime_unlock_precommit_probe_start_handoff_missing',
                 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing',
@@ -42189,6 +42459,16 @@ function Get-FileTransferRecoveryFailureClassification {
             $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof.UnresolvedCount
         RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredVerdict =
             $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof.Verdict
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRawCount =
+            $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.RawCount
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredDistinctCount =
+            $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.DistinctCount
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRecoveredCount =
+            $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.RecoveredCount
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredUnresolvedCount =
+            $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.UnresolvedCount
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredVerdict =
+            $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.Verdict
         RegularV4FrontierRepairPressureAuthorityLifecycleSplitRawCount = $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.RawCount
         RegularV4FrontierRepairPressureAuthorityLifecycleSplitDistinctCount = $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.DistinctCount
         RegularV4FrontierRepairPressureAuthorityLifecycleSplitRecoveredCount = $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.RecoveredCount
@@ -42805,6 +43085,11 @@ function New-FileTransferInvariantLedgerObject {
         runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_recovered_count = [string]$recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredRecoveredCount
         runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_unresolved_count = [string]$recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredUnresolvedCount
         runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_verdict = $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredVerdict
+        runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_raw_count = [string]$recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRawCount
+        runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_distinct_count = [string]$recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredDistinctCount
+        runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_recovered_count = [string]$recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRecoveredCount
+        runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_unresolved_count = [string]$recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredUnresolvedCount
+        runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_verdict = $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredVerdict
         runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount
         runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount
         runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount
@@ -43040,6 +43325,7 @@ function Write-FileTransferDiagnosticsArtifacts {
             'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing',
             'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved',
             'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing',
+            'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired',
             'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired',
             'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
             'regular_v4_frontier_tail_repair_state_publication_missing',
@@ -43169,6 +43455,10 @@ function Write-FileTransferDiagnosticsArtifacts {
                 'recovery: coordinator released a held initial activation with expired wire evidence'
                 break
             }
+            'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired' {
+                'recovery: coordinator released a held initial activation after its Tuna listener expired'
+                break
+            }
             'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing' {
                 'recovery: coordinator-held runtime unlock retry was not rechecked after fallback-tail recovery'
                 break
@@ -43232,7 +43522,7 @@ function Write-FileTransferDiagnosticsArtifacts {
     $operatorAcceptanceFailureClass = if ($recoveryClassification.Class -in @('filetransfer_live_route_epoch_projection_missing', 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'runtime_unlock_precommit_probe_start_handoff_missing', 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing', 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_initial_pressure_install_missing', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery', 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
         'incomplete_proof'
     }
-    elseif ($recoveryClassification.Class -in @('filetransfer_receive_recovery_operation_incomplete', 'filetransfer_receive_recovery_completed_unproven_successor_missing', 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved', 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing', 'filetransfer_receive_recovery_completed_proven_successor_missing', 'runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'filetransfer_bridge_recovery_execution_payload_hold_missing', 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing', 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing', 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing', 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved', 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing', 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'fallback_tail_yield_authority_invalid', 'filetransfer_route_transition_draining_transport_grace_terminalization', 'filetransfer_route_transition_incomplete', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
+    elseif ($recoveryClassification.Class -in @('filetransfer_receive_recovery_operation_incomplete', 'filetransfer_receive_recovery_completed_unproven_successor_missing', 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved', 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing', 'filetransfer_receive_recovery_completed_proven_successor_missing', 'runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'filetransfer_bridge_recovery_execution_payload_hold_missing', 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing', 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing', 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing', 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved', 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing', 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired', 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'fallback_tail_yield_authority_invalid', 'filetransfer_route_transition_draining_transport_grace_terminalization', 'filetransfer_route_transition_incomplete', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
         'route_runtime'
     }
     elseif ($invariantMayOwnAcceptanceFailure) {
@@ -43365,6 +43655,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredRecoveredCount),
         ("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredUnresolvedCount),
         ("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_verdict={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredVerdict),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_raw_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRawCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredDistinctCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRecoveredCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredUnresolvedCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_verdict={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredVerdict),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount),

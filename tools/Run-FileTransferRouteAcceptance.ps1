@@ -1333,6 +1333,11 @@ function New-RouteAcceptanceRunResult {
         runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredRecoveredCount = 0
         runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredUnresolvedCount = 0
         runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredVerdict = 'none'
+        runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRawCount = 0
+        runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredDistinctCount = 0
+        runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRecoveredCount = 0
+        runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredUnresolvedCount = 0
+        runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredVerdict = 'none'
         sessionLivenessTimeoutCount = 0
         bridgeLivenessStaleDeferralCount = 0
         bridgeLivenessTimeoutDuringValidRecoveryCount = 0
@@ -2780,6 +2785,11 @@ function Assert-Phase4OperatorVerdict {
     $Result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_recovered_count' -DefaultValue '0')
     $Result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_unresolved_count' -DefaultValue '0')
     $Result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_verdict' -DefaultValue ([string]$Result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredVerdict)
+    $Result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_raw_count' -DefaultValue '0')
+    $Result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_distinct_count' -DefaultValue '0')
+    $Result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_recovered_count' -DefaultValue '0')
+    $Result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_unresolved_count' -DefaultValue '0')
+    $Result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_verdict' -DefaultValue ([string]$Result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredVerdict)
     $Result.fallbackReceiverStateDeferredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'fallback_v6_receiver_state_deferred_count' -DefaultValue '0')
     $Result.fallbackReceiverStateCoalescedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'fallback_v6_receiver_state_coalesced_count' -DefaultValue '0')
     $firstProofClass = Get-RouteAcceptanceReportValue -Report $operator -Name 'first_proof_chain_failure_class' -DefaultValue '(none)'
@@ -6918,6 +6928,11 @@ function Write-Phase5PreflightFailureSummaryFiles {
         runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredRecoveredCount = 0
         runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredUnresolvedCount = 0
         runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredVerdict = 'none'
+        runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRawCount = 0
+        runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredDistinctCount = 0
+        runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRecoveredCount = 0
+        runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredUnresolvedCount = 0
+        runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredVerdict = 'none'
         baselineManifest = $BaselinePath
         generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
         preflightVerdict = 'FAIL'
@@ -8512,6 +8527,11 @@ function New-RouteAcceptanceSummaryRunDto {
         runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredRecoveredCount = [int]$Result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredRecoveredCount
         runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredUnresolvedCount = [int]$Result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredUnresolvedCount
         runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredVerdict = [string]$Result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredVerdict
+        runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRawCount = [int]$Result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRawCount
+        runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredDistinctCount = [int]$Result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredDistinctCount
+        runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRecoveredCount = [int]$Result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRecoveredCount
+        runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredUnresolvedCount = [int]$Result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredUnresolvedCount
+        runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredVerdict = [string]$Result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredVerdict
         operatorVerdict = [string]$Result.operatorVerdict
         hardFailureCount = [int]$Result.hardFailureCount
         warningCount = [int]$Result.warningCount
@@ -8879,6 +8899,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredDistinctCount = 0
     $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredRecoveredCount = 0
     $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredUnresolvedCount = 0
+    $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRawCount = 0
+    $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredDistinctCount = 0
+    $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRecoveredCount = 0
+    $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredUnresolvedCount = 0
     $regularV4FrontierRepairMissingRangeNotPreservedRawCount = 0
     $regularV4FrontierRepairMissingRangeNotPreservedDistinctCount = 0
     $regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount = 0
@@ -9065,6 +9089,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredDistinctCount += [int]$runDto.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredDistinctCount
         $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredRecoveredCount += [int]$runDto.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredRecoveredCount
         $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredUnresolvedCount += [int]$runDto.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredUnresolvedCount
+        $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRawCount += [int]$runDto.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRawCount
+        $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredDistinctCount += [int]$runDto.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredDistinctCount
+        $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRecoveredCount += [int]$runDto.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRecoveredCount
+        $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredUnresolvedCount += [int]$runDto.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredUnresolvedCount
         $regularV4FrontierRepairMissingRangeNotPreservedRawCount += [int]$runDto.regularV4FrontierRepairMissingRangeNotPreservedRawCount
         $regularV4FrontierRepairMissingRangeNotPreservedDistinctCount += [int]$runDto.regularV4FrontierRepairMissingRangeNotPreservedDistinctCount
         $regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount += [int]$runDto.regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount
@@ -9710,6 +9738,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_recovered_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredRecoveredCount),
         ("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_unresolved_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredUnresolvedCount),
         ("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_verdict={0}" -f ($(if ($runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredUnresolvedCount -gt 0) { 'fail' } elseif ($runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredDistinctCount -gt 0) { 'pass' } else { 'none' }))),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_raw_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRawCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_distinct_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredDistinctCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_recovered_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRecoveredCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_unresolved_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredUnresolvedCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_verdict={0}" -f ($(if ($runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredUnresolvedCount -gt 0) { 'fail' } elseif ($runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredDistinctCount -gt 0) { 'pass' } else { 'none' }))),
         ("filetransfer_receive_recovery_operation_verdict={0}" -f $(if ($fileTransferReceiveRecoveryOperationUnresolvedCount -gt 0) { 'fail' } elseif ($fileTransferReceiveRecoveryOperationDistinctCount -gt 0) { 'pass' } else { 'none' })),
         ("baseline_manifest={0}" -f $BaselinePath),
         ("goodput_regression_tolerance_percent={0:F1}" -f [double]$GoodputRegressionTolerancePercent),
@@ -9797,6 +9830,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_recovered_count={1}" -f $prefix, $result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredRecoveredCount)
         $textLines += ("{0}.runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_unresolved_count={1}" -f $prefix, $result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredUnresolvedCount)
         $textLines += ("{0}.runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_verdict={1}" -f $prefix, $result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredVerdict)
+        $textLines += ("{0}.runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_raw_count={1}" -f $prefix, $result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRawCount)
+        $textLines += ("{0}.runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_distinct_count={1}" -f $prefix, $result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredDistinctCount)
+        $textLines += ("{0}.runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_recovered_count={1}" -f $prefix, $result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRecoveredCount)
+        $textLines += ("{0}.runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_unresolved_count={1}" -f $prefix, $result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredUnresolvedCount)
+        $textLines += ("{0}.runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_verdict={1}" -f $prefix, $result.runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredVerdict)
         $textLines += ("{0}.filetransfer_receive_recovery_operation_verdict={1}" -f $prefix, $result.fileTransferReceiveRecoveryOperationVerdict)
         $textLines += ("{0}.operator_verdict={1}" -f $prefix, $result.operatorVerdict)
         $textLines += ("{0}.hard_failure_count={1}" -f $prefix, $result.hardFailureCount)
@@ -10374,6 +10412,19 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
             'fail'
         }
         elseif ($runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredDistinctCount -gt 0) {
+            'pass'
+        }
+        else {
+            'none'
+        }
+        runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRawCount = $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRawCount
+        runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredDistinctCount = $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredDistinctCount
+        runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRecoveredCount = $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredRecoveredCount
+        runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredUnresolvedCount = $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredUnresolvedCount
+        runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredVerdict = if ($runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredUnresolvedCount -gt 0) {
+            'fail'
+        }
+        elseif ($runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredDistinctCount -gt 0) {
             'pass'
         }
         else {

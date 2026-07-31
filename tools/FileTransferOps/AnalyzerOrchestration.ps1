@@ -1173,6 +1173,12 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_offer_envelope_refresh_issued') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_offer_envelope_refresh_prepared') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_offer_envelope_refresh_committed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_offer_envelope_refresh_physical_resume') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_path_lease_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_path_lease_listener_ready') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_listener_sidecar_event') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_path_lease_failed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_path_lease_sidecar_unavailable') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_transaction_offer_generation_created') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_offer_received_raw') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_message_rejected') +
@@ -1216,6 +1222,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_peer_reachability_observed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_proof_state_publication_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_proof_state_publication_recheck_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_proof_state_publication_recheck_invalidated') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_proof_state_publication_receipt_applied') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_proof_state_publication_invalidated') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v4_state_sent') +
@@ -1280,6 +1287,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
     $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof =
         Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryCorrelation `
+            -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
+    $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof =
+        Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredCorrelation `
             -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
     $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof =
         Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredCorrelation `
@@ -2097,6 +2107,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Reason = 'initial_activation_offer_expired_during_receive_recovery_hold'
         }) | Out-Null
     }
+    foreach ($candidateEvent in @($runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.UnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired'
+            Event = $candidateEvent
+            Reason = 'initial_activation_path_lease_listener_expired_during_receive_recovery_hold'
+        }) | Out-Null
+    }
     foreach ($candidateEvent in @($regularV4FrontierRepairMissingRangePreservationProof.UnresolvedCandidateEvents)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'regular_v4_frontier_repair_missing_range_not_preserved'
@@ -2275,6 +2292,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.UnresolvedCount -gt 0 -or
+        $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRetryFallbackTailUnblockRecheckProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RecoverySettlementProof.HandoffBypassCount -gt 0 -or
@@ -2338,6 +2356,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing',
                 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved',
                 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing',
+                'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired',
                 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired',
                 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
                 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected',
@@ -2427,6 +2446,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing',
             'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved',
             'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing',
+            'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired',
             'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired',
             'runtime_unlock_precommit_probe_start_handoff_missing',
             'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing',
@@ -2702,6 +2722,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_recovered_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof.RecoveredCount),
         ("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_unresolved_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof.UnresolvedCount),
         ("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_verdict={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof.Verdict),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_raw_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.RawCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_distinct_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.DistinctCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_recovered_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.RecoveredCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_unresolved_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.UnresolvedCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_verdict={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.Verdict),
        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.RequestedCount),
        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DecidedCount),
        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DiscardedCount),
@@ -3015,6 +3040,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_recovered_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof.RecoveredCount),
         ("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_unresolved_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof.UnresolvedCount),
         ("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_verdict={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof.Verdict),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_raw_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.RawCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_distinct_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.DistinctCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_recovered_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.RecoveredCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_unresolved_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.UnresolvedCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_verdict={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.Verdict),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.RequestedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DecidedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DiscardedCount),
@@ -3324,6 +3354,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_recovered_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof.RecoveredCount),
         ("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_unresolved_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof.UnresolvedCount),
         ("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_verdict={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof.Verdict),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_raw_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.RawCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_distinct_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.DistinctCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_recovered_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.RecoveredCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_unresolved_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.UnresolvedCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_verdict={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.Verdict),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.RequestedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DecidedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DiscardedCount),
@@ -3615,6 +3650,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_recovered_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof.RecoveredCount),
         ("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_unresolved_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof.UnresolvedCount),
         ("runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_verdict={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof.Verdict),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_raw_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.RawCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_distinct_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.DistinctCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_recovered_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.RecoveredCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_unresolved_count={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.UnresolvedCount),
+        ("runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_verdict={0}" -f $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.Verdict),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.RequestedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DecidedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DiscardedCount),
@@ -3934,6 +3974,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_recovered_count = $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof.RecoveredCount
         runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_unresolved_count = $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof.UnresolvedCount
         runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_verdict = $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof.Verdict
+        runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_raw_count = $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.RawCount
+        runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_distinct_count = $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.DistinctCount
+        runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_recovered_count = $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.RecoveredCount
+        runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_unresolved_count = $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.UnresolvedCount
+        runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_verdict = $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.Verdict
         runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.RequestedCount
         runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DecidedCount
         runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DiscardedCount

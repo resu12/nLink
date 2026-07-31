@@ -405,6 +405,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_recovered_count"]);
             Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_unresolved_count"]);
             Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_verdict"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_raw_count"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_distinct_count"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_recovered_count"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_unresolved_count"]);
+            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_verdict"]);
             var manifestPath = Path.Combine(runRoot, "route-acceptance-run-manifest.json");
             Assert.True(File.Exists(manifestPath), "Expected immutable route-acceptance manifest.");
             await using (var manifestStream = File.OpenRead(manifestPath))

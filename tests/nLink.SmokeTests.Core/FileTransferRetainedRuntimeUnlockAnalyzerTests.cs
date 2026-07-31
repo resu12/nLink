@@ -11795,6 +11795,100 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task AnalyzeRetained_ReleasedInitialActivationPathLeaseListenerExpired(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string source =
+            "session_id=sess_listener_expired; transfer_id=transfer_listener_expired; " +
+            "direction=outbound; offer_nonce=offer-listener-expired; payer_decision_id=4; " +
+            "offer_generation=1; transaction_generation=1; tuna_path_lease_generation=1; " +
+            "tuna_path_lease_listener_run_id=listener-start-1; " +
+            "control_envelope_fingerprint=envelope-2; log_writer_id=source-writer";
+        var lines = new List<string>
+        {
+            LogLine(
+                $"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {source}; decision_status=Held",
+                secondsOffset: 0),
+            LogLine(
+                "event=filetransfer_receive_recovery_operation_closure_adopted; " +
+                "session_id=sess_listener_expired; transfer_id=transfer_listener_expired; " +
+                "direction=outbound; execution_state=Completed; closure_state=Adopted; " +
+                "log_writer_id=source-writer",
+                secondsOffset: 1),
+            LogLine(
+                $"event=runtime_unlock_initial_activation_offer_envelope_refresh_committed; {source}; refresh_generation=1; decision_status=Accepted",
+                secondsOffset: 2),
+            LogLine(
+                $"event=runtime_unlock_initial_activation_receive_recovery_hold_resumed; {source}; decision_status=Released",
+                secondsOffset: 3),
+            LogLine(
+                $"event=runtime_unlock_initial_activation_offer_envelope_refresh_physical_resume; {source}; refresh_generation=1; boundary=PeerResponseTimeout",
+                secondsOffset: 4),
+            LogLine(
+                "event=tuna_listener_sidecar_event; sidecar_event=error; " +
+                "sidecar_reason=Tuna accept failed: accept timed out after 2m0s; " +
+                "log_writer_id=source-writer; log_writer_sequence=3772",
+                secondsOffset: 5),
+            LogLine(
+                "event=tuna_path_lease_failed; session_id=sess_listener_expired; " +
+                "transfer_id=transfer_listener_expired; direction=outbound; " +
+                "offer_generation=1; transaction_generation=1; lease_generation=1; " +
+                "listener_run_id=listener-start-1; log_writer_id=source-writer",
+                secondsOffset: 6),
+            LogLine(
+                "event=tuna_path_lease_sidecar_unavailable; session_id=sess_listener_expired; " +
+                "transfer_id=transfer_listener_expired; direction=outbound; " +
+                "offer_generation=1; transaction_generation=1; lease_generation=1; " +
+                "listener_run_id=listener-start-1; log_writer_id=source-writer",
+                secondsOffset: 7)
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-operator-verdict.txt");
+        Assert.Equal(
+            "runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired",
+            verdict["first_proof_chain_failure_class"]);
+        Assert.Equal(
+            "initial_activation_path_lease_listener_expired_during_receive_recovery_hold",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal(
+            "1",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_raw_count"]);
+        Assert.Equal(
+            "1",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_distinct_count"]);
+        Assert.Equal(
+            "0",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_recovered_count"]);
+        Assert.Equal(
+            "1",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_unresolved_count"]);
+        Assert.Equal("3772", verdict["first_proof_chain_failure_writer_sequence"]);
+        Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task AnalyzeRetained_InitialRuntimeUnlockOfferRetryRequiresCoordinatorLifecycle(
         bool compact)
     {
