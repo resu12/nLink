@@ -36,6 +36,15 @@ function New-GuiSmokeLogLedgerState {
         ActiveGenerationKey = ''
         FailureCode = ''
         FailureDetail = ''
+        StorageMode = 'RollingMemory'
+        AppendOnlyPath = ''
+        AppendOnlyMaximumBytes = 0L
+        AppendOnlyConsumedByteOffset = 0L
+        AppendOnlyLineStartOffsets = New-Object System.Collections.Generic.List[long]
+        AppendOnlyGenerationKey = ''
+        LastSuccessfulSyncStartedUtc = $null
+        LastSuccessfulSyncCompletedUtc = $null
+        LastSuccessfulSyncElapsedMilliseconds = 0L
     }
 }
 
@@ -62,6 +71,80 @@ function Reset-GuiSmokeLogLedgerState {
     $State.ActiveGenerationKey = ''
     $State.FailureCode = ''
     $State.FailureDetail = ''
+    $State.StorageMode = 'RollingMemory'
+    $State.AppendOnlyPath = ''
+    $State.AppendOnlyMaximumBytes = 0L
+    $State.AppendOnlyConsumedByteOffset = 0L
+    $State.AppendOnlyLineStartOffsets.Clear()
+    $State.AppendOnlyGenerationKey = ''
+    $State.LastSuccessfulSyncStartedUtc = $null
+    $State.LastSuccessfulSyncCompletedUtc = $null
+    $State.LastSuccessfulSyncElapsedMilliseconds = 0L
+}
+
+function Enable-GuiSmokeAppendOnlyLogLedgerState {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [long]$MaximumBytes = 4L * 1024L * 1024L * 1024L
+    )
+
+    if ($MaximumBytes -le 0) {
+        throw 'Gui smoke append-only ledger maximum bytes must be positive.'
+    }
+
+    $resolvedPath = [IO.Path]::GetFullPath($Path)
+    if ([IO.File]::Exists($resolvedPath)) {
+        throw "gui_smoke_append_only_log_preexisting:$resolvedPath"
+    }
+    $directory = [IO.Path]::GetDirectoryName($resolvedPath)
+    if ([string]::IsNullOrWhiteSpace($directory)) {
+        throw "gui_smoke_append_only_log_parent_missing:$resolvedPath"
+    }
+
+    [void][IO.Directory]::CreateDirectory($directory)
+    $stream = [IO.File]::Open($resolvedPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+    $stream.Flush($true)
+    $stream.Dispose()
+
+    $generationKey = 'append-only:' + (Get-GuiSmokeLogLedgerHash -Value $resolvedPath.ToLowerInvariant())
+    $creationTicks = [IO.File]::GetCreationTimeUtc($resolvedPath).Ticks
+    $State.StorageMode = 'AppendOnlyFile'
+    $State.AppendOnlyPath = $resolvedPath
+    $State.AppendOnlyMaximumBytes = $MaximumBytes
+    $State.AppendOnlyConsumedByteOffset = 0L
+    $State.AppendOnlyLineStartOffsets.Clear()
+    $State.AppendOnlyGenerationKey = $generationKey
+    $State.InitialGenerationKey = $generationKey
+    $State.ActiveGenerationKey = $generationKey
+    $generation = [pscustomobject]@{
+        GenerationKey = $generationKey
+        CreationTimeUtcTicks = [long]$creationTicks
+        ConsumedByteOffset = 0L
+        ConsumedLineCount = 0L
+        LastPath = $resolvedPath
+        FirstLineHash = ''
+        IsActivePath = $true
+    }
+    $State.Generations[$generationKey] = $generation
+    $State.InitialGenerationSnapshots = @([pscustomobject]@{
+        generationKey = $generationKey
+        creationTimeUtcTicks = [long]$creationTicks
+        firstLineHash = ''
+        lastPath = $resolvedPath
+        isActivePath = $true
+        consumedByteOffset = 0L
+        consumedLineCount = 0L
+    })
+}
+
+function Get-GuiSmokeLogLedgerLineCount {
+    param([Parameter(Mandatory = $true)]$State)
+
+    if ([string]$State.StorageMode -eq 'AppendOnlyFile') {
+        return [int]$State.AppendOnlyLineStartOffsets.Count
+    }
+    return [int]$State.Lines.Count
 }
 
 function Set-GuiSmokeLogLedgerWriterEvidenceBookmark {
@@ -70,8 +153,9 @@ function Set-GuiSmokeLogLedgerWriterEvidenceBookmark {
         [Parameter(Mandatory = $true)][int]$Bookmark
     )
 
-    if ($Bookmark -lt 0 -or $Bookmark -gt $State.Lines.Count) {
-        throw ("gui_smoke_log_writer_invalid_bookmark: bookmark={0}; line_count={1}" -f $Bookmark, $State.Lines.Count)
+    $lineCount = Get-GuiSmokeLogLedgerLineCount -State $State
+    if ($Bookmark -lt 0 -or $Bookmark -gt $lineCount) {
+        throw ("gui_smoke_log_writer_invalid_bookmark: bookmark={0}; line_count={1}" -f $Bookmark, $lineCount)
     }
     if ([int]$State.WriterEvidenceBookmark -ge 0 -and [int]$State.WriterEvidenceBookmark -ne $Bookmark) {
         throw ("gui_smoke_log_writer_bookmark_changed: initial={0}; replacement={1}" -f $State.WriterEvidenceBookmark, $Bookmark)
@@ -163,7 +247,7 @@ function Add-GuiSmokeLogLedgerWriterEvidence {
     $writerSequenceText = Get-GuiSmokeLogLedgerStructuredField -Line $Line -Name 'log_writer_sequence'
     if ([string]::IsNullOrWhiteSpace($writerId) -and [string]::IsNullOrWhiteSpace($writerSequenceText)) {
         if ([int]$State.WriterEvidenceBookmark -ge 0 -and
-            $State.Lines.Count -ge [int]$State.WriterEvidenceBookmark) {
+            (Get-GuiSmokeLogLedgerLineCount -State $State) -ge [int]$State.WriterEvidenceBookmark) {
             $State.WriterIdentityMismatchCount++
         }
         return
@@ -190,7 +274,7 @@ function Add-GuiSmokeLogLedgerWriterEvidence {
     if ($null -eq $writer) {
         if (-not $isStart) {
             if ([int]$State.WriterEvidenceBookmark -ge 0 -and
-                $State.Lines.Count -ge [int]$State.WriterEvidenceBookmark -and
+                (Get-GuiSmokeLogLedgerLineCount -State $State) -ge [int]$State.WriterEvidenceBookmark -and
                 $State.UnknownWritersAfterBookmark.Add($writerId)) {
                 $State.WriterIdentityMismatchCount++
             }
@@ -206,7 +290,7 @@ function Add-GuiSmokeLogLedgerWriterEvidence {
             -not [string]::Equals($acceptanceRunId, $expectedAcceptanceRunId, [System.StringComparison]::Ordinal) -or
             -not [string]::Equals($scenarioRunId, $expectedScenarioRunId, [System.StringComparison]::Ordinal)) {
             if ([int]$State.WriterEvidenceBookmark -ge 0 -and
-                $State.Lines.Count -ge [int]$State.WriterEvidenceBookmark) {
+                (Get-GuiSmokeLogLedgerLineCount -State $State) -ge [int]$State.WriterEvidenceBookmark) {
                 $State.WriterIdentityMismatchCount++
             }
             return
@@ -538,6 +622,36 @@ function Set-GuiSmokeLogLedgerFailure {
     if ([string]::IsNullOrWhiteSpace([string]$State.FailureCode)) {
         $State.FailureCode = $Code
         $State.FailureDetail = $Detail
+        $artifactDirectory = [string]$env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR
+        if (-not [string]::IsNullOrWhiteSpace($artifactDirectory)) {
+            try {
+                $failurePath = Join-Path ([IO.Path]::GetFullPath($artifactDirectory)) 'filetransfer-gui-log-cursor-failure.json'
+                $temporaryPath = '{0}.{1}.tmp' -f $failurePath, [guid]::NewGuid().ToString('N')
+                $failure = [ordered]@{
+                    schemaVersion = 1
+                    event = 'filetransfer_gui_log_cursor_failure'
+                    failureCode = $Code
+                    failureDetail = $Detail
+                    storageMode = [string]$State.StorageMode
+                    sourcePath = [string]$State.AppendOnlyPath
+                    activeGenerationKey = [string]$State.ActiveGenerationKey
+                    consumedByteOffset = [long]$State.AppendOnlyConsumedByteOffset
+                    consumedLineCount = [long](Get-GuiSmokeLogLedgerLineCount -State $State)
+                    lastSuccessfulSyncStartedUtc = $State.LastSuccessfulSyncStartedUtc
+                    lastSuccessfulSyncCompletedUtc = $State.LastSuccessfulSyncCompletedUtc
+                    lastSuccessfulSyncElapsedMilliseconds = [long]$State.LastSuccessfulSyncElapsedMilliseconds
+                    syncCount = [int]$State.SyncCount
+                    observedUtc = [DateTimeOffset]::UtcNow.ToString('O')
+                }
+                [IO.File]::WriteAllText($temporaryPath, ($failure | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
+                if ([IO.File]::Exists($failurePath)) { [IO.File]::Delete($failurePath) }
+                [IO.File]::Move($temporaryPath, $failurePath)
+            }
+            catch {
+                # Cursor failure remains authoritative even when its optional
+                # diagnostic record cannot be persisted.
+            }
+        }
     }
 }
 
@@ -557,12 +671,92 @@ function Invoke-GuiSmokeLogLedgerCancellationProbe {
     }
 }
 
+function Sync-GuiSmokeAppendOnlyLogLedger {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [AllowNull()][scriptblock]$CancellationProbe = $null
+    )
+
+    $startedUtc = [DateTimeOffset]::UtcNow
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    $State.LastSuccessfulSyncStartedUtc = $startedUtc
+    $stream = $null
+    try {
+        Invoke-GuiSmokeLogLedgerCancellationProbe -CancellationProbe $CancellationProbe
+        $path = [string]$State.AppendOnlyPath
+        if ([string]::IsNullOrWhiteSpace($path) -or -not [IO.File]::Exists($path)) {
+            Set-GuiSmokeLogLedgerFailure -State $State -Code 'gui_smoke_log_cursor_gap' -Detail ("path={0}; reason=append_only_source_missing" -f $path)
+            Assert-GuiSmokeLogLedgerHealthy -State $State
+        }
+
+        $generation = $State.Generations[[string]$State.AppendOnlyGenerationKey]
+        $creationTicks = [IO.File]::GetCreationTimeUtc($path).Ticks
+        if ($null -eq $generation -or [long]$generation.CreationTimeUtcTicks -ne [long]$creationTicks) {
+            Set-GuiSmokeLogLedgerFailure -State $State -Code 'gui_smoke_log_cursor_gap' -Detail ("path={0}; reason=append_only_source_replaced; expected_creation_ticks={1}; actual_creation_ticks={2}" -f $path, $(if ($null -eq $generation) { 0L } else { [long]$generation.CreationTimeUtcTicks }), $creationTicks)
+            Assert-GuiSmokeLogLedgerHealthy -State $State
+        }
+
+        $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+        $stream = [IO.FileStream]::new($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share, 65536, [IO.FileOptions]::SequentialScan)
+        $capturedLength = [long]$stream.Length
+        $consumed = [long]$State.AppendOnlyConsumedByteOffset
+        if ($capturedLength -lt $consumed) {
+            Set-GuiSmokeLogLedgerFailure -State $State -Code 'gui_smoke_log_cursor_truncated' -Detail ("path={0}; consumed_bytes={1}; current_bytes={2}; reason=append_only_source_truncated" -f $path, $consumed, $capturedLength)
+            Assert-GuiSmokeLogLedgerHealthy -State $State
+        }
+        if ($capturedLength -gt [long]$State.AppendOnlyMaximumBytes) {
+            Set-GuiSmokeLogLedgerFailure -State $State -Code 'gui_smoke_log_cursor_overflow' -Detail ("path={0}; max_bytes={1}; current_bytes={2}; reason=append_only_source_limit" -f $path, $State.AppendOnlyMaximumBytes, $capturedLength)
+            Assert-GuiSmokeLogLedgerHealthy -State $State
+        }
+
+        $stream.Position = $consumed
+        $buffer = [byte[]]::new(65536)
+        $absolutePosition = $consumed
+        $lineStart = $consumed
+        $committedOffset = $consumed
+        while ($absolutePosition -lt $capturedLength) {
+            Invoke-GuiSmokeLogLedgerCancellationProbe -CancellationProbe $CancellationProbe
+            $requested = [int][Math]::Min([long]$buffer.Length, $capturedLength - $absolutePosition)
+            $read = $stream.Read($buffer, 0, $requested)
+            if ($read -le 0) {
+                break
+            }
+            for ($index = 0; $index -lt $read; $index++) {
+                if ($buffer[$index] -eq 10) {
+                    $State.AppendOnlyLineStartOffsets.Add([long]$lineStart) | Out-Null
+                    $committedOffset = $absolutePosition + [long]$index + 1L
+                    $lineStart = $committedOffset
+                }
+            }
+            $absolutePosition += [long]$read
+        }
+
+        $State.AppendOnlyConsumedByteOffset = $committedOffset
+        $generation.ConsumedByteOffset = $committedOffset
+        $generation.ConsumedLineCount = [long]$State.AppendOnlyLineStartOffsets.Count
+        $State.SyncCount++
+        $State.LastSuccessfulSyncCompletedUtc = [DateTimeOffset]::UtcNow
+        $State.LastSuccessfulSyncElapsedMilliseconds = [long]$stopwatch.ElapsedMilliseconds
+    }
+    finally {
+        if ($stream) {
+            $stream.Dispose()
+        }
+        $stopwatch.Stop()
+    }
+}
+
 function Sync-GuiSmokeLogLedger {
     param(
         [Parameter(Mandatory = $true)]$State,
         [AllowEmptyCollection()][string[]]$Paths = @(),
         [AllowNull()][scriptblock]$CancellationProbe = $null
     )
+
+    if ([string]$State.StorageMode -eq 'AppendOnlyFile') {
+        Sync-GuiSmokeAppendOnlyLogLedger -State $State -CancellationProbe $CancellationProbe
+        return
+    }
 
     Invoke-GuiSmokeLogLedgerCancellationProbe -CancellationProbe $CancellationProbe
     Assert-GuiSmokeLogLedgerHealthy -State $State
@@ -854,13 +1048,23 @@ function Get-GuiSmokeLogLedgerBookmark {
     param([Parameter(Mandatory = $true)]$State)
 
     Assert-GuiSmokeLogLedgerHealthy -State $State
-    return [int]$State.Lines.Count
+    return Get-GuiSmokeLogLedgerLineCount -State $State
 }
 
 function Get-GuiSmokeLogLedgerLines {
     param([Parameter(Mandatory = $true)]$State)
 
     Assert-GuiSmokeLogLedgerHealthy -State $State
+    $lineCount = Get-GuiSmokeLogLedgerLineCount -State $State
+    if ([string]$State.StorageMode -eq 'AppendOnlyFile') {
+        $lines = New-Object System.Collections.Generic.List[string]
+        [void](Invoke-GuiSmokeLogLedgerRangeVisitor -State $State -StartIndex 0 -EndIndex $lineCount -Visitor {
+            param([string]$line, [int]$lineIndex)
+            $lines.Add($line) | Out-Null
+            return $null
+        })
+        return @($lines.ToArray())
+    }
     return @($State.Lines.ToArray())
 }
 
@@ -871,18 +1075,29 @@ function Get-GuiSmokeLogLedgerLinesAfterBookmark {
     )
 
     Assert-GuiSmokeLogLedgerHealthy -State $State
-    if ($Bookmark -lt 0 -or $Bookmark -gt $State.Lines.Count) {
+    $lineCount = Get-GuiSmokeLogLedgerLineCount -State $State
+    if ($Bookmark -lt 0 -or $Bookmark -gt $lineCount) {
         Set-GuiSmokeLogLedgerFailure `
             -State $State `
             -Code 'gui_smoke_log_cursor_invalid_bookmark' `
-            -Detail ("bookmark={0}; line_count={1}" -f $Bookmark, $State.Lines.Count)
+            -Detail ("bookmark={0}; line_count={1}" -f $Bookmark, $lineCount)
         Assert-GuiSmokeLogLedgerHealthy -State $State
     }
-    if ($Bookmark -eq $State.Lines.Count) {
+    if ($Bookmark -eq $lineCount) {
         return @()
     }
 
-    return @($State.Lines.GetRange($Bookmark, $State.Lines.Count - $Bookmark).ToArray())
+    if ([string]$State.StorageMode -eq 'AppendOnlyFile') {
+        $lines = New-Object System.Collections.Generic.List[string]
+        [void](Invoke-GuiSmokeLogLedgerRangeVisitor -State $State -StartIndex $Bookmark -EndIndex $lineCount -Visitor {
+            param([string]$line, [int]$lineIndex)
+            $lines.Add($line) | Out-Null
+            return $null
+        })
+        return @($lines.ToArray())
+    }
+
+    return @($State.Lines.GetRange($Bookmark, $lineCount - $Bookmark).ToArray())
 }
 
 function Invoke-GuiSmokeLogLedgerRangeVisitor {
@@ -894,14 +1109,45 @@ function Invoke-GuiSmokeLogLedgerRangeVisitor {
     )
 
     Assert-GuiSmokeLogLedgerHealthy -State $State
+    $lineCount = Get-GuiSmokeLogLedgerLineCount -State $State
     if ($StartIndex -lt 0 -or
         $EndIndex -lt $StartIndex -or
-        $EndIndex -gt $State.Lines.Count) {
+        $EndIndex -gt $lineCount) {
         Set-GuiSmokeLogLedgerFailure `
             -State $State `
             -Code 'gui_smoke_log_cursor_invalid_range' `
-            -Detail ("start_index={0}; end_index={1}; line_count={2}" -f $StartIndex, $EndIndex, $State.Lines.Count)
+            -Detail ("start_index={0}; end_index={1}; line_count={2}" -f $StartIndex, $EndIndex, $lineCount)
         Assert-GuiSmokeLogLedgerHealthy -State $State
+    }
+
+    if ([string]$State.StorageMode -eq 'AppendOnlyFile') {
+        if ($StartIndex -eq $EndIndex) {
+            return $null
+        }
+        $stream = $null
+        $reader = $null
+        try {
+            $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+            $stream = [IO.FileStream]::new([string]$State.AppendOnlyPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share, 65536, [IO.FileOptions]::SequentialScan)
+            $stream.Position = [long]$State.AppendOnlyLineStartOffsets[$StartIndex]
+            $reader = [IO.StreamReader]::new($stream, [Text.UTF8Encoding]::new($false, $true), $true, 65536, $true)
+            for ($lineIndex = $StartIndex; $lineIndex -lt $EndIndex; $lineIndex++) {
+                $line = $reader.ReadLine()
+                if ($null -eq $line) {
+                    Set-GuiSmokeLogLedgerFailure -State $State -Code 'gui_smoke_log_cursor_gap' -Detail ("path={0}; line_index={1}; reason=append_only_range_short_read" -f $State.AppendOnlyPath, $lineIndex)
+                    Assert-GuiSmokeLogLedgerHealthy -State $State
+                }
+                $result = & $Visitor ([string]$line) $lineIndex
+                if ($null -ne $result) {
+                    return $result
+                }
+            }
+            return $null
+        }
+        finally {
+            if ($reader) { $reader.Dispose() }
+            if ($stream) { $stream.Dispose() }
+        }
     }
 
     for ($lineIndex = $StartIndex; $lineIndex -lt $EndIndex; $lineIndex++) {
@@ -914,6 +1160,66 @@ function Invoke-GuiSmokeLogLedgerRangeVisitor {
     return $null
 }
 
+function Write-GuiSmokeAppendOnlyLogLedgerRangeCapture {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)][int]$StartIndex,
+        [Parameter(Mandatory = $true)][int]$EndIndex,
+        [Parameter(Mandatory = $true)][string]$DestinationPath
+    )
+
+    $resolvedDestinationPath = [IO.Path]::GetFullPath($DestinationPath)
+    if ([IO.File]::Exists($resolvedDestinationPath)) {
+        throw "Gui smoke log ledger capture already exists: $resolvedDestinationPath"
+    }
+    $destinationDirectory = [IO.Path]::GetDirectoryName($resolvedDestinationPath)
+    [void][IO.Directory]::CreateDirectory($destinationDirectory)
+    $tempPath = Join-Path $destinationDirectory (".{0}.{1}.tmp" -f [IO.Path]::GetFileName($resolvedDestinationPath), [guid]::NewGuid().ToString('N'))
+    $source = $null
+    $destination = $null
+    $sha256 = $null
+    try {
+        $startOffset = if ($StartIndex -lt $State.AppendOnlyLineStartOffsets.Count) { [long]$State.AppendOnlyLineStartOffsets[$StartIndex] } else { [long]$State.AppendOnlyConsumedByteOffset }
+        $endOffset = if ($EndIndex -lt $State.AppendOnlyLineStartOffsets.Count) { [long]$State.AppendOnlyLineStartOffsets[$EndIndex] } else { [long]$State.AppendOnlyConsumedByteOffset }
+        $remaining = $endOffset - $startOffset
+        if ($remaining -lt 0) { throw 'gui_smoke_append_only_capture_invalid_offsets' }
+        $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+        $source = [IO.FileStream]::new([string]$State.AppendOnlyPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share, 65536, [IO.FileOptions]::SequentialScan)
+        $source.Position = $startOffset
+        $destination = [IO.FileStream]::new($tempPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None, 65536, [IO.FileOptions]::SequentialScan)
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        $buffer = [byte[]]::new(65536)
+        $byteCount = 0L
+        while ($remaining -gt 0) {
+            $requested = [int][Math]::Min([long]$buffer.Length, $remaining)
+            $read = $source.Read($buffer, 0, $requested)
+            if ($read -le 0) { throw 'gui_smoke_append_only_capture_short_read' }
+            $destination.Write($buffer, 0, $read)
+            [void]$sha256.TransformBlock($buffer, 0, $read, $buffer, 0)
+            $remaining -= [long]$read
+            $byteCount += [long]$read
+        }
+        [void]$sha256.TransformFinalBlock([byte[]]::new(0), 0, 0)
+        $destination.Flush($true)
+        $destination.Dispose(); $destination = $null
+        $source.Dispose(); $source = $null
+        [IO.File]::Move($tempPath, $resolvedDestinationPath)
+        $tempPath = ''
+        return [pscustomobject]@{
+            Path = $resolvedDestinationPath
+            Sha256 = (([BitConverter]::ToString($sha256.Hash)) -replace '-', '').ToLowerInvariant()
+            LineCount = [long]($EndIndex - $StartIndex)
+            ByteCount = $byteCount
+        }
+    }
+    finally {
+        if ($source) { $source.Dispose() }
+        if ($destination) { $destination.Dispose() }
+        if ($sha256) { $sha256.Dispose() }
+        if (-not [string]::IsNullOrWhiteSpace($tempPath) -and [IO.File]::Exists($tempPath)) { [IO.File]::Delete($tempPath) }
+    }
+}
+
 function Write-GuiSmokeLogLedgerRangeCapture {
     param(
         [Parameter(Mandatory = $true)]$State,
@@ -921,6 +1227,10 @@ function Write-GuiSmokeLogLedgerRangeCapture {
         [Parameter(Mandatory = $true)][int]$EndIndex,
         [Parameter(Mandatory = $true)][string]$DestinationPath
     )
+
+    if ([string]$State.StorageMode -eq 'AppendOnlyFile') {
+        return Write-GuiSmokeAppendOnlyLogLedgerRangeCapture -State $State -StartIndex $StartIndex -EndIndex $EndIndex -DestinationPath $DestinationPath
+    }
 
     $resolvedDestinationPath = [IO.Path]::GetFullPath($DestinationPath)
     if ([IO.File]::Exists($resolvedDestinationPath)) {
@@ -1148,8 +1458,14 @@ function Copy-GuiSmokeFileAtomicCreateNew {
 function Get-GuiSmokeLogLedgerDiagnostics {
     param([Parameter(Mandatory = $true)]$State)
 
-    $consumedIdentities = @($State.ConsumedLineIdentities | Sort-Object)
-    $consumedIndexSha256 = Get-GuiSmokeLogLedgerHash -Value ($consumedIdentities -join [char]31)
+    $lineCount = Get-GuiSmokeLogLedgerLineCount -State $State
+    $consumedIdentities = if ([string]$State.StorageMode -eq 'AppendOnlyFile') { @() } else { @($State.ConsumedLineIdentities | Sort-Object) }
+    $consumedIndexSha256 = if ([string]$State.StorageMode -eq 'AppendOnlyFile') {
+        Get-GuiSmokeLogLedgerHash -Value ("{0}|0|{1}" -f $State.AppendOnlyGenerationKey, $lineCount)
+    }
+    else {
+        Get-GuiSmokeLogLedgerHash -Value ($consumedIdentities -join [char]31)
+    }
     $consumedIndexRanges = @(
         $State.Generations.Values |
             Sort-Object CreationTimeUtcTicks, GenerationKey |
@@ -1165,8 +1481,8 @@ function Get-GuiSmokeLogLedgerDiagnostics {
 
     return [pscustomobject]@{
         LedgerId = [string]$State.LedgerId
-        LineCount = [int]$State.Lines.Count
-        ConsumedIndexCount = [int]$State.ConsumedLineIdentities.Count
+        LineCount = [int]$lineCount
+        ConsumedIndexCount = [int]$lineCount
         ConsumedIndexSha256 = $consumedIndexSha256
         ConsumedIndexRanges = $consumedIndexRanges
         GenerationCount = [int]$State.Generations.Count
@@ -1180,6 +1496,11 @@ function Get-GuiSmokeLogLedgerDiagnostics {
         WriterDuplicateCount = [long]$State.WriterDuplicateCount
         WriterIdentityMismatchCount = [long]$State.WriterIdentityMismatchCount
         SyncCount = [int]$State.SyncCount
+        StorageMode = [string]$State.StorageMode
+        SourcePath = [string]$State.AppendOnlyPath
+        LastSuccessfulSyncStartedUtc = $State.LastSuccessfulSyncStartedUtc
+        LastSuccessfulSyncCompletedUtc = $State.LastSuccessfulSyncCompletedUtc
+        LastSuccessfulSyncElapsedMilliseconds = [long]$State.LastSuccessfulSyncElapsedMilliseconds
         FailureCode = if ([string]::IsNullOrWhiteSpace([string]$State.FailureCode)) { '(none)' } else { [string]$State.FailureCode }
         FailureDetail = if ([string]::IsNullOrWhiteSpace([string]$State.FailureDetail)) { '(none)' } else { [string]$State.FailureDetail }
     }
@@ -1202,6 +1523,38 @@ function Get-GuiSmokeLogLedgerWriterSnapshots {
                 }
             }
     )
+}
+
+function Update-GuiSmokeLogLedgerWriterEvidenceFromFrozenSource {
+    param([Parameter(Mandatory = $true)]$State)
+
+    if ([string]$State.StorageMode -ne 'AppendOnlyFile') {
+        return
+    }
+
+    $bookmark = [int]$State.WriterEvidenceBookmark
+    $lineCount = Get-GuiSmokeLogLedgerLineCount -State $State
+    $State.Writers.Clear()
+    $State.UnknownWritersAfterBookmark.Clear()
+    $State.WriterGapCount = 0L
+    $State.WriterDuplicateCount = 0L
+    $State.WriterIdentityMismatchCount = 0L
+    $State.WriterEvidenceBookmark = -1
+    if ($bookmark -gt 0) {
+        [void](Invoke-GuiSmokeLogLedgerRangeVisitor -State $State -StartIndex 0 -EndIndex $bookmark -Visitor {
+            param([string]$line, [int]$lineIndex)
+            Add-GuiSmokeLogLedgerWriterEvidence -State $State -Line $line
+            return $null
+        })
+    }
+    $State.WriterEvidenceBookmark = $bookmark
+    if ($bookmark -lt $lineCount) {
+        [void](Invoke-GuiSmokeLogLedgerRangeVisitor -State $State -StartIndex ([Math]::Max(0, $bookmark)) -EndIndex $lineCount -Visitor {
+            param([string]$line, [int]$lineIndex)
+            Add-GuiSmokeLogLedgerWriterEvidence -State $State -Line $line
+            return $null
+        })
+    }
 }
 
 function Get-GuiSmokeLogLedgerGenerationSnapshots {
@@ -1230,11 +1583,12 @@ function Get-GuiSmokeLogLedgerSnapshot {
         [int]$Bookmark = -1
     )
 
-    $effectiveBookmark = if ($Bookmark -ge 0) { $Bookmark } else { [int]$State.Lines.Count }
+    $lineCount = Get-GuiSmokeLogLedgerLineCount -State $State
+    $effectiveBookmark = if ($Bookmark -ge 0) { $Bookmark } else { [int]$lineCount }
     return [pscustomobject]@{
         ledgerId = [string]$State.LedgerId
         bookmark = [int]$effectiveBookmark
-        lineCount = [int]$State.Lines.Count
+        lineCount = [int]$lineCount
         initialGenerationKey = [string]$State.InitialGenerationKey
         activeGenerationKey = [string]$State.ActiveGenerationKey
         generations = @(Get-GuiSmokeLogLedgerGenerationSnapshots -State $State)
