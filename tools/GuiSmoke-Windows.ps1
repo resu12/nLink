@@ -10516,6 +10516,22 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $routeTransitionDrainingTransportGraceTerminalization =
         Test-TunaGuiRouteTransitionDrainingTransportGraceFailure `
             -Lines $regularV4EvidenceLineText
+    $fallbackV6ProofBootstrapMissing =
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @(
+                'event=filetransfer_route_transition_committed',
+                'target_route=file_tuna_v4',
+                'decision_status=Committed')) -and
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @(
+                'event=tuna_fallback_started')) -and
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @(
+                'event=filetransfer_fallback_nkn_proof_pending')) -and
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @(
+                'event=nkn_bridge_post_tuna_fallback_proof_send_window_skipped',
+                'reason=no_active_post_tuna_fallback_runtime')) -and
+        (-not (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @(
+                    'event=filetransfer_route_transition_prepared',
+                    'source_route=file_tuna_v4',
+                    'target_route=post_tuna_fallback_v6')))
     $regularV4RecoveryPredecessorSettlementClosedSuccessor =
         Test-TunaGuiRegularV4PredecessorSettlementClosedSuccessor -Lines $regularV4EvidenceLineText
     $regularV4FrontierRepairSettlementClosed =
@@ -10594,6 +10610,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $receiveRecoveryCompletedUnprovenSuccessorMissing -or
         $receiveRecoveryCompletedProvenSuccessorMissing -or
         $routeTransitionDrainingTransportGraceTerminalization -or
+        $fallbackV6ProofBootstrapMissing -or
         $regularV4FrontierRepairSettledStalledUnclosed -or
         $regularV4FrontierRepairSendDeferred -or
         $regularV4FrontierRepairStalled -or
@@ -10652,6 +10669,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     elseif ($initialActivationReceiveRecoveryHoldReleasedOfferExpired) {
         $phase = 'runtime_unlock_initial_activation'
         $reason = 'initial_activation_offer_expired_during_receive_recovery_hold'
+    }
+    elseif ($fallbackV6ProofBootstrapMissing) {
+        $phase = 'route_transition'
+        $reason =
+            'post_tuna_fallback_v6_proof_bootstrap_gated_on_committed_target_runtime'
     }
     elseif ($routeTransitionDrainingTransportGraceTerminalization) {
         $phase = 'route_transition'

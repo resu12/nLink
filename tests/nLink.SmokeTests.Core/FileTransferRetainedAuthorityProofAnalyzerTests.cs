@@ -2494,6 +2494,62 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
     [InlineData(false)]
     [InlineData(true)]
     [Trait("RetainedAuthorityProofSuite", "FileTransferRouteTransition")]
+    public async Task AnalyzeRetained_FallbackV6ProofBootstrapMissing_HasFullCompactParity(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_v6_proof_bootstrap_missing";
+        var lines = BuildFileTunaV4DataPathProofFixture(
+            transferId,
+            FileTransferRouteTransitionMessage(
+                "filetransfer_route_transition_committed",
+                transferId,
+                operationGeneration: 7,
+                authorityId: "transition-tuna-7",
+                status: "Committed",
+                sourceRoute: "regular_nkn_v4_fast",
+                sourceProtocol: 4,
+                targetRoute: "file_tuna_v4",
+                targetProtocol: 4,
+                targetTransport: "Tuna",
+                writerSequence: 100),
+            $"event=tuna_fallback_started; session_id=sess_a; transfer_id={transferId}; direction=outbound; fallback_epoch=1; log_writer_id=writer_route_transition; log_writer_sequence=101",
+            $"event=filetransfer_fallback_nkn_proof_pending; session_id=sess_a; transfer_id={transferId}; direction=outbound; fallback_epoch=1; log_writer_id=writer_route_transition; log_writer_sequence=102",
+            $"event=filetransfer_fallback_nkn_proof_waiting_for_v6_epoch; session_id=sess_a; transfer_id={transferId}; direction=outbound; fallback_epoch=1; log_writer_id=writer_route_transition; log_writer_sequence=103",
+            $"event=nkn_bridge_post_tuna_fallback_proof_send_window_skipped; session_id=sess_a; transfer_id={transferId}; direction=outbound; reason=no_active_post_tuna_fallback_runtime; log_writer_id=writer_route_transition; log_writer_sequence=104");
+
+        var result = compact
+            ? await RunAnalyzeFixtureAsync(
+                lines,
+                environment: new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                })
+            : await RunAnalyzeFixtureAsync(lines);
+        Assert.Equal(0, result.Script.ExitCode);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal(
+            "1",
+            verdict["filetransfer_fallback_v6_proof_bootstrap_missing_distinct_count"]);
+        Assert.Equal(
+            "filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing",
+            verdict["first_proof_chain_failure_class"]);
+        Assert.Equal(
+            "post_tuna_fallback_v6_proof_bootstrap_gated_on_committed_target_runtime",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+        Assert.Equal("fail", verdict["runtime_correctness_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedAuthorityProofSuite", "FileTransferRouteTransition")]
     public async Task AnalyzeRetained_FileTransferRouteTransitionLiveEpochProjection_MissingIsPrecise(
         bool compact)
     {
