@@ -8,8 +8,9 @@ namespace NLink.Core.Logging;
 public static class LocalOperationalLog
 {
     private const int RecentEntryCapacity = 512;
+    private const long AcceptanceLogMaximumBytes = 4L * 1024L * 1024L * 1024L;
     private static readonly object Gate = new();
-    private static readonly RollingFileLogger Logger = new(GetDefaultLogPath());
+    private static readonly RollingFileLogger Logger = CreateLogger();
     private static readonly OrderedOperationalLogWritePump WritePump = new(Logger, WriteMarkerToStandardError);
     private static readonly Queue<string> RecentEntries = new();
     private static readonly string WriterId = CreateWriterId();
@@ -243,6 +244,46 @@ public static class LocalOperationalLog
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         var logsDir = Path.Combine(localAppData, "nLink", "logs");
         return Path.Combine(logsDir, "nlink.log");
+    }
+
+    private static RollingFileLogger CreateLogger()
+    {
+        var acceptancePath = Environment.GetEnvironmentVariable("NLINK_FILETRANSFER_ACCEPTANCE_LOG_PATH");
+        var artifactDirectory = Environment.GetEnvironmentVariable("NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR");
+        var acceptanceRunId = Environment.GetEnvironmentVariable("NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID");
+        var scenarioRunId = Environment.GetEnvironmentVariable("NLINK_FILETRANSFER_SCENARIO_RUN_ID");
+        if (!string.IsNullOrWhiteSpace(acceptancePath) &&
+            !string.IsNullOrWhiteSpace(artifactDirectory) &&
+            !string.IsNullOrWhiteSpace(acceptanceRunId) &&
+            !string.Equals(acceptanceRunId.Trim(), "(none)", StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(scenarioRunId) &&
+            !string.Equals(scenarioRunId.Trim(), "(none)", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                var resolvedArtifactDirectory = Path.GetFullPath(artifactDirectory)
+                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                var resolvedAcceptancePath = Path.GetFullPath(acceptancePath);
+                if (Path.IsPathFullyQualified(acceptancePath) &&
+                    resolvedAcceptancePath.StartsWith(resolvedArtifactDirectory, StringComparison.OrdinalIgnoreCase))
+                {
+                    // The GUI acceptance harness owns this private file and enforces
+                    // the same hard bound while it streams evidence. Production logs
+                    // retain their normal 2 MiB x 20 rolling policy.
+                    return new RollingFileLogger(
+                        resolvedAcceptancePath,
+                        maxFileBytes: AcceptanceLogMaximumBytes,
+                        retainedFileCount: 1);
+                }
+            }
+            catch
+            {
+                // Invalid acceptance evidence configuration must not redirect
+                // ordinary product logs outside the standard local log folder.
+            }
+        }
+
+        return new RollingFileLogger(GetDefaultLogPath());
     }
 
     private static string CreateWriterId()
