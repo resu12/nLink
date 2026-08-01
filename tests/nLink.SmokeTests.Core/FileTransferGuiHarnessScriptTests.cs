@@ -1252,6 +1252,59 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeLogLedger_AppendOnlyAcceptanceSourceStreamsAndFailsClosed()
+    {
+        var helperPath = Path.Combine(FindRepoRoot(), "tools", "GuiSmokeLogLedger.ps1")
+            .Replace("'", "''", StringComparison.Ordinal);
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            . '{{helperPath}}'
+
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-ledger-append-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'nlink.log'
+                $state = New-GuiSmokeLogLedgerState
+                Enable-GuiSmokeAppendOnlyLogLedgerState -State $state -Path $path -MaximumBytes 4096
+                $utf8 = [Text.UTF8Encoding]::new($false)
+                [IO.File]::AppendAllText($path, "one`r`ntwo`r`npartial", $utf8)
+                Sync-GuiSmokeLogLedger -State $state -Paths @($path)
+                if ((Get-GuiSmokeLogLedgerBookmark -State $state) -ne 2) { throw 'partial line was committed' }
+                if ($state.Lines.Count -ne 0) { throw 'append-only source retained raw lines in memory' }
+                if ((@(Get-GuiSmokeLogLedgerLines -State $state) -join '|') -ne 'one|two') { throw 'streamed lines mismatch' }
+
+                [IO.File]::AppendAllText($path, "-done`r`nthree`r`n", $utf8)
+                Sync-GuiSmokeLogLedger -State $state -Paths @($path)
+                $visited = New-Object System.Collections.Generic.List[string]
+                [void](Invoke-GuiSmokeLogLedgerRangeVisitor -State $state -StartIndex 1 -EndIndex 4 -Visitor {
+                    param([string]$line, [int]$index)
+                    $visited.Add("$index=$line") | Out-Null
+                    return $null
+                })
+                if (($visited -join '|') -ne '1=two|2=partial-done|3=three') { throw "range visit mismatch: $($visited -join '|')" }
+
+                $capture = Write-GuiSmokeLogLedgerRangeCapture -State $state -StartIndex 1 -EndIndex 4 -DestinationPath (Join-Path $tempRoot 'capture.log')
+                if ($capture.LineCount -ne 3 -or (Get-Content -LiteralPath $capture.Path -Raw) -ne "two`r`npartial-done`r`nthree`r`n") { throw 'byte-bound capture mismatch' }
+                $diagnostics = Get-GuiSmokeLogLedgerDiagnostics -State $state
+                if ($diagnostics.StorageMode -ne 'AppendOnlyFile' -or $diagnostics.ConsumedIndexCount -ne 4) { throw 'append-only diagnostics mismatch' }
+
+                [IO.File]::WriteAllText($path, "replacement`r`n", $utf8)
+                $failure = try { Sync-GuiSmokeLogLedger -State $state -Paths @($path); '' } catch { $_.Exception.Message }
+                if ($failure -notlike 'gui_smoke_log_cursor_truncated*' -and $failure -notlike 'gui_smoke_log_cursor_gap*') { throw "replacement was not rejected: $failure" }
+                Write-Output 'gui-log-ledger-append-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Append-only ledger test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-log-ledger-append-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GuiSmokeLogLedger_ExportsStableIdentityAndDetectsGenerationOrdinalReplay()
     {
         var helperPath = Path.Combine(FindRepoRoot(), "tools", "GuiSmokeLogLedger.ps1")
@@ -1463,7 +1516,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("consumedIndexSha256", guiText, StringComparison.Ordinal);
         Assert.Contains("cursorIntegrityVerdict", guiText, StringComparison.Ordinal);
         Assert.Contains("[string]$FileName = 'filetransfer-retained-log-slice.log'", wrapperText, StringComparison.Ordinal);
-        Assert.DoesNotContain("filetransfer-gui-log-ledger-slice.log", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer-gui-log-ledger-slice.log", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer-tuna-gui-evidence-manifest.json", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("NLINK_FILETRANSFER_ACCEPTANCE_LOG_PATH", guiText, StringComparison.Ordinal);
         Assert.Contains("Invoke-TunaGuiSmokeWithHardDeadline", wrapperText, StringComparison.Ordinal);
         Assert.Contains("filetransfer-gui-evidence-finalization-timeout.json", wrapperText, StringComparison.Ordinal);
         Assert.Contains("RouteAcceptanceEvidenceCompletionAttempted", routeAcceptanceText, StringComparison.Ordinal);
@@ -2664,6 +2719,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             if ($regularTerminal.Phase -ne 'live_route_proof') { throw 'regular V4 terminal class not mapped' }
             $faultWindow = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=filetransfer_gui_live_fallback_fault_window_missed' -HistoricalPhase 'setup' -HistoricalReason 'unknown'
             if ($faultWindow.Phase -ne 'live_route_proof' -or $faultWindow.Reason -ne 'fallback_switch_off_not_injected_before_completed_transfer') { throw 'fault-window class not mapped' }
+            $retentionOverrun = Resolve-TunaGuiFailureClassification -ErrorMessage 'gui_smoke_log_cursor_gap: reason=active_generation_missing_after_reconciliation; reason=active_predecessor_not_observed' -HistoricalPhase 'setup' -HistoricalReason 'unknown'
+            if ($retentionOverrun.Phase -ne 'evidence_harness' -or $retentionOverrun.Reason -ne 'active_log_generation_rotated_out_before_cursor_reconciliation') { throw 'ledger retention overrun class not mapped' }
             $fallbackPrefix = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=terminal_fallback_prefix_missing' -HistoricalPhase 'regular_v4_frontier_repair' -HistoricalReason 'regular_v4_frontier_repair_stalled'
             if ($fallbackPrefix.Phase -ne 'live_route_proof' -or $fallbackPrefix.Reason -ne 'terminal_fallback_prefix_missing') { throw 'terminal fallback prefix class lost precedence' }
             $publicationMismatch = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_retry_source_publication_mismatch; retained_event=filetransfer_regular_v4_frontier_repair_stalled' -HistoricalPhase 'regular_v4_frontier_repair' -HistoricalReason 'regular_v4_frontier_repair_stalled'

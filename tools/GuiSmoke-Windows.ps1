@@ -1328,10 +1328,30 @@ function Copy-AppLogsIfPresent {
 function Clear-AppLogsIfPresent {
     Reset-GuiSmokeLogLedgerState -State $script:GuiSmokeAppLogLedger
     $logsDir = Join-Path $env:LOCALAPPDATA 'nLink\logs'
-    if (-not (Test-Path $logsDir)) { return }
+    if (Test-Path $logsDir) {
+        Get-ChildItem -Path $logsDir -File -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
 
-    Get-ChildItem -Path $logsDir -File -ErrorAction SilentlyContinue |
-        Remove-Item -Force -ErrorAction SilentlyContinue
+    Remove-Item Env:NLINK_FILETRANSFER_ACCEPTANCE_LOG_PATH -ErrorAction SilentlyContinue
+    $artifactDir = [string]$env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR
+    $acceptanceRunId = [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID
+    $scenarioRunId = [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID
+    if ([string]::IsNullOrWhiteSpace($artifactDir) -or
+        [string]::IsNullOrWhiteSpace($acceptanceRunId) -or
+        [string]::Equals($acceptanceRunId, '(none)', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::IsNullOrWhiteSpace($scenarioRunId) -or
+        [string]::Equals($scenarioRunId, '(none)', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return
+    }
+
+    $resolvedArtifactDir = [IO.Path]::GetFullPath($artifactDir).TrimEnd([char[]]@([char]'\', [char]'/')) + [IO.Path]::DirectorySeparatorChar
+    $acceptanceLogPath = [IO.Path]::GetFullPath((Join-Path $resolvedArtifactDir 'live-operational-log\nlink.log'))
+    if (-not $acceptanceLogPath.StartsWith($resolvedArtifactDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "gui_smoke_append_only_log_outside_artifact:$acceptanceLogPath"
+    }
+    Enable-GuiSmokeAppendOnlyLogLedgerState -State $script:GuiSmokeAppLogLedger -Path $acceptanceLogPath
+    $env:NLINK_FILETRANSFER_ACCEPTANCE_LOG_PATH = $acceptanceLogPath
 }
 
 function Get-AppLogBookmark {
@@ -1345,6 +1365,10 @@ function Get-AppLogBookmark {
 }
 
 function Get-AppLogPaths {
+    if ([string]$script:GuiSmokeAppLogLedger.StorageMode -eq 'AppendOnlyFile') {
+        return @([string]$script:GuiSmokeAppLogLedger.AppendOnlyPath)
+    }
+
     $logsDir = Join-Path $env:LOCALAPPDATA 'nLink\logs'
     if (-not (Test-Path -LiteralPath $logsDir -PathType Container)) {
         return @()
@@ -3017,6 +3041,7 @@ function Write-FileTransferGuiLogLedgerEvidence {
     # writers have stopped and their redirected output has reached EOF.
     try {
         Sync-GuiSmokeAppLogLedger -IgnoreScenarioDeadline
+        Update-GuiSmokeLogLedgerWriterEvidenceFromFrozenSource -State $script:GuiSmokeAppLogLedger
         $finalSnapshot = Get-GuiSmokeLogLedgerSnapshot `
             -State $script:GuiSmokeAppLogLedger `
             -Bookmark $Bookmark
@@ -3283,6 +3308,7 @@ function Write-FileTransferGuiLogLedgerEvidence {
     $writerEvidenceTempPath = '{0}.{1}.tmp' -f $writerEvidencePath, ([guid]::NewGuid().ToString('N'))
     $writerEvidenceStream = $null
     $writerEvidenceSha256 = $null
+    $writerLedgerReader = $null
     $writerLedgerVisitCount = 0L
     try {
         if (Test-Path -LiteralPath $writerEvidencePath -PathType Leaf) {
@@ -3301,9 +3327,27 @@ function Write-FileTransferGuiLogLedgerEvidence {
         $writerEvidenceLineCount = 0L
         $writerEvidenceByteCount = 0L
         $frozenWriterEvidenceEnd = [int]$finalSnapshot.lineCount
-        for ($ledgerIndex = 0; $ledgerIndex -lt $frozenWriterEvidenceEnd; $ledgerIndex++) {
+        if ($null -ne $script:GuiSmokeAppLogLedger.PSObject.Properties['StorageMode'] -and
+            [string]$script:GuiSmokeAppLogLedger.StorageMode -eq 'AppendOnlyFile') {
+            $writerLedgerReader = [System.IO.StreamReader]::new(
+                [string]$script:GuiSmokeAppLogLedger.AppendOnlyPath,
+                [System.Text.UTF8Encoding]::new($false, $true),
+                $true,
+                65536)
+        }
+        $ledgerIndex = 0
+        while ($ledgerIndex -lt $frozenWriterEvidenceEnd) {
             $writerLedgerVisitCount++
-            $writerLine = [string]$script:GuiSmokeAppLogLedger.Lines[$ledgerIndex]
+            $writerLine = if ($null -ne $writerLedgerReader) {
+                [string]$writerLedgerReader.ReadLine()
+            }
+            else {
+                [string]$script:GuiSmokeAppLogLedger.Lines[$ledgerIndex]
+            }
+            $ledgerIndex++
+            if ($null -eq $writerLine) {
+                throw "writer_evidence_source_short_read:index=$($ledgerIndex - 1);expected=$frozenWriterEvidenceEnd"
+            }
             $fields = ConvertFrom-GuiSmokeLogLedgerStructuredFields -Line $writerLine
             $writerId = [string]$fields['log_writer_id']
             $writerEvidenceFieldDuplicate = $fields.ContainsKey('__nlink_duplicate_writer_evidence_field')
@@ -3431,6 +3475,9 @@ function Write-FileTransferGuiLogLedgerEvidence {
         $writerIntegrityReasons.Add($writerEvidenceFailure) | Out-Null
     }
     finally {
+        if ($writerLedgerReader) {
+            $writerLedgerReader.Dispose()
+        }
         if ($writerEvidenceStream) {
             $writerEvidenceStream.Dispose()
         }
@@ -3740,6 +3787,11 @@ function Write-FileTransferGuiLogLedgerEvidence {
         consumedIndexSha256 = [string]$diagnostics.ConsumedIndexSha256
         consumedIndexRanges = @($diagnostics.ConsumedIndexRanges)
         syncCount = [int]$diagnostics.SyncCount
+        storageMode = $(if ($null -ne $diagnostics.PSObject.Properties['StorageMode']) { [string]$diagnostics.StorageMode } else { 'RollingMemory' })
+        sourcePath = $(if ($null -ne $diagnostics.PSObject.Properties['SourcePath']) { [string]$diagnostics.SourcePath } else { '' })
+        lastSuccessfulSyncStartedUtc = $(if ($null -ne $diagnostics.PSObject.Properties['LastSuccessfulSyncStartedUtc']) { $diagnostics.LastSuccessfulSyncStartedUtc } else { $null })
+        lastSuccessfulSyncCompletedUtc = $(if ($null -ne $diagnostics.PSObject.Properties['LastSuccessfulSyncCompletedUtc']) { $diagnostics.LastSuccessfulSyncCompletedUtc } else { $null })
+        lastSuccessfulSyncElapsedMilliseconds = $(if ($null -ne $diagnostics.PSObject.Properties['LastSuccessfulSyncElapsedMilliseconds']) { [long]$diagnostics.LastSuccessfulSyncElapsedMilliseconds } else { 0L })
         failureCode = [string]$diagnostics.FailureCode
         failureDetail = [string]$diagnostics.FailureDetail
         retainedSlice = $retainedSliceEvidence
@@ -4749,6 +4801,14 @@ function Get-TunaGuiExplicitFailureClassification {
 
     $cursorFailureMatch = [regex]::Match($ErrorMessage, '(?i)(?<value>gui_smoke_log_cursor_[a-z0-9_-]+)')
     if ($cursorFailureMatch.Success) {
+        if ([string]::Equals($cursorFailureMatch.Groups['value'].Value, 'gui_smoke_log_cursor_gap', [System.StringComparison]::OrdinalIgnoreCase) -and
+            ($ErrorMessage.IndexOf('active_generation_missing_after_reconciliation', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+             $ErrorMessage.IndexOf('active_predecessor_not_observed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0)) {
+            return [pscustomobject]@{
+                Phase = 'evidence_harness'
+                Reason = 'active_log_generation_rotated_out_before_cursor_reconciliation'
+            }
+        }
         return [pscustomobject]@{
             Phase = 'harness_log_cursor'
             Reason = $cursorFailureMatch.Groups['value'].Value.ToLowerInvariant()
@@ -16624,6 +16684,9 @@ function Get-AppLaunchEnvironmentOverrides {
     param([string]$RoleName = '')
 
     $overrides = @{}
+    if ([string]$script:GuiSmokeAppLogLedger.StorageMode -eq 'AppendOnlyFile') {
+        $overrides['NLINK_FILETRANSFER_ACCEPTANCE_LOG_PATH'] = [string]$script:GuiSmokeAppLogLedger.AppendOnlyPath
+    }
     if (Test-LegacyHigherClarityTupleActive) {
         $overrides['NLINK_FEATURE_SCREENCAP_MAX_FPS'] = '15'
         $overrides['NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS'] = '8'

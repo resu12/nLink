@@ -1622,7 +1622,90 @@ function Update-TunaGuiControlledRestartSummary {
     $summary | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
 }
 
+function Write-TunaGuiDirectEvidenceManifest {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [AllowEmptyString()][string]$ExePath = '',
+        [int]$GuiExitCode = -1
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ArtifactDir) -or -not (Test-Path -LiteralPath $ArtifactDir -PathType Container)) {
+        return
+    }
+
+    $statePath = Join-Path $ArtifactDir 'filetransfer-gui-evidence-finalization-state.json'
+    $ledgerPath = Join-Path $ArtifactDir 'filetransfer-gui-log-ledger.json'
+    $capturePath = Join-Path $ArtifactDir 'filetransfer-gui-log-ledger-slice.log'
+    $analyzerInputPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'
+    $state = if (Test-Path -LiteralPath $statePath -PathType Leaf) { Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json } else { $null }
+    $ledger = if (Test-Path -LiteralPath $ledgerPath -PathType Leaf) { Get-Content -LiteralPath $ledgerPath -Raw | ConvertFrom-Json } else { $null }
+    $captureSha = if (Test-Path -LiteralPath $capturePath -PathType Leaf) { (Get-FileHash -LiteralPath $capturePath -Algorithm SHA256).Hash.ToLowerInvariant() } else { '' }
+    $analyzerInputSha = if (Test-Path -LiteralPath $analyzerInputPath -PathType Leaf) { (Get-FileHash -LiteralPath $analyzerInputPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { '' }
+    $stateCaptureSha = if ($null -ne $state -and $state.PSObject.Properties.Name -contains 'captureSha256') { [string]$state.captureSha256 } else { '' }
+    $ledgerCaptureSha = if ($null -ne $ledger -and $null -ne $ledger.analyzerInput) { [string]$ledger.analyzerInput.captureSha256 } else { '' }
+    $captureMatches = -not [string]::IsNullOrWhiteSpace($captureSha) -and
+        [string]::Equals($captureSha, $ledgerCaptureSha, [System.StringComparison]::OrdinalIgnoreCase) -and
+        ([string]::IsNullOrWhiteSpace($stateCaptureSha) -or [string]::Equals($captureSha, $stateCaptureSha, [System.StringComparison]::OrdinalIgnoreCase))
+    $artifactFinalized = $null -ne $state -and
+        -not ([bool]$state.timedOut) -and
+        [string]$state.lastCompletedStage -eq 'gui_child_exited' -and
+        $null -ne $ledger -and
+        $captureMatches
+    $cursorPass = $null -ne $ledger -and [string]$ledger.cursorIntegrityVerdict -eq 'pass'
+    $writerPass = $null -ne $ledger -and [int]$ledger.writerEvidenceVersion -eq 3 -and [string]$ledger.writerIntegrityVerdict -eq 'pass'
+    $currentRuntimeProof = $artifactFinalized -and $cursorPass -and $writerPass
+    $sourceCommit = ''
+    $sourceDirty = $true
+    try {
+        $sourceCommit = [string](& git -C $RepoRoot rev-parse HEAD 2>$null)
+        $sourceDirty = @(& git -C $RepoRoot status --porcelain 2>$null).Count -gt 0
+    }
+    catch {}
+
+    $hashFile = {
+        param([string]$Path)
+        if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+        return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    $manifest = [ordered]@{
+        schemaVersion = 1
+        event = 'filetransfer_tuna_gui_direct_evidence_manifest'
+        acceptanceRunId = [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID
+        scenarioRunId = [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID
+        sourceCommit = $sourceCommit.Trim()
+        sourceDirty = $sourceDirty
+        guiExitCode = $GuiExitCode
+        routeMode = $RouteMode
+        payloadSize = $PayloadSize
+        direction = $Direction
+        payerMode = $PayerMode
+        fault = $Fault
+        liveToggleSequence = $LiveToggleSequence
+        executablePath = $ExePath
+        executableSha256 = & $hashFile $ExePath
+        harnessSha256 = & $hashFile (Join-Path $RepoRoot 'tools\GuiSmoke-Windows.ps1')
+        wrapperSha256 = & $hashFile (Join-Path $RepoRoot 'tools\Run-FileTransferTunaGuiSmoke.ps1')
+        finalizationStatePath = $statePath
+        ledgerPath = $ledgerPath
+        capturePath = $capturePath
+        captureSha256 = $captureSha
+        analyzerInputPath = $analyzerInputPath
+        analyzerInputSha256 = $analyzerInputSha
+        artifactFinalized = $artifactFinalized
+        cursorIntegrityVerdict = $(if ($cursorPass) { 'pass' } else { 'fail' })
+        writerEvidenceVersion = $(if ($null -ne $ledger) { [int]$ledger.writerEvidenceVersion } else { 0 })
+        writerIntegrityVerdict = $(if ($writerPass) { 'pass' } else { 'fail' })
+        currentRuntimeProof = $currentRuntimeProof
+        generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
+    }
+    Write-TunaGuiAtomicJson -Path (Join-Path $ArtifactDir 'filetransfer-tuna-gui-evidence-manifest.json') -Value $manifest
+}
+
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$resolvedArtifactDir = ''
+$resolvedExe = ''
+$guiSmokeExitCode = -1
 Push-Location $repoRoot
 try {
     if ([string]::IsNullOrWhiteSpace($WalletPassword)) {
@@ -1690,6 +1773,15 @@ try {
     New-Item -ItemType Directory -Force -Path $resolvedArtifactDir | Out-Null
     $receivedRoot = Join-Path $resolvedArtifactDir 'received'
     New-Item -ItemType Directory -Force -Path $receivedRoot | Out-Null
+
+    if ([string]::IsNullOrWhiteSpace([string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID) -or
+        [string]::Equals([string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID, '(none)', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID = 'direct-tuna-' + [guid]::NewGuid().ToString('N')
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID) -or
+        [string]::Equals([string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID, '(none)', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $env:NLINK_FILETRANSFER_SCENARIO_RUN_ID = 'filetransfer-tuna-' + [guid]::NewGuid().ToString('N')
+    }
 
     $env:NLINK_RUN_GUI_SMOKE = '1'
     $env:NLINK_RUN_TUNA_GUI_FILETRANSFER = '1'
@@ -1806,5 +1898,17 @@ try {
     }
 }
 finally {
+    if (-not [string]::IsNullOrWhiteSpace($resolvedArtifactDir)) {
+        try {
+            Write-TunaGuiDirectEvidenceManifest `
+                -RepoRoot $repoRoot `
+                -ArtifactDir $resolvedArtifactDir `
+                -ExePath $resolvedExe `
+                -GuiExitCode $guiSmokeExitCode
+        }
+        catch {
+            Write-Warning "Failed to write direct Tuna GUI evidence manifest: $($_.Exception.Message)"
+        }
+    }
     Pop-Location
 }
