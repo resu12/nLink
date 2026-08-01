@@ -7597,6 +7597,47 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             return $true
         }
 
+        function Select-ProofStatePeerReceipt {
+            param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Candidates)
+
+            if ($Candidates.Count -eq 0) {
+                return @()
+            }
+
+            $identityKeys = @($Candidates | ForEach-Object {
+                $fingerprint = Get-ProofStateFrameFingerprint -Event $_
+                if (-not (Test-ProofStateVisibleValue $fingerprint)) {
+                    return ''
+                }
+
+                return [string]::Join('|', @(
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id'),
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id'),
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id'),
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction'),
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'route'),
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'protocol_version'),
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'live_route_epoch'),
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'route_publication_generation'),
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'runtime_generation'),
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'terminal_generation'),
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'leg_generation'),
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transport_epoch'),
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'bridge_recovery_generation'),
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'data_session_generation'),
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'epoch'),
+                    $fingerprint)).ToLowerInvariant()
+            } | Select-Object -Unique)
+
+            if ($Candidates.Count -gt 1 -and
+                ($identityKeys.Count -ne 1 -or
+                    [string]::IsNullOrWhiteSpace([string]$identityKeys[0]))) {
+                return @()
+            }
+
+            return @($Candidates | Sort-Object Index | Select-Object -First 1)
+        }
+
         function Test-ProofStateHeartbeatPair {
             param(
                 [Parameter(Mandatory = $true)]$Heartbeat,
@@ -8404,10 +8445,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     -TargetIssued $targetBoundaries[0].Issued `
                     -Candidate $_)
             })
-            $peerReceipt = @()
-            if ($peerReceiptCandidates.Count -eq 1) {
-                $peerReceipt = @($peerReceiptCandidates[0])
-            }
+            $peerReceipt = @(Select-ProofStatePeerReceipt `
+                -Candidates $peerReceiptCandidates)
             $targetProof = @($indexedLines | Where-Object {
                 $peerReceipt.Count -eq 1 -and
                 $_.Index -gt $peerReceipt[0].Index -and

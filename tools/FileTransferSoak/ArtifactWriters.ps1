@@ -9989,6 +9989,178 @@ function Get-FileTransferRouteTransitionCorrelation {
     }
 }
 
+function Get-FileTransferGuiLiveFallbackFaultWindowCorrelation {
+    param(
+        [object[]]$Events = @(),
+        [string]$LiveRouteProofMode = 'None'
+    )
+
+    if (-not [string]::Equals(
+            $LiveRouteProofMode,
+            'RegularActivationCycle',
+            [System.StringComparison]::OrdinalIgnoreCase)) {
+        return [pscustomobject]@{
+            RawCount = 0
+            DistinctCount = 0
+            RecoveredCount = 0
+            UnresolvedCount = 0
+            Verdict = 'pass'
+            CandidateRecords = @()
+            UnresolvedCandidateRecords = @()
+        }
+    }
+
+    [object[]]$ordered = @($Events | Where-Object { $null -ne $_ } |
+            Sort-Object Sequence, LineNumber)
+    [object[]]$commits = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_route_transition_committed' -and
+            (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in
+                @('Committed', 'Idempotent') -and
+            (Get-FileTransferEventField -Event $_ -Name 'target_route' -Default '') -eq
+                'file_tuna_v4'
+        })
+    [object[]]$publications = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_route_hint_authorized_publication_accepted'
+        })
+    [object[]]$dispositions = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_route_transition_disposition_applied'
+        })
+    [object[]]$payloads = @($ordered | Where-Object {
+            $_.EventName -in @(
+                'filetransfer_data_path_send_result',
+                'filetransfer_data_path_receive_result',
+                'filetransfer_tuna_data_path_peer_visible')
+        })
+    [object[]]$terminals = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_live_route_epoch_terminal' -and
+            (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq
+                'file_tuna_v4' -and
+            (Get-FileTransferEventField -Event $_ -Name 'terminal_state' -Default '') -eq
+                'completed'
+        })
+    [object[]]$fallbackBoundaries = @($ordered | Where-Object {
+            ($_.EventName -eq 'tuna_acceleration_reset' -and
+                (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq
+                    'header_switch_off') -or
+            ($_.EventName -eq 'tuna_runtime_locked' -and
+                (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq
+                    'header_switch_off') -or
+            $_.EventName -in @(
+                'tuna_fallback_started',
+                'filetransfer_fallback_v6_proof_bootstrap_decided') -or
+            ($_.EventName -eq 'filetransfer_route_transition_prepared' -and
+                (Get-FileTransferEventField -Event $_ -Name 'source_route' -Default '') -eq
+                    'file_tuna_v4' -and
+                (Get-FileTransferEventField -Event $_ -Name 'target_route' -Default '') -eq
+                    'post_tuna_fallback_v6')
+        })
+
+    function Test-FaultWindowScopeMatch {
+        param($Left, $Right)
+
+        foreach ($name in @('session_id', 'transfer_id', 'direction')) {
+            $expected = Get-FileTransferEventField -Event $Left -Name $name -Default ''
+            $actual = Get-FileTransferEventField -Event $Right -Name $name -Default ''
+            if ([string]::IsNullOrWhiteSpace($expected) -or
+                [string]::IsNullOrWhiteSpace($actual) -or
+                -not [string]::Equals(
+                    $expected,
+                    $actual,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    $records = New-Object System.Collections.Generic.List[object]
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($terminal in $terminals) {
+        $terminalSequence = [int64]$terminal.Sequence
+        [object[]]$matchingCommits = @($commits | Where-Object {
+                [int64]$_.Sequence -lt $terminalSequence -and
+                (Test-FaultWindowScopeMatch -Left $_ -Right $terminal)
+            } | Sort-Object Sequence, LineNumber -Descending | Select-Object -First 1)
+        if ($matchingCommits.Count -ne 1) {
+            continue
+        }
+
+        $commit = $matchingCommits[0]
+        $commitSequence = [int64]$commit.Sequence
+        $authorityId = Get-FileTransferEventField -Event $commit -Name 'authority_id' -Default ''
+        $transitionGeneration = Get-FileTransferEventField -Event $commit -Name 'transition_generation' -Default ''
+        $targetPublication = Get-FileTransferEventField -Event $commit -Name 'target_route_publication_generation' -Default ''
+        $targetCommit = Get-FileTransferEventField -Event $commit -Name 'target_route_commit_generation' -Default ''
+        [object[]]$publication = @($publications | Where-Object {
+                [int64]$_.Sequence -ge $commitSequence -and
+                [int64]$_.Sequence -lt $terminalSequence -and
+                (Test-FaultWindowScopeMatch -Left $commit -Right $_) -and
+                (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq
+                    'file_tuna_v4' -and
+                (Get-FileTransferEventField -Event $_ -Name 'route_publication_generation' -Default '') -eq
+                    $targetPublication -and
+                (Get-FileTransferEventField -Event $_ -Name 'route_commit_generation' -Default '') -eq
+                    $targetCommit
+            } | Select-Object -First 1)
+        [object[]]$disposition = @($dispositions | Where-Object {
+                [int64]$_.Sequence -ge $commitSequence -and
+                [int64]$_.Sequence -lt $terminalSequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq
+                    $authorityId -and
+                (Get-FileTransferEventField -Event $_ -Name 'transition_generation' -Default '') -eq
+                    $transitionGeneration -and
+                ((Get-FileTransferEventField -Event $_ -Name 'disposition' -Default '') -eq
+                    'committed' -or
+                 (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in
+                    @('Applied', 'Idempotent'))
+            } | Select-Object -First 1)
+        [object[]]$payload = @($payloads | Where-Object {
+                [int64]$_.Sequence -ge $commitSequence -and
+                [int64]$_.Sequence -lt $terminalSequence -and
+                (Test-FaultWindowScopeMatch -Left $commit -Right $_) -and
+                (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq
+                    'file_tuna_v4' -and
+                (Get-FileTransferEventField -Event $_ -Name 'route_commit_generation' -Default '') -eq
+                    $targetCommit
+            } | Select-Object -First 1)
+        [object[]]$fallback = @($fallbackBoundaries | Where-Object {
+                [int64]$_.Sequence -gt $commitSequence -and
+                [int64]$_.Sequence -lt $terminalSequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq
+                    (Get-FileTransferEventField -Event $commit -Name 'session_id' -Default '')
+            } | Select-Object -First 1)
+        if ($publication.Count -ne 1 -or
+            $disposition.Count -ne 1 -or
+            $payload.Count -ne 1 -or
+            $fallback.Count -ne 0) {
+            continue
+        }
+
+        $sessionId = Get-FileTransferEventField -Event $terminal -Name 'session_id' -Default ''
+        $transferId = Get-FileTransferEventField -Event $terminal -Name 'transfer_id' -Default ''
+        $key = "gui-fallback-fault-window|$sessionId|$transferId"
+        if (-not $seen.Add($key.ToLowerInvariant())) {
+            continue
+        }
+        $records.Add([pscustomobject]@{
+            Class = 'filetransfer_gui_live_fallback_fault_window_missed'
+            Event = $terminal
+            Reason = 'fallback_switch_off_not_injected_before_completed_transfer'
+            DistinctKey = $key
+        }) | Out-Null
+    }
+
+    return [pscustomobject]@{
+        RawCount = $records.Count
+        DistinctCount = $records.Count
+        RecoveredCount = 0
+        UnresolvedCount = $records.Count
+        Verdict = if ($records.Count -gt 0) { 'fail' } else { 'pass' }
+        CandidateRecords = @($records.ToArray())
+        UnresolvedCandidateRecords = @($records.ToArray())
+    }
+}
+
 function Get-FileTransferRouteTransitionLiveEpochProjectionCorrelation {
     param([object[]]$Events = @())
 
@@ -13066,7 +13238,9 @@ function New-FileTransferRouteConsistencySummaryLines {
         $fileTunaV4DataPathProof.RouteTransitionTransportGraceProof
     $runtimeUnlockRegularV4RouteCommitSendDrainProof = $fileTunaV4DataPathProof.RouteCommitSendDrainProof
     if ($null -eq $RecoveryClassification) {
-        $RecoveryClassification = Get-FileTransferRecoveryFailureClassification -Summary $Summary
+        $RecoveryClassification = Get-FileTransferRecoveryFailureClassification `
+            -Summary $Summary `
+            -LiveRouteProofMode $LiveRouteProofMode
     }
     [object[]]$fallbackAuthoritySequence = @($fallbackAuthorityProof.Sequence)
 
@@ -13231,6 +13405,11 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("filetransfer_live_route_epoch_projection_missing_recovered_count={0}" -f $RecoveryClassification.FileTransferLiveRouteEpochProjectionMissingRecoveredCount)) | Out-Null
     $lines.Add(("filetransfer_live_route_epoch_projection_missing_unresolved_count={0}" -f $RecoveryClassification.FileTransferLiveRouteEpochProjectionMissingUnresolvedCount)) | Out-Null
     $lines.Add(("filetransfer_route_transition_verdict={0}" -f $RecoveryClassification.FileTransferRouteTransitionVerdict)) | Out-Null
+    $lines.Add(("filetransfer_gui_live_fallback_fault_window_missed_raw_count={0}" -f $RecoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedRawCount)) | Out-Null
+    $lines.Add(("filetransfer_gui_live_fallback_fault_window_missed_distinct_count={0}" -f $RecoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedDistinctCount)) | Out-Null
+    $lines.Add(("filetransfer_gui_live_fallback_fault_window_missed_recovered_count={0}" -f $RecoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedRecoveredCount)) | Out-Null
+    $lines.Add(("filetransfer_gui_live_fallback_fault_window_missed_unresolved_count={0}" -f $RecoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedUnresolvedCount)) | Out-Null
+    $lines.Add(("filetransfer_gui_live_fallback_fault_window_missed_verdict={0}" -f $RecoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedVerdict)) | Out-Null
     $lines.Add(("filetransfer_fallback_v6_proof_bootstrap_missing_raw_count={0}" -f $RecoveryClassification.FileTransferFallbackV6ProofBootstrapMissingRawCount)) | Out-Null
     $lines.Add(("filetransfer_fallback_v6_proof_bootstrap_missing_distinct_count={0}" -f $RecoveryClassification.FileTransferFallbackV6ProofBootstrapMissingDistinctCount)) | Out-Null
     $lines.Add(("filetransfer_fallback_v6_proof_bootstrap_missing_recovered_count={0}" -f $RecoveryClassification.FileTransferFallbackV6ProofBootstrapMissingRecoveredCount)) | Out-Null
@@ -15002,14 +15181,18 @@ function New-FileTransferThroughputDecompositionSummaryLines {
 function New-FileTransferStabilityGateSummaryLines {
     param(
         [Parameter(Mandatory = $true)]$Summary,
-        [Parameter(Mandatory = $true)]$GateResult
+        [Parameter(Mandatory = $true)]$GateResult,
+        [ValidateSet('None', 'SwitchOff', 'MultiToggle', 'RegularActivationCycle')]
+        [string]$LiveRouteProofMode = 'None'
     )
 
     $gapStallEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_gap_stall_summary'))
     $progressTimeoutWithReceiverGapStall = if ($Summary.LiveProgressTimeoutCount -gt 0 -and $gapStallEvents.Count -gt 0) { 1 } else { 0 }
     $warningCap = Get-FileTransferGateWarningCap -GateResult $GateResult
     $fallbackDiagnostics = Get-FileTransferGateFallbackDiagnostics -GateResult $GateResult
-    $recoveryClassification = Get-FileTransferRecoveryFailureClassification -Summary $Summary
+    $recoveryClassification = Get-FileTransferRecoveryFailureClassification `
+        -Summary $Summary `
+        -LiveRouteProofMode $LiveRouteProofMode
     $fallbackAuthorityProof = Get-FileTransferFallbackLegAuthorityProof -TransferEvents $Summary.TransferEvents
     $fallbackTailProof = Get-FileTransferFallbackTailReconciliationProof -Summary $Summary
     $bridgeLivenessProof = Get-FileTransferBridgeLivenessIntegrationProof -Summary $Summary
@@ -15087,6 +15270,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("filetransfer_live_route_epoch_projection_missing_recovered_count={0}" -f $recoveryClassification.FileTransferLiveRouteEpochProjectionMissingRecoveredCount),
         ("filetransfer_live_route_epoch_projection_missing_unresolved_count={0}" -f $recoveryClassification.FileTransferLiveRouteEpochProjectionMissingUnresolvedCount),
         ("filetransfer_route_transition_verdict={0}" -f $recoveryClassification.FileTransferRouteTransitionVerdict),
+        ("filetransfer_gui_live_fallback_fault_window_missed_raw_count={0}" -f $recoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedRawCount),
+        ("filetransfer_gui_live_fallback_fault_window_missed_distinct_count={0}" -f $recoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedDistinctCount),
+        ("filetransfer_gui_live_fallback_fault_window_missed_recovered_count={0}" -f $recoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedRecoveredCount),
+        ("filetransfer_gui_live_fallback_fault_window_missed_unresolved_count={0}" -f $recoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedUnresolvedCount),
+        ("filetransfer_gui_live_fallback_fault_window_missed_verdict={0}" -f $recoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedVerdict),
         ("filetransfer_fallback_v6_proof_bootstrap_missing_raw_count={0}" -f $recoveryClassification.FileTransferFallbackV6ProofBootstrapMissingRawCount),
         ("filetransfer_fallback_v6_proof_bootstrap_missing_distinct_count={0}" -f $recoveryClassification.FileTransferFallbackV6ProofBootstrapMissingDistinctCount),
         ("filetransfer_fallback_v6_proof_bootstrap_missing_recovered_count={0}" -f $recoveryClassification.FileTransferFallbackV6ProofBootstrapMissingRecoveredCount),
@@ -29159,6 +29347,49 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
         return $true
     }
 
+    function Select-ProofStatePeerReceipt {
+        param(
+            [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Candidates
+        )
+
+        if ($Candidates.Count -eq 0) {
+            return @()
+        }
+
+        $identityKeys = @($Candidates | ForEach-Object {
+            $fingerprint = Get-ProofStateFrameFingerprint -Event $_
+            if (-not (Test-ProofStateVisible $fingerprint)) {
+                return ''
+            }
+
+            return [string]::Join('|', @(
+                (Get-ProofStateField -Event $_ -Names @('log_writer_id')),
+                (Get-ProofStateField -Event $_ -Names @('session_id')),
+                (Get-ProofStateField -Event $_ -Names @('transfer_id')),
+                (Get-ProofStateField -Event $_ -Names @('direction')),
+                (Get-ProofStateField -Event $_ -Names @('route')),
+                (Get-ProofStateField -Event $_ -Names @('protocol_version')),
+                (Get-ProofStateField -Event $_ -Names @('live_route_epoch')),
+                (Get-ProofStateField -Event $_ -Names @('route_publication_generation')),
+                (Get-ProofStateField -Event $_ -Names @('runtime_generation')),
+                (Get-ProofStateField -Event $_ -Names @('terminal_generation')),
+                (Get-ProofStateField -Event $_ -Names @('leg_generation')),
+                (Get-ProofStateField -Event $_ -Names @('transport_epoch')),
+                (Get-ProofStateField -Event $_ -Names @('bridge_recovery_generation')),
+                (Get-ProofStateField -Event $_ -Names @('data_session_generation')),
+                (Get-ProofStateField -Event $_ -Names @('epoch')),
+                $fingerprint)).ToLowerInvariant()
+        } | Select-Object -Unique)
+
+        if ($Candidates.Count -gt 1 -and
+            ($identityKeys.Count -ne 1 -or
+                [string]::IsNullOrWhiteSpace([string]$identityKeys[0]))) {
+            return @()
+        }
+
+        return @($Candidates | Sort-Object Sequence | Select-Object -First 1)
+    }
+
     [object[]]$issuedEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_receive_recovery_operation_issued' -and
         (Get-ProofStateField -Event $_ -Names @('direction')) -eq 'inbound' -and
@@ -29951,10 +30182,8 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
                     -TargetIssued $record.TargetIssued `
                     -Candidate $_)
             })
-            $peerReceipt = @()
-            if ($peerReceiptCandidates.Count -eq 1) {
-                $peerReceipt = @($peerReceiptCandidates[0])
-            }
+            $peerReceipt = @(Select-ProofStatePeerReceipt `
+                -Candidates $peerReceiptCandidates)
 
             $proof = @($proofEvents | Where-Object {
                 $peerReceipt.Count -eq 1 -and
@@ -38491,10 +38720,12 @@ function Get-FileTransferRuntimeUnlockRetryDispatchAuthorityTupleMismatchCorrela
 
 function Get-FileTransferRecoveryFailureClassification {
     param(
-        [Parameter(Mandatory = $true)]$Summary
+        [Parameter(Mandatory = $true)]$Summary,
+        [ValidateSet('None', 'SwitchOff', 'MultiToggle', 'RegularActivationCycle')]
+        [string]$LiveRouteProofMode = 'None'
     )
 
-    $cachePropertyName = '__FileTransferRecoveryFailureClassification'
+    $cachePropertyName = '__FileTransferRecoveryFailureClassification_{0}' -f $LiveRouteProofMode
     if ($null -ne $Summary.PSObject.Properties[$cachePropertyName]) {
         return $Summary.PSObject.Properties[$cachePropertyName].Value
     }
@@ -39319,6 +39550,10 @@ function Get-FileTransferRecoveryFailureClassification {
     $publicationAuthorityFieldCoverageProof = Get-FileTransferPublicationAuthorityFieldCoverageProof -Summary $Summary
     $fileTunaV4DataPathProof = Get-FileTransferFileTunaV4DataPathProof -Summary $Summary
     $fileTransferRouteTransitionProof = $fileTunaV4DataPathProof.RouteTransitionProof
+    $fileTransferGuiLiveFallbackFaultWindowProof =
+        Get-FileTransferGuiLiveFallbackFaultWindowCorrelation `
+            -Events $allEvents `
+            -LiveRouteProofMode $LiveRouteProofMode
     $fileTransferRouteTransitionLiveEpochProjectionProof =
         $fileTunaV4DataPathProof.RouteTransitionLiveEpochProjectionProof
     $fileTransferRouteTransitionDrainingTransportGraceProof =
@@ -42184,6 +42419,15 @@ function Get-FileTransferRecoveryFailureClassification {
             -UseDefaultReason
     }
     foreach ($candidateRecord in @(
+            $fileTransferGuiLiveFallbackFaultWindowProof.UnresolvedCandidateRecords)) {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class 'filetransfer_gui_live_fallback_fault_window_missed' `
+            -Events @($candidateRecord.Event) `
+            -DefaultReason ([string]$candidateRecord.Reason) `
+            -UseDefaultReason
+    }
+    foreach ($candidateRecord in @(
             $fileTransferRouteTransitionLiveEpochProjectionProof.UnresolvedCandidateRecords)) {
         Add-FileTransferProofChainFailureCandidates `
             -Candidates $proofChainFailureCandidates `
@@ -42887,7 +43131,11 @@ function Get-FileTransferRecoveryFailureClassification {
         FirstProofChainFailureWriterSequence = if ($null -ne $firstProofChainFailure) {
             [int64]$firstProofChainFailure.WriterSequence
         } else { 0L }
-        SemanticFailureDomain = if ($class -in @(
+        SemanticFailureDomain = if ($class -eq
+                'filetransfer_gui_live_fallback_fault_window_missed') {
+            'evidence_harness'
+        }
+        elseif ($class -in @(
                 'filetransfer_live_route_epoch_projection_missing')) {
             'route_evidence'
         }
@@ -43358,6 +43606,16 @@ function Get-FileTransferRecoveryFailureClassification {
         FileTransferRouteTransitionIncompleteRecoveredCount = $fileTransferRouteTransitionProof.RecoveredCount
         FileTransferRouteTransitionIncompleteUnresolvedCount = $fileTransferRouteTransitionProof.UnresolvedCount
         FileTransferRouteTransitionVerdict = $fileTransferRouteTransitionProof.Verdict
+        FileTransferGuiLiveFallbackFaultWindowMissedRawCount =
+            $fileTransferGuiLiveFallbackFaultWindowProof.RawCount
+        FileTransferGuiLiveFallbackFaultWindowMissedDistinctCount =
+            $fileTransferGuiLiveFallbackFaultWindowProof.DistinctCount
+        FileTransferGuiLiveFallbackFaultWindowMissedRecoveredCount =
+            $fileTransferGuiLiveFallbackFaultWindowProof.RecoveredCount
+        FileTransferGuiLiveFallbackFaultWindowMissedUnresolvedCount =
+            $fileTransferGuiLiveFallbackFaultWindowProof.UnresolvedCount
+        FileTransferGuiLiveFallbackFaultWindowMissedVerdict =
+            $fileTransferGuiLiveFallbackFaultWindowProof.Verdict
         FileTransferFallbackV6ProofBootstrapMissingRawCount =
             $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRawCount
         FileTransferFallbackV6ProofBootstrapMissingDistinctCount =
@@ -43627,7 +43885,9 @@ function New-FileTransferInvariantLedgerObject {
     $fallbackRuntimeUnlockSeparationProof = Get-FileTransferFallbackRuntimeUnlockSeparationProof -Summary $Summary
     $publicationAuthorityFieldCoverageProof = Get-FileTransferPublicationAuthorityFieldCoverageProof -Summary $Summary
     $fileTunaV4DataPathProof = Get-FileTransferFileTunaV4DataPathProof -Summary $Summary
-    $recoveryClassification = Get-FileTransferRecoveryFailureClassification -Summary $Summary
+    $recoveryClassification = Get-FileTransferRecoveryFailureClassification `
+        -Summary $Summary `
+        -LiveRouteProofMode $LiveRouteProofMode
 
     $shaOk = Get-FileTransferInvariantShaOk -TerminalEvents @($Summary.TerminalEvents) -GateVerdict $GateResult.Verdict
     $terminalWinner = Get-FileTransferInvariantTerminalWinner -TerminalEvents @($Summary.TerminalEvents) -ShaOk $shaOk
@@ -43845,6 +44105,11 @@ function New-FileTransferInvariantLedgerObject {
         filetransfer_live_route_epoch_projection_missing_recovered_count = [string]$recoveryClassification.FileTransferLiveRouteEpochProjectionMissingRecoveredCount
         filetransfer_live_route_epoch_projection_missing_unresolved_count = [string]$recoveryClassification.FileTransferLiveRouteEpochProjectionMissingUnresolvedCount
         filetransfer_route_transition_verdict = $recoveryClassification.FileTransferRouteTransitionVerdict
+        filetransfer_gui_live_fallback_fault_window_missed_raw_count = [string]$recoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedRawCount
+        filetransfer_gui_live_fallback_fault_window_missed_distinct_count = [string]$recoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedDistinctCount
+        filetransfer_gui_live_fallback_fault_window_missed_recovered_count = [string]$recoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedRecoveredCount
+        filetransfer_gui_live_fallback_fault_window_missed_unresolved_count = [string]$recoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedUnresolvedCount
+        filetransfer_gui_live_fallback_fault_window_missed_verdict = [string]$recoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedVerdict
         filetransfer_fallback_v6_proof_bootstrap_missing_raw_count = [string]$recoveryClassification.FileTransferFallbackV6ProofBootstrapMissingRawCount
         filetransfer_fallback_v6_proof_bootstrap_missing_distinct_count = [string]$recoveryClassification.FileTransferFallbackV6ProofBootstrapMissingDistinctCount
         filetransfer_fallback_v6_proof_bootstrap_missing_recovered_count = [string]$recoveryClassification.FileTransferFallbackV6ProofBootstrapMissingRecoveredCount
@@ -44123,7 +44388,9 @@ function Write-FileTransferDiagnosticsArtifacts {
     $warningCap = Get-FileTransferGateWarningCap -GateResult $GateResult
     $fallbackDiagnostics = Get-FileTransferGateFallbackDiagnostics -GateResult $GateResult
     $liveRouteProof = Get-FileTransferLiveRouteEpochProof -TransferEvents $Summary.TransferEvents -Mode $LiveRouteProofMode
-    $recoveryClassification = Get-FileTransferRecoveryFailureClassification -Summary $Summary
+    $recoveryClassification = Get-FileTransferRecoveryFailureClassification `
+        -Summary $Summary `
+        -LiveRouteProofMode $LiveRouteProofMode
     $fallbackAuthorityProof = Get-FileTransferFallbackLegAuthorityProof -TransferEvents $Summary.TransferEvents
     $fallbackTailProof = Get-FileTransferFallbackTailReconciliationProof -Summary $Summary
     $bridgeLivenessProof = Get-FileTransferBridgeLivenessIntegrationProof -Summary $Summary
@@ -44387,7 +44654,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         $effectiveNextArtifact = 'filetransfer-operator-verdict.txt'
     }
 
-    $operatorAcceptanceFailureClass = if ($recoveryClassification.Class -in @('filetransfer_live_route_epoch_projection_missing', 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'runtime_unlock_precommit_probe_start_handoff_missing', 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing', 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_initial_pressure_install_missing', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery', 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
+    $operatorAcceptanceFailureClass = if ($recoveryClassification.Class -in @('filetransfer_gui_live_fallback_fault_window_missed', 'filetransfer_live_route_epoch_projection_missing', 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'runtime_unlock_precommit_probe_start_handoff_missing', 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing', 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_initial_pressure_install_missing', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery', 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
         'incomplete_proof'
     }
     elseif ($recoveryClassification.Class -in @('filetransfer_receive_recovery_operation_incomplete', 'filetransfer_receive_recovery_completed_unproven_successor_missing', 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved', 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing', 'filetransfer_receive_recovery_completed_proven_successor_missing', 'runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'filetransfer_bridge_recovery_execution_payload_hold_missing', 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing', 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing', 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing', 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved', 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing', 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired', 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'fallback_tail_yield_authority_invalid', 'filetransfer_route_transition_draining_transport_grace_terminalization', 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing', 'filetransfer_route_transition_incomplete', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
@@ -44860,6 +45127,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("filetransfer_live_route_epoch_projection_missing_recovered_count={0}" -f $recoveryClassification.FileTransferLiveRouteEpochProjectionMissingRecoveredCount),
         ("filetransfer_live_route_epoch_projection_missing_unresolved_count={0}" -f $recoveryClassification.FileTransferLiveRouteEpochProjectionMissingUnresolvedCount),
         ("filetransfer_route_transition_verdict={0}" -f $recoveryClassification.FileTransferRouteTransitionVerdict),
+        ("filetransfer_gui_live_fallback_fault_window_missed_raw_count={0}" -f $recoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedRawCount),
+        ("filetransfer_gui_live_fallback_fault_window_missed_distinct_count={0}" -f $recoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedDistinctCount),
+        ("filetransfer_gui_live_fallback_fault_window_missed_recovered_count={0}" -f $recoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedRecoveredCount),
+        ("filetransfer_gui_live_fallback_fault_window_missed_unresolved_count={0}" -f $recoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedUnresolvedCount),
+        ("filetransfer_gui_live_fallback_fault_window_missed_verdict={0}" -f $recoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedVerdict),
         ("filetransfer_fallback_v6_proof_bootstrap_missing_raw_count={0}" -f $recoveryClassification.FileTransferFallbackV6ProofBootstrapMissingRawCount),
         ("filetransfer_fallback_v6_proof_bootstrap_missing_distinct_count={0}" -f $recoveryClassification.FileTransferFallbackV6ProofBootstrapMissingDistinctCount),
         ("filetransfer_fallback_v6_proof_bootstrap_missing_recovered_count={0}" -f $recoveryClassification.FileTransferFallbackV6ProofBootstrapMissingRecoveredCount),
@@ -45118,7 +45390,7 @@ function Write-FileTransferDiagnosticsArtifacts {
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'bridge-bulk-summary.txt' -Lines (New-FileTransferBridgeBulkSummaryLines -Summary $Summary) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'coexistence-summary.txt' -Lines (New-FileTransferCoexistenceSummaryLines -Summary $Summary) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'external-transport-health-summary.txt' -Lines (New-FileTransferExternalTransportHealthSummaryLines -Summary $Summary) | Out-Null
-    Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'stability-gates-summary.txt' -Lines (New-FileTransferStabilityGateSummaryLines -Summary $Summary -GateResult $GateResult) | Out-Null
+    Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'stability-gates-summary.txt' -Lines (New-FileTransferStabilityGateSummaryLines -Summary $Summary -GateResult $GateResult -LiveRouteProofMode $LiveRouteProofMode) | Out-Null
     Write-FileTransferInvariantLedgerArtifacts -ArtifactDir $ArtifactDir -Summary $Summary -GateResult $GateResult -LiveRouteProofMode $LiveRouteProofMode | Out-Null
     Write-FileTransferV4PromotionDecision -ArtifactDir $ArtifactDir | Out-Null
 

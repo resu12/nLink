@@ -18,6 +18,75 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     [InlineData(true, false)]
     [InlineData(false, true)]
     [InlineData(true, true)]
+    public async Task AnalyzeRetained_LiveFallbackFaultWindowRequiresPreterminalInjection(
+        bool compact,
+        bool injected)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string scope =
+            "session_id=sess_fault_window; transfer_id=transfer_fault_window; direction=inbound";
+        var messages = new List<string>
+        {
+            $"event=filetransfer_route_transition_committed; {scope}; authority_id=transition-1; " +
+                "transition_generation=1; source_route=regular_nkn_v4_fast; target_route=file_tuna_v4; " +
+                "target_route_publication_generation=2; target_route_commit_generation=1; decision_status=Committed",
+            $"event=filetransfer_route_hint_authorized_publication_accepted; {scope}; route=file_tuna_v4; " +
+                "protocol_version=4; live_route_epoch=1; runtime_generation=2; terminal_generation=0; " +
+                "leg_generation=2; route_publication_generation=2; route_commit_generation=1; " +
+                "target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; " +
+                "route_publication_action_kind=RouteCommitPublication; coordinator_decision_reason=accepted",
+            $"event=filetransfer_route_transition_disposition_applied; {scope}; authority_id=transition-1; " +
+                "transition_generation=1; disposition=committed; apply_status=applied",
+            $"event=filetransfer_data_path_receive_result; {scope}; route=file_tuna_v4; " +
+                "route_publication_generation=2; route_commit_generation=1; delivery_result=received"
+        };
+        if (injected)
+        {
+            messages.Add(
+                $"event=tuna_acceleration_reset; {scope}; reason=header_switch_off");
+        }
+        messages.Add(
+            $"event=filetransfer_live_route_epoch_terminal; {scope}; route=file_tuna_v4; " +
+            "terminal_state=completed; log_writer_sequence=30462");
+
+        var result = await RunAnalyzeFixtureAsync(
+            messages.Select(LogLine).ToArray(),
+            ["-LiveRouteProofMode", "RegularActivationCycle"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal(injected ? "0" : "1", verdict["filetransfer_gui_live_fallback_fault_window_missed_raw_count"]);
+        Assert.Equal(injected ? "0" : "1", verdict["filetransfer_gui_live_fallback_fault_window_missed_distinct_count"]);
+        Assert.Equal(injected ? "0" : "1", verdict["filetransfer_gui_live_fallback_fault_window_missed_unresolved_count"]);
+        if (!injected)
+        {
+            Assert.Equal("incomplete_proof", verdict["acceptance_failure_class"]);
+            Assert.Equal("incomplete_proof", verdict["runtime_correctness_verdict"]);
+            Assert.Equal("evidence_harness", verdict["semantic_failure_domain"]);
+            Assert.Equal(
+                "filetransfer_gui_live_fallback_fault_window_missed",
+                verdict["first_proof_chain_failure_class"]);
+            Assert.Equal(
+                "fallback_switch_off_not_injected_before_completed_transfer",
+                verdict["first_proof_chain_failure_reason"]);
+        }
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
     public async Task AnalyzeRetained_ReceiveRecoveryProofStateActivationPauseRequiresHeldResume(
         bool compact,
         bool recovered)
@@ -398,6 +467,8 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
                     "decision_status=Accepted; log_writer_id=writer_inbound",
                 $"event=filetransfer_v4_state_received; {outboundScope}; epoch=226; " +
                     "v4_state_wire_fingerprint=wire-state-2; applied=1",
+                $"event=filetransfer_v4_state_received; {outboundScope}; epoch=226; " +
+                    "v4_state_wire_fingerprint=wire-state-2; applied=1; duplicate=1",
                 $"event=filetransfer_receive_recovery_operation_proof_observed; {outboundOperation}; {outboundScope}; " +
                     "closure_generation=1; closure_state=Adopted; proof_identity=file_transfer_v4_state:226",
                 $"event=filetransfer_receive_recovery_operation_closure_adopted; {outboundOperation}; {outboundScope}; " +
