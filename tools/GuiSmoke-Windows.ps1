@@ -4643,6 +4643,7 @@ function New-TunaGuiFileTransferFailureClassificationResult {
         RuntimeUnlockDispatchDeferredForRegularV4ReceiveRecovery = $false
         RuntimeUnlockRetryRegularV4RecoverySettlementMissing = $false
         RuntimeUnlockRetrySourcePublicationMismatch = $false
+        InitialActivationAnswerPeerDeliveryMissing = $false
         InitialActivationReceiveRecoveryHoldNotPreserved = $false
         InitialActivationReceiveRecoveryHoldReleasedOfferExpired = $false
         RouteTransitionDrainingTransportGraceTerminalization = $false
@@ -4704,6 +4705,12 @@ function Get-TunaGuiExplicitFailureClassification {
                 return [pscustomobject]@{
                     Phase = 'runtime_unlock_initial_activation'
                     Reason = 'initial_activation_retry_exhausted_while_receive_recovery_awaiting_proof'
+                }
+            }
+            'runtime_unlock_initial_activation_answer_peer_delivery_missing' {
+                return [pscustomobject]@{
+                    Phase = 'runtime_unlock_initial_activation'
+                    Reason = 'validated_offer_answer_not_delivered_to_initiator'
                 }
             }
             'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing' {
@@ -5235,6 +5242,76 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         }
 
         return $true
+    }
+
+    function Test-TunaGuiInitialActivationAnswerPeerDeliveryMissing {
+        param(
+            [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+        )
+
+        $indexed = for ($index = 0; $index -lt $Lines.Count; $index++) {
+            [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
+        }
+        $timeouts = @($indexed | Where-Object {
+            (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('tuna_acceleration_answer_ack_timeout')) -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'trigger') -eq 'runtime_unlock' -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'retry_reason') -eq
+                'runtime_unlock_answer_ack_timeout'
+        })
+        foreach ($timeout in $timeouts) {
+            $sessionId = Get-TunaGuiLogLineFieldValue -Line $timeout.Line -Name 'session_id'
+            $payerDecisionId = Get-TunaGuiLogLineFieldValue -Line $timeout.Line -Name 'payer_decision_id'
+            $generation = Get-TunaGuiLogLineFieldValue -Line $timeout.Line -Name 'generation'
+            $writer = Get-TunaGuiLogLineFieldValue -Line $timeout.Line -Name 'log_writer_id'
+            if ([string]::IsNullOrWhiteSpace($sessionId) -or
+                [string]::IsNullOrWhiteSpace($payerDecisionId) -or
+                [string]::IsNullOrWhiteSpace($generation) -or
+                [string]::IsNullOrWhiteSpace($writer)) {
+                continue
+            }
+
+            $pending = @($indexed | Where-Object {
+                $_.Index -lt $timeout.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('tuna_acceleration_answer_ack_pending')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $sessionId -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq $payerDecisionId -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'generation') -eq $generation -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer
+            } | Select-Object -Last 1)
+            if ($pending.Count -ne 1) {
+                continue
+            }
+
+            $sends = @($indexed | Where-Object {
+                $_.Index -gt $pending[0].Index -and $_.Index -lt $timeout.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'tuna_acceleration_answer_sent',
+                        'tuna_acceleration_answer_replay_sent')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq $payerDecisionId -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer
+            })
+            if ($sends.Count -eq 0) {
+                continue
+            }
+
+            $peerAnswer = @($indexed | Where-Object {
+                $_.Index -gt $sends[0].Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('tuna_acceleration_answer_received_raw')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -ne $writer
+            } | Select-Object -First 1)
+            $preCommit = @($indexed | Where-Object {
+                $_.Index -gt $timeout.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'runtime_unlock_precommit_probe_launch_requested',
+                        'filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided',
+                        'filetransfer_route_transition_prepared'))
+            } | Select-Object -First 1)
+            if ($peerAnswer.Count -eq 0 -or $preCommit.Count -eq 0) {
+                return $true
+            }
+        }
+
+        return $false
     }
 
     function Test-TunaGuiInitialActivationReceiveRecoveryHoldNotPreserved {
@@ -10526,6 +10603,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $regularV4ReceiveRecoveryClosedNoDeferral -and
         (-not $runtimeUnlockTransactionStarted)
     $regularV4EvidenceLineText = [string[]]@($evidenceLines | ForEach-Object { [string]$_ })
+    $initialActivationAnswerPeerDeliveryMissing =
+        Test-TunaGuiInitialActivationAnswerPeerDeliveryMissing `
+            -Lines $regularV4EvidenceLineText
     $initialActivationReceiveRecoveryHoldNotPreserved =
         Test-TunaGuiInitialActivationReceiveRecoveryHoldNotPreserved `
             -Lines $regularV4EvidenceLineText
@@ -10643,6 +10723,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $runtimeUnlockFileTransferOwnerStaleBeforeOfferDispatch -or
         $runtimeUnlockRetryRecoverySettlementMissingMarker -or
         $runtimeUnlockRetryRegularV4RecoverySettlementMissing -or
+        $initialActivationAnswerPeerDeliveryMissing -or
         $initialActivationReceiveRecoveryHoldNotPreserved -or
         $initialActivationReceiveRecoveryHoldReleasedPathLeaseExpired -or
         $initialActivationReceiveRecoveryHoldReleasedOfferExpired -or
@@ -10701,6 +10782,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
 
         $phase = 'preflight_bridge_bootstrap'
         $reason = $bridgeBootstrapSubreason
+    }
+    elseif ($initialActivationAnswerPeerDeliveryMissing) {
+        $phase = 'runtime_unlock_initial_activation'
+        $reason = 'validated_offer_answer_not_delivered_to_initiator'
     }
     elseif ($initialActivationCommittedRefreshPrevalidationRejected) {
         $phase = 'runtime_unlock_initial_activation'
@@ -11029,6 +11114,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         RuntimeUnlockDispatchDeferredForRegularV4ReceiveRecovery = [bool]$runtimeUnlockDispatchDeferredForRegularV4ReceiveRecovery
         RuntimeUnlockRetryRegularV4RecoverySettlementMissing = [bool]$runtimeUnlockRetryRegularV4RecoverySettlementMissing
         RuntimeUnlockRetrySourcePublicationMismatch = [bool]$runtimeUnlockRetrySourcePublicationMismatch
+        InitialActivationAnswerPeerDeliveryMissing =
+            [bool]$initialActivationAnswerPeerDeliveryMissing
         InitialActivationReceiveRecoveryHoldNotPreserved =
             [bool]$initialActivationReceiveRecoveryHoldNotPreserved
         InitialActivationReceiveRecoveryHoldReleasedOfferExpired =

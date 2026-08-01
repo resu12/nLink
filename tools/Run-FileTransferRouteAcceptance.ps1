@@ -1349,6 +1349,11 @@ function New-RouteAcceptanceRunResult {
         runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount = 0
         runtimeUnlockInitialOfferRetryLifecycleHandoffMissingUnresolvedCount = 0
         runtimeUnlockInitialOfferRetryLifecycleHandoffVerdict = 'none'
+        runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRawCount = 0
+        runtimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount = 0
+        runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount = 0
+        runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount = 0
+        runtimeUnlockInitialActivationAnswerPeerDeliveryVerdict = 'none'
         runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount = 0
         runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount = 0
         runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount = 0
@@ -2801,6 +2806,11 @@ function Assert-Phase4OperatorVerdict {
     $Result.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_recovered_count' -DefaultValue '0')
     $Result.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_unresolved_count' -DefaultValue '0')
     $Result.runtimeUnlockInitialOfferRetryLifecycleHandoffVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_offer_retry_lifecycle_handoff_verdict' -DefaultValue ([string]$Result.runtimeUnlockInitialOfferRetryLifecycleHandoffVerdict)
+    $Result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_activation_answer_peer_delivery_missing_raw_count' -DefaultValue '0')
+    $Result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_activation_answer_peer_delivery_missing_distinct_count' -DefaultValue '0')
+    $Result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count' -DefaultValue '0')
+    $Result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count' -DefaultValue '0')
+    $Result.runtimeUnlockInitialActivationAnswerPeerDeliveryVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_activation_answer_peer_delivery_verdict' -DefaultValue ([string]$Result.runtimeUnlockInitialActivationAnswerPeerDeliveryVerdict)
     $Result.runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_raw_count' -DefaultValue '0')
     $Result.runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_distinct_count' -DefaultValue '0')
     $Result.runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count' -DefaultValue '0')
@@ -6952,6 +6962,11 @@ function Write-Phase5PreflightFailureSummaryFiles {
         runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount = 0
         runtimeUnlockInitialOfferRetryLifecycleHandoffMissingUnresolvedCount = 0
         runtimeUnlockInitialOfferRetryLifecycleHandoffVerdict = 'none'
+        runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRawCount = 0
+        runtimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount = 0
+        runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount = 0
+        runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount = 0
+        runtimeUnlockInitialActivationAnswerPeerDeliveryVerdict = 'none'
         runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount = 0
         runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount = 0
         runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount = 0
@@ -8569,6 +8584,11 @@ function New-RouteAcceptanceSummaryRunDto {
         runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount = [int]$Result.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount
         runtimeUnlockInitialOfferRetryLifecycleHandoffMissingUnresolvedCount = [int]$Result.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingUnresolvedCount
         runtimeUnlockInitialOfferRetryLifecycleHandoffVerdict = [string]$Result.runtimeUnlockInitialOfferRetryLifecycleHandoffVerdict
+        runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRawCount = [int]$Result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRawCount
+        runtimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount = [int]$Result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount
+        runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount = [int]$Result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount
+        runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount = [int]$Result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount
+        runtimeUnlockInitialActivationAnswerPeerDeliveryVerdict = [string]$Result.runtimeUnlockInitialActivationAnswerPeerDeliveryVerdict
         runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount = [int]$Result.runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount
         runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount = [int]$Result.runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount
         runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount = [int]$Result.runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount
@@ -8948,6 +8968,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingDistinctCount = 0
     $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount = 0
     $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingUnresolvedCount = 0
+    $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRawCount = 0
+    $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount = 0
+    $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount = 0
+    $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount = 0
     $runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount = 0
     $runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount = 0
     $runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount = 0
@@ -9142,6 +9166,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingDistinctCount += [int]$runDto.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingDistinctCount
         $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount += [int]$runDto.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount
         $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingUnresolvedCount += [int]$runDto.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingUnresolvedCount
+        $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRawCount += [int]$runDto.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRawCount
+        $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount += [int]$runDto.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount
+        $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount += [int]$runDto.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount
+        $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount += [int]$runDto.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount
         $runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount += [int]$runDto.runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount
         $runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount += [int]$runDto.runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount
         $runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount += [int]$runDto.runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount
@@ -9797,6 +9825,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_recovered_count={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount),
         ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_unresolved_count={0}" -f $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingUnresolvedCount),
         ("runtime_unlock_initial_offer_retry_lifecycle_handoff_verdict={0}" -f ($(if ($runtimeUnlockInitialOfferRetryLifecycleHandoffMissingUnresolvedCount -gt 0) { 'fail' } elseif ($runtimeUnlockInitialOfferRetryLifecycleHandoffMissingDistinctCount -gt 0) { 'pass' } else { 'none' }))),
+        ("runtime_unlock_initial_activation_answer_peer_delivery_missing_raw_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRawCount),
+        ("runtime_unlock_initial_activation_answer_peer_delivery_missing_distinct_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount),
+        ("runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount),
+        ("runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount),
+        ("runtime_unlock_initial_activation_answer_peer_delivery_verdict={0}" -f ($(if ($runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount -gt 0) { 'fail' } elseif ($runtimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount -gt 0) { 'pass' } else { 'none' }))),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_raw_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_distinct_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount),
@@ -9889,6 +9922,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount)
         $textLines += ("{0}.runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_unresolved_count={1}" -f $prefix, $result.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingUnresolvedCount)
         $textLines += ("{0}.runtime_unlock_initial_offer_retry_lifecycle_handoff_verdict={1}" -f $prefix, $result.runtimeUnlockInitialOfferRetryLifecycleHandoffVerdict)
+        $textLines += ("{0}.runtime_unlock_initial_activation_answer_peer_delivery_missing_raw_count={1}" -f $prefix, $result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRawCount)
+        $textLines += ("{0}.runtime_unlock_initial_activation_answer_peer_delivery_missing_distinct_count={1}" -f $prefix, $result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount)
+        $textLines += ("{0}.runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount)
+        $textLines += ("{0}.runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count={1}" -f $prefix, $result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount)
+        $textLines += ("{0}.runtime_unlock_initial_activation_answer_peer_delivery_verdict={1}" -f $prefix, $result.runtimeUnlockInitialActivationAnswerPeerDeliveryVerdict)
         $textLines += ("{0}.runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_raw_count={1}" -f $prefix, $result.runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount)
         $textLines += ("{0}.runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_distinct_count={1}" -f $prefix, $result.runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount)
         $textLines += ("{0}.runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count={1}" -f $prefix, $result.runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount)
@@ -10456,6 +10494,19 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
             'fail'
         }
         elseif ($runtimeUnlockInitialOfferRetryLifecycleHandoffMissingDistinctCount -gt 0) {
+            'pass'
+        }
+        else {
+            'none'
+        }
+        runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRawCount = $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRawCount
+        runtimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount = $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount
+        runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount = $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount
+        runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount = $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount
+        runtimeUnlockInitialActivationAnswerPeerDeliveryVerdict = if ($runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount -gt 0) {
+            'fail'
+        }
+        elseif ($runtimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount -gt 0) {
             'pass'
         }
         else {

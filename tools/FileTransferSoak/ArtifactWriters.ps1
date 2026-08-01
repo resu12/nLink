@@ -13304,6 +13304,11 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_recovered_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_unresolved_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialOfferRetryLifecycleHandoffMissingUnresolvedCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_offer_retry_lifecycle_handoff_verdict={0}" -f $RecoveryClassification.RuntimeUnlockInitialOfferRetryLifecycleHandoffVerdict)) | Out-Null
+    $lines.Add(("runtime_unlock_initial_activation_answer_peer_delivery_missing_raw_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingRawCount)) | Out-Null
+    $lines.Add(("runtime_unlock_initial_activation_answer_peer_delivery_missing_distinct_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount)) | Out-Null
+    $lines.Add(("runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount)) | Out-Null
+    $lines.Add(("runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount)) | Out-Null
+    $lines.Add(("runtime_unlock_initial_activation_answer_peer_delivery_verdict={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryVerdict)) | Out-Null
     $lines.Add(("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_raw_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_distinct_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount)) | Out-Null
@@ -15383,6 +15388,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount),
         ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferRetryLifecycleHandoffMissingUnresolvedCount),
         ("runtime_unlock_initial_offer_retry_lifecycle_handoff_verdict={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferRetryLifecycleHandoffVerdict),
+        ("runtime_unlock_initial_activation_answer_peer_delivery_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingRawCount),
+        ("runtime_unlock_initial_activation_answer_peer_delivery_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount),
+        ("runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount),
+        ("runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount),
+        ("runtime_unlock_initial_activation_answer_peer_delivery_verdict={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryVerdict),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_raw_count={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount),
@@ -21069,6 +21079,145 @@ function Get-FileTransferRuntimeUnlockInitialOfferRetryLifecycleHandoffCorrelati
         DistinctCandidateEvents = @($distinctCandidates.ToArray())
         RecoveredCandidateEvents = @($recoveredCandidates.ToArray())
         UnresolvedCandidateEvents = @($unresolvedCandidates.ToArray())
+    }
+}
+
+function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrelation {
+    param(
+        [AllowEmptyCollection()][object[]]$Events = @()
+    )
+
+    [object[]]$orderedEvents = @(
+        $Events | Where-Object { $null -ne $_ } | Sort-Object Sequence, LineNumber
+    )
+    [object[]]$timeouts = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_answer_ack_timeout' -and
+        (Get-FileTransferEventField -Event $_ -Name 'trigger' -Default '') -eq 'runtime_unlock' -and
+        (Get-FileTransferEventField -Event $_ -Name 'retry_reason' -Default '') -eq
+            'runtime_unlock_answer_ack_timeout'
+    })
+    [object[]]$pendingEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_answer_ack_pending'
+    })
+    [object[]]$answerSends = @($orderedEvents | Where-Object {
+        $_.EventName -in @(
+            'tuna_acceleration_answer_sent',
+            'tuna_acceleration_answer_replay_sent') -and
+        (Get-FileTransferEventField -Event $_ -Name 'accepted' -Default '1') -ne '0'
+    })
+    [object[]]$rawAnswerReceipts = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_answer_received_raw'
+    })
+    [object[]]$answerAcks = @($orderedEvents | Where-Object {
+        $_.EventName -in @(
+            'tuna_acceleration_answer_ack_sent',
+            'tuna_acceleration_answer_ack_received_raw',
+            'tuna_acceleration_answer_ack_received')
+    })
+    [object[]]$preCommitEvents = @($orderedEvents | Where-Object {
+        $_.EventName -in @(
+            'runtime_unlock_precommit_probe_launch_requested',
+            'filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided',
+            'runtime_unlock_precommit_probe_launch_started',
+            'runtime_unlock_precommit_probe_started',
+            'filetransfer_route_transition_prepared')
+    })
+
+    function Get-AnswerDeliveryIdentityValue {
+        param($Event, [string[]]$Names)
+        foreach ($name in $Names) {
+            $value = Get-FileTransferEventField -Event $Event -Name $name -Default ''
+            if (-not [string]::IsNullOrWhiteSpace($value) -and
+                $value -notin @('(none)', 'none', '(missing)', '__missing__')) {
+                return $value
+            }
+        }
+        return ''
+    }
+
+    $raw = New-Object System.Collections.Generic.List[object]
+    $distinct = New-Object System.Collections.Generic.List[object]
+    $recovered = New-Object System.Collections.Generic.List[object]
+    $unresolved = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    foreach ($timeout in $timeouts) {
+        $sessionId = Get-AnswerDeliveryIdentityValue $timeout @('session_id')
+        $payerDecisionId = Get-AnswerDeliveryIdentityValue $timeout @('payer_decision_id')
+        $generation = Get-AnswerDeliveryIdentityValue $timeout @('generation')
+        $writer = Get-AnswerDeliveryIdentityValue $timeout @('log_writer_id')
+        if ([string]::IsNullOrWhiteSpace($sessionId) -or
+            [string]::IsNullOrWhiteSpace($payerDecisionId) -or
+            [string]::IsNullOrWhiteSpace($generation) -or
+            [string]::IsNullOrWhiteSpace($writer)) {
+            continue
+        }
+
+        $pending = @($pendingEvents | Where-Object {
+            [int64]$_.Sequence -lt [int64]$timeout.Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -eq $payerDecisionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('generation')) -eq $generation -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -Last 1)
+        if ($pending.Count -ne 1) {
+            continue
+        }
+
+        $sends = @($answerSends | Where-Object {
+            [int64]$_.Sequence -gt [int64]$pending[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$timeout.Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -eq $payerDecisionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        })
+        if ($sends.Count -eq 0) {
+            continue
+        }
+
+        $raw.Add($timeout) | Out-Null
+        $key = [string]::Join('|', @($writer, $sessionId, $payerDecisionId, $generation)).ToLowerInvariant()
+        if ($seen.ContainsKey($key)) {
+            continue
+        }
+        $seen[$key] = $true
+        $distinct.Add($timeout) | Out-Null
+
+        $peerRaw = @($rawAnswerReceipts | Where-Object {
+            [int64]$_.Sequence -gt [int64]$sends[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -ne $writer
+        } | Select-Object -First 1)
+        $ack = @()
+        $preCommit = @()
+        if ($peerRaw.Count -eq 1) {
+            $ack = @($answerAcks | Where-Object {
+                [int64]$_.Sequence -gt [int64]$peerRaw[0].Sequence -and
+                (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId)
+            } | Select-Object -First 1)
+        }
+        if ($ack.Count -eq 1) {
+            $preCommit = @($preCommitEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$ack[0].Sequence -and
+                (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId)
+            } | Select-Object -First 1)
+        }
+
+        if ($peerRaw.Count -eq 1 -and $ack.Count -eq 1 -and $preCommit.Count -eq 1) {
+            $recovered.Add($timeout) | Out-Null
+        }
+        else {
+            $unresolved.Add($timeout) | Out-Null
+        }
+    }
+
+    return [pscustomobject]@{
+        RawCount = $raw.Count
+        DistinctCount = $distinct.Count
+        RecoveredCount = $recovered.Count
+        UnresolvedCount = $unresolved.Count
+        Verdict = if ($unresolved.Count -gt 0) { 'fail' } elseif ($distinct.Count -gt 0) { 'pass' } else { 'none' }
+        RawCandidateEvents = @($raw.ToArray())
+        DistinctCandidateEvents = @($distinct.ToArray())
+        RecoveredCandidateEvents = @($recovered.ToArray())
+        UnresolvedCandidateEvents = @($unresolved.ToArray())
     }
 }
 
@@ -38913,6 +39062,9 @@ function Get-FileTransferRecoveryFailureClassification {
         Get-FileTransferRuntimeUnlockInitialOfferRetryLifecycleHandoffCorrelation `
             -Events $events `
             -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents
+    $runtimeUnlockInitialActivationAnswerPeerDeliveryProof =
+        Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrelation `
+            -Events $events
     $runtimeUnlockInitialOfferReceiveRecoveryHoldProof =
         Get-FileTransferRuntimeUnlockInitialOfferReceiveRecoveryHoldCorrelation `
             -Events $events
@@ -42245,6 +42397,12 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_initial_activation_answer_peer_delivery_missing' `
+        -Events @($runtimeUnlockInitialActivationAnswerPeerDeliveryProof.UnresolvedCandidateEvents) `
+        -DefaultReason 'validated_offer_answer_not_delivered_to_initiator' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved' `
         -Events @($runtimeUnlockInitialOfferReceiveRecoveryHoldProof.UnresolvedCandidateEvents) `
         -DefaultReason 'initial_activation_retry_exhausted_while_receive_recovery_awaiting_proof' `
@@ -42668,6 +42826,9 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($runtimeUnlockInitialOfferRetryLifecycleHandoffProof.UnresolvedCount -gt 0) {
         $class = 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing'
+    }
+    elseif ($runtimeUnlockInitialActivationAnswerPeerDeliveryProof.UnresolvedCount -gt 0) {
+        $class = 'runtime_unlock_initial_activation_answer_peer_delivery_missing'
     }
     elseif ($runtimeUnlockInitialOfferReceiveRecoveryHoldProof.UnresolvedCount -gt 0) {
         $class = 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved'
@@ -43157,6 +43318,7 @@ function Get-FileTransferRecoveryFailureClassification {
                 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing',
                 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing',
                 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing',
+                'runtime_unlock_initial_activation_answer_peer_delivery_missing',
                 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved',
                 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing',
                 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired',
@@ -43378,6 +43540,11 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount = $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.RecoveredCount
         RuntimeUnlockInitialOfferRetryLifecycleHandoffMissingUnresolvedCount = $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.UnresolvedCount
         RuntimeUnlockInitialOfferRetryLifecycleHandoffVerdict = $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.Verdict
+        RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingRawCount = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.RawCount
+        RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.DistinctCount
+        RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.RecoveredCount
+        RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.UnresolvedCount
+        RuntimeUnlockInitialActivationAnswerPeerDeliveryVerdict = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.Verdict
         RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount = $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.RawCount
         RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount = $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.DistinctCount
         RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount = $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.RecoveredCount
@@ -44198,6 +44365,11 @@ function New-FileTransferInvariantLedgerObject {
         runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_recovered_count = [string]$recoveryClassification.RuntimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount
         runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_unresolved_count = [string]$recoveryClassification.RuntimeUnlockInitialOfferRetryLifecycleHandoffMissingUnresolvedCount
         runtime_unlock_initial_offer_retry_lifecycle_handoff_verdict = $recoveryClassification.RuntimeUnlockInitialOfferRetryLifecycleHandoffVerdict
+        runtime_unlock_initial_activation_answer_peer_delivery_missing_raw_count = [string]$recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingRawCount
+        runtime_unlock_initial_activation_answer_peer_delivery_missing_distinct_count = [string]$recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount
+        runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count = [string]$recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount
+        runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count = [string]$recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount
+        runtime_unlock_initial_activation_answer_peer_delivery_verdict = $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryVerdict
         runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_raw_count = [string]$recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount
         runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_distinct_count = [string]$recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount
         runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count = [string]$recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount
@@ -44454,6 +44626,7 @@ function Write-FileTransferDiagnosticsArtifacts {
             'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing',
             'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing',
             'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing',
+            'runtime_unlock_initial_activation_answer_peer_delivery_missing',
             'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved',
             'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing',
             'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired',
@@ -44578,6 +44751,10 @@ function Write-FileTransferDiagnosticsArtifacts {
                 'recovery: initial runtime-unlock offer retirement did not enter the coordinator retry lifecycle'
                 break
             }
+            'runtime_unlock_initial_activation_answer_peer_delivery_missing' {
+                'recovery: validated runtime-unlock answer was not delivered to the initiating peer'
+                break
+            }
             'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved' {
                 'recovery: initial runtime-unlock activation exhausted its retry budget while receive recovery awaited proof'
                 break
@@ -44656,6 +44833,9 @@ function Write-FileTransferDiagnosticsArtifacts {
 
     $operatorAcceptanceFailureClass = if ($recoveryClassification.Class -in @('filetransfer_gui_live_fallback_fault_window_missed', 'filetransfer_live_route_epoch_projection_missing', 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'runtime_unlock_precommit_probe_start_handoff_missing', 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing', 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_initial_pressure_install_missing', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery', 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
         'incomplete_proof'
+    }
+    elseif ($recoveryClassification.Class -eq 'runtime_unlock_initial_activation_answer_peer_delivery_missing') {
+        'route_runtime'
     }
     elseif ($recoveryClassification.Class -in @('filetransfer_receive_recovery_operation_incomplete', 'filetransfer_receive_recovery_completed_unproven_successor_missing', 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved', 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing', 'filetransfer_receive_recovery_completed_proven_successor_missing', 'runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'filetransfer_bridge_recovery_execution_payload_hold_missing', 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing', 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing', 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing', 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved', 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing', 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired', 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'fallback_tail_yield_authority_invalid', 'filetransfer_route_transition_draining_transport_grace_terminalization', 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing', 'filetransfer_route_transition_incomplete', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
         'route_runtime'
@@ -44784,6 +44964,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount),
         ("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferRetryLifecycleHandoffMissingUnresolvedCount),
         ("runtime_unlock_initial_offer_retry_lifecycle_handoff_verdict={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferRetryLifecycleHandoffVerdict),
+        ("runtime_unlock_initial_activation_answer_peer_delivery_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingRawCount),
+        ("runtime_unlock_initial_activation_answer_peer_delivery_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount),
+        ("runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount),
+        ("runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount),
+        ("runtime_unlock_initial_activation_answer_peer_delivery_verdict={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryVerdict),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_raw_count={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount),

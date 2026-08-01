@@ -14,6 +14,48 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransferOpsScriptsTestBase
 {
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_InitialActivationAnswerRequiresPeerDelivery(bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string responderScope =
+            "session_id=sess_answer_delivery; payer_decision_id=41; generation=7; " +
+            "log_writer_id=writer_responder";
+        var result = await RunAnalyzeFixtureAsync(
+            [
+                LogLine($"event=tuna_acceleration_offer_received_raw; {responderScope}; msg_id=offer-1"),
+                LogLine($"event=tuna_acceleration_answer_ack_pending; {responderScope}"),
+                LogLine($"event=tuna_acceleration_answer_sent; {responderScope}; accepted=1; msg_id=answer-1"),
+                LogLine($"event=tuna_acceleration_answer_replay_sent; {responderScope}; attempt=1; msg_id=answer-1"),
+                LogLine($"event=tuna_acceleration_answer_ack_timeout; {responderScope}; trigger=runtime_unlock; retry_reason=runtime_unlock_answer_ack_timeout")
+            ],
+            [],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count"]);
+        Assert.Equal("runtime_unlock_initial_activation_answer_peer_delivery_missing", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("validated_offer_answer_not_delivered_to_initiator", verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
+        Assert.Equal("fail", verdict["runtime_correctness_verdict"]);
+        Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+    }
+
+    [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]
     [InlineData(false, true)]
