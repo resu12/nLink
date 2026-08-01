@@ -547,6 +547,31 @@ function Complete-RouteAcceptanceRunEvidence {
                     (Test-Path -LiteralPath $diagnosticsPath -PathType Leaf) -and
                     (Test-Path -LiteralPath $analyzerInputPath -PathType Leaf) -and
                     -not (Test-Path -LiteralPath $evidenceFinalizationTimeoutPath -PathType Leaf)
+                $selectedResult = @($script:RunResults.ToArray() | Where-Object {
+                        [string]::Equals(
+                            [string]$_.name,
+                            [string]$attempt.ScenarioName,
+                            [System.StringComparison]::OrdinalIgnoreCase) -and
+                        [string]::Equals(
+                            [System.IO.Path]::GetFullPath([string]$_.artifactDir),
+                            [System.IO.Path]::GetFullPath($artifactDir),
+                            [System.StringComparison]::OrdinalIgnoreCase)
+                    } | Select-Object -First 1)
+                $selected = $selectedResult.Count -eq 1
+                $selectionDisposition = if ($selected) {
+                    if ($artifactFinalized) {
+                        'selected_finalized_attempt'
+                    }
+                    else {
+                        'selected_fail_closed_unfinalized_attempt'
+                    }
+                }
+                elseif ($artifactFinalized) {
+                    'historical_finalized_attempt'
+                }
+                else {
+                    'historical_unfinalized_attempt'
+                }
                 Get-RouteAcceptanceScenarioEvidence `
                     -ScenarioName ([string]$attempt.ScenarioName) `
                     -Attempt ([int]$attempt.Attempt) `
@@ -554,6 +579,8 @@ function Complete-RouteAcceptanceRunEvidence {
                     -ScenarioRunId ([string]$attempt.ScenarioRunId) `
                     -ArtifactDir $artifactDir `
                     -ArtifactFinalized:$artifactFinalized `
+                    -Selected:$selected `
+                    -SelectionDisposition $selectionDisposition `
                     -LogLedgerPath $ledgerPath `
                     -AnalyzerDiagnosticsPath $diagnosticsPath `
                     -AnalyzerInputPath $analyzerInputPath
@@ -7299,7 +7326,11 @@ function Clear-Phase5StaleSetupFailureAfterRuntimeEvidence {
         $combinedSetup.IndexOf('regular_v4_frontier_repair', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combinedSetup.IndexOf('regular_v4_receive_recovery', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combinedSetup.IndexOf('post_fallback_runtime_unlock_resume', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-        $combinedSetup.IndexOf('fallback_tail_quiescence', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+        $combinedSetup.IndexOf('fallback_tail_quiescence', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combinedSetup.IndexOf('live_route_proof', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combinedSetup.IndexOf('terminal_before_fallback_switch_off', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combinedSetup.IndexOf('regular_v4_terminal_before_tuna_activation_commit', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combinedSetup.IndexOf('completed_before_fault_injection', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
     if (-not $isPreflightSetupLabel -and -not $isRuntimeFailureLabel) {
         return $false
     }
@@ -8369,15 +8400,27 @@ function Invoke-Phase4RouteAcceptanceScenario {
                 Set-Phase5CompletedLiveFallbackWarningVariance -Scenario $Scenario -Result $rerunResult | Out-Null
                 Set-Phase5PostTerminalGuiCleanupWarning -Scenario $Scenario -Result $rerunResult | Out-Null
                 Set-Phase5CanonicalRuntimeUnlockReceiveRecoveryExhaustion -Scenario $Scenario -Result $rerunResult | Out-Null
+                Clear-Phase5StaleSetupFailureAfterRuntimeEvidence -Result $rerunResult | Out-Null
             }
             Add-RouteAcceptanceScenarioAttemptEvidence -ScenarioName ([string]$Scenario.Name) -AttemptIndex ($rerun + 1) -ArtifactDir $rerunDir
-            if (Test-RouteAcceptanceEvidenceFinalizationTimedOut -ArtifactDir $rerunDir) {
-                $result = $rerunResult
+            $rerunArtifactFinalized =
+                (Test-Path -LiteralPath (Join-Path $rerunDir 'filetransfer-gui-log-ledger.json') -PathType Leaf) -and
+                (Test-Path -LiteralPath (Join-Path $rerunDir 'filetransfer-retained-analysis-stage-diagnostics.json') -PathType Leaf) -and
+                (Test-Path -LiteralPath (Join-Path $rerunDir 'filetransfer-retained-log-slice.log') -PathType Leaf) -and
+                -not (Test-RouteAcceptanceEvidenceFinalizationTimedOut -ArtifactDir $rerunDir)
+            if (-not $rerunArtifactFinalized) {
+                $firstAttemptResult.attemptCount = $rerun + 1
+                $firstAttemptResult.retryUsed = $true
+                $firstAttemptResult.selectedAttempt = 1
+                $firstAttemptResult.firstFailureReason = $firstFailureReason
+                $firstAttemptResult.rerunArtifactDir = $rerunDir
+                $firstAttemptResult.rerunFailureReason = 'rerun did not produce finalized evidence; preserving the previously selected attempt'
+                $result = $firstAttemptResult
                 break
             }
             $rerunResult.attemptCount = $rerun + 1
             $rerunResult.retryUsed = $true
-            $rerunResult.selectedAttempt = if ($rerunResult.failures.Count -eq 0) { $rerun + 1 } else { 0 }
+            $rerunResult.selectedAttempt = $rerun + 1
             $rerunResult.firstFailureReason = $firstFailureReason
             if ($rerunResult.failures.Count -ne 0 -and (Test-Phase4SetupInvalidAttempt -Result $rerunResult)) {
                 $rerunFailureReason = if (-not [string]::IsNullOrWhiteSpace($rerunExecutionFailure)) {
@@ -8402,50 +8445,6 @@ function Invoke-Phase4RouteAcceptanceScenario {
                 }
                 $result = $firstAttemptResult
                 break
-            }
-
-            $firstAttemptFailureClassForWarningPolicy = Get-RouteAcceptanceResultFailureClass -AcceptancePhase $AcceptancePhase -Result $firstAttemptResult
-            $rerunWarningCapExceededKinds = [string]$rerunResult.warningCapExceededKinds
-            $rerunIntroducedWarningPolicyEvidence = $AcceptancePhase -eq 'phase5' -and
-                ($firstAttemptFailureClassForWarningPolicy -eq 'performance' -or $firstAttemptFailureClassForWarningPolicy -eq 'environmental') -and
-                -not [string]::IsNullOrWhiteSpace($rerunWarningCapExceededKinds) -and
-                $rerunWarningCapExceededKinds -ne '(none)'
-            if ($rerunIntroducedWarningPolicyEvidence) {
-                $firstAttemptResult.attemptCount = $rerun + 1
-                $firstAttemptResult.retryUsed = $true
-                $firstAttemptResult.selectedAttempt = 1
-                $firstAttemptResult.firstFailureReason = $firstFailureReason
-                $firstAttemptResult.rerunArtifactDir = $rerunDir
-                $firstAttemptResult.rerunFailureReason = ("rerun introduced warning_policy failure; preserving first-attempt evidence: warning cap exceeded: {0}" -f $rerunWarningCapExceededKinds)
-                $result = $firstAttemptResult
-                break
-            }
-
-            if ($rerunResult.failures.Count -ne 0) {
-                $firstAttemptFailureClass = Get-RouteAcceptanceResultFailureClass -AcceptancePhase $AcceptancePhase -Result $firstAttemptResult
-                $rerunFailureClass = Get-RouteAcceptanceResultFailureClass -AcceptancePhase $AcceptancePhase -Result $rerunResult
-                if (($firstAttemptFailureClass -eq 'performance' -or $firstAttemptFailureClass -eq 'environmental') -and
-                    $rerunFailureClass -ne 'performance' -and
-                    $rerunFailureClass -ne 'environmental') {
-                    $rerunFailureReason = if (-not [string]::IsNullOrWhiteSpace($rerunExecutionFailure)) {
-                        "scenario rerun execution failed: {0}" -f $rerunExecutionFailure
-                    }
-                    else {
-                        Get-Phase4FirstFailureReason -Result $rerunResult
-                    }
-                    if ([string]::IsNullOrWhiteSpace($rerunFailureReason)) {
-                        $rerunFailureReason = 'rerun introduced non-performance evidence'
-                    }
-
-                    $firstAttemptResult.attemptCount = $rerun + 1
-                    $firstAttemptResult.retryUsed = $true
-                    $firstAttemptResult.selectedAttempt = 1
-                    $firstAttemptResult.firstFailureReason = $firstFailureReason
-                    $firstAttemptResult.rerunArtifactDir = $rerunDir
-                    $firstAttemptResult.rerunFailureReason = ("rerun introduced {0} failure; preserving first-attempt evidence: {1}" -f $rerunFailureClass, $rerunFailureReason)
-                    $result = $firstAttemptResult
-                    break
-                }
             }
 
             $result = $rerunResult

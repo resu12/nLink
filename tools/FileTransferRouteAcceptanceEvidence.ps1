@@ -1259,7 +1259,9 @@ function Get-RouteAcceptanceScenarioEvidence {
         [Parameter(Mandatory = $true)][bool]$ArtifactFinalized,
         [Parameter(Mandatory = $true)][string]$LogLedgerPath,
         [Parameter(Mandatory = $true)][string]$AnalyzerDiagnosticsPath,
-        [Parameter(Mandatory = $true)][string]$AnalyzerInputPath
+        [Parameter(Mandatory = $true)][string]$AnalyzerInputPath,
+        [bool]$Selected = $true,
+        [string]$SelectionDisposition = 'selected_finalized_attempt'
     )
 
     $cursor = if ($ArtifactFinalized) {
@@ -1330,6 +1332,8 @@ function Get-RouteAcceptanceScenarioEvidence {
         scenarioRunId = $ScenarioRunId
         artifactDir = [System.IO.Path]::GetFullPath($ArtifactDir)
         artifactFinalized = $ArtifactFinalized
+        selected = $Selected
+        selectionDisposition = $SelectionDisposition
         finalizationTimeout = [pscustomobject][ordered]@{
             path = [System.IO.Path]::GetFullPath($timeoutMarkerPath)
             exists = $timeoutMarkerExists
@@ -1815,7 +1819,31 @@ function Get-RouteAcceptanceEvidenceManifestValidation {
     if ($scenarioAttempts.Count -eq 0) {
         $cursorReasons.Add('scenario_attempts_missing') | Out-Null
     }
+    $manifestHasExplicitAttemptSelection = @($scenarioAttempts | Where-Object {
+            $null -ne $_.PSObject.Properties['selected']
+        }).Count -gt 0
+    $selectedScenarioAttemptIdentities = @(
+        Get-RouteAcceptanceEvidencePropertyValue `
+            -Object $Manifest `
+            -Name 'selectedScenarioAttempts' `
+            -DefaultValue @())
+    $legacySelectedAttemptByScenario = @{}
+    if (-not $manifestHasExplicitAttemptSelection) {
+        foreach ($scenarioAttempt in $scenarioAttempts) {
+            $legacyScenarioName = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $scenarioAttempt -Name 'scenarioName' -DefaultValue '')
+            $legacyAttemptNumber = [int](ConvertTo-RouteAcceptanceEvidenceInt64 -Value (
+                    Get-RouteAcceptanceEvidencePropertyValue -Object $scenarioAttempt -Name 'attempt' -DefaultValue 0))
+            $legacyArtifactFinalized = ConvertTo-RouteAcceptanceEvidenceBoolean -Value (
+                Get-RouteAcceptanceEvidencePropertyValue -Object $scenarioAttempt -Name 'artifactFinalized' -DefaultValue $false)
+            if ($legacyArtifactFinalized -and
+                (-not $legacySelectedAttemptByScenario.ContainsKey($legacyScenarioName) -or
+                 $legacyAttemptNumber -gt [int]$legacySelectedAttemptByScenario[$legacyScenarioName])) {
+                $legacySelectedAttemptByScenario[$legacyScenarioName] = $legacyAttemptNumber
+            }
+        }
+    }
     $seenScenarioRunIds = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::Ordinal)
+    $selectedAttemptCountByScenario = @{}
     foreach ($scenarioAttempt in $scenarioAttempts) {
         $scenarioName = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $scenarioAttempt -Name 'scenarioName' -DefaultValue '')
         $attemptNumber = [int](ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $scenarioAttempt -Name 'attempt' -DefaultValue 0))
@@ -1835,11 +1863,31 @@ function Get-RouteAcceptanceEvidenceManifestValidation {
         if ([string]::IsNullOrWhiteSpace($scenarioRunId) -or -not $seenScenarioRunIds.Add($scenarioRunId)) {
             $cursorReasons.Add('scenario_run_id_duplicate_or_missing') | Out-Null
         }
+        $selected = if ($manifestHasExplicitAttemptSelection) {
+            ConvertTo-RouteAcceptanceEvidenceBoolean -Value (
+                Get-RouteAcceptanceEvidencePropertyValue `
+                    -Object $scenarioAttempt `
+                    -Name 'selected' `
+                    -DefaultValue $false)
+        }
+        else {
+            $legacySelectedAttemptByScenario.ContainsKey($scenarioName) -and
+                [int]$legacySelectedAttemptByScenario[$scenarioName] -eq $attemptNumber
+        }
+        if ($selected) {
+            if (-not $selectedAttemptCountByScenario.ContainsKey($scenarioName)) {
+                $selectedAttemptCountByScenario[$scenarioName] = 0
+            }
+            $selectedAttemptCountByScenario[$scenarioName]++
+        }
         $artifactFinalized = ConvertTo-RouteAcceptanceEvidenceBoolean -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $scenarioAttempt -Name 'artifactFinalized' -DefaultValue $false)
         $finalizationTimeout = Get-RouteAcceptanceEvidenceFinalizationTimeoutValidation `
             -ScenarioAttempt $scenarioAttempt `
             -AcceptanceRunId $runId `
             -ScenarioRunId $scenarioRunId
+        if (-not $selected) {
+            continue
+        }
         if (-not $artifactFinalized) {
             $cursorReasons.Add('scenario_artifact_not_finalized') | Out-Null
             if ([bool]$finalizationTimeout.Present) {
@@ -2023,6 +2071,50 @@ function Get-RouteAcceptanceEvidenceManifestValidation {
             }
         }
     }
+    foreach ($scenarioName in $scenarioNames) {
+        $selectedCount = if ($selectedAttemptCountByScenario.ContainsKey($scenarioName)) {
+            [int]$selectedAttemptCountByScenario[$scenarioName]
+        }
+        else {
+            0
+        }
+        if ($selectedCount -ne 1) {
+            $cursorReasons.Add('scenario_selected_attempt_count_invalid') | Out-Null
+        }
+    }
+    if ($manifestHasExplicitAttemptSelection) {
+        if ($selectedScenarioAttemptIdentities.Count -ne $scenarioNames.Count) {
+            $cursorReasons.Add('selected_scenario_attempt_identity_count_invalid') | Out-Null
+        }
+        foreach ($selectedIdentity in $selectedScenarioAttemptIdentities) {
+            $identityScenarioName = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $selectedIdentity -Name 'scenarioName' -DefaultValue '')
+            $identityAttempt = [int](ConvertTo-RouteAcceptanceEvidenceInt64 -Value (
+                    Get-RouteAcceptanceEvidencePropertyValue -Object $selectedIdentity -Name 'attempt' -DefaultValue 0))
+            $identityScenarioRunId = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $selectedIdentity -Name 'scenarioRunId' -DefaultValue '')
+            $identityDisposition = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $selectedIdentity -Name 'disposition' -DefaultValue '')
+            $matchingSelectedAttempts = @($scenarioAttempts | Where-Object {
+                    (ConvertTo-RouteAcceptanceEvidenceBoolean -Value (
+                        Get-RouteAcceptanceEvidencePropertyValue -Object $_ -Name 'selected' -DefaultValue $false)) -and
+                    [string]::Equals(
+                        [string](Get-RouteAcceptanceEvidencePropertyValue -Object $_ -Name 'scenarioName' -DefaultValue ''),
+                        $identityScenarioName,
+                        [System.StringComparison]::Ordinal) -and
+                    [int](ConvertTo-RouteAcceptanceEvidenceInt64 -Value (
+                        Get-RouteAcceptanceEvidencePropertyValue -Object $_ -Name 'attempt' -DefaultValue 0)) -eq $identityAttempt -and
+                    [string]::Equals(
+                        [string](Get-RouteAcceptanceEvidencePropertyValue -Object $_ -Name 'scenarioRunId' -DefaultValue ''),
+                        $identityScenarioRunId,
+                        [System.StringComparison]::Ordinal) -and
+                    [string]::Equals(
+                        [string](Get-RouteAcceptanceEvidencePropertyValue -Object $_ -Name 'selectionDisposition' -DefaultValue ''),
+                        $identityDisposition,
+                        [System.StringComparison]::Ordinal)
+                })
+            if ($matchingSelectedAttempts.Count -ne 1) {
+                $cursorReasons.Add('selected_scenario_attempt_identity_mismatch') | Out-Null
+            }
+        }
+    }
 
     $structural = @($structuralReasons | Select-Object -Unique)
     $provenance = @($provenanceReasons | Select-Object -Unique)
@@ -2064,6 +2156,18 @@ function New-RouteAcceptanceEvidenceManifest {
     )
 
     $merged = Merge-RouteAcceptanceEvidenceSnapshots -InitialSnapshot $InitialSnapshot -FinalSnapshot $FinalSnapshot
+    $selectedScenarioAttempts = @($ScenarioAttempts | Where-Object {
+            ConvertTo-RouteAcceptanceEvidenceBoolean -Value (
+                Get-RouteAcceptanceEvidencePropertyValue -Object $_ -Name 'selected' -DefaultValue $false)
+        } | ForEach-Object {
+            [pscustomobject][ordered]@{
+                scenarioName = [string]$_.scenarioName
+                attempt = [int]$_.attempt
+                scenarioRunId = [string]$_.scenarioRunId
+                artifactDir = [string]$_.artifactDir
+                disposition = [string]$_.selectionDisposition
+            }
+        })
     $manifest = [pscustomobject][ordered]@{
         schemaVersion = 1
         event = 'filetransfer_route_acceptance_run_manifest'
@@ -2079,6 +2183,7 @@ function New-RouteAcceptanceEvidenceManifest {
         harness = $merged.harness
         bridge = $merged.bridge
         scenarioAttempts = @($ScenarioAttempts)
+        selectedScenarioAttempts = $selectedScenarioAttempts
         validation = $null
     }
     $manifest.validation = Get-RouteAcceptanceEvidenceManifestValidation -Manifest $manifest
