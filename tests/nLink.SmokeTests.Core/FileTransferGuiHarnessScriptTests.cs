@@ -462,7 +462,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     -TargetTransport Tuna `
                     -EventName filetransfer_live_route_epoch_started `
                     -Description authoritative-route-transition `
-                    -TimeoutMs 2000
+                    -TimeoutMs 2000 `
+                    -RequireAuthoritativeProjection
 
                 if ($matched.IndexOf('gui_authoritative_projection=1', [StringComparison]::Ordinal) -lt 0) {
                     throw "generic coordinator transition was not normalized: $matched"
@@ -2464,7 +2465,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
         var trackerBody = ExtractPowerShellFunctionBody(guiText, "Add-TunaGuiCompletedTerminalToTracker", "New-TunaGuiLiveSwitchOffProgressGateResult");
-        var pairBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiCompletedTerminalPairAfterBookmark", "Test-TunaGuiSwitchOffToggleReady");
+        var pairBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiCompletedTerminalPairAfterBookmark", "New-TunaGuiFaultAdmissionTracker");
+        var admissionTrackerBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFaultAdmissionTracker", "Update-TunaGuiFaultAdmissionTracker");
+        var updateTrackerBody = ExtractPowerShellFunctionBody(guiText, "Update-TunaGuiFaultAdmissionTracker", "Test-TunaGuiSwitchOffToggleReady");
         var toggleBody = ExtractPowerShellFunctionBody(guiText, "Test-TunaGuiSwitchOffToggleReady", "Wait-TunaGuiSwitchOffToggleOrTerminal");
         var waitBody = ExtractPowerShellFunctionBody(guiText, "Wait-TunaGuiSwitchOffToggleOrTerminal", "Try-PrearmTunaGuiSwitchOffToggle");
         var prearmBody = ExtractPowerShellFunctionBody(guiText, "Try-PrearmTunaGuiSwitchOffToggle", "Get-TunaGuiLogLineUtcText");
@@ -2474,6 +2477,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
 
             function Add-TunaGuiCompletedTerminalToTracker { {{trackerBody}} }
             function Get-TunaGuiCompletedTerminalPairAfterBookmark { {{pairBody}} }
+            function New-TunaGuiFaultAdmissionTracker { {{admissionTrackerBody}} }
+            function Update-TunaGuiFaultAdmissionTracker { {{updateTrackerBody}} }
             function Test-TunaGuiSwitchOffToggleReady { {{toggleBody}} }
             function Wait-TunaGuiSwitchOffToggleOrTerminal { {{waitBody}} }
             function Try-PrearmTunaGuiSwitchOffToggle { {{prearmBody}} }
@@ -2486,11 +2491,17 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 if (-not $match.Success) { return $null }
                 return [pscustomobject]@{ Direction = $match.Groups['direction'].Value; TransferId = $match.Groups['transfer'].Value; Line = $Line }
             }
-            function Get-AppLogLinesAfterBookmark {
-                param([int]$Bookmark)
+            function Sync-GuiSmokeAppLogLedger {
                 $script:logPoll++
-                if ($script:logPoll -ge $script:terminalAt) { return @($script:terminalLines) }
-                return @()
+                $script:currentLines = if ($script:logPoll -ge $script:terminalAt) { @($script:terminalLines) } else { @() }
+            }
+            function Get-GuiSmokeLogLedgerBookmark { param($State) return $script:currentLines.Count }
+            function Invoke-GuiSmokeLogLedgerRangeVisitor {
+                param($State, [int]$StartIndex, [int]$EndIndex, [scriptblock]$Visitor)
+                for ($i = $StartIndex; $i -lt $EndIndex; $i++) {
+                    $value = & $Visitor ([string]$script:currentLines[$i]) $i
+                    if ($null -ne $value) { return $value }
+                }
             }
             function Find-VisibleByAutomationId {
                 param($Root, [string]$AutomationId)
@@ -2506,6 +2517,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $script:toggleAt = $ToggleAt
                 $script:terminalAt = $TerminalAt
                 $script:terminalLines = @($TerminalLines)
+                $script:currentLines = @()
+                $script:GuiSmokeAppLogLedger = [pscustomobject]@{}
                 return Wait-TunaGuiSwitchOffToggleOrTerminal -Window ([pscustomobject]@{}) -Bookmark 0 -TimeoutMs 100 -PollIntervalMs 1
             }
 
@@ -2533,19 +2546,20 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
 
             $script:clickCount = 0
             function Wait-TunaGuiSwitchOffToggleOrTerminal {
-                return [pscustomobject]@{ Kind = 'terminal'; Toggle = $null; TransferId = 'tx-before-click'; WaitMs = 1L; Prearmed = $false }
+                return [pscustomobject]@{ Kind = 'terminal'; Toggle = $null; TransferId = 'tx-before-click'; WaitMs = 1L; Prearmed = $false; ToggleReadyUtc = '(none)'; LineVisitCount = 1L }
             }
             $noClick = Invoke-TunaGuiFallbackFault -Context $context -FaultMode 'switch-off' -PayerMode 'helpee' -Bookmark 0
             if ($noClick.Injected -or -not $noClick.TerminalCompletedBeforeFault -or $script:clickCount -ne 0) { throw 'terminal-first fault attempted a click' }
 
             function Wait-TunaGuiSwitchOffToggleOrTerminal {
-                return [pscustomobject]@{ Kind = 'toggle'; Toggle = $script:testToggle; TransferId = '(none)'; WaitMs = 1L; Prearmed = $true }
+                return [pscustomobject]@{ Kind = 'toggle'; Toggle = $script:testToggle; TransferId = '(none)'; WaitMs = 1L; Prearmed = $true; ToggleReadyUtc = '2026-08-01 09:25:04Z'; LineVisitCount = 1L }
             }
             function Get-TunaGuiCompletedTerminalPairAfterBookmark {
                 return [pscustomobject]@{ TransferId = 'tx-immediate-check'; Line = 'terminal' }
             }
-            $noLateClick = Invoke-TunaGuiFallbackFault -Context $context -FaultMode 'switch-off' -PayerMode 'helpee' -Bookmark 0 -PrearmedToggle $script:testToggle
-            if ($noLateClick.Injected -or -not $noLateClick.TerminalCompletedBeforeFault -or $script:clickCount -ne 0) { throw 'immediate pre-click terminal check attempted a click' }
+            function Wait-AppLogContainsAnyAllAfterBookmark { return 'event=tuna_acceleration_reset; reason=header_switch_off' }
+            $readyWinner = Invoke-TunaGuiFallbackFault -Context $context -FaultMode 'switch-off' -PayerMode 'helpee' -Bookmark 0 -PrearmedToggle $script:testToggle
+            if (-not $readyWinner.Injected -or $readyWinner.TerminalCompletedBeforeFault -or $script:clickCount -ne 1) { throw 'cached ready control did not win exactly once' }
 
             Write-Output 'gui-switch-off-terminal-aware-ok'
             """;
@@ -2590,6 +2604,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     ClickUtc = '2026-07-10T18:04:44.0000000Z'
                     TerminalCompletedBeforeFault = $false
                     Injected = $true
+                    ToggleReadyUtc = '2026-07-10T18:04:42.0000000Z'
+                    Winner = 'click'
+                    LineVisitCount = 17L
                 }
                 Add-TunaGuiFaultWindowEvidence `
                     -ArtifactDir $tempRoot `
@@ -2645,6 +2662,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
 
             $regularTerminal = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=regular_v4_terminal_before_tuna_activation_commit' -HistoricalPhase 'unknown' -HistoricalReason 'unknown'
             if ($regularTerminal.Phase -ne 'live_route_proof') { throw 'regular V4 terminal class not mapped' }
+            $faultWindow = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=filetransfer_gui_live_fallback_fault_window_missed' -HistoricalPhase 'setup' -HistoricalReason 'unknown'
+            if ($faultWindow.Phase -ne 'live_route_proof' -or $faultWindow.Reason -ne 'fallback_switch_off_not_injected_before_completed_transfer') { throw 'fault-window class not mapped' }
             $fallbackPrefix = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=terminal_fallback_prefix_missing' -HistoricalPhase 'regular_v4_frontier_repair' -HistoricalReason 'regular_v4_frontier_repair_stalled'
             if ($fallbackPrefix.Phase -ne 'live_route_proof' -or $fallbackPrefix.Reason -ne 'terminal_fallback_prefix_missing') { throw 'terminal fallback prefix class lost precedence' }
             $publicationMismatch = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_retry_source_publication_mismatch; retained_event=filetransfer_regular_v4_frontier_repair_stalled' -HistoricalPhase 'regular_v4_frontier_repair' -HistoricalReason 'regular_v4_frontier_repair_stalled'
@@ -4475,7 +4494,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.DoesNotContain("$terminalBeforeFallbackSequenceAllowed", guiText, StringComparison.Ordinal);
         Assert.Contains("$terminalBeforeFallbackExpectedRoutes = @($joinedRouteSequence.Split(',', [System.StringSplitOptions]::RemoveEmptyEntries))", guiText, StringComparison.Ordinal);
         Assert.Contains("fallbackEvidenceObserved", guiText, StringComparison.Ordinal);
-        Assert.Contains("failure_class=terminal_before_fallback_switch_off", guiText, StringComparison.Ordinal);
+        Assert.Contains("failure_class=filetransfer_gui_live_fallback_fault_window_missed", guiText, StringComparison.Ordinal);
         Assert.Contains("regular-to-Tuna and fallback/reactivation strict live-route epoch cycling", guiText, StringComparison.Ordinal);
         Assert.Contains("immediate_after_fallback_recovered=1", guiText, StringComparison.Ordinal);
         Assert.Contains("prearmed_on_step_{0}_immediate_after_fallback_recovered", guiText, StringComparison.Ordinal);

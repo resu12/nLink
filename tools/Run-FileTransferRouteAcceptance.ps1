@@ -8403,24 +8403,19 @@ function Invoke-Phase4RouteAcceptanceScenario {
                 Clear-Phase5StaleSetupFailureAfterRuntimeEvidence -Result $rerunResult | Out-Null
             }
             Add-RouteAcceptanceScenarioAttemptEvidence -ScenarioName ([string]$Scenario.Name) -AttemptIndex ($rerun + 1) -ArtifactDir $rerunDir
-            $rerunArtifactFinalized =
+            $requiresFinalizedAttemptSelection = $AcceptancePhase -eq 'phase5' -and
+                [string]::Equals(
+                    [string]$Scenario.Name,
+                    'regular-v4-live-activation-off-on-off-256mb',
+                    [System.StringComparison]::OrdinalIgnoreCase)
+            $rerunArtifactFinalized = $requiresFinalizedAttemptSelection -and
                 (Test-Path -LiteralPath (Join-Path $rerunDir 'filetransfer-gui-log-ledger.json') -PathType Leaf) -and
                 (Test-Path -LiteralPath (Join-Path $rerunDir 'filetransfer-retained-analysis-stage-diagnostics.json') -PathType Leaf) -and
                 (Test-Path -LiteralPath (Join-Path $rerunDir 'filetransfer-retained-log-slice.log') -PathType Leaf) -and
                 -not (Test-RouteAcceptanceEvidenceFinalizationTimedOut -ArtifactDir $rerunDir)
-            if (-not $rerunArtifactFinalized) {
-                $firstAttemptResult.attemptCount = $rerun + 1
-                $firstAttemptResult.retryUsed = $true
-                $firstAttemptResult.selectedAttempt = 1
-                $firstAttemptResult.firstFailureReason = $firstFailureReason
-                $firstAttemptResult.rerunArtifactDir = $rerunDir
-                $firstAttemptResult.rerunFailureReason = 'rerun did not produce finalized evidence; preserving the previously selected attempt'
-                $result = $firstAttemptResult
-                break
-            }
             $rerunResult.attemptCount = $rerun + 1
             $rerunResult.retryUsed = $true
-            $rerunResult.selectedAttempt = $rerun + 1
+            $rerunResult.selectedAttempt = if ($rerunResult.failures.Count -eq 0) { $rerun + 1 } else { 0 }
             $rerunResult.firstFailureReason = $firstFailureReason
             if ($rerunResult.failures.Count -ne 0 -and (Test-Phase4SetupInvalidAttempt -Result $rerunResult)) {
                 $rerunFailureReason = if (-not [string]::IsNullOrWhiteSpace($rerunExecutionFailure)) {
@@ -8445,6 +8440,57 @@ function Invoke-Phase4RouteAcceptanceScenario {
                 }
                 $result = $firstAttemptResult
                 break
+            }
+
+            $firstAttemptFailureClassForWarningPolicy = Get-RouteAcceptanceResultFailureClass -AcceptancePhase $AcceptancePhase -Result $firstAttemptResult
+            $rerunWarningCapExceededKinds = [string]$rerunResult.warningCapExceededKinds
+            $rerunIntroducedWarningPolicyEvidence = $AcceptancePhase -eq 'phase5' -and
+                ($firstAttemptFailureClassForWarningPolicy -eq 'performance' -or $firstAttemptFailureClassForWarningPolicy -eq 'environmental') -and
+                -not [string]::IsNullOrWhiteSpace($rerunWarningCapExceededKinds) -and
+                $rerunWarningCapExceededKinds -ne '(none)'
+            if ($rerunIntroducedWarningPolicyEvidence) {
+                $firstAttemptResult.attemptCount = $rerun + 1
+                $firstAttemptResult.retryUsed = $true
+                $firstAttemptResult.selectedAttempt = 1
+                $firstAttemptResult.firstFailureReason = $firstFailureReason
+                $firstAttemptResult.rerunArtifactDir = $rerunDir
+                $firstAttemptResult.rerunFailureReason = ("rerun introduced warning_policy failure; preserving first-attempt evidence: warning cap exceeded: {0}" -f $rerunWarningCapExceededKinds)
+                $result = $firstAttemptResult
+                break
+            }
+
+            if ($rerunResult.failures.Count -ne 0) {
+                $firstAttemptFailureClass = Get-RouteAcceptanceResultFailureClass -AcceptancePhase $AcceptancePhase -Result $firstAttemptResult
+                $rerunFailureClass = Get-RouteAcceptanceResultFailureClass -AcceptancePhase $AcceptancePhase -Result $rerunResult
+                if (($firstAttemptFailureClass -eq 'performance' -or $firstAttemptFailureClass -eq 'environmental') -and
+                    $rerunFailureClass -ne 'performance' -and
+                    $rerunFailureClass -ne 'environmental') {
+                    $rerunFailureReason = if (-not [string]::IsNullOrWhiteSpace($rerunExecutionFailure)) {
+                        "scenario rerun execution failed: {0}" -f $rerunExecutionFailure
+                    }
+                    else {
+                        Get-Phase4FirstFailureReason -Result $rerunResult
+                    }
+                    if ([string]::IsNullOrWhiteSpace($rerunFailureReason)) {
+                        $rerunFailureReason = 'rerun introduced non-performance evidence'
+                    }
+
+                    $firstAttemptResult.attemptCount = $rerun + 1
+                    $firstAttemptResult.retryUsed = $true
+                    $firstAttemptResult.selectedAttempt = 1
+                    $firstAttemptResult.firstFailureReason = $firstFailureReason
+                    $firstAttemptResult.rerunArtifactDir = $rerunDir
+                    $firstAttemptResult.rerunFailureReason = ("rerun introduced {0} failure; preserving first-attempt evidence: {1}" -f $rerunFailureClass, $rerunFailureReason)
+                    $result = $firstAttemptResult
+                    break
+                }
+            }
+
+            if ($requiresFinalizedAttemptSelection -and
+                $rerunArtifactFinalized -and
+                ([string]::Equals([string]$rerunResult.runtimeCorrectnessVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase) -or
+                 [string]::Equals([string]$rerunResult.runtimeCorrectnessVerdict, 'incomplete_proof', [System.StringComparison]::OrdinalIgnoreCase))) {
+                $rerunResult.selectedAttempt = $rerun + 1
             }
 
             $result = $rerunResult
