@@ -774,6 +774,12 @@ public sealed partial class SessionFileTransferService :
                 OnReceiveRecoveryPeerReachabilityObserved;
         }
 
+        if (transport is IFileTransferRouteTransitionBridge routeTransitionBridge)
+        {
+            routeTransitionBridge.FallbackV6ProofBootstrapEvaluationRequested +=
+                OnFallbackV6ProofBootstrapEvaluationRequested;
+        }
+
         if (transport is ISessionLivenessSignalingTransport sessionLivenessTransport)
         {
             sessionLivenessTransport.SessionLivenessProofReceived +=
@@ -3530,6 +3536,9 @@ public sealed partial class SessionFileTransferService :
         InboundTransferContext? heldProofStatePublicationContext = null;
         FileTransferReceiveRecoveryProofStatePublicationCommand?
             heldProofStatePublicationCommand = null;
+        IFileTransferRouteTransitionBridge? heldFallbackV6BootstrapBridge = null;
+        FileTransferFallbackV6ProofBootstrapEvaluation?
+            heldFallbackV6BootstrapEvaluation = null;
 
         lock (gate)
         {
@@ -3823,6 +3832,48 @@ public sealed partial class SessionFileTransferService :
                     }
                 }
             }
+
+            if (effectiveIsAvailable &&
+                transport is IFileTransferRouteTransitionBridge bootstrapBridge)
+            {
+                FileTransferFallbackV6ProofBootstrapCommand? heldBootstrap = null;
+                if (ReferenceEquals(outboundTransfer?.DataSession, dataSession) &&
+                    outboundTransfer is { IsTerminal: false } bootstrapOutbound)
+                {
+                    heldBootstrap = FileTransferCoordinator
+                        .GetCurrentHeldFileTransferFallbackV6ProofBootstrapCommand(
+                            CreateCoordinatorStateLocked(bootstrapOutbound));
+                }
+                else if (ReferenceEquals(inboundTransfer?.DataSession, dataSession) &&
+                         inboundTransfer is { IsTerminal: false } bootstrapInbound)
+                {
+                    heldBootstrap = FileTransferCoordinator
+                        .GetCurrentHeldFileTransferFallbackV6ProofBootstrapCommand(
+                            CreateCoordinatorStateLocked(bootstrapInbound));
+                }
+
+                if (heldBootstrap is { } held)
+                {
+                    heldFallbackV6BootstrapBridge = bootstrapBridge;
+                    heldFallbackV6BootstrapEvaluation = new(
+                        held.Observation.SessionId,
+                        held.Observation.Direction,
+                        held.Observation.ObservationGeneration,
+                        held.Observation.FallbackEpoch,
+                        held.Observation.Source,
+                        held.Observation.ProofKind,
+                        held.Observation.ObservedUtcMilliseconds);
+                }
+            }
+        }
+
+        if (heldFallbackV6BootstrapBridge is not null &&
+            heldFallbackV6BootstrapEvaluation is not null)
+        {
+            await ProcessFallbackV6ProofBootstrapEvaluationAsync(
+                    heldFallbackV6BootstrapBridge,
+                    heldFallbackV6BootstrapEvaluation)
+                .ConfigureAwait(false);
         }
 
         if (outboundPausedTransferId is not null && outboundPausedSessionId is not null)

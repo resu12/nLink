@@ -455,12 +455,39 @@ internal interface IFileTransferRegularV4FrontierRepairPressureInstallBridge
 
 internal interface IFileTransferRouteTransitionBridge
 {
+    event EventHandler<FileTransferFallbackV6ProofBootstrapEvaluationRequestedEventArgs>?
+        FallbackV6ProofBootstrapEvaluationRequested;
+
     FileTransferRouteTransitionPauseBindReceipt BindFileTransferRouteTransitionPause(
         FileTransferRouteTransitionPauseBindCommand command);
 
     FileTransferRouteTransitionDispositionReceipt
         ApplyFileTransferRouteTransitionDisposition(
             FileTransferRouteTransitionDispositionCommand command);
+
+    Task<FileTransferFallbackV6ProofBootstrapReceipt>
+        ExecuteFileTransferFallbackV6ProofBootstrapAsync(
+            FileTransferFallbackV6ProofBootstrapCommand command,
+            FileTransferTransportEpochFrameV6 epochFrame,
+            FileTransferDataFrame proofFrame,
+            IFileTransferDataSession dataSession,
+            Func<bool> isCommandCurrent,
+            CancellationToken ct);
+}
+
+internal sealed record FileTransferFallbackV6ProofBootstrapEvaluation(
+    string SessionId,
+    FileTransferDirection Direction,
+    long ObservationGeneration,
+    long FallbackEpoch,
+    string Source,
+    string ProofKind,
+    long ObservedUtcMilliseconds);
+
+internal sealed class FileTransferFallbackV6ProofBootstrapEvaluationRequestedEventArgs(
+    FileTransferFallbackV6ProofBootstrapEvaluation evaluation) : EventArgs
+{
+    public FileTransferFallbackV6ProofBootstrapEvaluation Evaluation { get; } = evaluation;
 }
 
 public interface IFileTransferRegularV4FrontierRepairSettlementObserver

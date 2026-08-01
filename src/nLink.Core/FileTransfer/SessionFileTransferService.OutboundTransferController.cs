@@ -1383,6 +1383,12 @@ public sealed partial class SessionFileTransferService
                     OnReceiveRecoveryPeerReachabilityObserved;
             }
 
+            if (previousTransport is IFileTransferRouteTransitionBridge routeTransitionBridge)
+            {
+                routeTransitionBridge.FallbackV6ProofBootstrapEvaluationRequested -=
+                    OnFallbackV6ProofBootstrapEvaluationRequested;
+            }
+
             if (previousTransport is
                 ISessionLivenessSignalingTransport sessionLivenessTransport)
             {

@@ -270,6 +270,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private bool fileTransferFallbackProofProbeScheduled;
     private bool fileTransferFallbackBulkProofObserved;
     private bool fileTransferFallbackControlProofObserved;
+    private readonly HashSet<string> fileTransferFallbackV6ProofBootstrapObservationKeys =
+        new(StringComparer.Ordinal);
     private string? fileTransferFallbackProofTransferId;
     private FileTransferDirection? fileTransferFallbackProofDirection;
     private string? fileTransferFallbackProofRouteToken;

@@ -1081,9 +1081,108 @@ internal readonly record struct FileTransferRouteTransitionSubstate(
     FileTransferRouteTransitionOperation? CurrentOperation = null,
     FileTransferRouteTransitionSupersession? PendingSupersession = null,
     FileTransferRouteTransitionOperation? LastTerminalOperation = null,
-    long LastTransitionGeneration = 0)
+    long LastTransitionGeneration = 0,
+    FileTransferFallbackV6ProofBootstrapCommand? PendingFallbackV6ProofBootstrap = null,
+    FileTransferFallbackV6ProofBootstrapReceipt? LastFallbackV6ProofBootstrapReceipt = null,
+    long LastFallbackV6ProofBootstrapGeneration = 0)
 {
     internal static FileTransferRouteTransitionSubstate Empty => default;
+}
+
+internal enum FileTransferFallbackV6ProofBootstrapFrameKind
+{
+    ReceiverState = 1,
+    FrontierRequest = 2,
+}
+
+internal readonly record struct FileTransferFallbackV6ProofBootstrapObservation(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    long ObservationGeneration,
+    long FallbackEpoch,
+    string Source,
+    string ProofKind,
+    long ObservedUtcMilliseconds,
+    FileTransferRouteTransitionDurableCheckpoint DurableCheckpoint)
+{
+    public bool IsDefault =>
+        string.IsNullOrWhiteSpace(SessionId) ||
+        string.IsNullOrWhiteSpace(TransferId) ||
+        Direction is not (FileTransferDirection.Outbound or FileTransferDirection.Inbound) ||
+        ObservationGeneration <= 0 ||
+        FallbackEpoch <= 0 ||
+        string.IsNullOrWhiteSpace(Source) ||
+        string.IsNullOrWhiteSpace(ProofKind) ||
+        ObservedUtcMilliseconds <= 0 ||
+        DurableCheckpoint.IsDefault;
+}
+
+internal sealed record FileTransferFallbackV6ProofBootstrapCommand(
+    FileTransferFallbackV6ProofBootstrapObservation Observation,
+    RuntimeOwnerToken SourceRuntimeOwner,
+    RoutePublicationToken SourceRoutePublication,
+    RouteCommitToken SourceRouteCommit,
+    int SourceTerminalGeneration,
+    int SourceLiveRouteEpoch,
+    int SourceLegGeneration,
+    long SourceTransportEpoch,
+    int SourceBridgeRecoveryGeneration,
+    long SourceDataSessionGeneration,
+    long TargetTransportEpoch,
+    FileTransferFallbackV6ProofBootstrapFrameKind FrameKind,
+    long BootstrapGeneration,
+    FileTransferAuthorityId AuthorityId)
+{
+    public bool IsDefault =>
+        Observation.IsDefault ||
+        SourceRuntimeOwner.IsDefault ||
+        SourceRoutePublication.IsDefault ||
+        SourceRouteCommit.IsDefault ||
+        SourceLegGeneration <= 0 ||
+        SourceTransportEpoch < 0 ||
+        SourceBridgeRecoveryGeneration < 0 ||
+        SourceDataSessionGeneration <= 0 ||
+        TargetTransportEpoch <= SourceTransportEpoch ||
+        BootstrapGeneration <= 0 ||
+        AuthorityId.IsDefault;
+}
+
+internal enum FileTransferFallbackV6ProofBootstrapReceiptStatus
+{
+    Delivered,
+    Held,
+    Rejected,
+}
+
+internal sealed record FileTransferFallbackV6ProofBootstrapReceipt(
+    FileTransferFallbackV6ProofBootstrapCommand Command,
+    FileTransferFallbackV6ProofBootstrapReceiptStatus Status,
+    PostTunaFallbackPeerProofFrameIdentity? FrameIdentity,
+    string Reason)
+{
+    public bool IsDefault =>
+        Command.IsDefault ||
+        string.IsNullOrWhiteSpace(Reason) ||
+        (Status == FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered &&
+         FrameIdentity is not { IsComplete: true });
+}
+
+internal enum FileTransferFallbackV6ProofBootstrapDecisionStatus
+{
+    Issued,
+    Idempotent,
+    Applied,
+    Rejected,
+}
+
+internal readonly record struct FileTransferFallbackV6ProofBootstrapDecision(
+    FileTransferFallbackV6ProofBootstrapDecisionStatus Status,
+    string Reason,
+    FileTransferFallbackV6ProofBootstrapCommand? Command = null,
+    FileTransferFallbackV6ProofBootstrapReceipt? Receipt = null)
+{
+    public FileTransferCoordinatorState State { get; init; } = null!;
 }
 
 internal readonly record struct FileTransferRouteTransitionPauseOwnership(
@@ -4901,6 +5000,242 @@ internal static class FileTransferCoordinator
                    FileTransferCoordinatorActionKind.RoutePublication;
     }
 
+    internal static FileTransferFallbackV6ProofBootstrapDecision
+        IssueFileTransferFallbackV6ProofBootstrap(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackV6ProofBootstrapObservation observation)
+    {
+        var substate = state.PersistentState.FileTransferRouteTransition;
+        if (substate.PendingFallbackV6ProofBootstrap is { } pending)
+        {
+            if (pending.Observation == observation &&
+                IsFileTransferFallbackV6ProofBootstrapCommandCurrent(state, pending))
+            {
+                return new FileTransferFallbackV6ProofBootstrapDecision(
+                    FileTransferFallbackV6ProofBootstrapDecisionStatus.Idempotent,
+                    "filetransfer_fallback_v6_proof_bootstrap_already_issued",
+                    pending)
+                {
+                    State = state,
+                };
+            }
+
+            if (IsFileTransferFallbackV6ProofBootstrapCommandCurrent(state, pending))
+            {
+                return new FileTransferFallbackV6ProofBootstrapDecision(
+                    FileTransferFallbackV6ProofBootstrapDecisionStatus.Rejected,
+                    "filetransfer_fallback_v6_proof_bootstrap_conflict")
+                {
+                    State = state,
+                };
+            }
+
+            substate = substate with
+            {
+                PendingFallbackV6ProofBootstrap = null,
+                LastFallbackV6ProofBootstrapReceipt =
+                    new FileTransferFallbackV6ProofBootstrapReceipt(
+                        pending,
+                        FileTransferFallbackV6ProofBootstrapReceiptStatus.Rejected,
+                        null,
+                        "filetransfer_fallback_v6_proof_bootstrap_source_scope_replaced"),
+            };
+        }
+
+        if (substate.LastFallbackV6ProofBootstrapReceipt is { } terminalReceipt &&
+            terminalReceipt.Command.Observation.FallbackEpoch == observation.FallbackEpoch &&
+            terminalReceipt.Command.Observation.Direction == observation.Direction &&
+            IsFileTransferFallbackV6ProofBootstrapSourceScopeCurrent(
+                state,
+                terminalReceipt.Command))
+        {
+            return new FileTransferFallbackV6ProofBootstrapDecision(
+                FileTransferFallbackV6ProofBootstrapDecisionStatus.Idempotent,
+                "filetransfer_fallback_v6_proof_bootstrap_already_terminal",
+                Receipt: terminalReceipt)
+            {
+                State = state,
+            };
+        }
+
+        if (observation.IsDefault ||
+            !string.Equals(state.SessionId, observation.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(state.TransferId, observation.TransferId, StringComparison.Ordinal) ||
+            state.Direction != observation.Direction ||
+            state.IsTerminal ||
+            state.RouteSelection.Route != FileTransferRoute.FileTunaV4 ||
+            state.RouteSelection.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            state.CurrentRuntimeOwner is not { IsDefault: false } owner ||
+            state.CurrentRoutePublicationToken is not { IsDefault: false } publication ||
+            state.CurrentRouteCommit is not { IsDefault: false } routeCommit ||
+            state.CurrentLeg is not { } leg ||
+            state.CurrentLiveRouteEpoch is not { } liveEpoch ||
+            state.CurrentDataSessionGeneration <= 0 ||
+            observation.DurableCheckpoint.SourceRuntimeOwner != owner ||
+            observation.DurableCheckpoint.SourceRoutePublication != publication ||
+            observation.DurableCheckpoint.SourceTerminalGeneration != state.TerminalGeneration ||
+            observation.DurableCheckpoint.SourceLegGeneration != leg.Generation ||
+            observation.DurableCheckpoint.SourceTransportEpoch != leg.TransportEpochId ||
+            observation.DurableCheckpoint.SourceBridgeRecoveryGeneration != leg.BridgeRecoveryGeneration ||
+            observation.DurableCheckpoint.DataSessionGeneration != state.CurrentDataSessionGeneration)
+        {
+            return new FileTransferFallbackV6ProofBootstrapDecision(
+                FileTransferFallbackV6ProofBootstrapDecisionStatus.Rejected,
+                "filetransfer_fallback_v6_proof_bootstrap_source_scope_not_current")
+            {
+                State = state,
+            };
+        }
+
+        var generation = Math.Max(1, substate.LastFallbackV6ProofBootstrapGeneration + 1);
+        var targetEpoch = Math.Max(1, leg.TransportEpochId + 1);
+        var command = new FileTransferFallbackV6ProofBootstrapCommand(
+            observation,
+            owner,
+            publication,
+            routeCommit,
+            state.TerminalGeneration,
+            liveEpoch.EpochId,
+            leg.Generation,
+            leg.TransportEpochId,
+            leg.BridgeRecoveryGeneration,
+            state.CurrentDataSessionGeneration,
+            targetEpoch,
+            state.Direction == FileTransferDirection.Inbound
+                ? FileTransferFallbackV6ProofBootstrapFrameKind.ReceiverState
+                : FileTransferFallbackV6ProofBootstrapFrameKind.FrontierRequest,
+            generation,
+            IssueAuthorityId(
+                "filetransfer_fallback_v6_proof_bootstrap",
+                state,
+                checked((int)Math.Min(int.MaxValue, generation))));
+        var nextState = state with
+        {
+            PersistentState = state.PersistentState with
+            {
+                FileTransferRouteTransition = substate with
+                {
+                    PendingFallbackV6ProofBootstrap = command,
+                    LastFallbackV6ProofBootstrapGeneration = generation,
+                },
+            },
+        };
+        return new FileTransferFallbackV6ProofBootstrapDecision(
+            FileTransferFallbackV6ProofBootstrapDecisionStatus.Issued,
+            "filetransfer_fallback_v6_proof_bootstrap_issued",
+            command)
+        {
+            State = nextState,
+        };
+    }
+
+    internal static FileTransferFallbackV6ProofBootstrapDecision
+        ApplyFileTransferFallbackV6ProofBootstrapReceipt(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackV6ProofBootstrapReceipt receipt)
+    {
+        var substate = state.PersistentState.FileTransferRouteTransition;
+        if (substate.LastFallbackV6ProofBootstrapReceipt is { } existing &&
+            existing == receipt)
+        {
+            return new FileTransferFallbackV6ProofBootstrapDecision(
+                FileTransferFallbackV6ProofBootstrapDecisionStatus.Idempotent,
+                "filetransfer_fallback_v6_proof_bootstrap_receipt_duplicate",
+                receipt.Command,
+                existing)
+            {
+                State = state,
+            };
+        }
+
+        if (receipt.IsDefault ||
+            substate.PendingFallbackV6ProofBootstrap is not { } pending ||
+            pending != receipt.Command ||
+            !IsFileTransferFallbackV6ProofBootstrapCommandCurrent(state, pending) ||
+            receipt.Status == FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered &&
+            (receipt.FrameIdentity is not { IsComplete: true } identity ||
+             identity.TransportEpoch != pending.TargetTransportEpoch ||
+             pending.FrameKind == FileTransferFallbackV6ProofBootstrapFrameKind.ReceiverState &&
+             !string.Equals(identity.FrameType, FileTransferProtocol.ReceiverStateFrameTypeV6, StringComparison.Ordinal) ||
+             pending.FrameKind == FileTransferFallbackV6ProofBootstrapFrameKind.FrontierRequest &&
+             !string.Equals(identity.FrameType, FileTransferProtocol.FrontierRequestFrameTypeV6, StringComparison.Ordinal)))
+        {
+            return new FileTransferFallbackV6ProofBootstrapDecision(
+                FileTransferFallbackV6ProofBootstrapDecisionStatus.Rejected,
+                "filetransfer_fallback_v6_proof_bootstrap_receipt_rejected")
+            {
+                State = state,
+            };
+        }
+
+        var nextSubstate = substate with
+        {
+            PendingFallbackV6ProofBootstrap =
+                receipt.Status == FileTransferFallbackV6ProofBootstrapReceiptStatus.Held
+                    ? pending
+                    : null,
+            LastFallbackV6ProofBootstrapReceipt = receipt,
+        };
+        var nextState = state with
+        {
+            PersistentState = state.PersistentState with
+            {
+                FileTransferRouteTransition = nextSubstate,
+            },
+        };
+        return new FileTransferFallbackV6ProofBootstrapDecision(
+            FileTransferFallbackV6ProofBootstrapDecisionStatus.Applied,
+            receipt.Status == FileTransferFallbackV6ProofBootstrapReceiptStatus.Held
+                ? "filetransfer_fallback_v6_proof_bootstrap_held"
+                : "filetransfer_fallback_v6_proof_bootstrap_receipt_applied",
+            pending,
+            receipt)
+        {
+            State = nextState,
+        };
+    }
+
+    internal static bool IsFileTransferFallbackV6ProofBootstrapCommandCurrent(
+        FileTransferCoordinatorState state,
+        FileTransferFallbackV6ProofBootstrapCommand command)
+        => state.PersistentState.FileTransferRouteTransition
+                .PendingFallbackV6ProofBootstrap == command &&
+           IsFileTransferFallbackV6ProofBootstrapSourceScopeCurrent(state, command);
+
+    internal static FileTransferFallbackV6ProofBootstrapCommand?
+        GetCurrentHeldFileTransferFallbackV6ProofBootstrapCommand(
+            FileTransferCoordinatorState state)
+    {
+        var substate = state.PersistentState.FileTransferRouteTransition;
+        return substate.PendingFallbackV6ProofBootstrap is { } pending &&
+               substate.LastFallbackV6ProofBootstrapReceipt is
+                   { Status: FileTransferFallbackV6ProofBootstrapReceiptStatus.Held } held &&
+               held.Command == pending &&
+               IsFileTransferFallbackV6ProofBootstrapCommandCurrent(state, pending)
+            ? pending
+            : null;
+    }
+
+    private static bool IsFileTransferFallbackV6ProofBootstrapSourceScopeCurrent(
+        FileTransferCoordinatorState state,
+        FileTransferFallbackV6ProofBootstrapCommand command)
+        => !command.IsDefault &&
+           !state.IsTerminal &&
+           string.Equals(state.SessionId, command.Observation.SessionId, StringComparison.Ordinal) &&
+           string.Equals(state.TransferId, command.Observation.TransferId, StringComparison.Ordinal) &&
+           state.Direction == command.Observation.Direction &&
+           state.RouteSelection.Route == FileTransferRoute.FileTunaV4 &&
+           state.RouteSelection.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+           state.CurrentRuntimeOwner == command.SourceRuntimeOwner &&
+           state.CurrentRoutePublicationToken == command.SourceRoutePublication &&
+           state.CurrentRouteCommit == command.SourceRouteCommit &&
+           state.TerminalGeneration == command.SourceTerminalGeneration &&
+           state.CurrentLiveRouteEpoch?.EpochId == command.SourceLiveRouteEpoch &&
+           state.CurrentLeg?.Generation == command.SourceLegGeneration &&
+           state.CurrentLeg?.TransportEpochId == command.SourceTransportEpoch &&
+           state.CurrentLeg?.BridgeRecoveryGeneration == command.SourceBridgeRecoveryGeneration &&
+           state.CurrentDataSessionGeneration == command.SourceDataSessionGeneration;
+
     internal static FileTransferRouteTransitionDecision PrepareFileTransferRouteTransition(
         FileTransferCoordinatorState state,
         FileTransferRouteTransitionPrepareRequest request)
@@ -5051,6 +5386,7 @@ internal static class FileTransferCoordinator
                 {
                     CurrentOperation = operation,
                     LastTransitionGeneration = transitionGeneration,
+                    PendingFallbackV6ProofBootstrap = null,
                 },
             },
         };

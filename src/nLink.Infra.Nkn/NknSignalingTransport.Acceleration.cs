@@ -172,6 +172,14 @@ public sealed partial class NknSignalingTransport
     private FileTransferRouteTransitionExecutionShadow
         fileTransferRouteTransitionExecutionShadow =
             FileTransferRouteTransitionExecutionShadow.Empty;
+    private event EventHandler<FileTransferFallbackV6ProofBootstrapEvaluationRequestedEventArgs>?
+        fallbackV6ProofBootstrapEvaluationRequested;
+    private FileTransferFallbackV6ProofBootstrapCommand?
+        activeFallbackV6ProofBootstrapCommand;
+    private Task<FileTransferFallbackV6ProofBootstrapReceipt>?
+        activeFallbackV6ProofBootstrapTask;
+    private FileTransferFallbackV6ProofBootstrapReceipt?
+        lastFallbackV6ProofBootstrapReceipt;
     private TaskCompletionSource<bool>? fileTransferTunaActivationBridgeRecoverySettledTcs;
     private long fileTransferTunaActivationBridgeRecoveryStartedTick;
     private long fileTransferTunaActivationBridgeRecoverySettledTick;
@@ -1617,6 +1625,149 @@ public sealed partial class NknSignalingTransport
         }
 
         LogFileTransferRouteTransitionPauseBindReceipt(receipt);
+        return receipt;
+    }
+
+    event EventHandler<FileTransferFallbackV6ProofBootstrapEvaluationRequestedEventArgs>?
+        IFileTransferRouteTransitionBridge.FallbackV6ProofBootstrapEvaluationRequested
+    {
+        add => fallbackV6ProofBootstrapEvaluationRequested += value;
+        remove => fallbackV6ProofBootstrapEvaluationRequested -= value;
+    }
+
+    Task<FileTransferFallbackV6ProofBootstrapReceipt>
+        IFileTransferRouteTransitionBridge.ExecuteFileTransferFallbackV6ProofBootstrapAsync(
+            FileTransferFallbackV6ProofBootstrapCommand command,
+            FileTransferTransportEpochFrameV6 epochFrame,
+            FileTransferDataFrame proofFrame,
+            IFileTransferDataSession dataSession,
+            Func<bool> isCommandCurrent,
+            CancellationToken ct)
+    {
+        lock (accelerationGate)
+        {
+            if (lastFallbackV6ProofBootstrapReceipt is { } terminal &&
+                terminal.Command == command &&
+                terminal.Status is not FileTransferFallbackV6ProofBootstrapReceiptStatus.Held)
+            {
+                return Task.FromResult(terminal);
+            }
+
+            if (activeFallbackV6ProofBootstrapTask is { } activeTask)
+            {
+                return activeFallbackV6ProofBootstrapCommand == command
+                    ? activeTask
+                    : Task.FromResult(new FileTransferFallbackV6ProofBootstrapReceipt(
+                        command,
+                        FileTransferFallbackV6ProofBootstrapReceiptStatus.Rejected,
+                        null,
+                        "filetransfer_fallback_v6_proof_bootstrap_execution_conflict"));
+            }
+
+            var task = Task.Run(
+                () => ExecuteFileTransferFallbackV6ProofBootstrapCoreAsync(
+                    command,
+                    epochFrame,
+                    proofFrame,
+                    dataSession,
+                    isCommandCurrent,
+                    ct),
+                CancellationToken.None);
+            activeFallbackV6ProofBootstrapCommand = command;
+            activeFallbackV6ProofBootstrapTask = task;
+            return task;
+        }
+    }
+
+    private async Task<FileTransferFallbackV6ProofBootstrapReceipt>
+        ExecuteFileTransferFallbackV6ProofBootstrapCoreAsync(
+            FileTransferFallbackV6ProofBootstrapCommand command,
+            FileTransferTransportEpochFrameV6 epochFrame,
+            FileTransferDataFrame proofFrame,
+            IFileTransferDataSession dataSession,
+            Func<bool> isCommandCurrent,
+            CancellationToken ct)
+    {
+        FileTransferFallbackV6ProofBootstrapReceipt receipt;
+        try
+        {
+            if (command.IsDefault ||
+                dataSession is not TransportFileTransferDataSession transportSession ||
+                !string.Equals(dataSession.SessionId, command.Observation.SessionId, StringComparison.Ordinal) ||
+                !string.Equals(dataSession.TransferId, command.Observation.TransferId, StringComparison.Ordinal) ||
+                epochFrame.TransportEpoch != command.TargetTransportEpoch ||
+                !string.Equals(epochFrame.SessionId, command.Observation.SessionId, StringComparison.Ordinal) ||
+                !string.Equals(epochFrame.TransferId, command.Observation.TransferId, StringComparison.Ordinal) ||
+                !PostTunaFallbackPeerProofFrameIdentity.TryCreate(proofFrame, out var identity) ||
+                identity.TransportEpoch != command.TargetTransportEpoch ||
+                command.FrameKind == FileTransferFallbackV6ProofBootstrapFrameKind.ReceiverState &&
+                proofFrame is not FileTransferReceiverStateFrameV6 ||
+                command.FrameKind == FileTransferFallbackV6ProofBootstrapFrameKind.FrontierRequest &&
+                proofFrame is not FileTransferFrontierRequestFrameV6 ||
+                !isCommandCurrent())
+            {
+                receipt = new FileTransferFallbackV6ProofBootstrapReceipt(
+                    command,
+                    FileTransferFallbackV6ProofBootstrapReceiptStatus.Rejected,
+                    null,
+                    "filetransfer_fallback_v6_proof_bootstrap_execution_invalid");
+            }
+            else
+            {
+                await transportSession.SendAsync(epochFrame, ct).ConfigureAwait(false);
+                if (!isCommandCurrent())
+                {
+                    receipt = new FileTransferFallbackV6ProofBootstrapReceipt(
+                        command,
+                        FileTransferFallbackV6ProofBootstrapReceiptStatus.Rejected,
+                        null,
+                        "filetransfer_fallback_v6_proof_bootstrap_stale_before_proof_send");
+                }
+                else
+                {
+                    await transportSession.SendAsync(proofFrame, ct).ConfigureAwait(false);
+                    receipt = new FileTransferFallbackV6ProofBootstrapReceipt(
+                        command,
+                        FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered,
+                        identity,
+                        "filetransfer_fallback_v6_proof_bootstrap_delivered");
+                }
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            receipt = new FileTransferFallbackV6ProofBootstrapReceipt(
+                command,
+                FileTransferFallbackV6ProofBootstrapReceiptStatus.Rejected,
+                null,
+                "filetransfer_fallback_v6_proof_bootstrap_canceled");
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException)
+        {
+            receipt = new FileTransferFallbackV6ProofBootstrapReceipt(
+                command,
+                dataSession.IsAvailable
+                    ? FileTransferFallbackV6ProofBootstrapReceiptStatus.Rejected
+                    : FileTransferFallbackV6ProofBootstrapReceiptStatus.Held,
+                null,
+                dataSession.IsAvailable
+                    ? "filetransfer_fallback_v6_proof_bootstrap_send_failed"
+                    : "filetransfer_fallback_v6_proof_bootstrap_data_session_unavailable");
+        }
+
+        lock (accelerationGate)
+        {
+            if (activeFallbackV6ProofBootstrapCommand == command)
+            {
+                activeFallbackV6ProofBootstrapCommand = null;
+                activeFallbackV6ProofBootstrapTask = null;
+                lastFallbackV6ProofBootstrapReceipt = receipt;
+            }
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_execution_completed; session_id={SanitizeLogToken(command.Observation.SessionId)}; transfer_id={SanitizeLogToken(command.Observation.TransferId)}; direction={FormatFileTransferDirection(command.Observation.Direction)}; authority_id={SanitizeLogToken(command.AuthorityId.ToString())}; bootstrap_generation={command.BootstrapGeneration}; fallback_epoch={command.Observation.FallbackEpoch}; target_transport_epoch={command.TargetTransportEpoch}; frame_kind={SanitizeLogToken(command.FrameKind.ToString())}; frame_fingerprint={SanitizeLogToken(receipt.FrameIdentity?.Sha256 ?? "none")}; receipt_status={SanitizeLogToken(receipt.Status.ToString())}; decision_reason={SanitizeLogToken(receipt.Reason)}");
         return receipt;
     }
 
@@ -8051,6 +8202,11 @@ public sealed partial class NknSignalingTransport
                 if (requiresV6EpochRecovery)
                 {
                     shouldLogUnconfirmed = true;
+                    authorityTransferId = fileTransferFallbackProofTransferId;
+                    authorityDirection = fileTransferFallbackProofDirection ??
+                        ResolveFileTransferFallbackV6ProofBootstrapDirection(
+                            normalizedProofKind);
+                    authorityProofGeneration = fileTransferFallbackProofGeneration;
                 }
                 else
                 {
@@ -8220,6 +8376,12 @@ public sealed partial class NknSignalingTransport
                     LocalOperationalLog.Info(
                         "NKN.Tuna",
                         $"event=filetransfer_fallback_nkn_proof_waiting_for_v6_epoch; session_id={SanitizeLogToken(pendingSessionId ?? "none")}; reason={reason}; proof={normalizedProofKind}; lanes={FormatAccelerationLanesForLog(lanes)}");
+                    PublishFileTransferFallbackV6ProofBootstrapEvaluation(
+                        pendingSessionId,
+                        authorityDirection,
+                        authorityProofGeneration,
+                        normalizedProofKind,
+                        reason);
                 }
             }
 
@@ -9943,6 +10105,76 @@ public sealed partial class NknSignalingTransport
             "NKN.Tuna",
             $"event=tuna_acceleration_runtime_unlock_queued_behind_pending_generation; reason={normalizedReason}; authority_mode={SanitizeLogToken(authorityMode.ToString())}; wait_reason={SanitizeLogToken(waitReason)}; has_offer={(hasOffer ? 1 : 0)}; has_answer_ack={(hasAnswerAck ? 1 : 0)}");
         return true;
+    }
+
+    private static FileTransferDirection?
+        ResolveFileTransferFallbackV6ProofBootstrapDirection(string proofKind)
+        => proofKind switch
+        {
+            "file_transfer_v4_state_frame_received" or
+            "file_transfer_v4_manifest_received" or
+            "file_transfer_v4_complete_frame_received" =>
+                FileTransferDirection.Outbound,
+            "file_transfer_v4_state_frame_sent" or
+            "file_transfer_v4_manifest_sent" or
+            "file_transfer_v4_complete_frame_sent" =>
+                FileTransferDirection.Inbound,
+            "file_transfer_v4_bulk_frame_received" =>
+                FileTransferDirection.Inbound,
+            "file_transfer_v4_bulk_frame_sent" =>
+                FileTransferDirection.Outbound,
+            _ => null,
+        };
+
+    private void PublishFileTransferFallbackV6ProofBootstrapEvaluation(
+        string? sessionId,
+        FileTransferDirection? direction,
+        long fallbackEpoch,
+        string proofKind,
+        string source)
+    {
+        var subscriber = fallbackV6ProofBootstrapEvaluationRequested;
+        if (subscriber is null ||
+            string.IsNullOrWhiteSpace(sessionId) ||
+            direction is not (FileTransferDirection.Outbound or FileTransferDirection.Inbound) ||
+            fallbackEpoch <= 0)
+        {
+            return;
+        }
+
+        var key = $"{sessionId}|{direction}|{fallbackEpoch}";
+        lock (fileTransferFallbackProofGate)
+        {
+            if (!fileTransferFallbackV6ProofBootstrapObservationKeys.Add(key))
+            {
+                return;
+            }
+        }
+
+        var evaluation = new FileTransferFallbackV6ProofBootstrapEvaluation(
+            sessionId.Trim(),
+            direction.Value,
+            fallbackEpoch,
+            fallbackEpoch,
+            source,
+            proofKind,
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_observed; session_id={SanitizeLogToken(evaluation.SessionId)}; direction={FormatFileTransferDirection(evaluation.Direction)}; observation_generation={evaluation.ObservationGeneration}; fallback_epoch={evaluation.FallbackEpoch}; proof_kind={SanitizeLogToken(evaluation.ProofKind)}; source={SanitizeLogToken(evaluation.Source)}; authority_effect=coordinator_evaluation_only");
+        try
+        {
+            subscriber.Invoke(
+                this,
+                new FileTransferFallbackV6ProofBootstrapEvaluationRequestedEventArgs(
+                    evaluation));
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=filetransfer_fallback_v6_proof_bootstrap_observation_failed; session_id={SanitizeLogToken(evaluation.SessionId)}; direction={FormatFileTransferDirection(evaluation.Direction)}; fallback_epoch={evaluation.FallbackEpoch}; error={SanitizeLogToken(ex.GetType().Name)}");
+        }
     }
 
     private bool TryBindPendingRuntimeUnlockAccelerationNegotiationUnsafe(

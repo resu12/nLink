@@ -15576,6 +15576,155 @@ public sealed class FileTransferCoordinatorTests
 
     [Fact]
     [Trait("FileTransferCoordinatorSuite", "FileTransferRouteTransition")]
+    public void FileTransferFallbackV6ProofBootstrap_IsOneShotAndDoesNotMutateTunaRoute()
+    {
+        var regular = FileTransferRouteResolver.Resolve(
+            FileTransferRoute.RegularNknV4Fast);
+        var tuna = ActivateTuna(
+            StartRegular(regular).State,
+            FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4),
+            committedChunk: 4).State with
+        {
+            CurrentDataSessionIdentity = "fallback-bootstrap-data-session",
+            CurrentDataSessionGeneration = 17,
+        };
+        var owner = tuna.CurrentRuntimeOwner!.Value;
+        var publication = tuna.CurrentRoutePublicationToken!.Value;
+        var commit = tuna.CurrentRouteCommit!.Value;
+        var leg = tuna.CurrentLeg!;
+        var checkpoint = new FileTransferRouteTransitionDurableCheckpoint(
+            owner,
+            publication,
+            tuna.TerminalGeneration,
+            leg.Generation,
+            leg.TransportEpochId,
+            leg.BridgeRecoveryGeneration,
+            tuna.CurrentDataSessionGeneration,
+            StateEpoch: 9,
+            ContiguousCommittedChunkIndex: 8,
+            DurableHighestChunkIndex: 7,
+            ChunkCount: 128,
+            CheckpointGeneration: 2);
+        var observation = new FileTransferFallbackV6ProofBootstrapObservation(
+            tuna.SessionId,
+            tuna.TransferId,
+            tuna.Direction,
+            ObservationGeneration: 1,
+            FallbackEpoch: 1,
+            Source: "header_switch_off",
+            ProofKind: "file_transfer_v4_state_frame_received",
+            ObservedUtcMilliseconds: 10_000,
+            checkpoint);
+
+        var issued =
+            FileTransferCoordinator.IssueFileTransferFallbackV6ProofBootstrap(
+                tuna,
+                observation);
+        Assert.Equal(
+            FileTransferFallbackV6ProofBootstrapDecisionStatus.Issued,
+            issued.Status);
+        var command = Assert.IsType<FileTransferFallbackV6ProofBootstrapCommand>(
+            issued.Command);
+        Assert.Equal(FileTransferRoute.FileTunaV4, issued.State.RouteSelection.Route);
+        Assert.Equal(owner, issued.State.CurrentRuntimeOwner);
+        Assert.Equal(publication, issued.State.CurrentRoutePublicationToken);
+        Assert.Equal(commit, issued.State.CurrentRouteCommit);
+        Assert.Equal(leg.Generation, issued.State.CurrentLeg!.Generation);
+        Assert.True(command.TargetTransportEpoch > leg.TransportEpochId);
+
+        var duplicate =
+            FileTransferCoordinator.IssueFileTransferFallbackV6ProofBootstrap(
+                issued.State,
+                observation);
+        Assert.Equal(
+            FileTransferFallbackV6ProofBootstrapDecisionStatus.Idempotent,
+            duplicate.Status);
+        Assert.Equal(command, duplicate.Command);
+        Assert.Same(issued.State, duplicate.State);
+
+        var identity = new PostTunaFallbackPeerProofFrameIdentity(
+            command.FrameKind ==
+                FileTransferFallbackV6ProofBootstrapFrameKind.ReceiverState
+                    ? FileTransferProtocol.ReceiverStateFrameTypeV6
+                    : FileTransferProtocol.FrontierRequestFrameTypeV6,
+            command.TargetTransportEpoch,
+            new string('b', 64));
+        var receipt = new FileTransferFallbackV6ProofBootstrapReceipt(
+            command,
+            FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered,
+            identity,
+            "filetransfer_fallback_v6_proof_bootstrap_delivered");
+        var heldReceipt = new FileTransferFallbackV6ProofBootstrapReceipt(
+            command,
+            FileTransferFallbackV6ProofBootstrapReceiptStatus.Held,
+            null,
+            "filetransfer_fallback_v6_proof_bootstrap_data_session_unavailable");
+        var held =
+            FileTransferCoordinator.ApplyFileTransferFallbackV6ProofBootstrapReceipt(
+                issued.State,
+                heldReceipt);
+        Assert.Equal(
+            FileTransferFallbackV6ProofBootstrapDecisionStatus.Applied,
+            held.Status);
+        Assert.Equal(
+            command,
+            FileTransferCoordinator
+                .GetCurrentHeldFileTransferFallbackV6ProofBootstrapCommand(
+                    held.State));
+
+        var duplicateHeld =
+            FileTransferCoordinator.ApplyFileTransferFallbackV6ProofBootstrapReceipt(
+                held.State,
+                heldReceipt);
+        Assert.Equal(
+            FileTransferFallbackV6ProofBootstrapDecisionStatus.Idempotent,
+            duplicateHeld.Status);
+        Assert.Same(held.State, duplicateHeld.State);
+
+        var applied =
+            FileTransferCoordinator.ApplyFileTransferFallbackV6ProofBootstrapReceipt(
+                held.State,
+                receipt);
+        Assert.Equal(
+            FileTransferFallbackV6ProofBootstrapDecisionStatus.Applied,
+            applied.Status);
+        Assert.Null(
+            FileTransferCoordinator.GetFileTransferRouteTransitionSubstate(
+                    applied.State)
+                .PendingFallbackV6ProofBootstrap);
+        Assert.Equal(receipt,
+            FileTransferCoordinator.GetFileTransferRouteTransitionSubstate(
+                    applied.State)
+                .LastFallbackV6ProofBootstrapReceipt);
+        Assert.Equal(FileTransferRoute.FileTunaV4, applied.State.RouteSelection.Route);
+
+        var newerObservationSameFallback =
+            FileTransferCoordinator.IssueFileTransferFallbackV6ProofBootstrap(
+                applied.State,
+                observation with
+                {
+                    ObservationGeneration = 2,
+                    ObservedUtcMilliseconds = 10_001,
+                });
+        Assert.Equal(
+            FileTransferFallbackV6ProofBootstrapDecisionStatus.Idempotent,
+            newerObservationSameFallback.Status);
+        Assert.Null(newerObservationSameFallback.Command);
+        Assert.Equal(receipt, newerObservationSameFallback.Receipt);
+        Assert.Same(applied.State, newerObservationSameFallback.State);
+
+        var duplicateReceipt =
+            FileTransferCoordinator.ApplyFileTransferFallbackV6ProofBootstrapReceipt(
+                applied.State,
+                receipt);
+        Assert.Equal(
+            FileTransferFallbackV6ProofBootstrapDecisionStatus.Idempotent,
+            duplicateReceipt.Status);
+        Assert.Same(applied.State, duplicateReceipt.State);
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "FileTransferRouteTransition")]
     public void FileTransferRouteTransition_FallbackToTunaRequiresExactEffectivePhase2Receipt()
     {
         var setup = CreateFallbackV6ToTunaRouteTransitionSetup();

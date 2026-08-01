@@ -88,6 +88,12 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     private readonly object regularV4RepairPressureGate = new();
     private readonly Dictionary<string, DevLocalRegularV4RepairPressureShadow> regularV4RepairPressures = new(StringComparer.Ordinal);
     private readonly object fileTransferRouteTransitionGate = new();
+    private FileTransferFallbackV6ProofBootstrapCommand?
+        activeFallbackV6ProofBootstrapCommand;
+    private Task<FileTransferFallbackV6ProofBootstrapReceipt>?
+        activeFallbackV6ProofBootstrapTask;
+    private FileTransferFallbackV6ProofBootstrapReceipt?
+        lastFallbackV6ProofBootstrapReceipt;
     private DevLocalFileTransferRouteTransitionExecutionShadow
         fileTransferRouteTransitionExecutionShadow =
             DevLocalFileTransferRouteTransitionExecutionShadow.Empty;
@@ -511,6 +517,133 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                         command.Authority.TargetTransport,
                         notify: false);
                 }
+            }
+        }
+
+        return receipt;
+    }
+
+    event EventHandler<FileTransferFallbackV6ProofBootstrapEvaluationRequestedEventArgs>?
+        IFileTransferRouteTransitionBridge.FallbackV6ProofBootstrapEvaluationRequested
+    {
+        add { }
+        remove { }
+    }
+
+    Task<FileTransferFallbackV6ProofBootstrapReceipt>
+        IFileTransferRouteTransitionBridge.ExecuteFileTransferFallbackV6ProofBootstrapAsync(
+            FileTransferFallbackV6ProofBootstrapCommand command,
+            FileTransferTransportEpochFrameV6 epochFrame,
+            FileTransferDataFrame proofFrame,
+            IFileTransferDataSession dataSession,
+            Func<bool> isCommandCurrent,
+            CancellationToken ct)
+    {
+        lock (fileTransferRouteTransitionGate)
+        {
+            if (lastFallbackV6ProofBootstrapReceipt is { } terminal &&
+                terminal.Command == command &&
+                terminal.Status is not FileTransferFallbackV6ProofBootstrapReceiptStatus.Held)
+            {
+                return Task.FromResult(terminal);
+            }
+
+            if (activeFallbackV6ProofBootstrapTask is { } active)
+            {
+                return activeFallbackV6ProofBootstrapCommand == command
+                    ? active
+                    : Task.FromResult(new FileTransferFallbackV6ProofBootstrapReceipt(
+                        command,
+                        FileTransferFallbackV6ProofBootstrapReceiptStatus.Rejected,
+                        null,
+                        "filetransfer_fallback_v6_proof_bootstrap_execution_conflict"));
+            }
+
+            var task = Task.Run(
+                () => ExecuteFallbackV6ProofBootstrapCoreAsync(
+                    command,
+                    epochFrame,
+                    proofFrame,
+                    dataSession,
+                    isCommandCurrent,
+                    ct),
+                CancellationToken.None);
+            activeFallbackV6ProofBootstrapCommand = command;
+            activeFallbackV6ProofBootstrapTask = task;
+            return task;
+        }
+    }
+
+    private async Task<FileTransferFallbackV6ProofBootstrapReceipt>
+        ExecuteFallbackV6ProofBootstrapCoreAsync(
+            FileTransferFallbackV6ProofBootstrapCommand command,
+            FileTransferTransportEpochFrameV6 epochFrame,
+            FileTransferDataFrame proofFrame,
+            IFileTransferDataSession dataSession,
+            Func<bool> isCommandCurrent,
+            CancellationToken ct)
+    {
+        FileTransferFallbackV6ProofBootstrapReceipt receipt;
+        try
+        {
+            if (command.IsDefault ||
+                !string.Equals(dataSession.SessionId, command.Observation.SessionId, StringComparison.Ordinal) ||
+                !string.Equals(dataSession.TransferId, command.Observation.TransferId, StringComparison.Ordinal) ||
+                epochFrame.TransportEpoch != command.TargetTransportEpoch ||
+                !PostTunaFallbackPeerProofFrameIdentity.TryCreate(proofFrame, out var identity) ||
+                identity.TransportEpoch != command.TargetTransportEpoch ||
+                !isCommandCurrent())
+            {
+                receipt = new FileTransferFallbackV6ProofBootstrapReceipt(
+                    command,
+                    FileTransferFallbackV6ProofBootstrapReceiptStatus.Rejected,
+                    null,
+                    "filetransfer_fallback_v6_proof_bootstrap_execution_invalid");
+            }
+            else
+            {
+                await dataSession.SendAsync(epochFrame, ct).ConfigureAwait(false);
+                if (!isCommandCurrent())
+                {
+                    receipt = new FileTransferFallbackV6ProofBootstrapReceipt(
+                        command,
+                        FileTransferFallbackV6ProofBootstrapReceiptStatus.Rejected,
+                        null,
+                        "filetransfer_fallback_v6_proof_bootstrap_stale_before_proof_send");
+                }
+                else
+                {
+                    await dataSession.SendAsync(proofFrame, ct).ConfigureAwait(false);
+                    receipt = new FileTransferFallbackV6ProofBootstrapReceipt(
+                        command,
+                        FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered,
+                        identity,
+                        "filetransfer_fallback_v6_proof_bootstrap_delivered");
+                }
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or OperationCanceledException)
+        {
+            receipt = new FileTransferFallbackV6ProofBootstrapReceipt(
+                command,
+                ct.IsCancellationRequested || dataSession.IsAvailable
+                    ? FileTransferFallbackV6ProofBootstrapReceiptStatus.Rejected
+                    : FileTransferFallbackV6ProofBootstrapReceiptStatus.Held,
+                null,
+                ct.IsCancellationRequested
+                    ? "filetransfer_fallback_v6_proof_bootstrap_canceled"
+                    : dataSession.IsAvailable
+                        ? "filetransfer_fallback_v6_proof_bootstrap_send_failed"
+                        : "filetransfer_fallback_v6_proof_bootstrap_data_session_unavailable");
+        }
+
+        lock (fileTransferRouteTransitionGate)
+        {
+            if (activeFallbackV6ProofBootstrapCommand == command)
+            {
+                activeFallbackV6ProofBootstrapCommand = null;
+                activeFallbackV6ProofBootstrapTask = null;
+                lastFallbackV6ProofBootstrapReceipt = receipt;
             }
         }
 
