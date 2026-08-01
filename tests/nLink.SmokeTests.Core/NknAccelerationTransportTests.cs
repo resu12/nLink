@@ -31,6 +31,87 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         FakeNknClient.ResetNetwork();
     }
 
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TransportAccelerationAnswer_UsesExactValidatedInboundSourceInsteadOfCachedEndpoint()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        var options = NknTransportOptions.Load();
+        const string peerTail = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        var hostClient = new FakeNknClient(
+            "host.answer.reply-target.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        var helperClient = new FakeNknClient(
+            $"helper.answer.reply-target-base.{peerTail}",
+            $"subclient.helper.answer.reply-target-live.{peerTail}");
+        var hostLane = new RetryableTunaAccelerationSession(
+            canListen: false,
+            failedDialAttemptsBeforeSuccess: 0,
+            supportedLanes: NknAccelerationLaneKind.File);
+        using var host = new NknSignalingTransport(
+            hostClient,
+            options,
+            new NknIdentity("host-answer-reply-target-id", hostClient.Address),
+            NknTunaAccelerationOptions.Disabled,
+            hostLane);
+        using var helper = new NknSignalingTransport(
+            helperClient,
+            options,
+            new NknIdentity(
+                "helper-answer-reply-target-id",
+                helperClient.InitialAddress));
+        var sessionId = await ApproveNknSessionAsync(
+            host,
+            helper,
+            cts.Token,
+            InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+            suppressAutomaticAccelerationNegotiation: true);
+        SetPrivateField(host, "remoteEndpoint", helperClient.InitialAddress);
+
+        var answerTarget = new TaskCompletionSource<string>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        hostClient.BeforeSendAsync = (destination, payload, _) =>
+        {
+            if (EnvelopeCodec.TryDeserialize(payload, out var sent) &&
+                sent.Type == MsgType.TransportAccelerationAnswer)
+            {
+                answerTarget.TrySetResult(destination);
+            }
+
+            return Task.CompletedTask;
+        };
+        var offer = CreateOfferPayload(
+            sessionId,
+            "ad11223344556677889900aabbccddee",
+            supportedLanes: new[] { "file" },
+            payerDecisionId: 41L);
+        offer.Trigger = "runtime_unlock";
+        offer.SenderRole = "helpee";
+        var envelope = BuildSecureAccelerationEnvelope(
+            helper,
+            MsgType.TransportAccelerationOffer,
+            offer,
+            "transport_acceleration_offer",
+            offer.Nonce,
+            sequence: 410,
+            senderIdentity: helperClient.InitialAddress);
+        var logStart = GetOperationalLogLength();
+
+        InvokePrivateMethod(
+            host,
+            "HandleTransportAccelerationOffer",
+            helperClient.ConnectedAddress,
+            envelope);
+
+        await Task.Delay(TimeSpan.FromSeconds(1), cts.Token);
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.True(answerTarget.Task.IsCompleted, logTail);
+        Assert.Equal(helperClient.ConnectedAddress, await answerTarget.Task);
+        Assert.Contains(
+            "target_mode=validated_inbound_source",
+            logTail,
+            StringComparison.Ordinal);
+    }
+
     [Theory]
     [Trait("Category", "Smoke")]
     [InlineData((int)MsgType.TransportAccelerationPayerIntent)]
@@ -26441,7 +26522,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         TPayload payload,
         string secureMessageType,
         string requestId,
-        long sequence)
+        long sequence,
+        string? senderIdentity = null)
     {
         var key = Assert.IsType<byte[]>(GetPrivateField(senderTransport, "controlSessionSharedKey")).AsSpan().ToArray();
         var envelopeCode = Assert.IsType<string>(GetPrivateField(senderTransport, "currentEnvelopeCode"));
@@ -26452,7 +26534,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 Family: SessionSecureMessageFamily.RemoteControl,
                 MessageType: secureMessageType,
                 SessionId: sessionId,
-                SenderIdentity: new PeerAddress(senderTransport.LocalPeerAddress),
+                SenderIdentity: new PeerAddress(senderIdentity ?? senderTransport.LocalPeerAddress),
                 Sequence: sequence,
                 RequestId: requestId),
             JsonSerializer.SerializeToUtf8Bytes(payload));
