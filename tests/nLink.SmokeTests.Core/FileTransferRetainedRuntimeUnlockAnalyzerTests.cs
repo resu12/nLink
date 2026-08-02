@@ -56,6 +56,57 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_InitialActivationAnswerReplayWindowEndsBeforePeerRecovery(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string responderScope =
+            "session_id=sess_answer_recovery; payer_decision_id=41; generation=7; " +
+            "log_writer_id=writer_responder";
+        var result = await RunAnalyzeFixtureAsync(
+            [
+                LogLine($"event=tuna_acceleration_answer_ack_pending; {responderScope}"),
+                LogLine($"event=runtime_unlock_acceleration_reply_target_decided; {responderScope}; " +
+                    "purpose=answer; boundary=answer_send; status=accepted; " +
+                    "target_mode=validated_inbound_source"),
+                LogLine($"event=tuna_acceleration_answer_sent; {responderScope}; accepted=1; " +
+                    "msg_id=answer-1"),
+                LogLine($"event=tuna_acceleration_answer_replay_sent; {responderScope}; " +
+                    "attempt=16; msg_id=answer-1"),
+                LogLine("event=bridge_ready; session_id=sess_answer_recovery; " +
+                    "log_writer_id=writer_initiator; pid=42"),
+                LogLine($"event=tuna_acceleration_answer_ack_timeout; {responderScope}; " +
+                    "trigger=runtime_unlock; retry_reason=runtime_unlock_answer_ack_timeout")
+            ],
+            [],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal(
+            "runtime_unlock_initial_activation_answer_peer_delivery_missing",
+            verdict["first_proof_chain_failure_class"]);
+        Assert.Equal(
+            "exact_source_answer_replay_exhausted_before_receive_stalled_peer_replacement_ready",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count"]);
+    }
+
+    [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]
     [InlineData(false, true)]
@@ -515,8 +566,15 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
                     "closure_generation=1; closure_state=Adopted; proof_identity=file_transfer_v4_state:226",
                 $"event=filetransfer_receive_recovery_operation_closure_adopted; {outboundOperation}; {outboundScope}; " +
                     "closure_generation=1; closure_state=Adopted; proof_identity=file_transfer_v4_state:226",
-                $"event=filetransfer_bridge_recovery_payload_submission_resumed; {outboundOperation}; {outboundScope}; " +
-                    "closure_generation=1; closure_state=Adopted; proof_identity=file_transfer_v4_state:226"
+                "event=filetransfer_regular_v4_physical_send_lease_registered; " +
+                    "session_id=sess_proof_state_timing; transfer_id=transfer_proof_state_timing; " +
+                    "direction=outbound; source_route=regular_nkn_v4_fast; " +
+                    "source_protocol_version=4; source_live_route_epoch=0; " +
+                    "source_route_publication_generation=1; source_runtime_generation=1; " +
+                    "source_terminal_generation=0; source_leg_generation=1; " +
+                    "source_transport_epoch=0; source_bridge_recovery_generation=0; " +
+                    "source_data_session_generation=1; send_kind=RegularV4Payload; " +
+                    "log_writer_id=writer_outbound"
             ]);
         }
 

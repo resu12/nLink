@@ -21122,6 +21122,17 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
             'runtime_unlock_precommit_probe_started',
             'filetransfer_route_transition_prepared')
     })
+    [object[]]$bridgeReadyEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'bridge_ready'
+    })
+    [object[]]$replyTargetEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_acceleration_reply_target_decided' -and
+        (Get-FileTransferEventField -Event $_ -Name 'purpose' -Default '') -in @(
+            'answer',
+            'answer_replay') -and
+        (Get-FileTransferEventField -Event $_ -Name 'status' -Default '') -eq
+            'accepted'
+    })
 
     function Get-AnswerDeliveryIdentityValue {
         param($Event, [string[]]$Names)
@@ -21139,6 +21150,8 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
     $distinct = New-Object System.Collections.Generic.List[object]
     $recovered = New-Object System.Collections.Generic.List[object]
     $unresolved = New-Object System.Collections.Generic.List[object]
+    $peerRecoveryReplayWindowUnresolved =
+        New-Object System.Collections.Generic.List[object]
     $seen = @{}
     foreach ($timeout in $timeouts) {
         $sessionId = Get-AnswerDeliveryIdentityValue $timeout @('session_id')
@@ -21205,6 +21218,29 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
         }
         else {
             $unresolved.Add($timeout) | Out-Null
+            $lastSend = @($sends | Sort-Object Sequence, LineNumber |
+                Select-Object -Last 1)
+            $replyTarget = @($replyTargetEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$pending[0].Sequence -and
+                [int64]$_.Sequence -le [int64]$lastSend[0].Sequence -and
+                (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer -and
+                (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -eq $payerDecisionId -and
+                (Get-AnswerDeliveryIdentityValue $_ @('generation')) -eq $generation
+            } | Select-Object -Last 1)
+            $peerReady = @($bridgeReadyEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$lastSend[0].Sequence -and
+                [int64]$_.Sequence -lt [int64]$timeout.Sequence -and
+                (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -ne $writer
+            } | Select-Object -First 1)
+            $postReadyReplay = @($sends | Where-Object {
+                $peerReady.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$peerReady[0].Sequence
+            }).Count -gt 0
+            if ($replyTarget.Count -eq 1 -and
+                $peerReady.Count -eq 1 -and
+                -not $postReadyReplay) {
+                $peerRecoveryReplayWindowUnresolved.Add($timeout) | Out-Null
+            }
         }
     }
 
@@ -21218,6 +21254,8 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
         DistinctCandidateEvents = @($distinct.ToArray())
         RecoveredCandidateEvents = @($recovered.ToArray())
         UnresolvedCandidateEvents = @($unresolved.ToArray())
+        PeerRecoveryReplayWindowUnresolvedCandidateEvents =
+            @($peerRecoveryReplayWindowUnresolved.ToArray())
     }
 }
 
@@ -29536,7 +29574,51 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
             return @()
         }
 
+        $applied = @($Candidates | Where-Object {
+            (Get-ProofStateField -Event $_ -Names @('applied')) -eq '1'
+        } | Sort-Object Sequence | Select-Object -First 1)
+        if ($applied.Count -eq 1) {
+            return $applied
+        }
+
         return @($Candidates | Sort-Object Sequence | Select-Object -First 1)
+    }
+
+    function Test-ProofStatePayloadAdmissionMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Operation,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        foreach ($mapping in @(
+                @('session_id', 'session_id'),
+                @('transfer_id', 'transfer_id'),
+                @('direction', 'direction'),
+                @('route', 'source_route'),
+                @('protocol_version', 'source_protocol_version'),
+                @('live_route_epoch', 'source_live_route_epoch'),
+                @('route_publication_generation', 'source_route_publication_generation'),
+                @('runtime_generation', 'source_runtime_generation'),
+                @('terminal_generation', 'source_terminal_generation'),
+                @('leg_generation', 'source_leg_generation'),
+                @('transport_epoch', 'source_transport_epoch'),
+                @('bridge_recovery_generation', 'source_bridge_recovery_generation'),
+                @('data_session_generation', 'source_data_session_generation'))) {
+            $left = Get-ProofStateField -Event $Operation -Names @($mapping[0])
+            $right = Get-ProofStateField -Event $Candidate -Names @($mapping[1])
+            if ([string]::IsNullOrWhiteSpace($left) -or
+                [string]::IsNullOrWhiteSpace($right) -or
+                -not [string]::Equals(
+                    $left,
+                    $right,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        return (Get-ProofStateField -Event $Candidate -Names @('send_kind')) -in @(
+            'RegularV4Payload',
+            'RegularV4Repair')
     }
 
     [object[]]$issuedEvents = @($events | Where-Object {
@@ -29667,6 +29749,12 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
         $_.EventName -eq
             'filetransfer_bridge_recovery_payload_submission_resumed'
     })
+    [object[]]$payloadAdmissionEvents = @($events | Where-Object {
+        $_.EventName -in @(
+            'filetransfer_regular_v4_physical_send_lease_registered',
+            'filetransfer_route_transition_physical_send_lease_registered') -and
+        (Get-ProofStateField -Event $_ -Names @('direction')) -eq 'outbound'
+    })
     [object[]]$recheckDecisions = @($events | Where-Object {
         $_.EventName -eq
             'filetransfer_receive_recovery_proof_state_publication_recheck_decided' -and
@@ -29685,11 +29773,25 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
         (Get-ProofStateField -Event $_ -Names @('decision_reason')) -eq
             'receive_recovery_proof_observed'
     })
+    [object[]]$publicationInvalidatedEvents = @($events | Where-Object {
+        $_.EventName -eq
+            'filetransfer_receive_recovery_proof_state_publication_invalidated'
+    })
     [object[]]$stateReceivedEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_v4_state_received'
     })
     [object[]]$operationInvalidatedEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_receive_recovery_operation_invalidated'
+    })
+    [object[]]$operationSupersededEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_receive_recovery_operation_superseded'
+    })
+    [object[]]$operationStartEvents = @($events | Where-Object {
+        $_.EventName -eq
+            'filetransfer_receive_recovery_operation_execution_start_decided' -and
+        (Get-ProofStateField -Event $_ -Names @('execution_start_status')) -in @(
+            'Started',
+            'Idempotent')
     })
     [object[]]$transferTerminalEvents = @($events | Where-Object {
         $_.EventName -in @(
@@ -30356,6 +30458,62 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
                     -Candidate $_)
             } | Select-Object -First 2)
 
+            $releaseBoundary = [int64]::MaxValue
+            $successor = @($outboundIssuedEvents | Where-Object {
+                $adopted.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$adopted[0].Sequence -and
+                (Get-ProofStateField -Event $_ -Names @('log_writer_id')) -eq
+                    (Get-ProofStateField -Event $record.TargetIssued -Names @('log_writer_id')) -and
+                (Get-ProofStateField -Event $_ -Names @('session_id')) -eq
+                    (Get-ProofStateField -Event $record.TargetIssued -Names @('session_id')) -and
+                (Get-ProofStateField -Event $_ -Names @('transfer_id')) -eq
+                    (Get-ProofStateField -Event $record.TargetIssued -Names @('transfer_id')) -and
+                [int64](Get-ProofStateField -Event $_ -Names @('receive_recovery_operation_generation')) -gt
+                    [int64](Get-ProofStateField -Event $record.TargetIssued -Names @('receive_recovery_operation_generation'))
+            } | Select-Object -First 1)
+            if ($successor.Count -eq 1) {
+                $releaseBoundary = [Math]::Min(
+                    $releaseBoundary,
+                    [int64]$successor[0].Sequence)
+            }
+            $targetInvalidation = @($operationInvalidatedEvents | Where-Object {
+                $adopted.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$adopted[0].Sequence -and
+                (Test-ProofStateOperationMatch -Issued $record.TargetIssued -Candidate $_)
+            } | Select-Object -First 1)
+            if ($targetInvalidation.Count -eq 1) {
+                $releaseBoundary = [Math]::Min(
+                    $releaseBoundary,
+                    [int64]$targetInvalidation[0].Sequence)
+            }
+            $targetTerminal = @($transferTerminalEvents | Where-Object {
+                $adopted.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$adopted[0].Sequence -and
+                (Get-ProofStateField -Event $_ -Names @('log_writer_id')) -eq
+                    (Get-ProofStateField -Event $record.TargetIssued -Names @('log_writer_id')) -and
+                (Get-ProofStateField -Event $_ -Names @('session_id')) -eq
+                    (Get-ProofStateField -Event $record.TargetIssued -Names @('session_id')) -and
+                (Get-ProofStateField -Event $_ -Names @('transfer_id')) -eq
+                    (Get-ProofStateField -Event $record.TargetIssued -Names @('transfer_id'))
+            } | Select-Object -First 1)
+            if ($targetTerminal.Count -eq 1) {
+                $releaseBoundary = [Math]::Min(
+                    $releaseBoundary,
+                    [int64]$targetTerminal[0].Sequence)
+            }
+            $payloadAdmission = @($payloadAdmissionEvents | Where-Object {
+                $adopted.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$adopted[0].Sequence -and
+                [int64]$_.Sequence -lt $releaseBoundary -and
+                (Test-ProofStatePayloadAdmissionMatch `
+                    -Operation $record.TargetIssued `
+                    -Candidate $_)
+            } | Select-Object -First 1)
+
+            $coordinatorReleaseObserved =
+                $resumed.Count -eq 1 -or
+                $payloadAdmission.Count -eq 1
+
             if ($decision.Count -eq 1 -and
                 $stateSend.Count -eq 1 -and
                 $publicationReceipt.Count -eq 1 -and
@@ -30364,7 +30522,7 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
                 $peerReceipt.Count -eq 1 -and
                 $proof.Count -eq 1 -and
                 $adopted.Count -eq 1 -and
-                $resumed.Count -eq 1) {
+                $coordinatorReleaseObserved) {
                 $recovered.Add($record.Event) | Out-Null
             }
             else {
@@ -30424,6 +30582,40 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
                 -Issued $proof[0] `
                 -Candidate $_)
         } | Select-Object -First 1)
+        $releaseBoundary = [int64]::MaxValue
+        $outboundSuccessor = @($outboundIssuedEvents | Where-Object {
+            $adopted.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$adopted[0].Sequence -and
+            (Get-ProofStateField -Event $_ -Names @('log_writer_id')) -eq
+                (Get-ProofStateField -Event $proof[0] -Names @('log_writer_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('session_id')) -eq
+                (Get-ProofStateField -Event $proof[0] -Names @('session_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('transfer_id')) -eq
+                (Get-ProofStateField -Event $proof[0] -Names @('transfer_id')) -and
+            [int64](Get-ProofStateField -Event $_ -Names @('receive_recovery_operation_generation')) -gt
+                [int64](Get-ProofStateField -Event $proof[0] -Names @('receive_recovery_operation_generation'))
+        } | Select-Object -First 1)
+        if ($outboundSuccessor.Count -eq 1) {
+            $releaseBoundary = [int64]$outboundSuccessor[0].Sequence
+        }
+        $outboundInvalidation = @($operationInvalidatedEvents | Where-Object {
+            $adopted.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$adopted[0].Sequence -and
+            (Test-ProofStateOperationMatch -Issued $proof[0] -Candidate $_)
+        } | Select-Object -First 1)
+        if ($outboundInvalidation.Count -eq 1) {
+            $releaseBoundary = [Math]::Min(
+                $releaseBoundary,
+                [int64]$outboundInvalidation[0].Sequence)
+        }
+        $payloadAdmission = @($payloadAdmissionEvents | Where-Object {
+            $adopted.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$adopted[0].Sequence -and
+            [int64]$_.Sequence -lt $releaseBoundary -and
+            (Test-ProofStatePayloadAdmissionMatch `
+                -Operation $proof[0] `
+                -Candidate $_)
+        } | Select-Object -First 1)
         $returnProof = @($proofEvents | Where-Object {
             $adopted.Count -eq 1 -and
             [int64]$_.Sequence -gt [int64]$adopted[0].Sequence -and
@@ -30459,6 +30651,7 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
         } | Select-Object -First 1)
         $coordinatorReleaseObserved =
             $resumed.Count -eq 1 -or
+            $payloadAdmission.Count -eq 1 -or
             ($returnProof.Count -eq 1 -and $returnAdopted.Count -eq 1) -or
             $proofOwnedRecheckInvalidation.Count -eq 1
 
@@ -30472,6 +30665,113 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
         }
         else {
             $unresolved.Add($record.Event) | Out-Null
+        }
+    }
+
+    foreach ($candidateEvent in @($unresolved.ToArray())) {
+        $record = @($distinct.Values | Where-Object {
+            [int64]$_.Event.Sequence -eq [int64]$candidateEvent.Sequence
+        } | Select-Object -First 1)
+        if ($record.Count -ne 1 -or
+            $record[0].BoundaryKind -ne 'activation_pause_submission_hold') {
+            continue
+        }
+
+        $pendingInvalidation = @($publicationInvalidatedEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$candidateEvent.Sequence -and
+            (Test-ProofStatePublicationCommandMatch `
+                -Issued $record[0].Issued `
+                -Retained $record[0].Retained `
+                -Candidate $_) -and
+            (Get-ProofStateField -Event $_ -Names @('decision_reason')) -eq
+                'filetransfer_receive_recovery_operation_successor_issued'
+        } | Select-Object -First 1)
+        $predecessorGeneration = Get-ProofStateField `
+            -Event $record[0].Issued `
+            -Names @('receive_recovery_operation_generation')
+        $supersession = @($operationSupersededEvents | Where-Object {
+            $pendingInvalidation.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$pendingInvalidation[0].Sequence -and
+            (Get-ProofStateField -Event $_ -Names @('log_writer_id')) -eq
+                (Get-ProofStateField -Event $record[0].Issued -Names @('log_writer_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('session_id')) -eq
+                (Get-ProofStateField -Event $record[0].Issued -Names @('session_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('transfer_id')) -eq
+                (Get-ProofStateField -Event $record[0].Issued -Names @('transfer_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('direction')) -eq
+                (Get-ProofStateField -Event $record[0].Issued -Names @('direction')) -and
+            (Get-ProofStateField -Event $_ -Names @('predecessor_receive_recovery_operation_generation')) -eq
+                $predecessorGeneration
+        } | Select-Object -First 1)
+        $successorGeneration = if ($supersession.Count -eq 1) {
+            Get-ProofStateField -Event $supersession[0] -Names @(
+                'successor_receive_recovery_operation_generation')
+        }
+        else { '' }
+        $successorIssued = @($issuedEvents | Where-Object {
+            $supersession.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$supersession[0].Sequence -and
+            (Get-ProofStateField -Event $_ -Names @('log_writer_id')) -eq
+                (Get-ProofStateField -Event $record[0].Issued -Names @('log_writer_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('session_id')) -eq
+                (Get-ProofStateField -Event $record[0].Issued -Names @('session_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('transfer_id')) -eq
+                (Get-ProofStateField -Event $record[0].Issued -Names @('transfer_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('receive_recovery_operation_generation')) -eq
+                $successorGeneration
+        } | Select-Object -First 1)
+        $successorStart = @($operationStartEvents | Where-Object {
+            $successorIssued.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$successorIssued[0].Sequence -and
+            (Test-ProofStateOperationMatch -Issued $successorIssued[0] -Candidate $_)
+        } | Select-Object -First 1)
+        $successorReceipt = @($receiptEvents | Where-Object {
+            $successorStart.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$successorStart[0].Sequence -and
+            (Test-ProofStateOperationMatch -Issued $successorIssued[0] -Candidate $_)
+        } | Select-Object -First 1)
+        $successorRetained = @($retainedEvents | Where-Object {
+            $successorReceipt.Count -eq 1 -and
+            [int64]$_.Sequence -ge [int64]$successorReceipt[0].Sequence -and
+            (Test-ProofStateOperationMatch -Issued $successorIssued[0] -Candidate $_)
+        } | Select-Object -First 1)
+        $successorDecision = @($decisions | Where-Object {
+            $successorRetained.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$successorRetained[0].Sequence -and
+            (Test-ProofStatePublicationCommandMatch -Issued $successorIssued[0] -Retained $successorRetained[0] -Candidate $_)
+        } | Select-Object -First 1)
+        $successorSend = @($stateSends | Where-Object {
+            $successorDecision.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$successorDecision[0].Sequence -and
+            (Test-ProofStatePublicationCommandMatch -Issued $successorIssued[0] -Retained $successorRetained[0] -Candidate $_)
+        } | Select-Object -First 1)
+        $successorPublicationReceipt = @($publicationReceipts | Where-Object {
+            $successorSend.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$successorSend[0].Sequence -and
+            (Test-ProofStatePublicationCommandMatch -Issued $successorIssued[0] -Retained $successorRetained[0] -Candidate $_)
+        } | Select-Object -First 1)
+        $successorProof = @($proofEvents | Where-Object {
+            $successorPublicationReceipt.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$successorPublicationReceipt[0].Sequence -and
+            (Get-ProofStateField -Event $_ -Names @('session_id')) -eq
+                (Get-ProofStateField -Event $successorIssued[0] -Names @('session_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('transfer_id')) -eq
+                (Get-ProofStateField -Event $successorIssued[0] -Names @('transfer_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('direction')) -eq 'outbound'
+        } | Select-Object -First 1)
+        $successorAdopted = @($adoptedEvents | Where-Object {
+            $successorProof.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$successorProof[0].Sequence -and
+            (Test-ProofStateOperationMatch -Issued $successorProof[0] -Candidate $_)
+        } | Select-Object -First 1)
+        $successorResumed = @($resumedEvents | Where-Object {
+            $successorAdopted.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$successorAdopted[0].Sequence -and
+            (Test-ProofStateOperationMatch -Issued $successorProof[0] -Candidate $_)
+        } | Select-Object -First 1)
+        if ($successorAdopted.Count -eq 1 -and $successorResumed.Count -eq 1) {
+            $unresolved.Remove($candidateEvent) | Out-Null
+            $recovered.Add($candidateEvent) | Out-Null
         }
     }
 
@@ -42395,12 +42695,24 @@ function Get-FileTransferRecoveryFailureClassification {
             -DefaultReason $candidateReason `
             -UseDefaultReason
     }
-    Add-FileTransferProofChainFailureCandidates `
-        -Candidates $proofChainFailureCandidates `
-        -Class 'runtime_unlock_initial_activation_answer_peer_delivery_missing' `
-        -Events @($runtimeUnlockInitialActivationAnswerPeerDeliveryProof.UnresolvedCandidateEvents) `
-        -DefaultReason 'validated_offer_answer_not_delivered_to_initiator' `
-        -UseDefaultReason
+    foreach ($candidateEvent in @($runtimeUnlockInitialActivationAnswerPeerDeliveryProof.UnresolvedCandidateEvents)) {
+        $candidateReason = if (@(
+                $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.PeerRecoveryReplayWindowUnresolvedCandidateEvents |
+                    Where-Object {
+                        [int64]$_.Sequence -eq [int64]$candidateEvent.Sequence
+                    }).Count -gt 0) {
+            'exact_source_answer_replay_exhausted_before_receive_stalled_peer_replacement_ready'
+        }
+        else {
+            'validated_offer_answer_not_delivered_to_initiator'
+        }
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class 'runtime_unlock_initial_activation_answer_peer_delivery_missing' `
+            -Events @($candidateEvent) `
+            -DefaultReason $candidateReason `
+            -UseDefaultReason
+    }
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved' `

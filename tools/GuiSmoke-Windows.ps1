@@ -5374,6 +5374,69 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         return $false
     }
 
+    function Test-TunaGuiInitialActivationAnswerPeerRecoveryReplayWindowMissing {
+        param(
+            [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+        )
+
+        $indexed = for ($index = 0; $index -lt $Lines.Count; $index++) {
+            [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
+        }
+        foreach ($timeout in @($indexed | Where-Object {
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                            'tuna_acceleration_answer_ack_timeout')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'trigger') -eq
+                        'runtime_unlock'
+                })) {
+            $writer = Get-TunaGuiLogLineFieldValue -Line $timeout.Line -Name 'log_writer_id'
+            $payer = Get-TunaGuiLogLineFieldValue -Line $timeout.Line -Name 'payer_decision_id'
+            $generation = Get-TunaGuiLogLineFieldValue -Line $timeout.Line -Name 'generation'
+            if ([string]::IsNullOrWhiteSpace($writer) -or
+                [string]::IsNullOrWhiteSpace($payer) -or
+                [string]::IsNullOrWhiteSpace($generation)) {
+                continue
+            }
+
+            $sends = @($indexed | Where-Object {
+                $_.Index -lt $timeout.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'tuna_acceleration_answer_sent',
+                        'tuna_acceleration_answer_replay_sent')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq $payer
+            })
+            if ($sends.Count -eq 0) {
+                continue
+            }
+
+            $lastSend = @($sends | Select-Object -Last 1)
+            $target = @($indexed | Where-Object {
+                $_.Index -le $lastSend[0].Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'runtime_unlock_acceleration_reply_target_decided')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq $payer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'generation') -eq $generation -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'status') -eq 'accepted' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'target_mode') -eq
+                    'validated_inbound_source'
+            } | Select-Object -Last 1)
+            $peerReady = @($indexed | Where-Object {
+                $_.Index -gt $lastSend[0].Index -and $_.Index -lt $timeout.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('bridge_ready')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -ne $writer
+            } | Select-Object -First 1)
+            $postReadyReplay = @($sends | Where-Object {
+                $peerReady.Count -eq 1 -and $_.Index -gt $peerReady[0].Index
+            }).Count -gt 0
+            if ($target.Count -eq 1 -and $peerReady.Count -eq 1 -and -not $postReadyReplay) {
+                return $true
+            }
+        }
+
+        return $false
+    }
+
     function Test-TunaGuiInitialActivationReceiveRecoveryHoldNotPreserved {
         param(
             [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
@@ -7778,7 +7841,51 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 return @()
             }
 
+            $applied = @($Candidates | Where-Object {
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'applied') -eq '1'
+            } | Sort-Object Index | Select-Object -First 1)
+            if ($applied.Count -eq 1) {
+                return $applied
+            }
+
             return @($Candidates | Sort-Object Index | Select-Object -First 1)
+        }
+
+        function Test-ProofStatePayloadAdmissionMatch {
+            param(
+                [Parameter(Mandatory = $true)]$Operation,
+                [Parameter(Mandatory = $true)]$Candidate
+            )
+
+            foreach ($mapping in @(
+                    @('session_id', 'session_id'),
+                    @('transfer_id', 'transfer_id'),
+                    @('direction', 'direction'),
+                    @('route', 'source_route'),
+                    @('protocol_version', 'source_protocol_version'),
+                    @('live_route_epoch', 'source_live_route_epoch'),
+                    @('route_publication_generation', 'source_route_publication_generation'),
+                    @('runtime_generation', 'source_runtime_generation'),
+                    @('terminal_generation', 'source_terminal_generation'),
+                    @('leg_generation', 'source_leg_generation'),
+                    @('transport_epoch', 'source_transport_epoch'),
+                    @('bridge_recovery_generation', 'source_bridge_recovery_generation'),
+                    @('data_session_generation', 'source_data_session_generation'))) {
+                $left = Get-ProofStateFieldValue -Line $Operation.Line -Names @($mapping[0])
+                $right = Get-ProofStateFieldValue -Line $Candidate.Line -Names @($mapping[1])
+                if ([string]::IsNullOrWhiteSpace($left) -or
+                    [string]::IsNullOrWhiteSpace($right) -or
+                    -not [string]::Equals(
+                        $left,
+                        $right,
+                        [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $false
+                }
+            }
+
+            return (Get-ProofStateFieldValue -Line $Candidate.Line -Names @('send_kind')) -in @(
+                'RegularV4Payload',
+                'RegularV4Repair')
         }
 
         function Test-ProofStateHeartbeatPair {
@@ -8101,13 +8208,27 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             $resumed = @($indexedLines | Where-Object {
                 $adopted.Count -eq 1 -and
                 $_.Index -gt $adopted[0].Index -and
-                (Test-TunaGuiLogLineHasEvent `
-                    -Line $_.Line `
-                    -Events @(
-                        'filetransfer_bridge_recovery_payload_submission_resumed')) -and
-                (Test-ProofStateOperationMatch `
-                    -Issued $adopted[0] `
-                    -Candidate $_)
+                (
+                    (
+                        (Test-TunaGuiLogLineHasEvent `
+                            -Line $_.Line `
+                            -Events @(
+                                'filetransfer_bridge_recovery_payload_submission_resumed')) -and
+                        (Test-ProofStateOperationMatch `
+                            -Issued $adopted[0] `
+                            -Candidate $_)
+                    ) -or
+                    (
+                        (Test-TunaGuiLogLineHasEvent `
+                            -Line $_.Line `
+                            -Events @(
+                                'filetransfer_regular_v4_physical_send_lease_registered',
+                                'filetransfer_route_transition_physical_send_lease_registered')) -and
+                        (Test-ProofStatePayloadAdmissionMatch `
+                            -Operation $adopted[0] `
+                            -Candidate $_)
+                    )
+                )
             } | Select-Object -First 2)
             if ($resume.Count -eq 1 -and
                 $stateSend.Count -eq 1 -and
@@ -8115,6 +8236,28 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 $peerReceipt.Count -eq 1 -and
                 $adopted.Count -eq 1 -and
                 $resumed.Count -eq 1) {
+                continue
+            }
+
+            $successorInvalidation = @($indexedLines | Where-Object {
+                $_.Index -gt $disposition[0].Index -and
+                (Test-TunaGuiLogLineHasEvent `
+                    -Line $_.Line `
+                    -Events @(
+                        'filetransfer_receive_recovery_proof_state_publication_invalidated')) -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'invalidation_target') -eq 'pending_command' -and
+                (Get-TunaGuiLogLineFieldValue `
+                    -Line $_.Line `
+                    -Name 'decision_reason') -eq
+                        'filetransfer_receive_recovery_operation_successor_issued' -and
+                (Test-ProofStatePublicationMatch `
+                    -Issued $issued `
+                    -Retained $retained[0] `
+                    -Candidate $_)
+            } | Select-Object -First 1)
+            if ($successorInvalidation.Count -eq 1) {
                 continue
             }
 
@@ -8646,6 +8789,17 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         (Test-ProofStatePublicationMatch `
                             -Issued $issued `
                             -Retained $retained[0] `
+                            -Candidate $_)
+                    ) -or
+                    (
+                        $_.Index -gt $targetAdopted[0].Index -and
+                        (Test-TunaGuiLogLineHasEvent `
+                            -Line $_.Line `
+                            -Events @(
+                                'filetransfer_regular_v4_physical_send_lease_registered',
+                                'filetransfer_route_transition_physical_send_lease_registered')) -and
+                        (Test-ProofStatePayloadAdmissionMatch `
+                            -Operation $targetBoundaries[0].Issued `
                             -Candidate $_)
                     )
                 )
@@ -10666,6 +10820,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $initialActivationAnswerPeerDeliveryMissing =
         Test-TunaGuiInitialActivationAnswerPeerDeliveryMissing `
             -Lines $regularV4EvidenceLineText
+    $initialActivationAnswerPeerRecoveryReplayWindowMissing =
+        Test-TunaGuiInitialActivationAnswerPeerRecoveryReplayWindowMissing `
+            -Lines $regularV4EvidenceLineText
     $initialActivationReceiveRecoveryHoldNotPreserved =
         Test-TunaGuiInitialActivationReceiveRecoveryHoldNotPreserved `
             -Lines $regularV4EvidenceLineText
@@ -10845,7 +11002,12 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     }
     elseif ($initialActivationAnswerPeerDeliveryMissing) {
         $phase = 'runtime_unlock_initial_activation'
-        $reason = 'validated_offer_answer_not_delivered_to_initiator'
+        $reason = if ($initialActivationAnswerPeerRecoveryReplayWindowMissing) {
+            'exact_source_answer_replay_exhausted_before_receive_stalled_peer_replacement_ready'
+        }
+        else {
+            'validated_offer_answer_not_delivered_to_initiator'
+        }
     }
     elseif ($initialActivationCommittedRefreshPrevalidationRejected) {
         $phase = 'runtime_unlock_initial_activation'

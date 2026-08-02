@@ -3347,6 +3347,61 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task InitialActivationAnswerPeerDeliveryDetectsPeerRecoveryReplayWindow()
+    {
+        var guiText = File.ReadAllText(
+            Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = Regex.Replace(guiText, @"(?m)^ {4}", string.Empty);
+        var fieldValueBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Test-TunaGuiLogLineHasEvent");
+        var hasEventBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineHasEvent",
+            "Test-TunaGuiLogLineFieldMatch");
+        var classifierBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiInitialActivationAnswerPeerRecoveryReplayWindowMissing",
+            "Test-TunaGuiInitialActivationReceiveRecoveryHoldNotPreserved");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
+            function Test-TunaGuiLogLineHasEvent { {{hasEventBody}} }
+            function Test-TunaGuiInitialActivationAnswerPeerRecoveryReplayWindowMissing {
+                {{classifierBody}}
+            }
+            $scope = 'session_id=session-answer; payer_decision_id=4; generation=6; log_writer_id=writer-responder'
+            $lines = @(
+                "event=runtime_unlock_acceleration_reply_target_decided; $scope; purpose=answer; status=accepted; target_mode=validated_inbound_source",
+                "event=tuna_acceleration_answer_sent; $scope; msg_id=answer-1",
+                "event=tuna_acceleration_answer_replay_sent; $scope; attempt=16; msg_id=answer-1",
+                'event=bridge_ready; session_id=session-answer; log_writer_id=writer-initiator',
+                "event=tuna_acceleration_answer_ack_timeout; $scope; trigger=runtime_unlock; retry_reason=runtime_unlock_answer_ack_timeout"
+            )
+            if (-not (Test-TunaGuiInitialActivationAnswerPeerRecoveryReplayWindowMissing -Lines $lines)) {
+                throw 'peer recovery replay-window boundary was not detected'
+            }
+            $lines = @($lines[0..3]) +
+                "event=tuna_acceleration_answer_replay_sent; $scope; attempt=17; msg_id=answer-1" +
+                $lines[4]
+            if (Test-TunaGuiInitialActivationAnswerPeerRecoveryReplayWindowMissing -Lines $lines) {
+                throw 'post-readiness replay did not resolve the replay-window boundary'
+            }
+            Write-Output 'gui-answer-peer-recovery-replay-window-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"GUI answer replay-window test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "gui-answer-peer-recovery-replay-window-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ReceiveRecoveryProofStatePublicationRechecksAfterPostDeliveryHeartbeat()
     {
         var guiText = File.ReadAllText(
@@ -3416,7 +3471,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $recovered += "event=filetransfer_v4_state_received; $outboundScope; epoch=226; v4_state_wire_fingerprint=wire-state-2; applied=1; duplicate=1"
             $recovered += "event=filetransfer_receive_recovery_operation_proof_observed; $outboundOperation; $outboundScope; closure_generation=1; closure_state=Adopted; proof_identity=file_transfer_v4_state:226"
             $recovered += "event=filetransfer_receive_recovery_operation_closure_adopted; $outboundOperation; $outboundScope; closure_generation=1; closure_state=Adopted; proof_identity=file_transfer_v4_state:226"
-            $recovered += "event=filetransfer_bridge_recovery_payload_submission_resumed; $outboundOperation; $outboundScope; closure_generation=1; closure_state=Adopted; proof_identity=file_transfer_v4_state:226"
+            $recovered += 'event=filetransfer_regular_v4_physical_send_lease_registered; session_id=session-proof-state; transfer_id=transfer-proof-state; direction=outbound; source_route=regular_nkn_v4_fast; source_protocol_version=4; source_live_route_epoch=0; source_route_publication_generation=1; source_runtime_generation=1; source_terminal_generation=0; source_leg_generation=1; source_transport_epoch=0; source_bridge_recovery_generation=0; source_data_session_generation=1; send_kind=RegularV4Payload; log_writer_id=writer-outbound'
             if (Test-TunaGuiReceiveRecoveryCompletedRetainedProofStatePublicationFailure -Lines $recovered) {
                 throw 'exact generation-2 publication and peer receipt did not recover the boundary'
             }
