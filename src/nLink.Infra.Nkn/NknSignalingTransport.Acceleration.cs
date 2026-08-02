@@ -72,7 +72,6 @@ public sealed partial class NknSignalingTransport
     private const long TunaFallbackProofLogEveryFrames = 5000;
     private const int AccelerationOfferReplayAttempts = 12;
     private const int AccelerationAnswerReplayAttempts = 3;
-    private const int RuntimeUnlockAccelerationAnswerReplayAttempts = 16;
     private const int AccelerationAnswerAckReplayAttempts = 3;
     private const string AccelerationObservedLaneControlQueue = "control_queue";
     private const string AccelerationObservedLaneControlPriority = "control_priority";
@@ -263,6 +262,9 @@ public sealed partial class NknSignalingTransport
     private long pendingAccelerationAnswerAckGeneration;
     private RuntimeUnlockOfferAuthorityMode? pendingAccelerationAnswerAckAuthorityMode;
     private AccelerationReplyTargetEvidence? pendingAccelerationAnswerAckReplyTarget;
+    private PendingAccelerationReplyShadow? pendingAccelerationAnswerReplyShadow;
+    private PendingAccelerationReplyShadow? pendingAccelerationAnswerAckReplyShadow;
+    private long pendingAccelerationReplyWorkerGeneration;
     private string? inboundRuntimeUnlockDialSessionId;
     private string? inboundRuntimeUnlockDialNonce;
     private long inboundRuntimeUnlockDialPayerDecisionId;
@@ -378,6 +380,18 @@ public sealed partial class NknSignalingTransport
         string Nonce,
         long PayerDecisionId,
         long LineageGeneration,
+        string Purpose);
+
+    private sealed record PendingAccelerationReplyShadow(
+        Envelope Envelope,
+        AccelerationReplyTargetEvidence ReplyTarget,
+        string SessionId,
+        string Nonce,
+        long PayerDecisionId,
+        long PendingGeneration,
+        RuntimeUnlockOfferAuthorityMode? AuthorityMode,
+        long DeadlineUtcMs,
+        long WorkerGeneration,
         string Purpose);
 
     private sealed record RuntimeUnlockInitialActivationReceiveRecoveryHoldShadow(
@@ -23404,7 +23418,14 @@ public sealed partial class NknSignalingTransport
             LocalOperationalLog.Info(
                 "NKN.Tuna",
                 $"event=tuna_acceleration_answer_ack_pending; session_id={SanitizeLogToken(offer.SessionId)}; lanes={FormatAccelerationLanesForLog(validation.AcceptedLanes)}; payer_decision_id={offer.PayerDecisionId}; generation={answerAckGeneration}");
-            ScheduleAccelerationAnswerAckTimeout(offer.SessionId, offer.Nonce, offer.PayerDecisionId, answerAckGeneration);
+            if (!isRuntimeUnlockOffer)
+            {
+                ScheduleAccelerationAnswerAckTimeout(
+                    offer.SessionId,
+                    offer.Nonce,
+                    offer.PayerDecisionId,
+                    answerAckGeneration);
+            }
         }
 
         await SendAccelerationAnswerAsync(
@@ -23539,6 +23560,7 @@ public sealed partial class NknSignalingTransport
             var generation = ++pendingAccelerationAnswerAckGeneration;
             pendingAccelerationAnswerAckReplyTarget =
                 replyTarget with { LineageGeneration = generation };
+            pendingAccelerationAnswerReplyShadow = null;
             return generation;
         }
     }
@@ -23579,9 +23601,147 @@ public sealed partial class NknSignalingTransport
             {
                 pendingAccelerationAnswerAckReplyTarget =
                     replyTarget with { LineageGeneration = generation };
+                if (pendingAccelerationAnswerReplyShadow is { } shadow &&
+                    shadow.PendingGeneration == generation)
+                {
+                    pendingAccelerationAnswerReplyShadow = shadow with
+                    {
+                        ReplyTarget = pendingAccelerationAnswerAckReplyTarget,
+                    };
+                }
             }
 
             return pendingAccelerationAnswerAckReplyTarget ?? replyTarget;
+        }
+    }
+
+    private PendingAccelerationReplyShadow? BindPendingAccelerationAnswerReplyShadow(
+        Envelope envelope,
+        AccelerationReplyTargetEvidence replyTarget,
+        string sessionId,
+        string nonce,
+        long payerDecisionId,
+        long generation,
+        long deadlineUtcMs,
+        out bool workerCreated)
+    {
+        lock (accelerationGate)
+        {
+            workerCreated = false;
+            if (!IsPendingAccelerationAnswerAck(
+                    sessionId,
+                    nonce,
+                    payerDecisionId,
+                    generation))
+            {
+                return null;
+            }
+
+            if (pendingAccelerationAnswerReplyShadow is { } current)
+            {
+                return current;
+            }
+
+            var shadow = new PendingAccelerationReplyShadow(
+                envelope,
+                replyTarget,
+                sessionId.Trim(),
+                nonce.Trim(),
+                payerDecisionId,
+                generation,
+                pendingAccelerationAnswerAckAuthorityMode,
+                deadlineUtcMs,
+                ++pendingAccelerationReplyWorkerGeneration,
+                "answer");
+            pendingAccelerationAnswerReplyShadow = shadow;
+            workerCreated = true;
+            return shadow;
+        }
+    }
+
+    private bool TryGetCurrentPendingAccelerationReplyShadow(
+        PendingAccelerationReplyShadow expected,
+        out PendingAccelerationReplyShadow current)
+    {
+        lock (accelerationGate)
+        {
+            current = pendingAccelerationAnswerReplyShadow!;
+            return current is not null &&
+                   current.WorkerGeneration == expected.WorkerGeneration &&
+                   current.PendingGeneration == expected.PendingGeneration &&
+                   string.Equals(
+                       current.Envelope.MessageId,
+                       expected.Envelope.MessageId,
+                       StringComparison.Ordinal) &&
+                   IsPendingAccelerationAnswerAck(
+                       current.SessionId,
+                       current.Nonce,
+                       current.PayerDecisionId,
+                       current.PendingGeneration);
+        }
+    }
+
+    private PendingAccelerationReplyShadow BindPendingAccelerationAnswerAckReplyShadow(
+        Envelope envelope,
+        AccelerationReplyTargetEvidence replyTarget,
+        string sessionId,
+        string nonce,
+        long payerDecisionId,
+        long pendingGeneration,
+        long deadlineUtcMs,
+        bool runtimeUnlock,
+        out bool workerCreated)
+    {
+        lock (accelerationGate)
+        {
+            workerCreated = false;
+            if (pendingAccelerationAnswerAckReplyShadow is { } current &&
+                string.Equals(current.SessionId, sessionId.Trim(), StringComparison.Ordinal) &&
+                string.Equals(current.Nonce, nonce.Trim(), StringComparison.Ordinal) &&
+                current.PayerDecisionId == payerDecisionId &&
+                current.PendingGeneration == pendingGeneration)
+            {
+                current = current with { ReplyTarget = replyTarget };
+                pendingAccelerationAnswerAckReplyShadow = current;
+                return current;
+            }
+
+            var shadow = new PendingAccelerationReplyShadow(
+                envelope,
+                replyTarget,
+                sessionId.Trim(),
+                nonce.Trim(),
+                payerDecisionId,
+                pendingGeneration,
+                runtimeUnlock
+                    ? RuntimeUnlockOfferAuthorityMode.InitialActivation
+                    : null,
+                deadlineUtcMs,
+                ++pendingAccelerationReplyWorkerGeneration,
+                "answer_ack");
+            pendingAccelerationAnswerAckReplyShadow = shadow;
+            workerCreated = true;
+            return shadow;
+        }
+    }
+
+    private bool TryGetCurrentPendingAccelerationAnswerAckReplyShadow(
+        PendingAccelerationReplyShadow expected,
+        out PendingAccelerationReplyShadow current)
+    {
+        lock (accelerationGate)
+        {
+            current = pendingAccelerationAnswerAckReplyShadow!;
+            return current is not null &&
+                   current.WorkerGeneration == expected.WorkerGeneration &&
+                   current.PendingGeneration == expected.PendingGeneration &&
+                   string.Equals(current.SessionId, expected.SessionId, StringComparison.Ordinal) &&
+                   string.Equals(current.Nonce, expected.Nonce, StringComparison.Ordinal) &&
+                   current.PayerDecisionId == expected.PayerDecisionId &&
+                   string.Equals(
+                       current.Envelope.MessageId,
+                       expected.Envelope.MessageId,
+                       StringComparison.Ordinal);
         }
     }
 
@@ -24219,6 +24379,8 @@ public sealed partial class NknSignalingTransport
         pendingAccelerationAnswerAckPayerDecisionId = 0;
         pendingAccelerationAnswerAckAuthorityMode = null;
         pendingAccelerationAnswerAckReplyTarget = null;
+        pendingAccelerationAnswerReplyShadow = null;
+        pendingAccelerationAnswerAckReplyShadow = null;
         pendingAccelerationAnswerAckGeneration++;
         SchedulePendingRuntimeUnlockAccelerationNegotiationAfterCurrentOperationUnsafe("answer_ack_cleared");
     }
@@ -24284,17 +24446,38 @@ public sealed partial class NknSignalingTransport
         string nonce,
         long payerDecisionId,
         long generation)
+        => ScheduleAccelerationAnswerAckTimeoutForReply(
+            sessionId,
+            nonce,
+            payerDecisionId,
+            generation,
+            replyShadow: null);
+
+    private void ScheduleAccelerationAnswerAckTimeoutForReply(
+        string sessionId,
+        string nonce,
+        long payerDecisionId,
+        long generation,
+        PendingAccelerationReplyShadow? replyShadow)
     {
         if (generation <= 0)
         {
             return;
         }
 
-        var timeout = ResolveAccelerationAnswerAckTimeout(sessionId, nonce, payerDecisionId, generation);
-        if (timeout <= TimeSpan.Zero)
-        {
-            return;
-        }
+        var timeout = AccelerationAnswerAckTimeoutOverrideForTests is { } overrideTimeout
+            ? overrideTimeout
+            : replyShadow is { AuthorityMode: not null }
+            ? TimeSpan.FromMilliseconds(Math.Max(
+                0,
+                replyShadow.DeadlineUtcMs -
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()))
+            : ResolveAccelerationAnswerAckTimeout(
+                sessionId,
+                nonce,
+                payerDecisionId,
+                generation);
+        timeout = timeout <= TimeSpan.Zero ? TimeSpan.FromMilliseconds(1) : timeout;
 
         _ = Task.Run(
             async () =>
@@ -24303,7 +24486,11 @@ public sealed partial class NknSignalingTransport
                 {
                     await Task.Delay(timeout, CancellationToken.None).ConfigureAwait(false);
                     if (disposed ||
-                        !IsPendingAccelerationAnswerAck(sessionId, nonce, payerDecisionId, generation))
+                        !IsPendingAccelerationAnswerAck(sessionId, nonce, payerDecisionId, generation) ||
+                        (replyShadow is not null &&
+                         !TryGetCurrentPendingAccelerationReplyShadow(
+                             replyShadow,
+                             out _)))
                     {
                         return;
                     }
@@ -24346,7 +24533,7 @@ public sealed partial class NknSignalingTransport
                         : "answer_ack_timeout";
                     LocalOperationalLog.Warn(
                         "NKN.Tuna",
-                        $"event=tuna_acceleration_answer_ack_timeout; session_id={SanitizeLogToken(sessionId)}; timeout_ms={(long)timeout.TotalMilliseconds}; payer_decision_id={payerDecisionId}; generation={generation}; trigger={SanitizeLogToken(pendingTrigger)}; retry_reason={SanitizeLogToken(timeoutReason)}");
+                        $"event=tuna_acceleration_answer_ack_timeout; session_id={SanitizeLogToken(sessionId)}; timeout_ms={(long)timeout.TotalMilliseconds}; payer_decision_id={payerDecisionId}; generation={generation}; trigger={SanitizeLogToken(pendingTrigger)}; reply_deadline_utc_ms={replyShadow?.DeadlineUtcMs ?? 0}; delivery_evidence=local_submission_only; retry_reason={SanitizeLogToken(timeoutReason)}");
                     ResumeFileTransferDataSessionsAfterTunaActivationNegotiation(
                         timeoutReason,
                         sessionId,
@@ -24461,6 +24648,28 @@ public sealed partial class NknSignalingTransport
             accepted &&
             pendingAnswerAckGeneration > 0 &&
             IsPendingAccelerationAnswerAckForSession(offer.SessionId);
+        PendingAccelerationReplyShadow? replyShadow = null;
+        var replayWorkerCreated = false;
+        if (accepted && pendingAnswerAckGeneration > 0)
+        {
+            replyShadow = BindPendingAccelerationAnswerReplyShadow(
+                envelope,
+                replyTarget,
+                answer.SessionId,
+                answer.Nonce,
+                answer.PayerDecisionId,
+                pendingAnswerAckGeneration,
+                answer.ExpiresAtUnixMs,
+                out replayWorkerCreated);
+            if (replyShadow is null)
+            {
+                return;
+            }
+
+            envelope = replyShadow.Envelope;
+            replyTarget = replyShadow.ReplyTarget;
+        }
+
         var queued = await SendAccelerationControlEnvelopeWithBulkBypassAsync(
                 replyTarget.Target,
                 envelope,
@@ -24471,34 +24680,36 @@ public sealed partial class NknSignalingTransport
             .ConfigureAwait(false);
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=tuna_acceleration_answer_{(queued.Succeeded ? "sent" : "rejected")}; accepted={(accepted ? 1 : 0)}; reason={SanitizeLogToken(rejectReason)}; lanes={string.Join(",", answer.SupportedLanes)}; payer_decision_id={answer.PayerDecisionId}; target_mode=validated_inbound_source; target_peer_fingerprint={replyTarget.PeerFingerprint}; inbound_msg_id={SanitizeLogToken(replyTarget.InboundMessageId)}; msg_id={SanitizeLogToken(envelope.MessageId)}");
+            $"event=tuna_acceleration_answer_{(queued.Succeeded ? "sent" : "rejected")}; accepted={(accepted ? 1 : 0)}; reason={SanitizeLogToken(rejectReason)}; lanes={string.Join(",", answer.SupportedLanes)}; payer_decision_id={answer.PayerDecisionId}; generation={pendingAnswerAckGeneration}; target_mode=validated_inbound_source; target_peer_fingerprint={replyTarget.PeerFingerprint}; inbound_msg_id={SanitizeLogToken(replyTarget.InboundMessageId)}; msg_id={SanitizeLogToken(envelope.MessageId)}; reply_deadline_utc_ms={replyShadow?.DeadlineUtcMs ?? answer.ExpiresAtUnixMs}; remaining_lifetime_ms={Math.Max(0, (replyShadow?.DeadlineUtcMs ?? answer.ExpiresAtUnixMs) - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())}; delivery_evidence=local_submission_only");
         if (accepted &&
             pendingAnswerAckGeneration > 0 &&
-            scheduleReplay &&
-            (queued.Succeeded || requireRuntimeUnlockAnswerObservedSend))
+            replayWorkerCreated &&
+            replyShadow is not null &&
+            (replyShadow.AuthorityMode is not null || queued.Succeeded))
         {
-            ScheduleAccelerationAnswerReplay(
-                envelope,
+            ScheduleAccelerationAnswerAckTimeoutForReply(
                 answer.SessionId,
                 answer.Nonce,
                 answer.PayerDecisionId,
                 pendingAnswerAckGeneration,
-                ResolveAccelerationAnswerReplayAttempts(offer.Trigger, accepted),
-                requireRuntimeUnlockAnswerObservedSend);
+                replyShadow);
+            if (scheduleReplay || replyShadow.AuthorityMode is not null)
+            {
+                ScheduleAccelerationAnswerReplay(
+                    replyShadow,
+                    ResolveAccelerationAnswerReplayAttempts(),
+                    requireRuntimeUnlockAnswerObservedSend);
+            }
         }
     }
 
     private void ScheduleAccelerationAnswerReplay(
-        Envelope envelope,
-        string sessionId,
-        string nonce,
-        long payerDecisionId,
-        long generation,
+        PendingAccelerationReplyShadow replyShadow,
         int maxAttempts = AccelerationAnswerReplayAttempts,
         bool requireObservedSend = false)
     {
-        if (generation <= 0 ||
-            maxAttempts <= 0)
+        if (replyShadow.PendingGeneration <= 0 ||
+            (replyShadow.AuthorityMode is null && maxAttempts <= 0))
         {
             return;
         }
@@ -24506,44 +24717,62 @@ public sealed partial class NknSignalingTransport
         _ = Task.Run(
             async () =>
             {
-                for (var attempt = 1; attempt <= maxAttempts; attempt++)
+                for (var attempt = 1;
+                     replyShadow.AuthorityMode is not null || attempt <= maxAttempts;
+                     attempt++)
                 {
                     try
                     {
-                        await Task.Delay(ResolveAccelerationAnswerReplayDelay(), CancellationToken.None).ConfigureAwait(false);
+                        var remainingMs = replyShadow.DeadlineUtcMs -
+                            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                        if (remainingMs <= 0)
+                        {
+                            return;
+                        }
+
+                        var delay = ResolveAccelerationAnswerReplayDelay();
+                        if (replyShadow.AuthorityMode is not null &&
+                            delay.TotalMilliseconds > remainingMs)
+                        {
+                            delay = TimeSpan.FromMilliseconds(remainingMs);
+                        }
+
+                        await Task.Delay(delay, CancellationToken.None).ConfigureAwait(false);
                         if (disposed ||
-                            !IsPendingAccelerationAnswerAck(sessionId, nonce, payerDecisionId, generation))
+                            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >=
+                                replyShadow.DeadlineUtcMs ||
+                            !TryGetCurrentPendingAccelerationReplyShadow(
+                                replyShadow,
+                                out var currentShadow))
                         {
                             return;
                         }
 
                         var requireReplayObservedSend =
                             requireObservedSend &&
-                            IsPendingAccelerationAnswerAckForSession(sessionId);
-                        var replyTarget = GetPendingAccelerationAnswerReplyTarget();
-                        if (replyTarget is null ||
-                            replyTarget.LineageGeneration != generation ||
-                            !ValidateAccelerationReplyTarget(
-                                replyTarget,
-                                sessionId,
-                                nonce,
-                                payerDecisionId,
+                            IsPendingAccelerationAnswerAckForSession(
+                                currentShadow.SessionId);
+                        if (!ValidateAccelerationReplyTarget(
+                                currentShadow.ReplyTarget,
+                                currentShadow.SessionId,
+                                currentShadow.Nonce,
+                                currentShadow.PayerDecisionId,
                                 "answer_replay"))
                         {
                             return;
                         }
 
                         var queued = await SendAccelerationControlEnvelopeWithBulkBypassAsync(
-                                replyTarget.Target,
-                                envelope,
+                                currentShadow.ReplyTarget.Target,
+                                currentShadow.Envelope,
                                 "answer_replay",
                                 CancellationToken.None,
                                 requireReplayObservedSend,
-                                sessionId)
+                                currentShadow.SessionId)
                             .ConfigureAwait(false);
                         LocalOperationalLog.Info(
                             "NKN.Tuna",
-                            $"event=tuna_acceleration_answer_replay_{(queued.Succeeded ? "sent" : "rejected")}; attempt={attempt}; max_attempts={maxAttempts}; session_id={SanitizeLogToken(sessionId)}; payer_decision_id={payerDecisionId}; generation={generation}; target_mode=validated_inbound_source; target_peer_fingerprint={replyTarget.PeerFingerprint}; inbound_msg_id={SanitizeLogToken(replyTarget.InboundMessageId)}; msg_id={SanitizeLogToken(envelope.MessageId)}");
+                            $"event=tuna_acceleration_answer_replay_{(queued.Succeeded ? "sent" : "rejected")}; attempt={attempt}; max_attempts={(currentShadow.AuthorityMode is not null ? 0 : maxAttempts)}; session_id={SanitizeLogToken(currentShadow.SessionId)}; payer_decision_id={currentShadow.PayerDecisionId}; generation={currentShadow.PendingGeneration}; target_mode=validated_inbound_source; target_peer_fingerprint={currentShadow.ReplyTarget.PeerFingerprint}; inbound_msg_id={SanitizeLogToken(currentShadow.ReplyTarget.InboundMessageId)}; msg_id={SanitizeLogToken(currentShadow.Envelope.MessageId)}; reply_deadline_utc_ms={currentShadow.DeadlineUtcMs}; remaining_lifetime_ms={Math.Max(0, currentShadow.DeadlineUtcMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())}; delivery_evidence=local_submission_only");
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
@@ -24559,23 +24788,22 @@ public sealed partial class NknSignalingTransport
     private static TimeSpan ResolveAccelerationAnswerReplayDelay()
         => AccelerationAnswerReplayDelayOverrideForTests ?? AccelerationAnswerReplayDelay;
 
-    private static int ResolveAccelerationAnswerReplayAttempts(string? trigger, bool accepted)
+    private static int ResolveAccelerationAnswerReplayAttempts()
     {
         if (AccelerationAnswerReplayAttemptsOverrideForTests is { } overrideAttempts)
         {
             return Math.Max(0, overrideAttempts);
         }
 
-        return accepted && IsRuntimeUnlockActivationReason(trigger)
-            ? RuntimeUnlockAccelerationAnswerReplayAttempts
-            : AccelerationAnswerReplayAttempts;
+        return AccelerationAnswerReplayAttempts;
     }
 
     private async Task SendAccelerationAnswerAckAsync(
         TransportAccelerationAnswerPayload answer,
         AccelerationReplyTargetEvidence replyTarget,
         NknAccelerationLaneKind lanes,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool runtimeUnlock = false)
     {
         if (!ValidateAccelerationReplyTarget(
                 replyTarget,
@@ -24605,6 +24833,18 @@ public sealed partial class NknSignalingTransport
             answer.Nonce,
             JsonSerializer.SerializeToUtf8Bytes(ack));
         var envelope = CreateEnvelope(envelopeCode, MsgType.TransportAccelerationAnswerAck, payload, replyTo: null);
+        var replyShadow = BindPendingAccelerationAnswerAckReplyShadow(
+            envelope,
+            replyTarget,
+            answer.SessionId,
+            answer.Nonce,
+            answer.PayerDecisionId,
+            replyTarget.LineageGeneration,
+            ack.ExpiresAtUnixMs,
+            runtimeUnlock,
+            out var replayWorkerCreated);
+        envelope = replyShadow.Envelope;
+        replyTarget = replyShadow.ReplyTarget;
         var queued = await SendAccelerationControlEnvelopeWithBulkBypassAsync(
                 replyTarget.Target,
                 envelope,
@@ -24613,15 +24853,10 @@ public sealed partial class NknSignalingTransport
             .ConfigureAwait(false);
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=tuna_acceleration_answer_ack_{(queued.Succeeded ? "sent" : "rejected")}; session_id={SanitizeLogToken(answer.SessionId)}; lanes={FormatAccelerationLanesForLog(lanes)}; payer_decision_id={answer.PayerDecisionId}; target_mode=validated_inbound_source; target_peer_fingerprint={replyTarget.PeerFingerprint}; inbound_msg_id={SanitizeLogToken(replyTarget.InboundMessageId)}; msg_id={SanitizeLogToken(envelope.MessageId)}");
-        if (queued.Succeeded)
+            $"event=tuna_acceleration_answer_ack_{(queued.Succeeded ? "sent" : "rejected")}; session_id={SanitizeLogToken(answer.SessionId)}; lanes={FormatAccelerationLanesForLog(lanes)}; payer_decision_id={answer.PayerDecisionId}; generation={replyShadow.PendingGeneration}; target_mode=validated_inbound_source; target_peer_fingerprint={replyTarget.PeerFingerprint}; inbound_msg_id={SanitizeLogToken(replyTarget.InboundMessageId)}; msg_id={SanitizeLogToken(envelope.MessageId)}; reply_deadline_utc_ms={replyShadow.DeadlineUtcMs}; remaining_lifetime_ms={Math.Max(0, replyShadow.DeadlineUtcMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())}; delivery_evidence=local_submission_only");
+        if (replayWorkerCreated && (runtimeUnlock || queued.Succeeded))
         {
-            ScheduleAccelerationAnswerAckReplay(
-                replyTarget,
-                envelope,
-                answer.SessionId,
-                answer.Nonce,
-                answer.PayerDecisionId);
+            ScheduleAccelerationAnswerAckReplay(replyShadow);
         }
     }
 
@@ -24667,44 +24902,64 @@ public sealed partial class NknSignalingTransport
             ct);
 
     private void ScheduleAccelerationAnswerAckReplay(
-        AccelerationReplyTargetEvidence replyTarget,
-        Envelope envelope,
-        string sessionId,
-        string nonce,
-        long payerDecisionId)
+        PendingAccelerationReplyShadow replyShadow)
     {
         _ = Task.Run(
             async () =>
             {
-                for (var attempt = 1; attempt <= AccelerationAnswerAckReplayAttempts; attempt++)
+                for (var attempt = 1;
+                     replyShadow.AuthorityMode is not null ||
+                         attempt <= AccelerationAnswerAckReplayAttempts;
+                     attempt++)
                 {
                     try
                     {
-                        await Task.Delay(AccelerationAnswerAckReplayDelay, CancellationToken.None).ConfigureAwait(false);
-                        if (disposed || !IsAccelerationNegotiatedAndHealthy())
+                        var remainingMs = replyShadow.DeadlineUtcMs -
+                            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                        if (remainingMs <= 0)
+                        {
+                            return;
+                        }
+
+                        var delay = AccelerationAnswerAckReplayDelay;
+                        if (replyShadow.AuthorityMode is not null &&
+                            delay.TotalMilliseconds > remainingMs)
+                        {
+                            delay = TimeSpan.FromMilliseconds(remainingMs);
+                        }
+
+                        await Task.Delay(delay, CancellationToken.None).ConfigureAwait(false);
+                        if (disposed ||
+                            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >=
+                                replyShadow.DeadlineUtcMs ||
+                            !TryGetCurrentPendingAccelerationAnswerAckReplyShadow(
+                                replyShadow,
+                                out var currentShadow) ||
+                            (currentShadow.AuthorityMode is null &&
+                             !IsAccelerationNegotiatedAndHealthy()))
                         {
                             return;
                         }
 
                         if (!ValidateAccelerationReplyTarget(
-                                replyTarget,
-                                sessionId,
-                                nonce,
-                                payerDecisionId,
+                                currentShadow.ReplyTarget,
+                                currentShadow.SessionId,
+                                currentShadow.Nonce,
+                                currentShadow.PayerDecisionId,
                                 "answer_ack_replay"))
                         {
                             return;
                         }
 
                         var queued = await SendAccelerationControlEnvelopeWithBulkBypassAsync(
-                                replyTarget.Target,
-                                envelope,
+                                currentShadow.ReplyTarget.Target,
+                                currentShadow.Envelope,
                                 "answer_ack_replay",
                                 CancellationToken.None)
                             .ConfigureAwait(false);
                         LocalOperationalLog.Info(
                             "NKN.Tuna",
-                            $"event=tuna_acceleration_answer_ack_replay_{(queued.Succeeded ? "sent" : "rejected")}; attempt={attempt}; session_id={SanitizeLogToken(sessionId)}; payer_decision_id={payerDecisionId}; target_mode=validated_inbound_source; target_peer_fingerprint={replyTarget.PeerFingerprint}; inbound_msg_id={SanitizeLogToken(replyTarget.InboundMessageId)}; msg_id={SanitizeLogToken(envelope.MessageId)}");
+                            $"event=tuna_acceleration_answer_ack_replay_{(queued.Succeeded ? "sent" : "rejected")}; attempt={attempt}; session_id={SanitizeLogToken(currentShadow.SessionId)}; payer_decision_id={currentShadow.PayerDecisionId}; generation={currentShadow.PendingGeneration}; target_mode=validated_inbound_source; target_peer_fingerprint={currentShadow.ReplyTarget.PeerFingerprint}; inbound_msg_id={SanitizeLogToken(currentShadow.ReplyTarget.InboundMessageId)}; msg_id={SanitizeLogToken(currentShadow.Envelope.MessageId)}; reply_deadline_utc_ms={currentShadow.DeadlineUtcMs}; remaining_lifetime_ms={Math.Max(0, currentShadow.DeadlineUtcMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())}; delivery_evidence=local_submission_only");
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
@@ -25172,7 +25427,13 @@ public sealed partial class NknSignalingTransport
         ObserveAccelerationControlSendTask(priorityControlTask, purpose, "control_priority");
 
         Task<AccelerationControlSendResult>? bulkTask = null;
-        if (string.IsNullOrWhiteSpace(remoteBulkEndpoint))
+        var replyRequiresExactTarget = purpose is
+            "answer" or "answer_replay" or "answer_ack" or
+            "answer_ack_replay";
+        var bulkTarget = replyRequiresExactTarget
+            ? target
+            : remoteBulkEndpoint;
+        if (string.IsNullOrWhiteSpace(bulkTarget))
         {
             LocalOperationalLog.Warn(
                 "NKN.Tuna",
@@ -25184,7 +25445,7 @@ public sealed partial class NknSignalingTransport
                 "NKN.Tuna",
                 $"event=tuna_acceleration_control_bulk_bypass_started; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(envelope.Type)}; delay_ms=0; mode=control_to_bulk_endpoint");
             bulkTask = SendAccelerationControlBulkCopyAsync(
-                remoteBulkEndpoint,
+                bulkTarget,
                 envelope,
                 bytes,
                 purpose,
@@ -27287,7 +27548,8 @@ public sealed partial class NknSignalingTransport
                             answer,
                             answerReplyTarget,
                             validation.AcceptedLanes,
-                            CancellationToken.None)
+                            CancellationToken.None,
+                            runtimeUnlock: true)
                         .ConfigureAwait(false);
                     await Task.Delay(RuntimeUnlockAnswerAckProbeSettleDelay, CancellationToken.None).ConfigureAwait(false);
                     Interlocked.Exchange(ref accelerationNegotiationRetryAttempts, 0);

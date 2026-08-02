@@ -5,6 +5,7 @@ using System.Net.Sockets;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using NLink.Core;
 using NLink.Core.Configuration;
 using NLink.Core.FileTransfer;
@@ -14905,9 +14906,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             {
                 if (string.Equals(destination, hostClient.ConnectedAddress, StringComparison.Ordinal) &&
                     EnvelopeCodec.TryDeserialize(payload, out var envelope) &&
-                    envelope.Type == MsgType.TransportAccelerationAnswer)
+                    envelope.Type == MsgType.TransportAccelerationAnswer &&
+                    Interlocked.CompareExchange(ref blockedAnswerCount, 1, 0) == 0)
                 {
-                    Interlocked.Increment(ref blockedAnswerCount);
                     await blockedControlAnswer.Task.WaitAsync(ct).ConfigureAwait(false);
                 }
             };
@@ -14980,7 +14981,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         var previousAnswerReplayAttempts = NknSignalingTransport.AccelerationAnswerReplayAttemptsOverrideForTests;
         NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = TimeSpan.Zero;
         NknSignalingTransport.AccelerationAnswerReplayDelayOverrideForTests = TimeSpan.FromMilliseconds(20);
-        NknSignalingTransport.AccelerationAnswerReplayAttemptsOverrideForTests = 8;
+        NknSignalingTransport.AccelerationAnswerReplayAttemptsOverrideForTests = 16;
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
@@ -14994,7 +14995,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             {
                 if (EnvelopeCodec.TryDeserialize(payload, out var envelope) &&
                     envelope.Type == MsgType.TransportAccelerationAnswer &&
-                    Interlocked.Increment(ref droppedAnswerCopies) <= 12)
+                    Interlocked.Increment(ref droppedAnswerCopies) <= 100)
                 {
                     return Task.FromResult(false);
                 }
@@ -15066,12 +15067,34 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     StringComparison.Ordinal),
                 TimeSpan.FromSeconds(3));
 
-            Assert.True(Volatile.Read(ref droppedAnswerCopies) >= 12);
+            Assert.True(Volatile.Read(ref droppedAnswerCopies) >= 100);
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=tuna_acceleration_answer_replay_", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_answer_received_raw;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_answer_ack_received;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=runtime_unlock_answer_ack_probe_barrier", logTail, StringComparison.Ordinal);
+            var replyMessageIds = Regex.Matches(
+                    logTail,
+                    @"event=tuna_acceleration_answer_(?:sent|replay_sent);[^\r\n]*msg_id=([^;\r\n]+)")
+                .Select(match => match.Groups[1].Value)
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            Assert.Single(replyMessageIds);
+            var replyDeadlines = Regex.Matches(
+                    logTail,
+                    @"event=tuna_acceleration_answer_(?:sent|replay_sent);[^\r\n]*reply_deadline_utc_ms=([0-9]+)")
+                .Select(match => match.Groups[1].Value)
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            Assert.Single(replyDeadlines);
+            var replayOrdinals = Regex.Matches(
+                    logTail,
+                    @"event=tuna_acceleration_answer_replay_(?:sent|rejected); attempt=([0-9]+);")
+                .Select(match => int.Parse(match.Groups[1].Value))
+                .ToArray();
+            Assert.True(
+                replayOrdinals.Length > 0 && replayOrdinals.Max() > 16,
+                $"Expected a replay after attempt 16; max={replayOrdinals.DefaultIfEmpty().Max()}, dropped={Volatile.Read(ref droppedAnswerCopies)}.");
             Assert.Contains(
                 "event=runtime_unlock_offer_authority_boundary_decided; boundary=answer_received; authority_mode=InitialActivation; decision_status=accepted;",
                 logTail,
@@ -27356,7 +27379,6 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         {
             args = [args[0], args[1], listenerRearmReceipt];
         }
-
         return CoreSmokeTestsBase.InvokePrivateMethod(target, methodName, args);
     }
 
