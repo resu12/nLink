@@ -4978,7 +4978,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
 
     function Get-TunaGuiRetiredPendingAnswerHandoffFailure {
         param(
-            [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+            [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
         )
 
         $states = @{}
