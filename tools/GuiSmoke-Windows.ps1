@@ -4669,9 +4669,9 @@ function New-TunaGuiFileTransferFailureClassificationResult {
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$RouteMode,
         [Parameter(Mandatory = $true)][string]$ClassificationSource,
         [bool]$ClassificationComplete = $true,
-        [long]$EvidenceLineVisitCount = 0,
-        [long]$EvidenceParsedRecordCount = 0,
-        [long]$EvidenceLookupCount = 0,
+        [object]$EvidenceLineVisitCount = 0L,
+        [object]$EvidenceParsedRecordCount = 0L,
+        [object]$EvidenceLookupCount = 0L,
         [long]$ClassificationElapsedMilliseconds = 0
     )
 
@@ -4696,6 +4696,7 @@ function New-TunaGuiFileTransferFailureClassificationResult {
         RuntimeUnlockRetryRegularV4RecoverySettlementMissing = $false
         RuntimeUnlockRetrySourcePublicationMismatch = $false
         InitialActivationAnswerPeerDeliveryMissing = $false
+        InitialActivationRetiredPendingAnswerHandoffMissing = $false
         InitialActivationReceiveRecoveryHoldNotPreserved = $false
         InitialActivationReceiveRecoveryHoldReleasedOfferExpired = $false
         RouteTransitionDrainingTransportGraceTerminalization = $false
@@ -4973,6 +4974,122 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         }
 
         return $match.Groups[1].Value.Trim()
+    }
+
+    function Get-TunaGuiRetiredPendingAnswerHandoffFailure {
+        param(
+            [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+        )
+
+        $states = @{}
+        $visits = 0L
+        foreach ($line in $Lines) {
+            $visits++
+            $eventName = Get-TunaGuiLogLineFieldValue -Line $line -Name 'event'
+            if ([string]::IsNullOrWhiteSpace($eventName)) {
+                continue
+            }
+            $writer = Get-TunaGuiLogLineFieldValue -Line $line -Name 'log_writer_id'
+            $sessionId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'session_id'
+            $payerDecisionId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'payer_decision_id'
+            $offerGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'offer_generation'
+            if ([string]::IsNullOrWhiteSpace($offerGeneration)) {
+                $offerGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'generation'
+            }
+
+            if ($eventName -eq 'tuna_acceleration_offer_queued' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'reason') -eq 'runtime_unlock' -and
+                -not [string]::IsNullOrWhiteSpace($writer) -and
+                -not [string]::IsNullOrWhiteSpace($sessionId) -and
+                -not [string]::IsNullOrWhiteSpace($payerDecisionId) -and
+                -not [string]::IsNullOrWhiteSpace($offerGeneration)) {
+                $key = "$writer|$sessionId|$payerDecisionId|$offerGeneration".ToLowerInvariant()
+                $states[$key] = [pscustomobject]@{
+                    Writer = $writer; SessionId = $sessionId; PayerDecisionId = $payerDecisionId
+                    OfferGeneration = $offerGeneration; TransactionGeneration = ''
+                    Retired = $false; Preserved = $false; RawAnswer = $false
+                    BoundaryAccepted = $false; RetiredAnswerAccepted = $false
+                    AnswerAck = $false; Barrier = $false; Candidate = $false
+                    TransactionAnswer = $false; InitiatorLaunch = $false
+                }
+                continue
+            }
+
+            $matching = @($states.Values | Where-Object {
+                ([string]::IsNullOrWhiteSpace($writer) -or $_.Writer -eq $writer) -and
+                ([string]::IsNullOrWhiteSpace($sessionId) -or $_.SessionId -eq $sessionId) -and
+                ([string]::IsNullOrWhiteSpace($payerDecisionId) -or $_.PayerDecisionId -eq $payerDecisionId) -and
+                ([string]::IsNullOrWhiteSpace($offerGeneration) -or $_.OfferGeneration -eq $offerGeneration)
+            })
+            if ($eventName -eq 'tuna_acceleration_answer_received_raw') {
+                $matching = @($states.Values | Where-Object { $_.Writer -eq $writer -and $_.Preserved -and -not $_.RawAnswer })
+            }
+            if ($matching.Count -ne 1) {
+                continue
+            }
+            $state = $matching[0]
+            switch ($eventName) {
+                'tuna_acceleration_outbound_offer_retired' {
+                    if ((Get-TunaGuiLogLineFieldValue -Line $line -Name 'reason') -eq 'runtime_unlock_offer_peer_response_timeout_pending_runtime_unlock_answer') { $state.Retired = $true }
+                }
+                'tuna_acceleration_pending_runtime_unlock_answer_preserved' {
+                    if ($state.Retired -and (Get-TunaGuiLogLineFieldValue -Line $line -Name 'reason') -eq 'runtime_unlock_offer_peer_response_timeout_pending_runtime_unlock_answer') { $state.Preserved = $true }
+                }
+                'tuna_acceleration_answer_received_raw' { if ($state.Preserved) { $state.RawAnswer = $true } }
+                'runtime_unlock_offer_authority_boundary_decided' {
+                    if ($state.RawAnswer -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'boundary') -eq 'answer_received' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_mode') -eq 'InitialActivation' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -ieq 'accepted') {
+                        $state.TransactionGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'transaction_generation'
+                        $state.BoundaryAccepted = -not [string]::IsNullOrWhiteSpace($state.TransactionGeneration)
+                    }
+                }
+                'tuna_acceleration_retired_offer_answer_accepted' { if ($state.BoundaryAccepted) { $state.RetiredAnswerAccepted = $true } }
+                'tuna_acceleration_answer_ack_sent' { if ($state.RetiredAnswerAccepted) { $state.AnswerAck = $true } }
+                'runtime_unlock_answer_ack_probe_barrier_released' { if ($state.AnswerAck) { $state.Barrier = $true } }
+                'filetransfer_runtime_unlock_handoff_pending_route_commit' {
+                    if ($state.Barrier -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'transaction_generation') -eq $state.TransactionGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'state') -ieq 'offersentobserved' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'path_probe_state') -ieq 'none') { $state.Candidate = $true }
+                }
+                'runtime_unlock_transaction_answer_received' {
+                    if ($state.Candidate -and (Get-TunaGuiLogLineFieldValue -Line $line -Name 'transaction_generation') -eq $state.TransactionGeneration) { $state.TransactionAnswer = $true }
+                }
+                'runtime_unlock_precommit_probe_launch_requested' {
+                    if ($state.TransactionAnswer -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'transaction_generation') -eq $state.TransactionGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'responder_waiting_for_peer_probe') -ne '1') { $state.InitiatorLaunch = $true }
+                }
+            }
+        }
+
+        return [pscustomobject]@{
+            Unresolved = @($states.Values | Where-Object { $_.Candidate -and -not ($_.TransactionAnswer -and $_.InitiatorLaunch) }).Count -gt 0
+            LineVisits = $visits
+        }
+    }
+
+    $retiredPendingAnswerFastPath =
+        Get-TunaGuiRetiredPendingAnswerHandoffFailure -Lines ([string[]]$evidenceLines)
+    if ($retiredPendingAnswerFastPath.Unresolved) {
+        if ($null -ne $TestMetrics) {
+            $TestMetrics.evidenceLineVisitCount = [long]$retiredPendingAnswerFastPath.LineVisits
+            $TestMetrics.evidenceLookupCount = 0L
+            $TestMetrics.classificationSource = "${classificationSource}_retired_pending_answer_index"
+        }
+        $result = New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'runtime_unlock_initial_activation' `
+            -Reason 'accepted_retired_pending_answer_not_promoted_to_runtime_unlock_transaction' `
+            -RouteMode $RouteMode `
+            -ClassificationSource "${classificationSource}_retired_pending_answer_index" `
+            -EvidenceLineVisitCount ([long]$retiredPendingAnswerFastPath.LineVisits) `
+            -EvidenceParsedRecordCount 0L `
+            -EvidenceLookupCount 0L `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
+        $result.InitialActivationRetiredPendingAnswerHandoffMissing = $true
+        return $result
     }
 
     function Test-TunaGuiLogLineHasEvent {
@@ -11446,7 +11563,10 @@ function Invoke-TunaGuiFailureClassificationEnrichment {
             -Reason 'evidence_enrichment_timeout' `
             -RouteMode $RouteMode `
             -ClassificationSource 'immutable_evidence_timeout' `
-            -ClassificationComplete $false
+            -ClassificationComplete $false `
+            -EvidenceLineVisitCount '(unavailable)' `
+            -EvidenceParsedRecordCount '(unavailable)' `
+            -EvidenceLookupCount '(unavailable)'
     }
 
     $evidencePaths = New-Object System.Collections.Generic.List[string]
@@ -11515,6 +11635,9 @@ function Invoke-TunaGuiFailureClassificationEnrichment {
                 -RouteMode $RouteMode `
                 -ClassificationSource 'immutable_evidence_timeout' `
                 -ClassificationComplete $false `
+                -EvidenceLineVisitCount '(unavailable)' `
+                -EvidenceParsedRecordCount '(unavailable)' `
+                -EvidenceLookupCount '(unavailable)' `
                 -ClassificationElapsedMilliseconds $stopwatch.ElapsedMilliseconds
         }
         if ($process.ExitCode -ne 0 -or
@@ -16423,11 +16546,11 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
             classificationComplete = [bool]$Classification.ClassificationComplete
             classificationStatus = $ClassificationStatus
             classificationEvidenceLineVisitCount =
-                [long]$Classification.EvidenceLineVisitCount
+                $Classification.EvidenceLineVisitCount
             classificationEvidenceParsedRecordCount =
-                [long]$Classification.EvidenceParsedRecordCount
+                $Classification.EvidenceParsedRecordCount
             classificationEvidenceLookupCount =
-                [long]$Classification.EvidenceLookupCount
+                $Classification.EvidenceLookupCount
             classificationElapsedMilliseconds =
                 [long]$Classification.ClassificationElapsedMilliseconds
             tunaActive = [bool]$Classification.TunaActive

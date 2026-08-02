@@ -2857,6 +2857,68 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeFailureClassification_RetiredPendingAnswerUsesIndexedFastPath()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "New-TunaGuiFileTransferFailureClassificationResult",
+            "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiExplicitFailureClassification",
+            "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiFileTransferSetupFailureClassification",
+            "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-retired-answer-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                @(
+                    'event=tuna_acceleration_offer_queued; reason=runtime_unlock; session_id=sess; payer_decision_id=4; generation=1; log_writer_id=writer',
+                    'event=tuna_acceleration_outbound_offer_retired; reason=runtime_unlock_offer_peer_response_timeout_pending_runtime_unlock_answer; session_id=sess; payer_decision_id=4; log_writer_id=writer',
+                    'event=tuna_acceleration_pending_runtime_unlock_answer_preserved; reason=runtime_unlock_offer_peer_response_timeout_pending_runtime_unlock_answer; session_id=sess; payer_decision_id=4; generation=1; log_writer_id=writer',
+                    'event=tuna_acceleration_answer_received_raw; msg_id=answer; log_writer_id=writer',
+                    'event=runtime_unlock_offer_authority_boundary_decided; boundary=answer_received; authority_mode=InitialActivation; decision_status=accepted; session_id=sess; payer_decision_id=4; offer_generation=1; transaction_generation=1; log_writer_id=writer',
+                    'event=tuna_acceleration_retired_offer_answer_accepted; session_id=sess; payer_decision_id=4; log_writer_id=writer',
+                    'event=tuna_acceleration_answer_ack_sent; session_id=sess; payer_decision_id=4; generation=1; log_writer_id=writer',
+                    'event=runtime_unlock_answer_ack_probe_barrier_released; session_id=sess; payer_decision_id=4; log_writer_id=writer',
+                    'event=filetransfer_runtime_unlock_handoff_pending_route_commit; session_id=sess; offer_generation=1; transaction_generation=1; state=offersentobserved; path_probe_state=none; log_writer_id=writer'
+                ) | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($result.Phase -ne 'runtime_unlock_initial_activation' -or
+                    $result.Reason -ne 'accepted_retired_pending_answer_not_promoted_to_runtime_unlock_transaction' -or
+                    -not $result.InitialActivationRetiredPendingAnswerHandoffMissing -or
+                    $result.ClassificationSource -ne 'immutable_evidence_retired_pending_answer_index' -or
+                    [long]$result.EvidenceLineVisitCount -ne 9) {
+                    throw "retired pending answer fast path mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+                Write-Output 'gui-retired-pending-answer-fast-path-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Retired pending-answer GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-retired-pending-answer-fast-path-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GuiSmokeFailureClassification_BudgetLeavesHardDeadlineGrace()
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));

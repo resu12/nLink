@@ -20781,6 +20781,31 @@ function Get-FileTransferRuntimeUnlockInitialOfferRetryLifecycleHandoffCorrelati
             'runtime_unlock_precommit_probe_launch_started',
             'runtime_unlock_precommit_probe_started')
     })
+    [object[]]$retiredOfferEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_outbound_offer_retired' -and
+        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq
+            'runtime_unlock_offer_peer_response_timeout_pending_runtime_unlock_answer'
+    })
+    [object[]]$pendingAnswerPreservedEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_pending_runtime_unlock_answer_preserved' -and
+        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq
+            'runtime_unlock_offer_peer_response_timeout_pending_runtime_unlock_answer'
+    })
+    [object[]]$retiredAnswerAcceptedEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_retired_offer_answer_accepted'
+    })
+    [object[]]$answerAckBarrierEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_answer_ack_probe_barrier_released'
+    })
+    [object[]]$pendingRouteCommitEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_runtime_unlock_handoff_pending_route_commit' -and
+        (Get-FileTransferEventField -Event $_ -Name 'state' -Default '').Equals(
+            'offersentobserved',
+            [System.StringComparison]::OrdinalIgnoreCase) -and
+        (Get-FileTransferEventField -Event $_ -Name 'path_probe_state' -Default '').Equals(
+            'none',
+            [System.StringComparison]::OrdinalIgnoreCase)
+    })
 
     function Test-InitialOfferIdentityMatch {
         param(
@@ -21058,6 +21083,137 @@ function Get-FileTransferRuntimeUnlockInitialOfferRetryLifecycleHandoffCorrelati
         }
         else {
             $unresolvedCandidates.Add($rejection) | Out-Null
+        }
+    }
+
+    # A peer-response timeout retires the wire offer while deliberately keeping
+    # the InitialActivation transaction and answer window alive.  If the late
+    # answer is accepted but that retained transaction remains OfferSentObserved,
+    # the initiator never owns a precommit launch.  Anchor the boundary at the
+    # exact pending-route-commit observation, not at the responder's intentional
+    # waiting launch.
+    foreach ($pendingRouteCommit in $pendingRouteCommitEvents) {
+        $writer = Get-InitialOfferBoundaryField -Event $pendingRouteCommit -Names @('log_writer_id')
+        $sessionId = Get-InitialOfferBoundaryField -Event $pendingRouteCommit -Names @('session_id')
+        $offerGeneration = Get-InitialOfferBoundaryField -Event $pendingRouteCommit -Names @('offer_generation')
+        $transactionGeneration = Get-InitialOfferBoundaryField -Event $pendingRouteCommit -Names @('transaction_generation')
+        if ([string]::IsNullOrWhiteSpace($writer) -or
+            [string]::IsNullOrWhiteSpace($sessionId) -or
+            [string]::IsNullOrWhiteSpace($offerGeneration) -or
+            [string]::IsNullOrWhiteSpace($transactionGeneration)) {
+            continue
+        }
+
+        [object[]]$matchingOffers = @($initialOffers | Where-Object {
+            [int64]$_.Sequence -lt [int64]$pendingRouteCommit.Sequence -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('generation')) -eq $offerGeneration
+        })
+        if ($matchingOffers.Count -ne 1) {
+            continue
+        }
+        $offer = $matchingOffers[0]
+        $payerDecisionId = Get-InitialOfferBoundaryField -Event $offer -Names @('payer_decision_id')
+
+        $retirement = @($retiredOfferEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$offer.Sequence -and
+            [int64]$_.Sequence -lt [int64]$pendingRouteCommit.Sequence -and
+            (Test-InitialOfferWriterMatch -Left $offer -Right $_) -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('payer_decision_id')) -eq $payerDecisionId
+        } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        $preserved = @($pendingAnswerPreservedEvents | Where-Object {
+            $retirement.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$retirement[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$pendingRouteCommit.Sequence -and
+            (Test-InitialOfferWriterMatch -Left $offer -Right $_) -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('payer_decision_id')) -eq $payerDecisionId -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('generation')) -eq $offerGeneration
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        $rawAnswer = @($rawAnswers | Where-Object {
+            $preserved.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$preserved[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$pendingRouteCommit.Sequence -and
+            (Test-InitialOfferWriterMatch -Left $offer -Right $_)
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        $acceptedBoundary = @($offerBoundaryDecisions | Where-Object {
+            $rawAnswer.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$rawAnswer[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$pendingRouteCommit.Sequence -and
+            (Test-InitialOfferWriterMatch -Left $offer -Right $_) -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('boundary')) -eq 'answer_received' -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('authority_mode', 'offer_authority_mode')) -eq 'InitialActivation' -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('decision_status')).Equals(
+                'accepted',
+                [System.StringComparison]::OrdinalIgnoreCase) -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('payer_decision_id')) -eq $payerDecisionId -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('offer_generation')) -eq $offerGeneration -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('transaction_generation')) -eq $transactionGeneration
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        $retiredAccepted = @($retiredAnswerAcceptedEvents | Where-Object {
+            $acceptedBoundary.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$acceptedBoundary[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$pendingRouteCommit.Sequence -and
+            (Test-InitialOfferWriterMatch -Left $offer -Right $_) -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('payer_decision_id')) -eq $payerDecisionId
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        $answerAck = @($answerAckSentEvents | Where-Object {
+            $retiredAccepted.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$retiredAccepted[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$pendingRouteCommit.Sequence -and
+            (Test-InitialOfferWriterMatch -Left $offer -Right $_) -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('payer_decision_id')) -eq $payerDecisionId -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('generation')) -eq $offerGeneration
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        $barrier = @($answerAckBarrierEvents | Where-Object {
+            $answerAck.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$answerAck[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$pendingRouteCommit.Sequence -and
+            (Test-InitialOfferWriterMatch -Left $offer -Right $_) -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('payer_decision_id')) -eq $payerDecisionId
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($retirement.Count -ne 1 -or $preserved.Count -ne 1 -or
+            $rawAnswer.Count -ne 1 -or $acceptedBoundary.Count -ne 1 -or
+            $retiredAccepted.Count -ne 1 -or $answerAck.Count -ne 1 -or
+            $barrier.Count -ne 1) {
+            continue
+        }
+
+        $rawCandidates.Add($pendingRouteCommit) | Out-Null
+        $key = [string]::Join('|', @($writer, $sessionId, $payerDecisionId, $offerGeneration, $transactionGeneration)).ToLowerInvariant()
+        if ($seen.ContainsKey($key)) {
+            continue
+        }
+        $seen[$key] = $true
+        $distinctCandidates.Add($pendingRouteCommit) | Out-Null
+
+        $transaction = @($transactionAnswerEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$pendingRouteCommit.Sequence -and
+            (Test-InitialOfferWriterMatch -Left $offer -Right $_) -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('offer_generation')) -eq $offerGeneration -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('transaction_generation')) -eq $transactionGeneration
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        $initiatorLaunch = @($preCommitHandoffEvents | Where-Object {
+            $transaction.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$transaction[0].Sequence -and
+            (Test-InitialOfferWriterMatch -Left $offer -Right $_) -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('offer_generation')) -eq $offerGeneration -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('transaction_generation')) -eq $transactionGeneration -and
+            (Get-InitialOfferBoundaryField -Event $_ -Names @('responder_waiting_for_peer_probe')) -ne '1'
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($transaction.Count -eq 1 -and $initiatorLaunch.Count -eq 1) {
+            $recoveredCandidates.Add($pendingRouteCommit) | Out-Null
+        }
+        else {
+            $unresolvedCandidates.Add($pendingRouteCommit) | Out-Null
         }
     }
 
@@ -42680,6 +42836,10 @@ function Get-FileTransferRecoveryFailureClassification {
         -UseDefaultReason
     foreach ($candidateEvent in @($runtimeUnlockInitialOfferRetryLifecycleHandoffProof.UnresolvedCandidateEvents)) {
         $candidateReason = if (
+            $candidateEvent.EventName -eq 'filetransfer_runtime_unlock_handoff_pending_route_commit') {
+            'accepted_retired_pending_answer_not_promoted_to_runtime_unlock_transaction'
+        }
+        elseif (
             $candidateEvent.EventName -eq 'runtime_unlock_retry_dispatch_install_rejected' -and
             (Get-FileTransferEventField -Event $candidateEvent -Name 'decision_reason' -Default '') -eq
                 'retry_dispatch_install_state_missing_answer_received') {
