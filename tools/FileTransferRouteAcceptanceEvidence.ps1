@@ -1089,6 +1089,12 @@ function Get-RouteAcceptanceCursorEvidence {
     if (-not (Test-RouteAcceptanceEvidenceSha256Value -Value $consumedIndexSha256)) {
         $reasons.Add('cursor_consumed_index_sha256_invalid') | Out-Null
     }
+    $storageMode = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'storageMode' -DefaultValue 'RollingMemory')
+    $isAppendOnlyStorage = [string]::Equals($storageMode, 'AppendOnlyFile', [System.StringComparison]::Ordinal)
+    if (-not $isAppendOnlyStorage -and
+        -not [string]::Equals($storageMode, 'RollingMemory', [System.StringComparison]::Ordinal)) {
+        $reasons.Add('cursor_storage_mode_invalid') | Out-Null
+    }
     $consumedIndexRanges = @(Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'consumedIndexRanges' -DefaultValue @())
     $consumedIndexRangeTotal = 0L
     $consumedIndexRangesByGeneration = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
@@ -1126,7 +1132,7 @@ function Get-RouteAcceptanceCursorEvidence {
         if ($rangeCount -ne $generationConsumedLineCount) {
             $reasons.Add('cursor_consumed_index_range_generation_count_mismatch') | Out-Null
         }
-        if ($rangeCount -le $consumedIndexCount -and $rangeCount -le $finalLineCount) {
+        if (-not $isAppendOnlyStorage -and $rangeCount -le $consumedIndexCount -and $rangeCount -le $finalLineCount) {
             for ($lineOrdinal = 0L; $lineOrdinal -lt $rangeCount; $lineOrdinal++) {
                 $reconstructedConsumedIdentities.Add(("{0}`n{1}" -f $rangeGenerationKey, $lineOrdinal)) | Out-Null
             }
@@ -1141,7 +1147,15 @@ function Get-RouteAcceptanceCursorEvidence {
     if ($consumedIndexRanges.Count -ne $finalGenerations.Count -or $consumedIndexRangeTotal -ne $consumedIndexCount) {
         $reasons.Add('cursor_consumed_index_range_count_mismatch') | Out-Null
     }
-    $recomputedConsumedIndexSha256 = Get-RouteAcceptanceEvidenceTextSha256 -Value ((@($reconstructedConsumedIdentities.ToArray() | Sort-Object)) -join [char]31)
+    $recomputedConsumedIndexSha256 = if ($isAppendOnlyStorage -and $consumedIndexRanges.Count -eq 1) {
+        $appendOnlyRange = $consumedIndexRanges[0]
+        $appendOnlyGenerationKey = Get-RouteAcceptanceEvidenceGenerationKey -Generation $appendOnlyRange
+        $appendOnlyRangeCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $appendOnlyRange -Name 'count' -DefaultValue -1) -DefaultValue -1
+        Get-RouteAcceptanceEvidenceTextSha256 -Value ("{0}|0|{1}" -f $appendOnlyGenerationKey, $appendOnlyRangeCount)
+    }
+    else {
+        Get-RouteAcceptanceEvidenceTextSha256 -Value ((@($reconstructedConsumedIdentities.ToArray() | Sort-Object)) -join [char]31)
+    }
     if (-not [string]::Equals($consumedIndexSha256, $recomputedConsumedIndexSha256, [System.StringComparison]::OrdinalIgnoreCase)) {
         $reasons.Add('cursor_consumed_index_sha256_mismatch') | Out-Null
     }

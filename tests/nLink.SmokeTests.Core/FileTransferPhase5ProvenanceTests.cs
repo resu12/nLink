@@ -568,6 +568,25 @@ Assert-Equal $valid.rotationCount 2 'rotation count'
 Assert-Equal $valid.writerEvidenceVersion 3 'writer evidence version'
 Assert-Equal $valid.writerIntegrityVerdict 'PASS' 'writer integrity verdict'
 
+$appendOnlyLedger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$appendOnlyGenerationKey = 'append-only:test-generation'
+$appendOnlyLedger | Add-Member -NotePropertyName storageMode -NotePropertyValue 'AppendOnlyFile'
+$appendOnlyLedger | Add-Member -NotePropertyName sourcePath -NotePropertyValue $fixture.AnalyzerInputPath
+$appendOnlyLedger.initial.lineCount = 0
+$appendOnlyLedger.initial.activeGenerationKey = $appendOnlyGenerationKey
+$appendOnlyLedger.initial.generations = @([pscustomobject]@{ generationKey = $appendOnlyGenerationKey; consumedByteOffset = 0; consumedLineCount = 0 })
+$appendOnlyLedger.final.activeGenerationKey = $appendOnlyGenerationKey
+$appendOnlyLedger.final.generations = @([pscustomobject]@{ generationKey = $appendOnlyGenerationKey; consumedByteOffset = 20; consumedLineCount = 2 })
+$appendOnlyLedger.rotationCount = 0
+$appendOnlyLedger.consumedIndexRanges = @([pscustomobject]@{ generationKey = $appendOnlyGenerationKey; firstLineOrdinal = 0; lastLineOrdinal = 1; count = 2 })
+$appendOnlyLedger.consumedIndexSha256 = Get-RouteAcceptanceEvidenceTextSha256 -Value ("{0}|0|2" -f $appendOnlyGenerationKey)
+$appendOnly = Get-RouteAcceptanceCursorEvidence -LogLedger $appendOnlyLedger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Equal $appendOnly.verdict 'PASS' 'append-only compact consumed range digest'
+
+$appendOnlyLedger.consumedIndexSha256 = Get-RouteAcceptanceEvidenceTextSha256 -Value ((@("$appendOnlyGenerationKey`n0", "$appendOnlyGenerationKey`n1") | Sort-Object) -join [char]31)
+$appendOnlyEnumeratedDigest = Get-RouteAcceptanceCursorEvidence -LogLedger $appendOnlyLedger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $appendOnlyEnumeratedDigest.reasons 'cursor_consumed_index_sha256_mismatch' 'append-only evidence must use the producer compact range digest'
+
 $ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
 $ledger.writerEvidenceVersion = 2
 $legacyWriterEvidence = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
