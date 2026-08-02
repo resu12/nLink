@@ -271,7 +271,8 @@ public sealed partial class SessionFileTransferService
                     currentLiveFallbackFrame
                         ? "current_post_tuna_fallback_live_route_frame"
                         : "peer_post_tuna_fallback_v6_proof",
-                    out snapshot);
+                    out snapshot,
+                    out _);
             }
 
             if (!context.RouteRuntime.UsesFileTunaV4Runtime)
@@ -279,9 +280,25 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
+            var bootstrapPeerBoundary =
+                FileTransferCoordinator
+                    .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerBoundary(
+                        CreateCoordinatorStateLocked(context),
+                        frame,
+                        out var bootstrapCommand,
+                        out var bootstrapReasonCode);
             if (IsRecoveredFileTunaV4LiveActivationEpoch(context.CurrentLiveRouteEpoch) &&
-                !IsFreshPostReactivationFallbackV6Proof(context, frame))
+                !IsFreshPostReactivationFallbackV6Proof(context, frame) &&
+                !bootstrapPeerBoundary)
             {
+                LogFallbackV6ProofBootstrapPeerFrameDecision(
+                    context.SessionId,
+                    context.TransferId,
+                    FileTransferDirection.Outbound,
+                    frame,
+                    bootstrapCommand,
+                    "rejected",
+                    bootstrapReasonCode);
                 LogPeerPostTunaFallbackV6ProofIgnoredAfterLiveActivation(
                     FileTransferDirection.Outbound,
                     context.TransferId,
@@ -291,17 +308,44 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
-            if (!TryRetainOutboundFileTransferRouteTransitionPeerFrameLocked(
+            var peerFrameHandled =
+                TryRetainOutboundFileTransferRouteTransitionPeerFrameLocked(
                     context,
                     frame,
                     currentLiveFallbackFrame
                         ? "current_post_tuna_fallback_live_route_frame"
                         : "peer_post_tuna_fallback_v6_proof",
-                    out snapshot))
+                    out snapshot,
+                    out var peerFrameRetained);
+            if (!peerFrameHandled)
             {
+                if (bootstrapPeerBoundary)
+                {
+                    LogFallbackV6ProofBootstrapPeerFrameDecision(
+                        context.SessionId,
+                        context.TransferId,
+                        FileTransferDirection.Outbound,
+                        frame,
+                        bootstrapCommand,
+                        "rejected",
+                        "peer_frame_retention_rejected");
+                }
                 return false;
             }
 
+            if (bootstrapPeerBoundary)
+            {
+                LogFallbackV6ProofBootstrapPeerFrameDecision(
+                    context.SessionId,
+                    context.TransferId,
+                    FileTransferDirection.Outbound,
+                    frame,
+                    bootstrapCommand,
+                    peerFrameRetained ? "accepted" : "rejected",
+                    peerFrameRetained
+                        ? bootstrapReasonCode
+                        : "peer_frame_retention_rejected");
+            }
             return true;
         }
     }
@@ -335,10 +379,28 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
+            FileTransferFallbackV6ProofBootstrapCommand bootstrapCommand = null!;
+            var bootstrapReasonCode = "bootstrap_not_current";
+            var bootstrapPeerBoundary = canPromoteFromFileTuna &&
+                FileTransferCoordinator
+                    .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerBoundary(
+                        CreateCoordinatorStateLocked(context),
+                        frame,
+                        out bootstrapCommand,
+                        out bootstrapReasonCode);
             if (canPromoteFromFileTuna &&
                 IsRecoveredFileTunaV4LiveActivationEpoch(context.CurrentLiveRouteEpoch) &&
-                !IsFreshPostReactivationFallbackV6Proof(context, frame))
+                !IsFreshPostReactivationFallbackV6Proof(context, frame) &&
+                !bootstrapPeerBoundary)
             {
+                LogFallbackV6ProofBootstrapPeerFrameDecision(
+                    context.SessionId,
+                    context.TransferId,
+                    FileTransferDirection.Inbound,
+                    frame,
+                    bootstrapCommand,
+                    "rejected",
+                    bootstrapReasonCode);
                 LogPeerPostTunaFallbackV6ProofIgnoredAfterLiveActivation(
                     FileTransferDirection.Inbound,
                     context.TransferId,
@@ -355,14 +417,62 @@ public sealed partial class SessionFileTransferService
                 context,
                 frame,
                 promotionReason,
-                out snapshot);
+                out snapshot,
+                out var peerFrameRetained);
             if (!promoted)
             {
+                if (bootstrapPeerBoundary)
+                {
+                    LogFallbackV6ProofBootstrapPeerFrameDecision(
+                        context.SessionId,
+                        context.TransferId,
+                        FileTransferDirection.Inbound,
+                        frame,
+                        bootstrapCommand,
+                        "rejected",
+                        "peer_frame_retention_rejected");
+                }
                 return false;
             }
 
+            if (bootstrapPeerBoundary)
+            {
+                LogFallbackV6ProofBootstrapPeerFrameDecision(
+                    context.SessionId,
+                    context.TransferId,
+                    FileTransferDirection.Inbound,
+                    frame,
+                    bootstrapCommand,
+                    peerFrameRetained ? "accepted" : "rejected",
+                    peerFrameRetained
+                        ? bootstrapReasonCode
+                        : "peer_frame_retention_rejected");
+            }
             return true;
         }
+    }
+
+    private static void LogFallbackV6ProofBootstrapPeerFrameDecision(
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction,
+        FileTransferDataFrame frame,
+        FileTransferFallbackV6ProofBootstrapCommand? command,
+        string decisionStatus,
+        string reasonCode)
+    {
+        var requestCorrelationId = frame is FileTransferFrontierRequestFrameV6 request
+            ? request.RequestCorrelationId
+            : null;
+        var frameFingerprint =
+            PostTunaFallbackPeerProofFrameIdentity.TryCreate(
+                frame,
+                out var frameIdentity)
+                ? frameIdentity.Sha256
+                : "(none)";
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; session_id={FormatProtocolLogValue(sessionId)}; transfer_id={FormatProtocolLogValue(transferId)}; direction={direction.ToString().ToLowerInvariant()}; authority_id={FormatProtocolLogValue(command?.AuthorityId.ToString() ?? "(none)")}; bootstrap_generation={command?.BootstrapGeneration ?? 0}; fallback_epoch={command?.Observation.FallbackEpoch ?? 0}; target_transport_epoch={command?.TargetTransportEpoch ?? 0}; frame_kind={FormatProtocolLogValue(command?.FrameKind.ToString() ?? "(none)")}; frame_type={FormatProtocolLogValue(frame.Type)}; frame_transport_epoch={ResolveV6RuntimeProofTransportEpoch(frame)}; frame_fingerprint={FormatProtocolLogValue(frameFingerprint)}; request_correlation_id={FormatProtocolLogValue(requestCorrelationId ?? "(none)")}; decision_status={FormatProtocolLogValue(decisionStatus)}; reason_code={FormatProtocolLogValue(reasonCode)}; authority_effect=none; decision_reason={FormatProtocolLogValue(reasonCode)}");
     }
 
     private bool ShouldBoundOutboundV4TransportSendForV6RegularNknSparseRuntime(OutboundTransferContext context)

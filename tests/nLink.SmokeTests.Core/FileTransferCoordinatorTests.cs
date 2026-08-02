@@ -15725,6 +15725,284 @@ public sealed class FileTransferCoordinatorTests
 
     [Fact]
     [Trait("FileTransferCoordinatorSuite", "FileTransferRouteTransition")]
+    public void FileTransferFallbackV6ProofBootstrapPeerBoundary_IsReadOnlyExactAndReciprocal()
+    {
+        var outbound = IssueFallbackV6ProofBootstrapForPeerBoundary(
+            FileTransferDirection.Outbound);
+        var outboundCommand = Assert.IsType<
+            FileTransferFallbackV6ProofBootstrapCommand>(outbound.Command);
+        var receiverState = new FileTransferReceiverStateFrameV6
+        {
+            SessionId = outbound.State.SessionId,
+            TransferId = outbound.State.TransferId,
+            Epoch = 10,
+            ContiguousCommittedChunkIndex = 8,
+            DurableReceivedHighestChunkIndex = 7,
+            CreditUntilChunkIndexExclusive = 8,
+            MissingRanges = [],
+            BytesCommitted = 8 * 1024,
+            TransferPaused = true,
+            TransferPauseReason =
+                FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
+            TransportEpoch = outboundCommand.TargetTransportEpoch,
+            Priority = FileTransferProtocol.FallbackV6ProofBootstrapPriority,
+            RecoveryMode =
+                FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
+        };
+
+        Assert.True(
+            FileTransferCoordinator
+                .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerBoundary(
+                    outbound.State,
+                    receiverState,
+                    out var pendingBoundary,
+                    out var pendingReason));
+        Assert.Equal(outboundCommand, pendingBoundary);
+        Assert.Equal("exact_bootstrap_boundary", pendingReason);
+        Assert.Equal(
+            outboundCommand,
+            FileTransferCoordinator
+                .GetCurrentFileTransferFallbackV6ProofBootstrapBoundary(
+                    outbound.State));
+
+        var held = FileTransferCoordinator.ApplyFileTransferFallbackV6ProofBootstrapReceipt(
+            outbound.State,
+            new FileTransferFallbackV6ProofBootstrapReceipt(
+                outboundCommand,
+                FileTransferFallbackV6ProofBootstrapReceiptStatus.Held,
+                null,
+                "filetransfer_fallback_v6_proof_bootstrap_data_session_unavailable"));
+        Assert.True(
+            FileTransferCoordinator
+                .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerBoundary(
+                    held.State,
+                    receiverState,
+                    out var heldBoundary,
+                    out var heldReason));
+        Assert.Equal(outboundCommand, heldBoundary);
+        Assert.Equal("exact_bootstrap_boundary", heldReason);
+        Assert.Equal(
+            "data_session_unavailable",
+            FileTransferProtocol.GetFallbackV6ProofBootstrapReceiptReasonCode(
+                held.Receipt!));
+
+        var delivered = FileTransferCoordinator.ApplyFileTransferFallbackV6ProofBootstrapReceipt(
+            held.State,
+            new FileTransferFallbackV6ProofBootstrapReceipt(
+                outboundCommand,
+                FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered,
+                new PostTunaFallbackPeerProofFrameIdentity(
+                    FileTransferProtocol.FrontierRequestFrameTypeV6,
+                    outboundCommand.TargetTransportEpoch,
+                    new string('c', 64)),
+                "filetransfer_fallback_v6_proof_bootstrap_delivered"));
+        Assert.True(
+            FileTransferCoordinator
+                .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerBoundary(
+                    delivered.State,
+                    receiverState,
+                    out var deliveredBoundary,
+                    out var deliveredReason));
+        Assert.Equal(outboundCommand, deliveredBoundary);
+        Assert.Equal("exact_bootstrap_boundary", deliveredReason);
+        Assert.Equal(
+            "delivered",
+            FileTransferProtocol.GetFallbackV6ProofBootstrapReceiptReasonCode(
+                delivered.Receipt!));
+
+        var retainedIdentity =
+            PostTunaFallbackPeerProofFrameIdentity.Create(receiverState);
+        var retainedProof = new PostTunaFallbackPeerProofEvidence(
+            delivered.State.SessionId,
+            delivered.State.TransferId,
+            FileTransferDirection.Outbound,
+            ProofGeneration: 1,
+            TransportEpoch: outboundCommand.TargetTransportEpoch,
+            ProofKind: "fallback_v6_proof_bootstrap_peer_state",
+            Reason: "fallback_v6_proof_bootstrap_peer_state",
+            FrameIdentity: retainedIdentity);
+        var prepared = FileTransferCoordinator.PrepareFileTransferRouteTransition(
+            delivered.State,
+            new FileTransferRouteTransitionPrepareRequest(
+                FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6,
+                outboundCommand.SourceRuntimeOwner,
+                outboundCommand.SourceRoutePublication,
+                outboundCommand.SourceRouteCommit,
+                FileTransferRoute.FileTunaV4,
+                FileTransferProtocol.ProtocolVersionV4,
+                FileTransferTransportKind.Tuna,
+                new FileTransferFallbackTransitionProofBoundary(
+                    outboundCommand.SourceRouteCommit,
+                    retainedProof,
+                    retainedIdentity,
+                    outboundCommand.TargetTransportEpoch,
+                    TargetBridgeRecoveryGeneration: Math.Max(
+                        1,
+                        outboundCommand.SourceBridgeRecoveryGeneration + 1)),
+                outboundCommand.Observation.DurableCheckpoint,
+                FileTransferRoute.PostTunaFallbackV6,
+                FileTransferProtocol.ProtocolVersionV6,
+                FileTransferTransportKind.RegularNkn,
+                FileTransferTransportHandoffKind.TunaToNormalFallback,
+                PredecessorTransitionAuthorityId: null,
+                "fallback_v6_proof_bootstrap_peer_state"));
+        Assert.Equal(
+            FileTransferRouteTransitionDecisionStatus.Prepared,
+            prepared.Status);
+        Assert.False(
+            FileTransferCoordinator
+                .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerBoundary(
+                    prepared.State,
+                    receiverState,
+                    out _,
+                    out var retainedReason));
+        Assert.Equal("bootstrap_not_current", retainedReason);
+        Assert.Null(
+            FileTransferCoordinator
+                .GetCurrentFileTransferFallbackV6ProofBootstrapBoundary(
+                    prepared.State));
+        Assert.False(
+            FileTransferCoordinator
+                .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerBoundary(
+                    prepared.State,
+                    receiverState with { Epoch = receiverState.Epoch + 1 },
+                    out _,
+                    out var replacementReason));
+        Assert.Equal("bootstrap_not_current", replacementReason);
+
+        var emptyDrainFingerprint =
+            FileTransferCoordinator
+                .CreateFileTransferRouteTransitionPhysicalDrainFingerprint([]);
+        var draining =
+            FileTransferCoordinator.BeginFileTransferRouteTransitionPhysicalDrain(
+                prepared.State,
+                prepared.Authority!.Value,
+                new FileTransferRouteTransitionPauseBindReceipt(
+                    prepared.PauseBindCommand!.Value,
+                    FileTransferRouteTransitionPauseBindStatus.Installed,
+                    "filetransfer_route_transition_pause_bound"),
+                capturedThroughPhysicalSendGeneration: 0,
+                capturedPhysicalSendLeaseIds: [],
+                emptyDrainFingerprint);
+        Assert.Equal(
+            FileTransferRouteTransitionDecisionStatus.Draining,
+            draining.Status);
+        Assert.False(
+            FileTransferCoordinator
+                .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerBoundary(
+                    draining.State,
+                    receiverState,
+                    out _,
+                    out var drainingReason));
+        Assert.Equal("bootstrap_not_current", drainingReason);
+
+        var invalidated = FileTransferCoordinator.InvalidateFileTransferRouteTransition(
+            draining.State,
+            prepared.Authority!.Value,
+            terminalInvalidation: false,
+            "fallback_v6_proof_bootstrap_test_rollback");
+        Assert.Equal(
+            FileTransferRouteTransitionDecisionStatus.Invalidated,
+            invalidated.Status);
+        Assert.False(
+            FileTransferCoordinator
+                .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerBoundary(
+                    invalidated.State,
+                    receiverState,
+                    out _,
+                    out var invalidatedReason));
+        Assert.Equal("bootstrap_not_current", invalidatedReason);
+
+        var rejected = FileTransferCoordinator.ApplyFileTransferFallbackV6ProofBootstrapReceipt(
+            outbound.State,
+            new FileTransferFallbackV6ProofBootstrapReceipt(
+                outboundCommand,
+                FileTransferFallbackV6ProofBootstrapReceiptStatus.Rejected,
+                null,
+                "filetransfer_fallback_v6_proof_bootstrap_send_failed"));
+        Assert.False(
+            FileTransferCoordinator
+                .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerBoundary(
+                    rejected.State,
+                    receiverState,
+                    out _,
+                    out var rejectedReason));
+        Assert.Equal("bootstrap_not_current", rejectedReason);
+        Assert.Equal(
+            "send_failed",
+            FileTransferProtocol.GetFallbackV6ProofBootstrapReceiptReasonCode(
+                rejected.Receipt!));
+        Assert.Null(
+            FileTransferCoordinator
+                .GetCurrentFileTransferFallbackV6ProofBootstrapBoundary(
+                    rejected.State));
+
+        Assert.False(
+            FileTransferCoordinator
+                .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerBoundary(
+                    delivered.State with { IsTerminal = true },
+                    receiverState,
+                    out _,
+                    out var terminalReason));
+        Assert.Equal("bootstrap_not_current", terminalReason);
+
+        var inbound = IssueFallbackV6ProofBootstrapForPeerBoundary(
+            FileTransferDirection.Inbound);
+        var inboundCommand = Assert.IsType<
+            FileTransferFallbackV6ProofBootstrapCommand>(inbound.Command);
+        var frontierRequest = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = inbound.State.SessionId,
+            TransferId = inbound.State.TransferId,
+            TransportEpoch = inboundCommand.TargetTransportEpoch,
+            RequestCorrelationId =
+                FileTransferProtocol.CreateFallbackV6ProofBootstrapCorrelationId(
+                    inboundCommand.BootstrapGeneration),
+            MissingRanges = [],
+            Priority = FileTransferProtocol.FallbackV6ProofBootstrapPriority,
+            RecoveryMode =
+                FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
+        };
+        Assert.True(
+            FileTransferCoordinator
+                .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerBoundary(
+                    inbound.State,
+                    frontierRequest,
+                    out var inboundBoundary,
+                    out var inboundReason));
+        Assert.Equal(inboundCommand, inboundBoundary);
+        Assert.Equal("exact_bootstrap_boundary", inboundReason);
+
+        Assert.False(
+            FileTransferCoordinator
+                .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerBoundary(
+                    inbound.State,
+                    frontierRequest with
+                    {
+                        RequestCorrelationId =
+                            FileTransferProtocol.CreateFallbackV6ProofBootstrapCorrelationId(
+                                inboundCommand.BootstrapGeneration + 1),
+                    },
+                    out _,
+                    out var generationReason));
+        Assert.Equal("peer_frame_generation_mismatch", generationReason);
+        Assert.False(
+            FileTransferCoordinator
+                .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerBoundary(
+                    inbound.State,
+                    receiverState with
+                    {
+                        SessionId = inbound.State.SessionId,
+                        TransferId = inbound.State.TransferId,
+                        TransportEpoch = inboundCommand.TargetTransportEpoch,
+                    },
+                    out _,
+                    out var reciprocalKindReason));
+        Assert.Equal("peer_frame_kind_mismatch", reciprocalKindReason);
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "FileTransferRouteTransition")]
     public void FileTransferRouteTransition_FallbackToTunaRequiresExactEffectivePhase2Receipt()
     {
         var setup = CreateFallbackV6ToTunaRouteTransitionSetup();
@@ -16560,14 +16838,67 @@ public sealed class FileTransferCoordinatorTests
         return (state, request, finalProof);
     }
 
-    private static FileTransferCoordinatorDecision StartRegular(FileTransferRouteSelection regular)
+    private static FileTransferCoordinatorDecision StartRegular(
+        FileTransferRouteSelection regular,
+        FileTransferDirection direction = FileTransferDirection.Outbound)
         => FileTransferCoordinator.Apply(
             CoordinatorEvent(
                 FileTransferCoordinatorEventKind.StartTransfer,
                 regular,
                 state: FileTransferLegState.Active,
                 canSendData: true),
-            EmptyState(regular));
+            EmptyState(regular, direction));
+
+    private static FileTransferFallbackV6ProofBootstrapDecision
+        IssueFallbackV6ProofBootstrapForPeerBoundary(
+            FileTransferDirection direction)
+    {
+        var regular = FileTransferRouteResolver.Resolve(
+            FileTransferRoute.RegularNknV4Fast);
+        var tuna = ActivateTuna(
+            StartRegular(regular, direction).State,
+            FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4),
+            committedChunk: 4).State with
+        {
+            CurrentDataSessionIdentity =
+                $"fallback-bootstrap-{direction.ToString().ToLowerInvariant()}",
+            CurrentDataSessionGeneration = 17,
+        };
+        var owner = tuna.CurrentRuntimeOwner!.Value;
+        var publication = tuna.CurrentRoutePublicationToken!.Value;
+        var leg = tuna.CurrentLeg!;
+        var checkpoint = new FileTransferRouteTransitionDurableCheckpoint(
+            owner,
+            publication,
+            tuna.TerminalGeneration,
+            leg.Generation,
+            leg.TransportEpochId,
+            leg.BridgeRecoveryGeneration,
+            tuna.CurrentDataSessionGeneration,
+            StateEpoch: 9,
+            ContiguousCommittedChunkIndex: 8,
+            DurableHighestChunkIndex: 7,
+            ChunkCount: 128,
+            CheckpointGeneration: 2);
+        var observation = new FileTransferFallbackV6ProofBootstrapObservation(
+            tuna.SessionId,
+            tuna.TransferId,
+            direction,
+            ObservationGeneration: 1,
+            FallbackEpoch: 1,
+            Source: "header_switch_off",
+            ProofKind: "file_transfer_v4_state_frame_received",
+            ObservedUtcMilliseconds: 10_000,
+            checkpoint);
+        var decision =
+            FileTransferCoordinator.IssueFileTransferFallbackV6ProofBootstrap(
+                tuna,
+                observation);
+        Assert.Equal(
+            FileTransferFallbackV6ProofBootstrapDecisionStatus.Issued,
+            decision.Status);
+        return decision;
+    }
 
     private static FileTransferCoordinatorDecision ActivateTuna(
         FileTransferCoordinatorState state,
@@ -17227,11 +17558,13 @@ public sealed class FileTransferCoordinatorTests
             transaction).State;
     }
 
-    private static FileTransferCoordinatorState EmptyState(FileTransferRouteSelection routeSelection)
+    private static FileTransferCoordinatorState EmptyState(
+        FileTransferRouteSelection routeSelection,
+        FileTransferDirection direction = FileTransferDirection.Outbound)
         => new(
             SessionId: "session_coordinator",
             TransferId: "transfer_coordinator",
-            Direction: FileTransferDirection.Outbound,
+            Direction: direction,
             IsTerminal: false,
             RouteSelection: routeSelection,
             CurrentLiveRouteEpoch: null,

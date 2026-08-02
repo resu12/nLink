@@ -232,9 +232,21 @@ public static class FileTransferDataFrameCodec
                 WriteFallbackTailYieldFields(buffer, yield);
                 break;
             case FileTransferFrontierRequestFrameV6 frontierRequest:
+                var proofBootstrap =
+                    FileTransferProtocol.TryGetFallbackV6ProofBootstrapGeneration(
+                        frontierRequest,
+                        out _);
+                if (!proofBootstrap &&
+                    (frontierRequest.TransportEpoch < 0 ||
+                     string.IsNullOrWhiteSpace(frontierRequest.RepairRequestId)))
+                {
+                    throw new InvalidOperationException(
+                        "V6 frontier request authority payload was invalid.");
+                }
+
                 if (!TryNormalizeV4MissingRanges(
                         frontierRequest.MissingRanges,
-                        allowEmpty: false,
+                        allowEmpty: proofBootstrap,
                         out var normalizedFrontierRanges,
                         maxRangeCount: FileTransferProtocol.MaxStateMissingRangesV6,
                         maxChunkCount: FileTransferProtocol.MaxChunkCountV6,
@@ -748,7 +760,7 @@ public static class FileTransferDataFrameCodec
                 break;
             case 45:
                 if (!reader.TryReadInt32(out var frontierRangeCount) ||
-                    frontierRangeCount <= 0 ||
+                    frontierRangeCount < 0 ||
                     frontierRangeCount > FileTransferProtocol.MaxStateMissingRangesV6)
                 {
                     return false;
@@ -1179,16 +1191,25 @@ public static class FileTransferDataFrameCodec
                     TargetTransport = targetTransport,
                 };
                 return true;
-            case FileTransferFrontierRequestFrameV6 frontierRequest when
-                frontierRequest.TransportEpoch >= 0 &&
-                !string.IsNullOrWhiteSpace(frontierRequest.RepairRequestId) &&
-                TryNormalizeV4MissingRanges(
-                    frontierRequest.MissingRanges,
-                    allowEmpty: false,
-                    out var frontierRanges,
-                    maxRangeCount: FileTransferProtocol.MaxStateMissingRangesV6,
-                    maxChunkCount: FileTransferProtocol.MaxChunkCountV6,
-                    maxTotalChunks: FileTransferProtocol.MaxStateMissingChunksV6):
+            case FileTransferFrontierRequestFrameV6 frontierRequest:
+                var isProofBootstrap =
+                    FileTransferProtocol.TryGetFallbackV6ProofBootstrapGeneration(
+                        frontierRequest,
+                        out _);
+                if ((!isProofBootstrap &&
+                     (frontierRequest.TransportEpoch < 0 ||
+                      string.IsNullOrWhiteSpace(frontierRequest.RepairRequestId))) ||
+                    !TryNormalizeV4MissingRanges(
+                        frontierRequest.MissingRanges,
+                        allowEmpty: isProofBootstrap,
+                        out var frontierRanges,
+                        maxRangeCount: FileTransferProtocol.MaxStateMissingRangesV6,
+                        maxChunkCount: FileTransferProtocol.MaxChunkCountV6,
+                        maxTotalChunks: FileTransferProtocol.MaxStateMissingChunksV6))
+                {
+                    return false;
+                }
+
                 normalized = frontierRequest with
                 {
                     Kind = FileTransferProtocol.Kind,

@@ -112,9 +112,11 @@ public sealed partial class SessionFileTransferService
         OutboundTransferContext context,
         FileTransferDataFrame frame,
         string reason,
-        out SessionFileTransferSnapshot? snapshot)
+        out SessionFileTransferSnapshot? snapshot,
+        out bool frameRetained)
     {
         snapshot = null;
+        frameRetained = false;
         if (!ReferenceEquals(outboundTransfer, context) ||
             context.IsTerminal ||
             context.DataSession is not { } dataSession ||
@@ -176,6 +178,10 @@ public sealed partial class SessionFileTransferService
                 merged,
                 out snapshot);
         }
+
+        frameRetained = IsExactFileTransferRouteTransitionPeerFrameRetained(
+            context.FileTransferRouteTransitionExecution,
+            frame);
 
         return true;
     }
@@ -257,9 +263,11 @@ public sealed partial class SessionFileTransferService
         InboundTransferContext context,
         FileTransferDataFrame frame,
         string reason,
-        out SessionFileTransferSnapshot? snapshot)
+        out SessionFileTransferSnapshot? snapshot,
+        out bool frameRetained)
     {
         snapshot = null;
+        frameRetained = false;
         if (!ReferenceEquals(inboundTransfer, context) ||
             context.IsTerminal ||
             context.DataSession is not { } dataSession ||
@@ -322,8 +330,26 @@ public sealed partial class SessionFileTransferService
                 out snapshot);
         }
 
+        frameRetained = IsExactFileTransferRouteTransitionPeerFrameRetained(
+            context.FileTransferRouteTransitionExecution,
+            frame);
+
         return true;
     }
+
+    private static bool IsExactFileTransferRouteTransitionPeerFrameRetained(
+        FileTransferRouteTransitionExecutionShadow? current,
+        FileTransferDataFrame frame)
+        => PostTunaFallbackPeerProofFrameIdentity.TryCreate(
+               frame,
+               out var candidateIdentity) &&
+           current is
+           {
+               RetainedPeerFrame: { } retainedFrame,
+               RetainedFrameIdentity: { } retainedIdentity,
+           } &&
+           retainedIdentity == candidateIdentity &&
+           retainedIdentity.Matches(retainedFrame);
 
     private static bool TryMergeFileTransferRouteTransitionEvidence(
         FileTransferRouteTransitionExecutionShadow? current,

@@ -2,6 +2,12 @@ namespace NLink.Core.FileTransfer;
 
 public static class FileTransferProtocol
 {
+    internal const string FallbackV6ProofBootstrapPriority = "proof";
+    internal const string FallbackV6ProofBootstrapRecoveryMode =
+        "post_tuna_fallback_v6_proof_bootstrap";
+    internal const string FallbackV6ProofBootstrapCorrelationPrefix =
+        "fallback-v6-proof-bootstrap:";
+
     public const string Kind = "filetransfer";
 
     public const string OfferTypeV2 = "filetransfer.offer.v2";
@@ -102,4 +108,150 @@ public static class FileTransferProtocol
             or ErrorFrameTypeV6
             or PauseControlFrameTypeV6
             or HeartbeatFrameTypeV6;
+
+    internal static string CreateFallbackV6ProofBootstrapCorrelationId(
+        long bootstrapGeneration)
+        => bootstrapGeneration > 0
+            ? $"{FallbackV6ProofBootstrapCorrelationPrefix}{bootstrapGeneration}"
+            : throw new ArgumentOutOfRangeException(nameof(bootstrapGeneration));
+
+    internal static bool TryGetFallbackV6ProofBootstrapGeneration(
+        FileTransferFrontierRequestFrameV6 request,
+        out long bootstrapGeneration)
+    {
+        bootstrapGeneration = 0;
+        if (request.TransportEpoch <= 0 ||
+            !string.IsNullOrWhiteSpace(request.RepairRequestId) ||
+            request.MissingRanges.Count != 0 ||
+            !string.Equals(
+                request.Priority,
+                FallbackV6ProofBootstrapPriority,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                request.RecoveryMode,
+                FallbackV6ProofBootstrapRecoveryMode,
+                StringComparison.Ordinal) ||
+            string.IsNullOrEmpty(request.RequestCorrelationId) ||
+            !request.RequestCorrelationId.StartsWith(
+                FallbackV6ProofBootstrapCorrelationPrefix,
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var generationText = request.RequestCorrelationId[
+            FallbackV6ProofBootstrapCorrelationPrefix.Length..];
+        return generationText.Length > 0 &&
+               generationText[0] is >= '1' and <= '9' &&
+               long.TryParse(
+                   generationText,
+                   System.Globalization.NumberStyles.None,
+                   System.Globalization.CultureInfo.InvariantCulture,
+                   out bootstrapGeneration) &&
+               bootstrapGeneration > 0 &&
+               string.Equals(
+                   request.RequestCorrelationId,
+                   CreateFallbackV6ProofBootstrapCorrelationId(
+                       bootstrapGeneration),
+                   StringComparison.Ordinal);
+    }
+
+    internal static bool IsFallbackV6ProofBootstrapReceiverState(
+        FileTransferReceiverStateFrameV6 state)
+        => state.TransportEpoch > 0 &&
+           state.Epoch > 0 &&
+           string.IsNullOrWhiteSpace(state.BatchId) &&
+           string.IsNullOrWhiteSpace(state.RepairRequestId) &&
+           state.MissingRanges.Count == 0 &&
+           !state.ReceiverMemoryPressure &&
+           !state.ReceiverDiskPressure &&
+           !state.TerminalReady &&
+           state.TransferPaused &&
+           state.CreditUntilChunkIndexExclusive ==
+               state.ContiguousCommittedChunkIndex &&
+           string.Equals(
+               state.TransferPauseReason,
+               FallbackV6ProofBootstrapRecoveryMode,
+               StringComparison.Ordinal) &&
+           string.Equals(
+               state.Priority,
+               FallbackV6ProofBootstrapPriority,
+               StringComparison.Ordinal) &&
+           string.Equals(
+               state.RecoveryMode,
+               FallbackV6ProofBootstrapRecoveryMode,
+               StringComparison.Ordinal);
+
+    internal static bool TryValidateFallbackV6ProofBootstrapCommandFrame(
+        FileTransferFallbackV6ProofBootstrapCommand command,
+        FileTransferDataFrame frame,
+        out PostTunaFallbackPeerProofFrameIdentity identity)
+    {
+        identity = null!;
+        if (command.IsDefault ||
+            !string.Equals(
+                frame.SessionId,
+                command.Observation.SessionId,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                frame.TransferId,
+                command.Observation.TransferId,
+                StringComparison.Ordinal) ||
+            !PostTunaFallbackPeerProofFrameIdentity.TryCreate(
+                frame,
+                out identity) ||
+            identity.TransportEpoch != command.TargetTransportEpoch)
+        {
+            return false;
+        }
+
+        return command.FrameKind switch
+        {
+            FileTransferFallbackV6ProofBootstrapFrameKind.FrontierRequest =>
+                frame is FileTransferFrontierRequestFrameV6 request &&
+                TryGetFallbackV6ProofBootstrapGeneration(
+                    request,
+                    out var bootstrapGeneration) &&
+                bootstrapGeneration == command.BootstrapGeneration,
+            FileTransferFallbackV6ProofBootstrapFrameKind.ReceiverState =>
+                frame is FileTransferReceiverStateFrameV6 state &&
+                IsFallbackV6ProofBootstrapReceiverState(state),
+            _ => false,
+        };
+    }
+
+    internal static string GetFallbackV6ProofBootstrapReceiptReasonCode(
+        FileTransferFallbackV6ProofBootstrapReceipt receipt)
+        => receipt.Status switch
+        {
+            FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered =>
+                "delivered",
+            FileTransferFallbackV6ProofBootstrapReceiptStatus.Held =>
+                string.Equals(
+                    receipt.Reason,
+                    "filetransfer_fallback_v6_proof_bootstrap_data_session_unavailable",
+                    StringComparison.Ordinal)
+                    ? "data_session_unavailable"
+                    : "held_other",
+            FileTransferFallbackV6ProofBootstrapReceiptStatus.Rejected =>
+                receipt.Reason switch
+                {
+                    "filetransfer_fallback_v6_proof_bootstrap_execution_conflict" =>
+                        "execution_conflict",
+                    "filetransfer_fallback_v6_proof_bootstrap_execution_invalid" =>
+                        "execution_invalid",
+                    "filetransfer_fallback_v6_proof_bootstrap_stale_before_proof_send" =>
+                        "stale_before_proof_send",
+                    "filetransfer_fallback_v6_proof_bootstrap_canceled" =>
+                        "canceled",
+                    "filetransfer_fallback_v6_proof_bootstrap_send_failed" =>
+                        "send_failed",
+                    "filetransfer_fallback_v6_proof_bootstrap_bridge_failed" =>
+                        "bridge_failed",
+                    "filetransfer_fallback_v6_proof_bootstrap_source_scope_replaced" =>
+                        "source_scope_replaced",
+                    _ => "rejected_other",
+                },
+            _ => "rejected_other",
+        };
 }

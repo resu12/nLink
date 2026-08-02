@@ -586,12 +586,13 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         FileTransferFallbackV6ProofBootstrapReceipt receipt;
         try
         {
-            if (command.IsDefault ||
-                !string.Equals(dataSession.SessionId, command.Observation.SessionId, StringComparison.Ordinal) ||
+            if (!string.Equals(dataSession.SessionId, command.Observation.SessionId, StringComparison.Ordinal) ||
                 !string.Equals(dataSession.TransferId, command.Observation.TransferId, StringComparison.Ordinal) ||
                 epochFrame.TransportEpoch != command.TargetTransportEpoch ||
-                !PostTunaFallbackPeerProofFrameIdentity.TryCreate(proofFrame, out var identity) ||
-                identity.TransportEpoch != command.TargetTransportEpoch ||
+                !FileTransferProtocol.TryValidateFallbackV6ProofBootstrapCommandFrame(
+                    command,
+                    proofFrame,
+                    out var identity) ||
                 !isCommandCurrent())
             {
                 receipt = new FileTransferFallbackV6ProofBootstrapReceipt(

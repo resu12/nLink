@@ -181,10 +181,12 @@ public sealed partial class SessionFileTransferService
                 TransferId = context.TransferId,
                 TransportEpoch = command.TargetTransportEpoch,
                 RequestCorrelationId =
-                    $"fallback-v6-proof-bootstrap:{command.BootstrapGeneration}",
+                    FileTransferProtocol.CreateFallbackV6ProofBootstrapCorrelationId(
+                        command.BootstrapGeneration),
                 MissingRanges = [],
-                Priority = "proof",
-                RecoveryMode = "post_tuna_fallback_v6_proof_bootstrap",
+                Priority = FileTransferProtocol.FallbackV6ProofBootstrapPriority,
+                RecoveryMode =
+                    FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
             };
             snapshot = CreateSnapshotLocked();
             LogFallbackV6ProofBootstrapDecision(
@@ -254,10 +256,12 @@ public sealed partial class SessionFileTransferService
             ReceiverDiskPressure = false,
             TerminalReady = false,
             TransferPaused = true,
-            TransferPauseReason = "post_tuna_fallback_v6_proof_bootstrap",
+            TransferPauseReason =
+                FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
             TransportEpoch = command.TargetTransportEpoch,
-            Priority = "proof",
-            RecoveryMode = "post_tuna_fallback_v6_proof_bootstrap",
+            Priority = FileTransferProtocol.FallbackV6ProofBootstrapPriority,
+            RecoveryMode =
+                FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
         };
         snapshot = CreateSnapshotLocked();
         LogFallbackV6ProofBootstrapDecision(
@@ -340,7 +344,8 @@ public sealed partial class SessionFileTransferService
             SessionId = command.Observation.SessionId,
             TransferId = command.Observation.TransferId,
             TransportEpoch = command.TargetTransportEpoch,
-            RecoveryMode = "post_tuna_fallback_v6_proof_bootstrap",
+            RecoveryMode =
+                FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
         };
 
     private static void LogFallbackV6ProofBootstrapDecision(
@@ -359,5 +364,5 @@ public sealed partial class SessionFileTransferService
         string applicationStatus)
         => LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; session_id={FormatProtocolLogValue(command.Observation.SessionId)}; transfer_id={FormatProtocolLogValue(command.Observation.TransferId)}; direction={command.Observation.Direction.ToString().ToLowerInvariant()}; authority_id={FormatProtocolLogValue(command.AuthorityId.ToString())}; bootstrap_generation={command.BootstrapGeneration}; fallback_epoch={command.Observation.FallbackEpoch}; target_transport_epoch={command.TargetTransportEpoch}; frame_kind={FormatProtocolLogValue(command.FrameKind.ToString())}; frame_fingerprint={FormatProtocolLogValue(receipt.FrameIdentity?.Sha256 ?? "(none)")}; receipt_status={FormatProtocolLogValue(receipt.Status.ToString())}; application_status={FormatProtocolLogValue(applicationStatus)}; decision_reason={FormatProtocolLogValue(receipt.Reason)}");
+            $"event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; session_id={FormatProtocolLogValue(command.Observation.SessionId)}; transfer_id={FormatProtocolLogValue(command.Observation.TransferId)}; direction={command.Observation.Direction.ToString().ToLowerInvariant()}; authority_id={FormatProtocolLogValue(command.AuthorityId.ToString())}; bootstrap_generation={command.BootstrapGeneration}; fallback_epoch={command.Observation.FallbackEpoch}; target_transport_epoch={command.TargetTransportEpoch}; frame_kind={FormatProtocolLogValue(command.FrameKind.ToString())}; frame_fingerprint={FormatProtocolLogValue(receipt.FrameIdentity?.Sha256 ?? "(none)")}; receipt_status={FormatProtocolLogValue(receipt.Status.ToString())}; application_status={FormatProtocolLogValue(applicationStatus)}; reason_code={FileTransferProtocol.GetFallbackV6ProofBootstrapReceiptReasonCode(receipt)}; decision_reason={FormatProtocolLogValue(receipt.Reason)}");
 }

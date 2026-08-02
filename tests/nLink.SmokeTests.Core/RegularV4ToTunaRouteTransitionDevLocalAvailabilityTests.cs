@@ -7,6 +7,65 @@ namespace NLink.SmokeTests;
 
 public sealed class FileTransferRouteTransitionDevLocalAvailabilityTests
 {
+    [Fact]
+    [Trait("FileTransferInfraSuite", "FileTransferRouteTransition")]
+    public async Task FallbackV6ProofBootstrap_WrongCommandGenerationIsRejected()
+    {
+        var command = IssueFallbackV6ProofBootstrapForPeerBoundary();
+        var proofFrame = CreateExactFallbackV6ProofBootstrapRequest(
+            command,
+            command.BootstrapGeneration + 1);
+
+        var receipt = await ExecuteFallbackV6ProofBootstrapAsync(
+            command,
+            proofFrame);
+
+        Assert.Equal(
+            FileTransferFallbackV6ProofBootstrapReceiptStatus.Rejected,
+            receipt.Status);
+        Assert.Equal(
+            "filetransfer_fallback_v6_proof_bootstrap_execution_invalid",
+            receipt.Reason);
+        Assert.Null(receipt.FrameIdentity);
+    }
+
+    [Fact]
+    [Trait("FileTransferInfraSuite", "FileTransferRouteTransition")]
+    public async Task FallbackV6ProofBootstrap_NoncanonicalNonemptyRequestIsRejected()
+    {
+        var command = IssueFallbackV6ProofBootstrapForPeerBoundary();
+        var proofFrame = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = command.Observation.SessionId,
+            TransferId = command.Observation.TransferId,
+            TransportEpoch = command.TargetTransportEpoch,
+            RepairRequestId = "ordinary-frontier-repair",
+            RequestCorrelationId = "ordinary-frontier-correlation",
+            Priority = "frontier",
+            RecoveryMode = "frontier_repair_only",
+            MissingRanges =
+            [
+                new FileTransferRangeV4
+                {
+                    StartChunkIndex = 0,
+                    ChunkCount = 1,
+                },
+            ],
+        };
+
+        var receipt = await ExecuteFallbackV6ProofBootstrapAsync(
+            command,
+            proofFrame);
+
+        Assert.Equal(
+            FileTransferFallbackV6ProofBootstrapReceiptStatus.Rejected,
+            receipt.Status);
+        Assert.Equal(
+            "filetransfer_fallback_v6_proof_bootstrap_execution_invalid",
+            receipt.Reason);
+        Assert.Null(receipt.FrameIdentity);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -254,6 +313,73 @@ public sealed class FileTransferRouteTransitionDevLocalAvailabilityTests
     private static long GetGeneration(IFileTransferDataSession dataSession)
         => Assert.IsType<long>(
             dataSession.GetType().GetProperty("Generation")!.GetValue(dataSession));
+
+    private static FileTransferFallbackV6ProofBootstrapCommand
+        IssueFallbackV6ProofBootstrapForPeerBoundary()
+    {
+        var method = typeof(FileTransferCoordinatorTests).GetMethod(
+            "IssueFallbackV6ProofBootstrapForPeerBoundary",
+            BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(method);
+        var decision = Assert.IsType<
+            FileTransferFallbackV6ProofBootstrapDecision>(
+            method!.Invoke(null, [FileTransferDirection.Outbound]));
+        var command = Assert.IsType<FileTransferFallbackV6ProofBootstrapCommand>(
+            decision.Command);
+        Assert.Equal(
+            FileTransferFallbackV6ProofBootstrapFrameKind.FrontierRequest,
+            command.FrameKind);
+        return command;
+    }
+
+    private static FileTransferFrontierRequestFrameV6
+        CreateExactFallbackV6ProofBootstrapRequest(
+            FileTransferFallbackV6ProofBootstrapCommand command,
+            long bootstrapGeneration)
+        => new()
+        {
+            SessionId = command.Observation.SessionId,
+            TransferId = command.Observation.TransferId,
+            TransportEpoch = command.TargetTransportEpoch,
+            RequestCorrelationId =
+                FileTransferProtocol.CreateFallbackV6ProofBootstrapCorrelationId(
+                    bootstrapGeneration),
+            Priority = FileTransferProtocol.FallbackV6ProofBootstrapPriority,
+            RecoveryMode =
+                FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
+            MissingRanges = [],
+        };
+
+    private static async Task<FileTransferFallbackV6ProofBootstrapReceipt>
+        ExecuteFallbackV6ProofBootstrapAsync(
+            FileTransferFallbackV6ProofBootstrapCommand command,
+            FileTransferDataFrame proofFrame)
+    {
+        using var transport = new DevLocalTransport();
+        using var dataSession =
+            await transport.OpenFileTransferDataSessionAsync(
+                command.Observation.SessionId,
+                command.Observation.TransferId,
+                CancellationToken.None);
+        var bridge = Assert.IsAssignableFrom<
+            IFileTransferRouteTransitionBridge>(transport);
+        var epochFrame = new FileTransferTransportEpochFrameV6
+        {
+            SessionId = command.Observation.SessionId,
+            TransferId = command.Observation.TransferId,
+            TransportEpoch = command.TargetTransportEpoch,
+            RecoveryMode =
+                FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
+        };
+
+        return await bridge.ExecuteFileTransferFallbackV6ProofBootstrapAsync(
+            command,
+            epochFrame,
+            proofFrame,
+            dataSession,
+            static () => true,
+            CancellationToken.None);
+    }
 
     private static FileTransferRouteTransitionAuthority CreateAuthority(
         long dataSessionGeneration)

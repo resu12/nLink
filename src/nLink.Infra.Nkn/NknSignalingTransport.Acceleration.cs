@@ -1716,19 +1716,16 @@ public sealed partial class NknSignalingTransport
         FileTransferFallbackV6ProofBootstrapReceipt receipt;
         try
         {
-            if (command.IsDefault ||
-                dataSession is not TransportFileTransferDataSession transportSession ||
+            if (dataSession is not TransportFileTransferDataSession transportSession ||
                 !string.Equals(dataSession.SessionId, command.Observation.SessionId, StringComparison.Ordinal) ||
                 !string.Equals(dataSession.TransferId, command.Observation.TransferId, StringComparison.Ordinal) ||
                 epochFrame.TransportEpoch != command.TargetTransportEpoch ||
                 !string.Equals(epochFrame.SessionId, command.Observation.SessionId, StringComparison.Ordinal) ||
                 !string.Equals(epochFrame.TransferId, command.Observation.TransferId, StringComparison.Ordinal) ||
-                !PostTunaFallbackPeerProofFrameIdentity.TryCreate(proofFrame, out var identity) ||
-                identity.TransportEpoch != command.TargetTransportEpoch ||
-                command.FrameKind == FileTransferFallbackV6ProofBootstrapFrameKind.ReceiverState &&
-                proofFrame is not FileTransferReceiverStateFrameV6 ||
-                command.FrameKind == FileTransferFallbackV6ProofBootstrapFrameKind.FrontierRequest &&
-                proofFrame is not FileTransferFrontierRequestFrameV6 ||
+                !FileTransferProtocol.TryValidateFallbackV6ProofBootstrapCommandFrame(
+                    command,
+                    proofFrame,
+                    out var identity) ||
                 !isCommandCurrent())
             {
                 receipt = new FileTransferFallbackV6ProofBootstrapReceipt(
@@ -1792,7 +1789,7 @@ public sealed partial class NknSignalingTransport
 
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=filetransfer_fallback_v6_proof_bootstrap_execution_completed; session_id={SanitizeLogToken(command.Observation.SessionId)}; transfer_id={SanitizeLogToken(command.Observation.TransferId)}; direction={FormatFileTransferDirection(command.Observation.Direction)}; authority_id={SanitizeLogToken(command.AuthorityId.ToString())}; bootstrap_generation={command.BootstrapGeneration}; fallback_epoch={command.Observation.FallbackEpoch}; target_transport_epoch={command.TargetTransportEpoch}; frame_kind={SanitizeLogToken(command.FrameKind.ToString())}; frame_fingerprint={SanitizeLogToken(receipt.FrameIdentity?.Sha256 ?? "none")}; receipt_status={SanitizeLogToken(receipt.Status.ToString())}; decision_reason={SanitizeLogToken(receipt.Reason)}");
+            $"event=filetransfer_fallback_v6_proof_bootstrap_execution_completed; session_id={SanitizeLogToken(command.Observation.SessionId)}; transfer_id={SanitizeLogToken(command.Observation.TransferId)}; direction={FormatFileTransferDirection(command.Observation.Direction)}; authority_id={SanitizeLogToken(command.AuthorityId.ToString())}; bootstrap_generation={command.BootstrapGeneration}; fallback_epoch={command.Observation.FallbackEpoch}; target_transport_epoch={command.TargetTransportEpoch}; frame_kind={SanitizeLogToken(command.FrameKind.ToString())}; frame_fingerprint={SanitizeLogToken(receipt.FrameIdentity?.Sha256 ?? "none")}; receipt_status={SanitizeLogToken(receipt.Status.ToString())}; reason_code={FileTransferProtocol.GetFallbackV6ProofBootstrapReceiptReasonCode(receipt)}; decision_reason={SanitizeLogToken(receipt.Reason)}");
         return receipt;
     }
 

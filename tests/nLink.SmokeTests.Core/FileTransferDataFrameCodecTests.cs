@@ -529,6 +529,70 @@ public sealed class FileTransferDataFrameCodecTests
     }
 
     [Fact]
+    public void V6FallbackProofBootstrapFrontierRequest_RoundTripsExactProofOnlyProfile()
+    {
+        var payload = FileTransferDataFrameCodec.Serialize(
+            new FileTransferFrontierRequestFrameV6
+            {
+                SessionId = "session_a",
+                TransferId = "transfer_fallback_bootstrap",
+                TransportEpoch = 12,
+                RequestCorrelationId = "fallback-v6-proof-bootstrap:3",
+                MissingRanges = [],
+                Priority = "proof",
+                RecoveryMode = "post_tuna_fallback_v6_proof_bootstrap",
+            });
+
+        Assert.True(FileTransferDataFrameCodec.TryDeserialize(payload, out var frame));
+        var request = Assert.IsType<FileTransferFrontierRequestFrameV6>(frame);
+        Assert.Equal(12, request.TransportEpoch);
+        Assert.Null(request.RepairRequestId);
+        Assert.Equal("fallback-v6-proof-bootstrap:3", request.RequestCorrelationId);
+        Assert.Empty(request.MissingRanges);
+        Assert.Equal("proof", request.Priority);
+        Assert.Equal("post_tuna_fallback_v6_proof_bootstrap", request.RecoveryMode);
+    }
+
+    [Theory]
+    [InlineData(0, null, "fallback-v6-proof-bootstrap:3", "proof", "post_tuna_fallback_v6_proof_bootstrap")]
+    [InlineData(12, "repair-1", "fallback-v6-proof-bootstrap:3", "proof", "post_tuna_fallback_v6_proof_bootstrap")]
+    [InlineData(12, null, null, "proof", "post_tuna_fallback_v6_proof_bootstrap")]
+    [InlineData(12, null, "fallback-v6-proof-bootstrap:0", "proof", "post_tuna_fallback_v6_proof_bootstrap")]
+    [InlineData(12, null, "fallback-v6-proof-bootstrap:03", "proof", "post_tuna_fallback_v6_proof_bootstrap")]
+    [InlineData(12, null, "fallback-v6-proof-bootstrap:3", "frontier", "post_tuna_fallback_v6_proof_bootstrap")]
+    [InlineData(12, null, "fallback-v6-proof-bootstrap:3", "proof", "post_tuna_fallback_v6")]
+    public void V6FallbackProofBootstrapFrontierRequest_RejectsProfileNearMisses(
+        long transportEpoch,
+        string? repairRequestId,
+        string? correlationId,
+        string? priority,
+        string? recoveryMode)
+    {
+        var request = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = "session_a",
+            TransferId = "transfer_fallback_bootstrap_near_miss",
+            TransportEpoch = transportEpoch,
+            RepairRequestId = repairRequestId,
+            RequestCorrelationId = correlationId,
+            MissingRanges = [],
+            Priority = priority,
+            RecoveryMode = recoveryMode,
+        };
+
+        Assert.Throws<InvalidOperationException>(
+            () => FileTransferDataFrameCodec.Serialize(request));
+        Assert.False(FileTransferDataFrameCodec.TryDeserialize(
+            BuildProofOnlyFrontierRequest(
+                transportEpoch,
+                repairRequestId,
+                correlationId,
+                priority,
+                recoveryMode),
+            out _));
+    }
+
+    [Fact]
     public void V6TransportProbeAndHeartbeatFrames_RoundTrip()
     {
         var probePayload = FileTransferDataFrameCodec.Serialize(
@@ -1007,6 +1071,29 @@ public sealed class FileTransferDataFrameCodecTests
         return buffer.ToArray();
     }
 
+    private static byte[] BuildProofOnlyFrontierRequest(
+        long transportEpoch,
+        string? repairRequestId,
+        string? correlationId,
+        string? priority,
+        string? recoveryMode)
+    {
+        using var buffer = new MemoryStream();
+        WriteUInt32(buffer, 0x3246544E);
+        buffer.WriteByte(1);
+        buffer.WriteByte(45);
+        WriteString(buffer, "session_a");
+        WriteString(buffer, "transfer_fallback_bootstrap_near_miss");
+        WriteInt64(buffer, transportEpoch);
+        WriteOptionalString(buffer, null);
+        WriteOptionalString(buffer, repairRequestId);
+        WriteOptionalString(buffer, priority);
+        WriteOptionalString(buffer, recoveryMode);
+        WriteInt32(buffer, 0);
+        WriteOptionalString(buffer, correlationId);
+        return buffer.ToArray();
+    }
+
     private static void WriteUInt32(Stream stream, uint value)
     {
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
@@ -1046,6 +1133,15 @@ public sealed class FileTransferDataFrameCodecTests
 
     private static void WriteBool(Stream stream, bool value)
         => stream.WriteByte(value ? (byte)1 : (byte)0);
+
+    private static void WriteOptionalString(Stream stream, string? value)
+    {
+        stream.WriteByte(string.IsNullOrWhiteSpace(value) ? (byte)0 : (byte)1);
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            WriteString(stream, value);
+        }
+    }
 
     private static void WriteString(Stream stream, string value)
     {

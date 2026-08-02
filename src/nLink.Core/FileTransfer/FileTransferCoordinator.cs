@@ -5216,6 +5216,185 @@ internal static class FileTransferCoordinator
             : null;
     }
 
+    internal static FileTransferFallbackV6ProofBootstrapCommand?
+        GetCurrentFileTransferFallbackV6ProofBootstrapBoundary(
+            FileTransferCoordinatorState state)
+    {
+        var substate = state.PersistentState.FileTransferRouteTransition;
+        FileTransferFallbackV6ProofBootstrapCommand? command = null;
+        var pendingWasRejected =
+            substate.PendingFallbackV6ProofBootstrap is { } pendingCandidate &&
+            substate.LastFallbackV6ProofBootstrapReceipt is
+                { Status: FileTransferFallbackV6ProofBootstrapReceiptStatus.Rejected } rejected &&
+            rejected.Command == pendingCandidate;
+        if (substate.PendingFallbackV6ProofBootstrap is { } pending &&
+            !pendingWasRejected)
+        {
+            command = pending;
+        }
+        else if (substate.LastFallbackV6ProofBootstrapReceipt is
+                 {
+                     Status: FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered,
+                     IsDefault: false,
+                     Command: { } delivered,
+                 })
+        {
+            command = delivered;
+        }
+
+        return command is { } candidate &&
+               IsFileTransferFallbackV6ProofBootstrapSourceScopeCurrent(
+                   state,
+                   candidate) &&
+               IsFileTransferFallbackV6ProofBootstrapTransitionScopeCurrent(
+                   state,
+                   candidate)
+            ? candidate
+            : null;
+    }
+
+    internal static bool
+        TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerBoundary(
+            FileTransferCoordinatorState state,
+            FileTransferDataFrame peerFrame,
+            out FileTransferFallbackV6ProofBootstrapCommand command,
+            out string reasonCode)
+    {
+        command = null!;
+        reasonCode = "bootstrap_not_current";
+        if (GetCurrentFileTransferFallbackV6ProofBootstrapBoundary(state) is not
+            { } current)
+        {
+            return false;
+        }
+
+        command = current;
+        if (!string.Equals(
+                peerFrame.SessionId,
+                current.Observation.SessionId,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                peerFrame.TransferId,
+                current.Observation.TransferId,
+                StringComparison.Ordinal))
+        {
+            reasonCode = "peer_frame_scope_mismatch";
+            return false;
+        }
+
+        switch (peerFrame)
+        {
+            case FileTransferReceiverStateFrameV6 receiverState when
+                current.Observation.Direction == FileTransferDirection.Outbound &&
+                current.FrameKind ==
+                    FileTransferFallbackV6ProofBootstrapFrameKind.FrontierRequest:
+                if (!FileTransferProtocol.IsFallbackV6ProofBootstrapReceiverState(
+                        receiverState))
+                {
+                    reasonCode = "peer_frame_profile_mismatch";
+                    return false;
+                }
+
+                if (receiverState.TransportEpoch != current.TargetTransportEpoch)
+                {
+                    reasonCode = "peer_frame_epoch_mismatch";
+                    return false;
+                }
+
+                reasonCode = "exact_bootstrap_boundary";
+                return true;
+
+            case FileTransferFrontierRequestFrameV6 frontierRequest when
+                current.Observation.Direction == FileTransferDirection.Inbound &&
+                current.FrameKind ==
+                    FileTransferFallbackV6ProofBootstrapFrameKind.ReceiverState:
+                if (!FileTransferProtocol.TryGetFallbackV6ProofBootstrapGeneration(
+                        frontierRequest,
+                        out var bootstrapGeneration))
+                {
+                    reasonCode = "peer_frame_profile_mismatch";
+                    return false;
+                }
+
+                if (frontierRequest.TransportEpoch != current.TargetTransportEpoch)
+                {
+                    reasonCode = "peer_frame_epoch_mismatch";
+                    return false;
+                }
+
+                if (bootstrapGeneration != current.BootstrapGeneration)
+                {
+                    reasonCode = "peer_frame_generation_mismatch";
+                    return false;
+                }
+
+                reasonCode = "exact_bootstrap_boundary";
+                return true;
+
+            default:
+                reasonCode = "peer_frame_kind_mismatch";
+                return false;
+        }
+    }
+
+    private static bool
+        IsFileTransferFallbackV6ProofBootstrapTransitionScopeCurrent(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackV6ProofBootstrapCommand command)
+    {
+        var transition = state.PersistentState.FileTransferRouteTransition;
+        if (transition.CurrentOperation is not null)
+        {
+            return false;
+        }
+
+        return transition.LastTerminalOperation is not
+               {
+                   State: FileTransferRouteTransitionState.Invalidated,
+               } invalidated ||
+               !IsFileTransferFallbackV6ProofBootstrapTransitionAuthorityScope(
+                   invalidated.Authority,
+                   command);
+    }
+
+    private static bool
+        IsFileTransferFallbackV6ProofBootstrapTransitionAuthorityScope(
+            FileTransferRouteTransitionAuthority authority,
+            FileTransferFallbackV6ProofBootstrapCommand command)
+    {
+        return authority.Kind ==
+                   FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6 &&
+               string.Equals(
+                   authority.SessionId,
+                   command.Observation.SessionId,
+                   StringComparison.Ordinal) &&
+               string.Equals(
+                   authority.TransferId,
+                   command.Observation.TransferId,
+                   StringComparison.Ordinal) &&
+               authority.Direction == command.Observation.Direction &&
+               authority.SourceRuntimeOwner == command.SourceRuntimeOwner &&
+               authority.SourceRoutePublication == command.SourceRoutePublication &&
+               authority.SourceRouteCommit == command.SourceRouteCommit &&
+               authority.SourceTerminalGeneration ==
+                   command.SourceTerminalGeneration &&
+               authority.SourceLiveRouteEpoch == command.SourceLiveRouteEpoch &&
+               authority.SourceLegGeneration == command.SourceLegGeneration &&
+               authority.SourceTransportEpoch == command.SourceTransportEpoch &&
+               authority.SourceBridgeRecoveryGeneration ==
+                   command.SourceBridgeRecoveryGeneration &&
+               authority.DataSessionGeneration ==
+                   command.SourceDataSessionGeneration &&
+               authority.TargetRoute == FileTransferRoute.PostTunaFallbackV6 &&
+               authority.TargetProtocolVersion ==
+                   FileTransferProtocol.ProtocolVersionV6 &&
+               authority.TargetTransport == FileTransferTransportKind.RegularNkn &&
+               authority.ProofBoundary is
+                   FileTransferFallbackTransitionProofBoundary fallback &&
+               fallback.SourceRouteCommit == command.SourceRouteCommit &&
+               fallback.TargetTransportEpoch == command.TargetTransportEpoch;
+    }
+
     private static bool IsFileTransferFallbackV6ProofBootstrapSourceScopeCurrent(
         FileTransferCoordinatorState state,
         FileTransferFallbackV6ProofBootstrapCommand command)
