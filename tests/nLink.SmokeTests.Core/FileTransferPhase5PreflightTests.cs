@@ -555,7 +555,8 @@ public sealed class FileTransferPhase5PreflightTests : FileTransferAcceptancePha
         Assert.Contains("preflight_bridge_bootstrap", scriptText, StringComparison.Ordinal);
         Assert.Contains("Test-Phase5BridgeReadinessPreflightRetryableFailure", scriptText, StringComparison.Ordinal);
         Assert.Contains("Test-Phase5BridgeReadinessPreflightQuarantinableFailure", scriptText, StringComparison.Ordinal);
-        Assert.Contains("-not [string]::IsNullOrEmpty($retainedText)", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Get-RouteAcceptanceRetainedMarkerIndex", scriptText, StringComparison.Ordinal);
+        Assert.Contains("hasRegularV4UnprovenEscalation", scriptText, StringComparison.Ordinal);
     }
 
     [Fact]

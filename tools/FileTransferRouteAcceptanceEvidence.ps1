@@ -2277,6 +2277,45 @@ function Write-RouteAcceptanceEvidenceManifest {
     }
 }
 
+function Set-RouteAcceptanceEvidenceManifest {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Manifest
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $directory = [System.IO.Path]::GetDirectoryName($fullPath)
+    if (-not [string]::IsNullOrWhiteSpace($directory)) {
+        [System.IO.Directory]::CreateDirectory($directory) | Out-Null
+    }
+
+    if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+        return Write-RouteAcceptanceEvidenceManifest -Path $fullPath -Manifest $Manifest
+    }
+
+    $temporaryPath = '{0}.{1}.tmp' -f $fullPath, ([guid]::NewGuid().ToString('N'))
+    $backupPath = '{0}.{1}.bak' -f $fullPath, ([guid]::NewGuid().ToString('N'))
+    try {
+        Write-RouteAcceptanceEvidenceManifest -Path $temporaryPath -Manifest $Manifest | Out-Null
+        [System.IO.File]::Replace($temporaryPath, $fullPath, $backupPath, $true)
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) {
+            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
+            Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    return [pscustomobject][ordered]@{
+        path = $fullPath
+        sha256 = Get-RouteAcceptanceEvidenceSha256 -Path $fullPath
+        validation = Test-RouteAcceptanceEvidenceManifestFile -Path $fullPath
+        preWriteValidation = Test-RouteAcceptanceEvidenceManifest -Manifest $Manifest
+    }
+}
+
 function Test-RouteAcceptanceEvidenceManifestFile {
     param([Parameter(Mandatory = $true)][string]$Path)
 

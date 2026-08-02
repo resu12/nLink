@@ -768,13 +768,16 @@ function Write-TunaGuiRetainedAnalysisTimeoutArtifacts {
         [string]::Equals($guiIntegrityOk, 'True', [System.StringComparison]::OrdinalIgnoreCase)
     $terminalSuccessWithProof = $terminalSuccess -and $routeProofOk
     $failureClass = if ($terminalSuccessWithProof) { 'retained_analysis_timeout_after_terminal_success' } else { 'retained_analysis_timeout' }
-    $acceptanceFailureClass = if ($terminalSuccessWithProof) { 'none' } else { 'setup' }
-    $operatorVerdict = if ($terminalSuccessWithProof) { 'PASS' } else { 'INVALID_SETUP' }
+    $acceptanceFailureClass = 'incomplete_proof'
+    $operatorVerdict = 'INCONCLUSIVE'
     $warningKinds = if ($terminalSuccessWithProof) { 'retained_analysis_timeout_after_terminal_success' } else { '(none)' }
 
     $dto = [ordered]@{
         failure_class = $failureClass
         acceptance_failure_class = $acceptanceFailureClass
+        semantic_failure_domain = 'unavailable'
+        retained_analysis_completed = 0
+        retained_analysis_status = 'timed_out'
         timed_out = 1
         timeout_seconds = $TimeoutSeconds
         process_id = $ProcessId
@@ -810,14 +813,17 @@ function Write-TunaGuiRetainedAnalysisTimeoutArtifacts {
     Set-Content -LiteralPath (Join-Path $AnalysisDir 'filetransfer-operator-verdict.txt') -Value @(
         ('verdict={0}' -f $operatorVerdict),
         ('acceptance_failure_class={0}' -f $acceptanceFailureClass),
+        'semantic_failure_domain=unavailable',
+        'retained_analysis_completed=0',
+        'retained_analysis_status=timed_out',
         ('failure_class={0}' -f $failureClass),
-        ('hard_failure_count={0}' -f ($(if ($terminalSuccessWithProof) { 0 } else { 1 }))),
+        'hard_failure_count=1',
         ('warning_kinds={0}' -f $warningKinds),
         ('timeout_seconds={0}' -f $TimeoutSeconds),
         ('log_path={0}' -f $LogPath)
     ) -Encoding UTF8
 
-    return $terminalSuccessWithProof
+    return $false
 }
 
 function Test-TunaGuiRetainedAnalysisCompletedProofArtifacts {
@@ -999,16 +1005,13 @@ function Invoke-TunaGuiRetainedAnalysis {
                 live_route_proof_mode = $LiveRouteProofMode
             }
             $diagnostics | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $diagnosticsPath -Encoding UTF8
-            $terminalSuccessTimeout = Write-TunaGuiRetainedAnalysisTimeoutArtifacts `
+            Write-TunaGuiRetainedAnalysisTimeoutArtifacts `
                 -AnalysisDir $AnalysisDir `
                 -LogPath $LogPath `
                 -TimeoutSeconds $analysisTimeoutSeconds `
                 -ProcessId $process.Id `
                 -StartedUtc $startedUtc.ToString('O') `
-                -LiveRouteProofMode $LiveRouteProofMode
-            if ($terminalSuccessTimeout) {
-                return
-            }
+                -LiveRouteProofMode $LiveRouteProofMode | Out-Null
 
             throw "Retained analysis timed out after ${analysisTimeoutSeconds}s. Artifacts: $AnalysisDir"
         }
@@ -1497,7 +1500,12 @@ function Write-TunaGuiControlledRestartFailureSummary {
     $errorPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-error.json'
     $errorSummary = $null
     if (Test-Path -LiteralPath $errorPath -PathType Leaf) {
-        $errorSummary = Get-Content -LiteralPath $errorPath -Raw | ConvertFrom-Json
+        try {
+            $errorSummary = Get-Content -LiteralPath $errorPath -Raw | ConvertFrom-Json
+        }
+        catch {
+            $errorSummary = $null
+        }
     }
 
     $diagnostics = Get-TunaGuiMeasuredFallbackDiagnostics -ArtifactDir $ArtifactDir
@@ -1512,7 +1520,7 @@ function Write-TunaGuiControlledRestartFailureSummary {
         fallbackDiagnostics = $diagnostics
     }
 
-    $summary | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
+    Write-TunaGuiAtomicJson -Path $summaryPath -Value $summary
 }
 
 function Write-TunaGuiFailureSummaryIfMissing {
@@ -1580,7 +1588,7 @@ function Write-TunaGuiFailureSummaryIfMissing {
         outboundErrorCode = '(unknown)'
     }
 
-    $summary | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
+    Write-TunaGuiAtomicJson -Path $summaryPath -Value $summary
 }
 
 function Update-TunaGuiControlledRestartSummary {
@@ -1619,7 +1627,7 @@ function Update-TunaGuiControlledRestartSummary {
     $summary | Add-Member -NotePropertyName fallbackFailurePhase -NotePropertyValue $fallbackFailurePhase -Force
     $summary | Add-Member -NotePropertyName fallbackFailureReason -NotePropertyValue '(none)' -Force
     $summary | Add-Member -NotePropertyName fallbackDiagnostics -NotePropertyValue $fallbackDiagnostics -Force
-    $summary | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
+    Write-TunaGuiAtomicJson -Path $summaryPath -Value $summary
 }
 
 function Write-TunaGuiDirectEvidenceManifest {
@@ -1655,6 +1663,71 @@ function Write-TunaGuiDirectEvidenceManifest {
     $cursorPass = $null -ne $ledger -and [string]$ledger.cursorIntegrityVerdict -eq 'pass'
     $writerPass = $null -ne $ledger -and [int]$ledger.writerEvidenceVersion -eq 3 -and [string]$ledger.writerIntegrityVerdict -eq 'pass'
     $currentRuntimeProof = $artifactFinalized -and $cursorPass -and $writerPass
+    $analysisDirs = if ($RouteMode -eq 'v4-restart-v6-fallback') {
+        @((Join-Path $ArtifactDir 'measured-fallback-analysis'))
+    }
+    elseif ($RouteMode -eq 'live-reactivation-second-transfer') {
+        @($ArtifactDir, (Join-Path $ArtifactDir 'second-transfer-analysis'))
+    }
+    else {
+        @($ArtifactDir)
+    }
+    $analysisStatuses = @(
+        foreach ($analysisDir in $analysisDirs) {
+            $timeoutSummaryPath = Join-Path $analysisDir 'filetransfer-retained-analysis-timeout-summary.json'
+            $completedReapedPath = Join-Path $analysisDir 'filetransfer-retained-analysis-completed-process-reaped.json'
+            $diagnosticsPath = Join-Path $analysisDir 'filetransfer-retained-analysis-diagnostics.json'
+            if (Test-Path -LiteralPath $timeoutSummaryPath -PathType Leaf) {
+                'timed_out'
+                continue
+            }
+            if (Test-Path -LiteralPath $completedReapedPath -PathType Leaf) {
+                'completed'
+                continue
+            }
+            if (-not (Test-Path -LiteralPath $diagnosticsPath -PathType Leaf)) {
+                'not_started'
+                continue
+            }
+
+            try {
+                $analysisDiagnostics = Get-Content -LiteralPath $diagnosticsPath -Raw | ConvertFrom-Json
+                if ($analysisDiagnostics.PSObject.Properties.Name -contains 'timed_out' -and
+                    [int]$analysisDiagnostics.timed_out -ne 0) {
+                    'timed_out'
+                }
+                elseif ($analysisDiagnostics.PSObject.Properties.Name -contains 'exit_code' -and
+                    [int]$analysisDiagnostics.exit_code -eq 0) {
+                    'completed'
+                }
+                elseif ($analysisDiagnostics.PSObject.Properties.Name -contains 'exit_code') {
+                    'failed'
+                }
+                else {
+                    'in_progress'
+                }
+            }
+            catch {
+                'failed'
+            }
+        }
+    )
+    $retainedAnalysisStatus = if ($analysisStatuses -contains 'timed_out') {
+        'timed_out'
+    }
+    elseif ($analysisStatuses -contains 'failed') {
+        'failed'
+    }
+    elseif ($analysisStatuses.Count -gt 0 -and @($analysisStatuses | Where-Object { $_ -ne 'completed' }).Count -eq 0) {
+        'completed'
+    }
+    elseif ($analysisStatuses -contains 'completed' -or $analysisStatuses -contains 'in_progress') {
+        'in_progress'
+    }
+    else {
+        'not_started'
+    }
+    $retainedAnalysisCompleted = $retainedAnalysisStatus -eq 'completed'
     $sourceCommit = ''
     $sourceDirty = $true
     try {
@@ -1697,6 +1770,8 @@ function Write-TunaGuiDirectEvidenceManifest {
         writerEvidenceVersion = $(if ($null -ne $ledger) { [int]$ledger.writerEvidenceVersion } else { 0 })
         writerIntegrityVerdict = $(if ($writerPass) { 'pass' } else { 'fail' })
         currentRuntimeProof = $currentRuntimeProof
+        retainedAnalysisCompleted = $retainedAnalysisCompleted
+        retainedAnalysisStatus = $retainedAnalysisStatus
         generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
     }
     Write-TunaGuiAtomicJson -Path (Join-Path $ArtifactDir 'filetransfer-tuna-gui-evidence-manifest.json') -Value $manifest
@@ -1829,6 +1904,28 @@ try {
         -ExePath $resolvedExe `
         -TimeoutSeconds $TimeoutSeconds
     $guiSmokeExitCode = [int]$guiSmokeResult.ExitCode
+    $summaryPath = Join-Path $resolvedArtifactDir 'filetransfer-tuna-gui-summary.json'
+    $summaryMissingAfterGuiChild = -not (Test-Path -LiteralPath $summaryPath -PathType Leaf)
+    if ($summaryMissingAfterGuiChild) {
+        if ($RouteMode -eq 'v4-restart-v6-fallback') {
+            Write-TunaGuiControlledRestartFailureSummary -ArtifactDir $resolvedArtifactDir -RouteMode $RouteMode
+        }
+        else {
+            $summaryFailurePhase = if ([bool]$guiSmokeResult.TimedOut) { 'evidence_finalization' } elseif ($guiSmokeExitCode -ne 0) { 'progress_failure' } else { 'summary_missing' }
+            $summaryFailureReason = if ([bool]$guiSmokeResult.TimedOut) { 'gui_evidence_finalization_timeout' } elseif ($guiSmokeExitCode -ne 0) { 'gui_smoke_failed' } else { 'gui_summary_missing' }
+            Write-TunaGuiFailureSummaryIfMissing `
+                -ArtifactDir $resolvedArtifactDir `
+                -RouteMode $RouteMode `
+                -SetupFailurePhase $summaryFailurePhase `
+                -SetupFailureReason $summaryFailureReason
+        }
+    }
+    Write-TunaGuiDirectEvidenceManifest `
+        -RepoRoot $repoRoot `
+        -ArtifactDir $resolvedArtifactDir `
+        -ExePath $resolvedExe `
+        -GuiExitCode $guiSmokeExitCode
+
     if ([bool]$guiSmokeResult.TimedOut) {
         Write-Error "GUI smoke evidence finalization timed out with exit code 124. Artifacts: $resolvedArtifactDir" -ErrorAction Continue
         exit 124
@@ -1837,25 +1934,20 @@ try {
     if ($guiSmokeExitCode -ne 0) {
         if ($RouteMode -eq 'v4-restart-v6-fallback') {
             Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir
-            Write-TunaGuiControlledRestartFailureSummary -ArtifactDir $resolvedArtifactDir -RouteMode $RouteMode
         }
         else {
             Invoke-TunaGuiLiveRetainedAnalysisBestEffort -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir -RouteMode $RouteMode
-            Write-TunaGuiFailureSummaryIfMissing -ArtifactDir $resolvedArtifactDir -RouteMode $RouteMode -SetupFailurePhase 'progress_failure' -SetupFailureReason 'gui_smoke_failed'
         }
 
         throw "GUI smoke failed with exit code $guiSmokeExitCode. Artifacts: $resolvedArtifactDir"
     }
 
-    $summaryPath = Join-Path $resolvedArtifactDir 'filetransfer-tuna-gui-summary.json'
-    if (-not (Test-Path -LiteralPath $summaryPath -PathType Leaf)) {
+    if ($summaryMissingAfterGuiChild) {
         if ($RouteMode -eq 'v4-restart-v6-fallback') {
             Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir
-            Write-TunaGuiControlledRestartFailureSummary -ArtifactDir $resolvedArtifactDir -RouteMode $RouteMode
         }
         else {
             Invoke-TunaGuiLiveRetainedAnalysisBestEffort -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir -RouteMode $RouteMode
-            Write-TunaGuiFailureSummaryIfMissing -ArtifactDir $resolvedArtifactDir -RouteMode $RouteMode -SetupFailurePhase 'summary_missing' -SetupFailureReason 'gui_summary_missing'
         }
 
         throw "GUI smoke did not write file-transfer Tuna summary. Artifacts: $resolvedArtifactDir"

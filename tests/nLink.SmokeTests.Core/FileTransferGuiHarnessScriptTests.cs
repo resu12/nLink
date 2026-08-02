@@ -2919,6 +2919,59 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeFailureClassification_InvalidFallbackBootstrapFrontierUsesIndexedFastPath()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = guiText
+            .Replace("\r\n    ", "\r\n", StringComparison.Ordinal)
+            .Replace("\n    ", "\n", StringComparison.Ordinal);
+        var fieldBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Get-TunaGuiRetiredPendingAnswerHandoffFailure");
+        var fastPathMatch = System.Text.RegularExpressions.Regex.Match(
+            nestedFunctionText,
+            @"(?s)function\s+Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure\s*\{(?<body>.*?)\r?\n\}\s*\r?\n\s*\$retiredPendingAnswerFastPath");
+        Assert.True(
+            fastPathMatch.Success,
+            "Could not extract the fallback-V6 bootstrap GUI fast path.");
+        var fastPathBody = fastPathMatch.Groups["body"].Value;
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldBody}} }
+            function Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure { {{fastPathBody}} }
+
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-invalid-fallback-bootstrap-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                @(
+                    'event=filetransfer_route_transition_committed; authority_id=transition; transition_generation=1; session_id=sess; transfer_id=transfer; direction=outbound; target_route=file_tuna_v4; target_live_route_epoch=1; target_runtime_generation=2; target_route_publication_generation=2; target_route_commit_generation=1; target_terminal_generation=0; target_leg_generation=2; decision_status=Committed; log_writer_id=writer',
+                    'event=filetransfer_fallback_v6_proof_bootstrap_observed; session_id=sess; direction=outbound; observation_generation=1; fallback_epoch=1; proof_kind=file_transfer_v4_state_frame_received; log_writer_id=writer',
+                    'event=filetransfer_fallback_v6_proof_bootstrap_decided; session_id=sess; transfer_id=transfer; direction=outbound; fallback_epoch=1; authority_id=bootstrap; bootstrap_generation=1; source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch=1; source_runtime_generation=2; source_route_publication_generation=2; source_route_commit_generation=1; source_terminal_generation=0; source_leg_generation=2; source_transport_epoch=0; source_bridge_recovery_generation=0; source_data_session_generation=1; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; target_transport_epoch=1; frame_kind=FrontierRequest; decision_status=Issued; log_writer_id=writer',
+                    'event=filetransfer_fallback_v6_proof_bootstrap_execution_completed; session_id=sess; transfer_id=transfer; direction=outbound; fallback_epoch=1; authority_id=bootstrap; bootstrap_generation=1; target_transport_epoch=1; frame_kind=FrontierRequest; frame_fingerprint=none; receipt_status=Rejected; reason_code=execution_invalid; log_writer_id=writer',
+                    'event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; session_id=sess; transfer_id=transfer; direction=outbound; fallback_epoch=1; authority_id=bootstrap; bootstrap_generation=1; target_transport_epoch=1; frame_kind=FrontierRequest; frame_fingerprint=(none); receipt_status=Rejected; application_status=Applied; reason_code=execution_invalid; log_writer_id=writer'
+                ) | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure -Lines @(Get-Content -LiteralPath $path)
+                if (-not $result.Unresolved -or [long]$result.LineVisits -ne 5) {
+                    throw "invalid fallback bootstrap fast path mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+                Write-Output 'gui-invalid-fallback-bootstrap-fast-path-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Invalid fallback-bootstrap GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-invalid-fallback-bootstrap-fast-path-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GuiSmokeFailureClassification_BudgetLeavesHardDeadlineGrace()
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
@@ -4765,7 +4818,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
-    public void RunFileTransferTunaGuiSmoke_TerminalSuccessRetainedTimeoutIsWarning()
+    public void RunFileTransferTunaGuiSmoke_RetainedTimeoutIsSemanticallyUnavailableNotSetup()
     {
         var repoRoot = FindRepoRoot();
         var wrapperText = File.ReadAllText(Path.Combine(repoRoot, "tools", "Run-FileTransferTunaGuiSmoke.ps1"));
@@ -4780,13 +4833,272 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             Assert.Contains("terminal_success_without_retained_route_proof", scriptText, StringComparison.Ordinal);
             Assert.Contains("route_consistency_verdict", scriptText, StringComparison.Ordinal);
             Assert.Contains("'verdict={0}' -f $operatorVerdict", scriptText, StringComparison.Ordinal);
-            Assert.Contains("if ($terminalSuccessTimeout)", scriptText, StringComparison.Ordinal);
-            Assert.Contains("return", scriptText, StringComparison.Ordinal);
+            Assert.Contains("$acceptanceFailureClass = 'incomplete_proof'", scriptText, StringComparison.Ordinal);
+            Assert.Contains("$operatorVerdict = 'INCONCLUSIVE'", scriptText, StringComparison.Ordinal);
+            Assert.Contains("semantic_failure_domain = 'unavailable'", scriptText, StringComparison.Ordinal);
+            Assert.Contains("retained_analysis_completed = 0", scriptText, StringComparison.Ordinal);
+            Assert.Contains("retained_analysis_status = 'timed_out'", scriptText, StringComparison.Ordinal);
+            Assert.DoesNotContain("if ($terminalSuccessTimeout)", scriptText, StringComparison.Ordinal);
+            Assert.DoesNotContain("$acceptanceFailureClass = if ($terminalSuccessWithProof) { 'none' } else { 'setup' }", scriptText, StringComparison.Ordinal);
+            Assert.DoesNotContain("$operatorVerdict = if ($terminalSuccessWithProof) { 'PASS' } else { 'INVALID_SETUP' }", scriptText, StringComparison.Ordinal);
         }
 
         Assert.Contains("$guiSummaryRaw", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("\"completed\"\\s*:\\s*(true|false)", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("\"integrityOk\"\\s*:\\s*(true|false)", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("Test-RouteAcceptanceSemanticAnalysisUnavailableFailure", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("$result.semanticFailureDomain = 'unavailable'", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("Tuna GUI semantic analysis unavailable", routeAcceptanceText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RouteAcceptance_CheckpointsEvidenceBeforeSemanticAssertionsAndEnrichment()
+    {
+        var repoRoot = FindRepoRoot();
+        var wrapperText = File.ReadAllText(Path.Combine(repoRoot, "tools", "Run-FileTransferTunaGuiSmoke.ps1"));
+        var routeAcceptanceText = File.ReadAllText(Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"));
+        var scenarioBody = ExtractPowerShellFunctionBody(
+            routeAcceptanceText,
+            "Invoke-Phase4RouteAcceptanceScenario",
+            "New-RouteAcceptanceSummaryRunDto");
+        var completionBody = ExtractPowerShellFunctionBody(
+            routeAcceptanceText,
+            "Complete-RouteAcceptanceRunEvidence",
+            "Checkpoint-RouteAcceptanceRunEvidence");
+
+        var firstAttemptRegistration = scenarioBody.IndexOf("Add-RouteAcceptanceScenarioAttemptEvidence", StringComparison.Ordinal);
+        var firstAttemptSelection = scenarioBody.IndexOf("Select-RouteAcceptanceScenarioAttemptEvidence", StringComparison.Ordinal);
+        var firstCheckpoint = scenarioBody.IndexOf("Checkpoint-RouteAcceptanceRunEvidence", StringComparison.Ordinal);
+        var firstAssertion = scenarioBody.IndexOf("$result = Assert-Phase4ScenarioRun", StringComparison.Ordinal);
+        Assert.True(firstAttemptRegistration >= 0 && firstAttemptRegistration < firstAssertion);
+        Assert.True(firstAttemptSelection >= 0 && firstAttemptSelection < firstAssertion);
+        Assert.True(firstCheckpoint >= 0 && firstCheckpoint < firstAssertion);
+
+        var rerunAssertion = scenarioBody.IndexOf("$rerunResult = Assert-Phase4ScenarioRun", StringComparison.Ordinal);
+        var rerunCheckpoint = scenarioBody.LastIndexOf("Checkpoint-RouteAcceptanceRunEvidence", rerunAssertion, StringComparison.Ordinal);
+        Assert.True(rerunCheckpoint >= 0 && rerunCheckpoint < rerunAssertion);
+        Assert.Contains("Set-RouteAcceptanceEvidenceManifest", completionBody, StringComparison.Ordinal);
+        Assert.Contains("$script:RouteAcceptanceSelectedScenarioAttempts", completionBody, StringComparison.Ordinal);
+        Assert.Contains("TrySelect-RouteAcceptanceScenarioAttemptEvidence", scenarioBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("-not $script:RouteAcceptanceSelectedScenarioAttempts.ContainsKey", scenarioBody, StringComparison.Ordinal);
+        Assert.Contains("Get-RouteAcceptanceAttemptFinalization", completionBody, StringComparison.Ordinal);
+        Assert.Contains("-AcceptanceRunId $script:RouteAcceptanceRunId", completionBody, StringComparison.Ordinal);
+        Assert.Contains("-ScenarioRunId ([string]$attempt.ScenarioRunId)", completionBody, StringComparison.Ordinal);
+        Assert.Contains("$selected = $artifactFinalized -and", completionBody, StringComparison.Ordinal);
+        var attemptProjectionStart = completionBody.IndexOf("$scenarioEvidence = @(", StringComparison.Ordinal);
+        var attemptProjectionEnd = completionBody.IndexOf("$finalGitState =", attemptProjectionStart, StringComparison.Ordinal);
+        Assert.True(attemptProjectionStart >= 0 && attemptProjectionEnd > attemptProjectionStart);
+        Assert.DoesNotContain("$script:RunResults.ToArray()", completionBody[attemptProjectionStart..attemptProjectionEnd], StringComparison.Ordinal);
+        Assert.Contains("Get-RouteAcceptanceDirectAttemptManifestPath", completionBody, StringComparison.Ordinal);
+        Assert.Contains("Get-RouteAcceptanceEvidenceSha256 -Path $directManifestPath", completionBody, StringComparison.Ordinal);
+
+        var wrapperMain = wrapperText[wrapperText.IndexOf("$guiSmokeResult = Invoke-TunaGuiSmokeWithHardDeadline", StringComparison.Ordinal)..];
+        var minimalSummaryCheckpoint = wrapperMain.IndexOf("$summaryMissingAfterGuiChild", StringComparison.Ordinal);
+        var directManifestCheckpoint = wrapperMain.IndexOf("Write-TunaGuiDirectEvidenceManifest", StringComparison.Ordinal);
+        var retainedAnalysis = wrapperMain.IndexOf("Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort", StringComparison.Ordinal);
+        Assert.True(minimalSummaryCheckpoint >= 0 && minimalSummaryCheckpoint < retainedAnalysis);
+        Assert.True(directManifestCheckpoint >= 0 && directManifestCheckpoint < retainedAnalysis);
+        Assert.Contains("retainedAnalysisCompleted", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("retainedAnalysisStatus", wrapperText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RouteAcceptanceAttemptFinalization_RequiresExactDirectClaimsAndIdentity()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var routeAcceptanceText = File.ReadAllText(Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"));
+        var directPathBody = ExtractPowerShellFunctionBody(
+            routeAcceptanceText,
+            "Get-RouteAcceptanceDirectAttemptManifestPath",
+            "Get-RouteAcceptanceAttemptFinalization");
+        var finalizationBody = ExtractPowerShellFunctionBody(
+            routeAcceptanceText,
+            "Get-RouteAcceptanceAttemptFinalization",
+            "Test-RouteAcceptanceAttemptFinalized");
+        var finalizedBody = ExtractPowerShellFunctionBody(
+            routeAcceptanceText,
+            "Test-RouteAcceptanceAttemptFinalized",
+            "TrySelect-RouteAcceptanceScenarioAttemptEvidence");
+        var trySelectBody = ExtractPowerShellFunctionBody(
+            routeAcceptanceText,
+            "TrySelect-RouteAcceptanceScenarioAttemptEvidence",
+            "Test-Phase4RerunnableMeasurementFailure");
+        var scriptText = $$"""
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            function Test-RouteAcceptanceEvidenceFinalizationTimedOut {
+                param([string]$ArtifactDir)
+                return Test-Path -LiteralPath (Join-Path $ArtifactDir 'filetransfer-gui-evidence-finalization-timeout.json') -PathType Leaf
+            }
+            function Get-RouteAcceptanceDirectAttemptManifestPath {
+            {{directPathBody}}
+            }
+            function Get-RouteAcceptanceAttemptFinalization {
+            {{finalizationBody}}
+            }
+            function Test-RouteAcceptanceAttemptFinalized {
+            {{finalizedBody}}
+            }
+            $script:selectedCount = 0
+            function Select-RouteAcceptanceScenarioAttemptEvidence {
+                param([string]$ScenarioName, [int]$AttemptIndex, [string]$ArtifactDir)
+                $script:selectedCount++
+            }
+            function TrySelect-RouteAcceptanceScenarioAttemptEvidence {
+            {{trySelectBody}}
+            }
+
+            function Assert-Finalized {
+                param([bool]$Expected, [string]$Message)
+                $actual = Test-RouteAcceptanceAttemptFinalized -ArtifactDir $tempRoot -AcceptanceRunId $runId -ScenarioRunId $scenarioRunId
+                if ($actual -ne $Expected) { throw "$Message expected=$Expected actual=$actual" }
+            }
+
+            function Write-DirectManifest {
+                param($ArtifactFinalized, $CurrentRuntimeProof, [string]$AcceptanceRunId = $runId, [string]$ScenarioRunId = $scenarioRunId, [string]$Name = 'filetransfer-route-attempt-evidence-manifest.json')
+                [ordered]@{
+                    acceptanceRunId = $AcceptanceRunId
+                    scenarioRunId = $ScenarioRunId
+                    artifactFinalized = $ArtifactFinalized
+                    currentRuntimeProof = $CurrentRuntimeProof
+                } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $tempRoot $Name) -Encoding UTF8
+            }
+
+            $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('nlink-direct-finalization-' + [guid]::NewGuid().ToString('N'))
+            $runId = 'run-identity'
+            $scenarioRunId = 'run-identity:scenario:1'
+            New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
+            try {
+                Write-DirectManifest -ArtifactFinalized $true -CurrentRuntimeProof $true
+                Assert-Finalized $true 'native true claims with exact identity must finalize'
+
+                New-Item -ItemType File -Force -Path (Join-Path $tempRoot 'filetransfer-gui-log-ledger.json') | Out-Null
+                New-Item -ItemType File -Force -Path (Join-Path $tempRoot 'filetransfer-retained-log-slice.log') | Out-Null
+                New-Item -ItemType File -Force -Path (Join-Path $tempRoot 'filetransfer-retained-analysis-stage-diagnostics.json') | Out-Null
+                Write-DirectManifest -ArtifactFinalized $false -CurrentRuntimeProof $true
+                Assert-Finalized $false 'false artifact claim must fail despite analyzer diagnostics'
+                $script:selectedCount = 0
+                $selected = TrySelect-RouteAcceptanceScenarioAttemptEvidence -ScenarioName 'scenario' -AttemptIndex 1 -ArtifactDir $tempRoot -AcceptanceRunId $runId -ScenarioRunId $scenarioRunId
+                if ($selected -or $script:selectedCount -ne 0) { throw 'false direct claim was selected' }
+
+                Write-DirectManifest -ArtifactFinalized $true -CurrentRuntimeProof $false
+                Assert-Finalized $false 'false current-runtime claim must fail'
+                Write-DirectManifest -ArtifactFinalized 'true' -CurrentRuntimeProof $true
+                Assert-Finalized $false 'string artifact claim must fail'
+                Write-DirectManifest -ArtifactFinalized $true -CurrentRuntimeProof 'true'
+                Assert-Finalized $false 'string current-runtime claim must fail'
+                Write-DirectManifest -ArtifactFinalized $true -CurrentRuntimeProof $true -AcceptanceRunId 'wrong-run'
+                Assert-Finalized $false 'acceptance identity mismatch must fail'
+                Write-DirectManifest -ArtifactFinalized $true -CurrentRuntimeProof $true -ScenarioRunId 'wrong-scenario'
+                Assert-Finalized $false 'scenario identity mismatch must fail'
+
+                Write-DirectManifest -ArtifactFinalized $true -CurrentRuntimeProof $true
+                Write-DirectManifest -ArtifactFinalized $false -CurrentRuntimeProof $false -Name 'filetransfer-tuna-gui-evidence-manifest.json'
+                Assert-Finalized $false 'false Tuna wrapper must override a true generic manifest'
+                Remove-Item -LiteralPath (Join-Path $tempRoot 'filetransfer-tuna-gui-evidence-manifest.json') -Force
+                Assert-Finalized $true 'generic direct manifest must resume after Tuna wrapper removal'
+                $script:selectedCount = 0
+                $selected = TrySelect-RouteAcceptanceScenarioAttemptEvidence -ScenarioName 'scenario' -AttemptIndex 1 -ArtifactDir $tempRoot -AcceptanceRunId $runId -ScenarioRunId $scenarioRunId
+                if (-not $selected -or $script:selectedCount -ne 1) { throw 'valid direct claim was not selected exactly once' }
+                Write-Output 'direct-attempt-finalization-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Direct attempt finalization test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("direct-attempt-finalization-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RouteAcceptanceRetainedMarkerIndex_StreamsOnceCachesAndInvalidates()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var routeAcceptanceText = File.ReadAllText(Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"));
+        var markerIndexBody = ExtractPowerShellFunctionBody(
+            routeAcceptanceText,
+            "Get-RouteAcceptanceRetainedMarkerIndex",
+            "Assert-RouteAcceptanceRegularNknTransportEvidence");
+        var manifestBindingIndex = markerIndexBody.IndexOf("analyzerInputSha256", StringComparison.Ordinal);
+        var fallbackHashIndex = markerIndexBody.IndexOf("[System.Security.Cryptography.SHA256]::Create()", StringComparison.Ordinal);
+        Assert.True(manifestBindingIndex >= 0 && fallbackHashIndex > manifestBindingIndex);
+        Assert.Contains("[System.IO.FileStream]::new", markerIndexBody, StringComparison.Ordinal);
+        Assert.Contains("[System.IO.StreamReader]::new", markerIndexBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("lastWriteTicks", markerIndexBody, StringComparison.Ordinal);
+        var scriptText = $$"""
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            $script:RouteAcceptanceRetainedMarkerIndexCache = @{}
+            function Get-RouteAcceptanceRetainedMarkerIndex {
+            {{markerIndexBody}}
+            }
+
+            $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('nlink-marker-index-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
+            try {
+                $path = Join-Path $tempRoot 'filetransfer-retained-log-slice.log'
+                $lines = [System.Collections.Generic.List[string]]::new()
+                $lines.Add('Active transport selected: NKN')
+                $lines.Add('event=nkn_bridge_receive_stall_detected')
+                for ($i = 0; $i -lt 149; $i++) { $lines.Add("event=filler_$i") }
+                $lines.Add('event=filetransfer_route_selected; route=file_tuna_v4')
+                $lines.Add('event=nkn_bridge_receive_stall_recovery_started')
+                $lines.Add('event=transfer_terminal; route=file_tuna_v4')
+                $lines.Add('event=session_liveness_timeout; reason=no_progress')
+                $lines.Add('event=session_liveness_timeout_deferred; reason=recovery')
+                $lines.Add('event=filetransfer_route_selected; route=file_tuna_v6')
+                $lines | Set-Content -LiteralPath $path -Encoding UTF8
+
+                $first = Get-RouteAcceptanceRetainedMarkerIndex -LogPath $path
+                $second = Get-RouteAcceptanceRetainedMarkerIndex -LogPath $path
+                if (-not [object]::ReferenceEquals($first, $second)) { throw 'cache did not return the indexed object' }
+                if ([long]$first.lineVisitCount -ne $lines.Count) { throw "line visits mismatch: $($first.lineVisitCount)" }
+                if ([long]$first.measuredWindowBridgeRecoveryCount -ne 2) { throw "measured recovery count mismatch: $($first.measuredWindowBridgeRecoveryCount)" }
+                if ([long]$first.sessionLivenessTimeoutCount -ne 1) { throw "liveness token boundary mismatch: $($first.sessionLivenessTimeoutCount)" }
+                if (-not $first.hasNknTransport -or -not $first.hasFileTunaV6 -or -not $first.hasForbiddenV6Route) { throw 'required marker missing' }
+
+                $originalLength = (Get-Item -LiteralPath $path).Length
+                $originalLastWriteUtc = (Get-Item -LiteralPath $path).LastWriteTimeUtc
+                $sameLengthText = [System.IO.File]::ReadAllText($path).Replace('route=file_tuna_v6', 'route=file_tuna_v4')
+                [System.IO.File]::WriteAllText($path, $sameLengthText, [System.Text.UTF8Encoding]::new($true))
+                if ((Get-Item -LiteralPath $path).Length -ne $originalLength) { throw 'same-length mutation changed file length' }
+                [System.IO.File]::SetLastWriteTimeUtc($path, $originalLastWriteUtc)
+                $third = Get-RouteAcceptanceRetainedMarkerIndex -LogPath $path
+                if ([object]::ReferenceEquals($first, $third)) { throw 'cache did not invalidate after same-length same-mtime mutation' }
+                if ([long]$third.lineVisitCount -ne $lines.Count) { throw "same-length rescan line visits mismatch: $($third.lineVisitCount)" }
+                if ($third.hasFileTunaV6 -or $third.hasForbiddenV6Route) { throw 'same-length mutation retained stale v6 markers' }
+                $thirdAgain = Get-RouteAcceptanceRetainedMarkerIndex -LogPath $path
+                if (-not [object]::ReferenceEquals($third, $thirdAgain)) { throw 'SHA cache did not reuse unchanged index' }
+
+                Add-Content -LiteralPath $path -Value 'event=session_liveness_timeout; reason=appended' -Encoding UTF8
+                $fourth = Get-RouteAcceptanceRetainedMarkerIndex -LogPath $path
+                if ([object]::ReferenceEquals($third, $fourth)) { throw 'cache did not invalidate after append' }
+                if ([long]$fourth.lineVisitCount -ne ($lines.Count + 1)) { throw "rescan line visits mismatch: $($fourth.lineVisitCount)" }
+                if ([long]$fourth.sessionLivenessTimeoutCount -ne 2) { throw "appended liveness count mismatch: $($fourth.sessionLivenessTimeoutCount)" }
+                Write-Output 'retained-marker-index-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Retained marker index test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("retained-marker-index-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]

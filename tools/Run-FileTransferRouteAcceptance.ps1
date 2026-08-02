@@ -43,6 +43,9 @@ $script:RouteAcceptanceEvidenceHarnessFiles = @()
 $script:RouteAcceptanceEvidenceDryRunFixtureRoot = ''
 $script:RouteAcceptanceEvidenceCompletionAttempted = $false
 $script:RouteAcceptanceEvidenceScenarioNames = @()
+$script:RouteAcceptanceSelectedScenarioAttempts = @{}
+$script:RouteAcceptanceEvidenceCheckpointFingerprint = ''
+$script:RouteAcceptanceRetainedMarkerIndexCache = @{}
 
 function Resolve-RepoRoot {
     return (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -109,13 +112,41 @@ function Add-RouteAcceptanceScenarioAttemptEvidence {
         [Parameter(Mandatory = $true)][string]$ArtifactDir
     )
 
+    $resolvedArtifactDir = [System.IO.Path]::GetFullPath($ArtifactDir)
+    $existing = @($script:RouteAcceptanceScenarioAttempts.ToArray() | Where-Object {
+            [string]::Equals([string]$_.ScenarioName, $ScenarioName, [System.StringComparison]::OrdinalIgnoreCase) -and
+            [int]$_.Attempt -eq $AttemptIndex -and
+            [string]::Equals(
+                [System.IO.Path]::GetFullPath([string]$_.ArtifactDir),
+                $resolvedArtifactDir,
+                [System.StringComparison]::OrdinalIgnoreCase)
+        } | Select-Object -First 1)
+    if ($existing.Count -gt 0) {
+        return $existing[0]
+    }
+
     $normalizedScenario = ($ScenarioName.Trim().ToLowerInvariant() -replace '[^a-z0-9_.-]', '_')
-    $script:RouteAcceptanceScenarioAttempts.Add([pscustomobject]@{
+    $attempt = [pscustomobject]@{
         ScenarioName = $ScenarioName
         Attempt = $AttemptIndex
         ScenarioRunId = ('{0}:{1}:{2}' -f $script:RouteAcceptanceRunId, $normalizedScenario, $AttemptIndex)
-        ArtifactDir = $ArtifactDir
-    }) | Out-Null
+        ArtifactDir = $resolvedArtifactDir
+    }
+    $script:RouteAcceptanceScenarioAttempts.Add($attempt) | Out-Null
+    return $attempt
+}
+
+function Select-RouteAcceptanceScenarioAttemptEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScenarioName,
+        [Parameter(Mandatory = $true)][int]$AttemptIndex,
+        [Parameter(Mandatory = $true)][string]$ArtifactDir
+    )
+
+    $script:RouteAcceptanceSelectedScenarioAttempts[$ScenarioName] = [pscustomobject]@{
+        Attempt = $AttemptIndex
+        ArtifactDir = [System.IO.Path]::GetFullPath($ArtifactDir)
+    }
 }
 
 function Get-RouteAcceptanceEvidenceDryRunFixtureRunId {
@@ -202,6 +233,162 @@ function New-RouteAcceptanceFakeEvidenceRuntime {
     }
 }
 
+function Write-RouteAcceptanceAtomicJson {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Value
+    )
+
+    $parent = Split-Path -Parent $Path
+    if (-not [string]::IsNullOrWhiteSpace($parent)) {
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    }
+
+    $tempPath = '{0}.tmp-{1}' -f $Path, [guid]::NewGuid().ToString('N')
+    try {
+        $json = $Value | ConvertTo-Json -Depth 12
+        [System.IO.File]::WriteAllText($tempPath, $json, [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::Move($tempPath, $Path)
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempPath -PathType Leaf) {
+            Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Write-RouteAcceptanceDirectAttemptManifest {
+    param(
+        [Parameter(Mandatory = $true)]$Attempt,
+        [switch]$SyntheticFinalizationState
+    )
+
+    $artifactDir = [System.IO.Path]::GetFullPath([string]$Attempt.ArtifactDir)
+    $tunaManifestPath = Join-Path $artifactDir 'filetransfer-tuna-gui-evidence-manifest.json'
+    if (Test-Path -LiteralPath $tunaManifestPath -PathType Leaf) {
+        return
+    }
+
+    $manifestPath = Join-Path $artifactDir 'filetransfer-route-attempt-evidence-manifest.json'
+    if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+        return
+    }
+
+    $ledgerPath = Join-Path $artifactDir 'filetransfer-gui-log-ledger.json'
+    $statePath = Join-Path $artifactDir 'filetransfer-gui-evidence-finalization-state.json'
+    $capturePath = Join-Path $artifactDir 'filetransfer-gui-log-ledger-slice.log'
+    $analyzerInputPath = Join-Path $artifactDir 'filetransfer-retained-log-slice.log'
+    $timeoutPath = Join-Path $artifactDir 'filetransfer-gui-evidence-finalization-timeout.json'
+    $ledger = $null
+    $state = $null
+    try {
+        if (Test-Path -LiteralPath $ledgerPath -PathType Leaf) {
+            $ledger = Get-Content -LiteralPath $ledgerPath -Raw | ConvertFrom-Json
+        }
+    }
+    catch {
+        $ledger = $null
+    }
+    try {
+        if (Test-Path -LiteralPath $statePath -PathType Leaf) {
+            $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+        }
+    }
+    catch {
+        $state = $null
+    }
+
+    $acceptanceRunId = [string]$script:RouteAcceptanceRunId
+    $scenarioRunId = [string]$Attempt.ScenarioRunId
+    $ledgerAcceptanceRunIdProperty = if ($null -ne $ledger) { $ledger.PSObject.Properties['acceptanceRunId'] } else { $null }
+    $ledgerScenarioRunIdProperty = if ($null -ne $ledger) { $ledger.PSObject.Properties['scenarioRunId'] } else { $null }
+    $ledgerRetainedSliceProperty = if ($null -ne $ledger) { $ledger.PSObject.Properties['retainedSlice'] } else { $null }
+    $ledgerRetainedSlice = if ($null -ne $ledgerRetainedSliceProperty) { $ledgerRetainedSliceProperty.Value } else { $null }
+    $ledgerCapturePathProperty = if ($null -ne $ledgerRetainedSlice) { $ledgerRetainedSlice.PSObject.Properties['path'] } else { $null }
+    $ledgerCaptureShaProperty = if ($null -ne $ledgerRetainedSlice) { $ledgerRetainedSlice.PSObject.Properties['sha256'] } else { $null }
+    $ledgerCapturePath = if ($null -ne $ledgerCapturePathProperty) { [string]$ledgerCapturePathProperty.Value } else { '' }
+    $ledgerCaptureSha = if ($null -ne $ledgerCaptureShaProperty) { [string]$ledgerCaptureShaProperty.Value } else { '' }
+    $ledgerIdentityMatches = $null -ne $ledgerAcceptanceRunIdProperty -and
+        $null -ne $ledgerScenarioRunIdProperty -and
+        [string]::Equals([string]$ledgerAcceptanceRunIdProperty.Value, $acceptanceRunId, [System.StringComparison]::Ordinal) -and
+        [string]::Equals([string]$ledgerScenarioRunIdProperty.Value, $scenarioRunId, [System.StringComparison]::Ordinal)
+    $captureMatches = $false
+    try {
+        $captureMatches = $ledgerIdentityMatches -and
+            -not [string]::IsNullOrWhiteSpace($ledgerCapturePath) -and
+            [string]::Equals(
+                [System.IO.Path]::GetFullPath($ledgerCapturePath),
+                [System.IO.Path]::GetFullPath($capturePath),
+                [System.StringComparison]::OrdinalIgnoreCase) -and
+            $ledgerCaptureSha -match '^[0-9a-fA-F]{64}$' -and
+            (Test-Path -LiteralPath $capturePath -PathType Leaf)
+    }
+    catch {
+        $captureMatches = $false
+    }
+
+    $stateFinalized = if ($SyntheticFinalizationState) {
+        $true
+    }
+    else {
+        $timedOutProperty = if ($null -ne $state) { $state.PSObject.Properties['timedOut'] } else { $null }
+        $completedStageProperty = if ($null -ne $state) { $state.PSObject.Properties['lastCompletedStage'] } else { $null }
+        $stateAcceptanceRunIdProperty = if ($null -ne $state) { $state.PSObject.Properties['acceptanceRunId'] } else { $null }
+        $stateScenarioRunIdProperty = if ($null -ne $state) { $state.PSObject.Properties['scenarioRunId'] } else { $null }
+        $stateCaptureShaProperty = if ($null -ne $state) { $state.PSObject.Properties['captureSha256'] } else { $null }
+        $null -ne $timedOutProperty -and
+            $timedOutProperty.Value -is [bool] -and
+            $timedOutProperty.Value -eq $false -and
+            $null -ne $completedStageProperty -and
+            [string]$completedStageProperty.Value -eq 'gui_child_exited' -and
+            $null -ne $stateAcceptanceRunIdProperty -and
+            [string]::Equals([string]$stateAcceptanceRunIdProperty.Value, $acceptanceRunId, [System.StringComparison]::Ordinal) -and
+            $null -ne $stateScenarioRunIdProperty -and
+            [string]::Equals([string]$stateScenarioRunIdProperty.Value, $scenarioRunId, [System.StringComparison]::Ordinal) -and
+            $null -ne $stateCaptureShaProperty -and
+            [string]::Equals([string]$stateCaptureShaProperty.Value, $ledgerCaptureSha, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+    $artifactFinalized = $stateFinalized -and
+        $captureMatches -and
+        (Test-Path -LiteralPath $analyzerInputPath -PathType Leaf) -and
+        -not (Test-Path -LiteralPath $timeoutPath -PathType Leaf)
+    $cursorIntegrityProperty = if ($null -ne $ledger) { $ledger.PSObject.Properties['cursorIntegrityVerdict'] } else { $null }
+    $writerEvidenceVersionProperty = if ($null -ne $ledger) { $ledger.PSObject.Properties['writerEvidenceVersion'] } else { $null }
+    $writerIntegrityProperty = if ($null -ne $ledger) { $ledger.PSObject.Properties['writerIntegrityVerdict'] } else { $null }
+    $writerEvidenceVersion = if ($null -ne $writerEvidenceVersionProperty) { [int]$writerEvidenceVersionProperty.Value } else { 0 }
+    $cursorPass = $null -ne $cursorIntegrityProperty -and [string]$cursorIntegrityProperty.Value -eq 'pass'
+    $writerPass = $writerEvidenceVersion -eq 3 -and
+        $null -ne $writerIntegrityProperty -and
+        [string]$writerIntegrityProperty.Value -eq 'pass'
+    $currentRuntimeProof = $artifactFinalized -and $cursorPass -and $writerPass
+    $analyzerInputSha = if (Test-Path -LiteralPath $analyzerInputPath -PathType Leaf) {
+        Get-RouteAcceptanceEvidenceSha256 -Path $analyzerInputPath
+    }
+    else {
+        ''
+    }
+
+    $manifest = [ordered]@{
+        schemaVersion = 1
+        event = 'filetransfer_route_acceptance_direct_attempt_manifest'
+        acceptanceRunId = $acceptanceRunId
+        scenarioRunId = $scenarioRunId
+        finalizationStatePath = $statePath
+        ledgerPath = $ledgerPath
+        capturePath = $capturePath
+        captureSha256 = $ledgerCaptureSha.ToLowerInvariant()
+        analyzerInputPath = $analyzerInputPath
+        analyzerInputSha256 = $analyzerInputSha
+        artifactFinalized = [bool]$artifactFinalized
+        cursorIntegrityVerdict = $(if ($cursorPass) { 'pass' } else { 'fail' })
+        writerEvidenceVersion = $writerEvidenceVersion
+        writerIntegrityVerdict = $(if ($writerPass) { 'pass' } else { 'fail' })
+        currentRuntimeProof = [bool]$currentRuntimeProof
+        generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
+    }
+    Write-RouteAcceptanceAtomicJson -Path $manifestPath -Value $manifest
+}
+
 function Write-RouteAcceptanceFakeCursorEvidence {
     param(
         [Parameter(Mandatory = $true)]$Attempt
@@ -210,19 +397,17 @@ function Write-RouteAcceptanceFakeCursorEvidence {
     $artifactDir = [string]$Attempt.ArtifactDir
     $ledgerPath = Join-Path $artifactDir 'filetransfer-gui-log-ledger.json'
     if (Test-Path -LiteralPath $ledgerPath -PathType Leaf) {
+        Write-RouteAcceptanceDirectAttemptManifest -Attempt $Attempt -SyntheticFinalizationState
         return
     }
 
     $retainedPath = Join-Path $artifactDir 'filetransfer-retained-log-slice.log'
-    $diagnosticsPath = Join-Path $artifactDir 'filetransfer-retained-analysis-stage-diagnostics.json'
-    if (-not (Test-Path -LiteralPath $retainedPath -PathType Leaf) -or
-        -not (Test-Path -LiteralPath $diagnosticsPath -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $retainedPath -PathType Leaf)) {
         return
     }
 
     $ledgerSlicePath = Join-Path $artifactDir 'filetransfer-gui-log-ledger-slice.log'
     [System.IO.File]::Copy($retainedPath, $ledgerSlicePath, $false)
-    $diagnostics = Get-Content -LiteralPath $diagnosticsPath -Raw | ConvertFrom-Json
     $lineCount = [int](Get-RouteAcceptanceEvidenceLineCount -Path $ledgerSlicePath)
     $byteCount = [long](Get-Item -LiteralPath $ledgerSlicePath).Length
     $generationKey = '0000000000000000001:fake-ledger-generation'
@@ -363,6 +548,8 @@ function Write-RouteAcceptanceFakeCursorEvidence {
             $stream.Dispose()
         }
     }
+
+    Write-RouteAcceptanceDirectAttemptManifest -Attempt $Attempt -SyntheticFinalizationState
 }
 
 function Test-RouteAcceptanceIncompleteProofRuntimeCandidate {
@@ -515,15 +702,79 @@ function Complete-RouteAcceptanceRunEvidence {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
         [Parameter(Mandatory = $true)][string]$RunRoot,
-        [Parameter(Mandatory = $true)][string[]]$ScenarioNames
+        [Parameter(Mandatory = $true)][string[]]$ScenarioNames,
+        [switch]$Checkpoint
     )
 
     if ($script:RouteAcceptanceEvidenceCompletionAttempted) {
         return
     }
 
-    $script:RouteAcceptanceEvidenceCompletionAttempted = $true
+    if (-not $Checkpoint) {
+        $script:RouteAcceptanceEvidenceCompletionAttempted = $true
+    }
+
     $manifestPath = Join-Path $RunRoot 'route-acceptance-run-manifest.json'
+    $attempts = @($script:RouteAcceptanceScenarioAttempts.ToArray())
+    $effectiveScenarioNames = if ($Checkpoint) {
+        @($ScenarioNames | Where-Object {
+                $candidateName = [string]$_
+                @($attempts | Where-Object {
+                        [string]::Equals([string]$_.ScenarioName, $candidateName, [System.StringComparison]::OrdinalIgnoreCase)
+                    }).Count -gt 0
+            })
+    }
+    else {
+        @($ScenarioNames)
+    }
+    $checkpointFingerprint = @(
+        $(if ($Checkpoint) { 'checkpoint' } else { 'final' }),
+        ($effectiveScenarioNames -join ','),
+        @($attempts | ForEach-Object {
+                $attemptRecord = $_
+                $attemptArtifactDir = [System.IO.Path]::GetFullPath([string]$attemptRecord.ArtifactDir)
+                $selectedRecord = if ($script:RouteAcceptanceSelectedScenarioAttempts.ContainsKey([string]$attemptRecord.ScenarioName)) {
+                    $script:RouteAcceptanceSelectedScenarioAttempts[[string]$attemptRecord.ScenarioName]
+                }
+                else {
+                    $null
+                }
+                $selected = $null -ne $selectedRecord -and
+                    [int]$selectedRecord.Attempt -eq [int]$attemptRecord.Attempt -and
+                    [string]::Equals(
+                        [System.IO.Path]::GetFullPath([string]$selectedRecord.ArtifactDir),
+                        $attemptArtifactDir,
+                        [System.StringComparison]::OrdinalIgnoreCase)
+                $artifactStamp = @(
+                    'filetransfer-gui-log-ledger.json',
+                    'filetransfer-retained-analysis-stage-diagnostics.json',
+                    'filetransfer-retained-log-slice.log'
+                ) | ForEach-Object {
+                    $candidatePath = Join-Path $attemptArtifactDir $_
+                    if (Test-Path -LiteralPath $candidatePath -PathType Leaf) {
+                        $candidateFile = Get-Item -LiteralPath $candidatePath
+                        '{0}:{1}' -f $candidateFile.Length, $candidateFile.LastWriteTimeUtc.Ticks
+                    }
+                    else {
+                        'missing'
+                    }
+                }
+                $directManifestPath = Get-RouteAcceptanceDirectAttemptManifestPath -ArtifactDir $attemptArtifactDir
+                $directManifestStamp = if (-not [string]::IsNullOrWhiteSpace($directManifestPath)) {
+                    Get-RouteAcceptanceEvidenceSha256 -Path $directManifestPath
+                }
+                else {
+                    'missing'
+                }
+                '{0}:{1}:{2}:{3}:{4}' -f $attemptRecord.ScenarioName, $attemptRecord.Attempt, $selected, ($artifactStamp -join ','), $directManifestStamp
+            })
+    ) -join '|'
+    if ($Checkpoint -and
+        [string]::Equals($script:RouteAcceptanceEvidenceCheckpointFingerprint, $checkpointFingerprint, [System.StringComparison]::Ordinal) -and
+        (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        return
+    }
+
     $scenarioEvidence = @()
     try {
         if ($null -eq $script:RouteAcceptanceInitialEvidenceSnapshot) {
@@ -531,40 +782,36 @@ function Complete-RouteAcceptanceRunEvidence {
         }
 
         if ($script:RouteAcceptanceExecutionMode -eq 'fake') {
-            foreach ($attempt in @($script:RouteAcceptanceScenarioAttempts.ToArray())) {
+            foreach ($attempt in $attempts) {
                 Write-RouteAcceptanceFakeCursorEvidence -Attempt $attempt
             }
         }
 
         $scenarioEvidence = @(
-            foreach ($attempt in @($script:RouteAcceptanceScenarioAttempts.ToArray())) {
+            foreach ($attempt in $attempts) {
                 $artifactDir = [string]$attempt.ArtifactDir
                 $ledgerPath = Join-Path $artifactDir 'filetransfer-gui-log-ledger.json'
                 $diagnosticsPath = Join-Path $artifactDir 'filetransfer-retained-analysis-stage-diagnostics.json'
                 $analyzerInputPath = Join-Path $artifactDir 'filetransfer-retained-log-slice.log'
-                $evidenceFinalizationTimeoutPath = Join-Path $artifactDir 'filetransfer-gui-evidence-finalization-timeout.json'
-                $artifactFinalized = (Test-Path -LiteralPath $ledgerPath -PathType Leaf) -and
-                    (Test-Path -LiteralPath $diagnosticsPath -PathType Leaf) -and
-                    (Test-Path -LiteralPath $analyzerInputPath -PathType Leaf) -and
-                    -not (Test-Path -LiteralPath $evidenceFinalizationTimeoutPath -PathType Leaf)
-                $selectedResult = @($script:RunResults.ToArray() | Where-Object {
+                $attemptFinalization = Get-RouteAcceptanceAttemptFinalization `
+                    -ArtifactDir $artifactDir `
+                    -AcceptanceRunId $script:RouteAcceptanceRunId `
+                    -ScenarioRunId ([string]$attempt.ScenarioRunId)
+                $artifactFinalized = [bool]$attemptFinalization.IsFinalized
+                $selectedRecord = if ($script:RouteAcceptanceSelectedScenarioAttempts.ContainsKey([string]$attempt.ScenarioName)) {
+                    $script:RouteAcceptanceSelectedScenarioAttempts[[string]$attempt.ScenarioName]
+                }
+                else {
+                    $null
+                }
+                $selected = $artifactFinalized -and $null -ne $selectedRecord -and
+                    [int]$selectedRecord.Attempt -eq [int]$attempt.Attempt -and
                         [string]::Equals(
-                            [string]$_.name,
-                            [string]$attempt.ScenarioName,
-                            [System.StringComparison]::OrdinalIgnoreCase) -and
-                        [string]::Equals(
-                            [System.IO.Path]::GetFullPath([string]$_.artifactDir),
+                            [System.IO.Path]::GetFullPath([string]$selectedRecord.ArtifactDir),
                             [System.IO.Path]::GetFullPath($artifactDir),
                             [System.StringComparison]::OrdinalIgnoreCase)
-                    } | Select-Object -First 1)
-                $selected = $selectedResult.Count -eq 1
                 $selectionDisposition = if ($selected) {
-                    if ($artifactFinalized) {
-                        'selected_finalized_attempt'
-                    }
-                    else {
-                        'selected_fail_closed_unfinalized_attempt'
-                    }
+                    'selected_finalized_attempt'
                 }
                 elseif ($artifactFinalized) {
                     'historical_finalized_attempt'
@@ -601,11 +848,11 @@ function Complete-RouteAcceptanceRunEvidence {
             -ArtifactRoot $RunRoot `
             -StartedUtc $script:RouteAcceptanceStartedUtc `
             -FinalizedUtc ([DateTime]::UtcNow) `
-            -ScenarioNames $ScenarioNames `
+            -ScenarioNames $effectiveScenarioNames `
             -InitialSnapshot $script:RouteAcceptanceInitialEvidenceSnapshot `
             -FinalSnapshot $finalSnapshot `
             -ScenarioAttempts $scenarioEvidence
-        $writeResult = Write-RouteAcceptanceEvidenceManifest -Path $manifestPath -Manifest $manifest
+        $writeResult = Set-RouteAcceptanceEvidenceManifest -Path $manifestPath -Manifest $manifest
         $validation = Test-RouteAcceptanceEvidenceManifestFile -Path $manifestPath
         $script:RouteAcceptanceManifestPath = [System.IO.Path]::GetFullPath($manifestPath)
         $script:RouteAcceptanceManifestSha256 = [string]$writeResult.sha256
@@ -618,6 +865,9 @@ function Complete-RouteAcceptanceRunEvidence {
             ProvenanceFailureReasons = @($validation.structuralReasons + $validation.provenanceReasons | Select-Object -Unique)
             CurrentRuntimeProof = [bool]$validation.currentRuntimeProof
             CurrentRuntimeProofReasons = @($validation.reasons | Select-Object -Unique)
+        }
+        if ($Checkpoint) {
+            $script:RouteAcceptanceEvidenceCheckpointFingerprint = $checkpointFingerprint
         }
     }
     catch {
@@ -632,7 +882,7 @@ function Complete-RouteAcceptanceRunEvidence {
                     -ArtifactRoot $RunRoot `
                     -StartedUtc $script:RouteAcceptanceStartedUtc `
                     -FinalizedUtc ([DateTime]::UtcNow) `
-                    -ScenarioNames $ScenarioNames `
+                    -ScenarioNames $effectiveScenarioNames `
                     -InitialSnapshot $script:RouteAcceptanceInitialEvidenceSnapshot `
                     -FinalSnapshot $script:RouteAcceptanceInitialEvidenceSnapshot `
                     -ScenarioAttempts @($scenarioEvidence)
@@ -659,9 +909,24 @@ function Complete-RouteAcceptanceRunEvidence {
         Write-Warning ("Route-acceptance evidence finalization failed closed: {0}" -f $failureReason)
     }
 
-    foreach ($result in @($script:RunResults.ToArray())) {
-        Set-RouteAcceptanceResultEvidence -Result $result -ScenarioEvidence $scenarioEvidence
+    if (-not $Checkpoint) {
+        foreach ($result in @($script:RunResults.ToArray())) {
+            Set-RouteAcceptanceResultEvidence -Result $result -ScenarioEvidence $scenarioEvidence
+        }
     }
+}
+
+function Checkpoint-RouteAcceptanceRunEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$RunRoot
+    )
+
+    Complete-RouteAcceptanceRunEvidence `
+        -RepoRoot $RepoRoot `
+        -RunRoot $RunRoot `
+        -ScenarioNames @($script:RouteAcceptanceEvidenceScenarioNames) `
+        -Checkpoint
 }
 
 function Get-RouteAcceptanceAppProcessesForExePath {
@@ -1412,6 +1677,274 @@ function Add-RouteAcceptanceFailure {
     $Result.failures.Add($Message) | Out-Null
 }
 
+function Get-RouteAcceptanceRetainedMarkerIndex {
+    param(
+        [string]$ArtifactDir = '',
+        [string]$LogPath = ''
+    )
+
+    if ([string]::IsNullOrWhiteSpace($LogPath)) {
+        $LogPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'
+    }
+
+    $resolvedPath = [System.IO.Path]::GetFullPath($LogPath)
+    if (-not (Test-Path -LiteralPath $resolvedPath -PathType Leaf)) {
+        return [pscustomobject]@{
+            exists = $false
+            path = $resolvedPath
+            lineVisitCount = 0L
+            hasDevLocalTransport = $false
+            hasNknTransport = $false
+            hasFileTunaV6 = $false
+            hasForbiddenV6Route = $false
+            hasReceiveRecoveryResumed = $false
+            hasMaxRestartExhaustion = $false
+            hasRegularV4UnprovenEscalation = $false
+            hasUnprovenRecoveryCompletion = $false
+            hasRegularV4StartupLocalOnlyNoAck = $false
+            hasV4SenderFailed = $false
+            hasPeerDisconnected = $false
+            hasV4FeedbackBothFailed = $false
+            sessionLivenessTimeoutCount = 0L
+            measuredWindowBridgeRecoveryCount = 0L
+        }
+    }
+
+    $authoritativeSha256 = ''
+    $artifactDir = Split-Path -Parent $resolvedPath
+    $tunaManifestPath = Join-Path $artifactDir 'filetransfer-tuna-gui-evidence-manifest.json'
+    $genericManifestPath = Join-Path $artifactDir 'filetransfer-route-attempt-evidence-manifest.json'
+    $directManifestPaths = if (Test-Path -LiteralPath $tunaManifestPath -PathType Leaf) {
+        @($tunaManifestPath)
+    }
+    elseif (Test-Path -LiteralPath $genericManifestPath -PathType Leaf) {
+        @($genericManifestPath)
+    }
+    else {
+        @()
+    }
+    foreach ($directManifestPath in $directManifestPaths) {
+        try {
+            $directManifest = Get-Content -LiteralPath $directManifestPath -Raw | ConvertFrom-Json
+            $boundPath = [string]$directManifest.analyzerInputPath
+            $boundSha = [string]$directManifest.analyzerInputSha256
+            if ($boundSha -match '^[0-9a-fA-F]{64}$' -and
+                -not [string]::IsNullOrWhiteSpace($boundPath) -and
+                [string]::Equals(
+                    [System.IO.Path]::GetFullPath($boundPath),
+                    $resolvedPath,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                $authoritativeSha256 = $boundSha.ToLowerInvariant()
+            }
+        }
+        catch {
+            $authoritativeSha256 = ''
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($authoritativeSha256)) {
+        $ledgerPath = Join-Path $artifactDir 'filetransfer-gui-log-ledger.json'
+        if (Test-Path -LiteralPath $ledgerPath -PathType Leaf) {
+            try {
+                $ledger = Get-Content -LiteralPath $ledgerPath -Raw | ConvertFrom-Json
+                $boundPath = [string]$ledger.analyzerInput.path
+                $boundSha = [string]$ledger.analyzerInput.captureSha256
+                if ($boundSha -match '^[0-9a-fA-F]{64}$' -and
+                    -not [string]::IsNullOrWhiteSpace($boundPath) -and
+                    [string]::Equals(
+                        [System.IO.Path]::GetFullPath($boundPath),
+                        $resolvedPath,
+                        [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $authoritativeSha256 = $boundSha.ToLowerInvariant()
+                }
+            }
+            catch {
+                $authoritativeSha256 = ''
+            }
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($authoritativeSha256)) {
+        $hashStream = $null
+        $sha256 = $null
+        try {
+            $hashStream = [System.IO.FileStream]::new(
+                $resolvedPath,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+            $sha256 = [System.Security.Cryptography.SHA256]::Create()
+            $authoritativeSha256 = -join @($sha256.ComputeHash($hashStream) | ForEach-Object { $_.ToString('x2') })
+        }
+        finally {
+            if ($null -ne $sha256) {
+                $sha256.Dispose()
+            }
+            if ($null -ne $hashStream) {
+                $hashStream.Dispose()
+            }
+        }
+    }
+
+    $cacheKey = '{0}|{1}' -f $resolvedPath.ToLowerInvariant(), $authoritativeSha256
+    if ($script:RouteAcceptanceRetainedMarkerIndexCache.ContainsKey($cacheKey)) {
+        return $script:RouteAcceptanceRetainedMarkerIndexCache[$cacheKey]
+    }
+
+    $lineVisitCount = 0L
+    $hasDevLocalTransport = $false
+    $hasNknTransport = $false
+    $hasFileTunaV6 = $false
+    $hasForbiddenV6Route = $false
+    $hasReceiveRecoveryResumed = $false
+    $hasMaxRestartExhaustion = $false
+    $hasRegularV4UnprovenEscalation = $false
+    $hasUnprovenRecoveryCompletion = $false
+    $hasRegularV4StartupLocalOnlyNoAck = $false
+    $hasV4SenderFailed = $false
+    $hasPeerDisconnected = $false
+    $hasV4FeedbackBothFailed = $false
+    $sessionLivenessTimeoutCount = 0L
+    $measuredWindowBridgeRecoveryCount = 0L
+    $measuredWindowStarted = $false
+    $measuredWindowClosed = $false
+    $recentRecoveryMarkers = [System.Collections.Generic.Queue[bool]]::new()
+    $recentRecoveryMarkerCount = 0
+    $stream = $null
+    $reader = $null
+    try {
+        $stream = [System.IO.FileStream]::new(
+            $resolvedPath,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+        $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8, $true, 65536)
+        while (-not $reader.EndOfStream) {
+            $line = [string]$reader.ReadLine()
+            $lineVisitCount++
+            $hasRecoveryMarker =
+                $line.IndexOf('event=nkn_bridge_receive_stall_detected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $line.IndexOf('event=nkn_bridge_receive_stall_recovery_started', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $line.IndexOf('event=nkn_bridge_receive_stall_recovery_completed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $line.IndexOf('event=nkn_bridge_receive_stall_recovery_receive_resumed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+
+            if (-not $measuredWindowStarted -and
+                $line.IndexOf('event=filetransfer_route_selected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                $line.IndexOf('route=file_tuna_v4', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $measuredWindowStarted = $true
+                $measuredWindowBridgeRecoveryCount = $recentRecoveryMarkerCount
+            }
+            if ($measuredWindowStarted -and -not $measuredWindowClosed -and $hasRecoveryMarker) {
+                $measuredWindowBridgeRecoveryCount++
+            }
+            if ($measuredWindowStarted -and -not $measuredWindowClosed -and
+                $line.IndexOf('event=transfer_terminal', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                $line.IndexOf('route=file_tuna_v4', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $measuredWindowClosed = $true
+            }
+
+            if ($line.IndexOf('Active transport selected: DevLocal', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $line.IndexOf('transport=devlocal', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $line.IndexOf('address=devlocal.', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $line.IndexOf('target=devlocal.', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $line.IndexOf('helper_identity=devlocal.', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $hasDevLocalTransport = $true
+            }
+            if ($line.IndexOf('Active transport selected: NKN', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $line.IndexOf('NLINK_TRANSPORT=NKN', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $line.IndexOf('transport=nkn', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $line.IndexOf('transport_profile=nkn', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $line.IndexOf('transport_profile=conservative_nkn_startup', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $hasNknTransport = $true
+            }
+            $containsFileTunaV6 = $line.IndexOf('file_tuna_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+            $containsDiagnosticRegularNknV6 = $line.IndexOf('diagnostic_regular_nkn_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+            if ($containsFileTunaV6) {
+                $hasFileTunaV6 = $true
+            }
+            if (($containsFileTunaV6 -or $containsDiagnosticRegularNknV6) -and
+                [regex]::IsMatch($line, '\broute\s*=\s*(file_tuna_v6|diagnostic_regular_nkn_v6)\b', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
+                $hasForbiddenV6Route = $true
+            }
+            if ($line.IndexOf('event=nkn_bridge_receive_stall_recovery_receive_resumed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $hasReceiveRecoveryResumed = $true
+            }
+            if ($line.IndexOf('event=nkn_bridge_receive_stall_recovery_failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                $line.IndexOf('reason=max_restarts_reached', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $hasMaxRestartExhaustion = $true
+            }
+            if ($line.IndexOf('regular_v4_unproven_recovery_escalation', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $hasRegularV4UnprovenEscalation = $true
+            }
+            if ($line.IndexOf('event=nkn_bridge_receive_stall_recovery_completed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                $line.IndexOf('stall_reason=regular_v4_unproven_recovery_escalation', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $hasUnprovenRecoveryCompletion = $true
+            }
+            if ($line.IndexOf('regular_v4_startup_local_only_no_ack', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $hasRegularV4StartupLocalOnlyNoAck = $true
+            }
+            if ($line.IndexOf('event=filetransfer_v4_sender_failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $hasV4SenderFailed = $true
+            }
+            if ($line.IndexOf('error_code=peer_disconnected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $hasPeerDisconnected = $true
+            }
+            if ($line.IndexOf('event=filetransfer_v4_feedback_both_failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $hasV4FeedbackBothFailed = $true
+            }
+            $livenessMarker = 'event=session_liveness_timeout'
+            $livenessIndex = $line.IndexOf($livenessMarker, [System.StringComparison]::OrdinalIgnoreCase)
+            if ($livenessIndex -ge 0) {
+                $afterMarker = $livenessIndex + $livenessMarker.Length
+                if ($afterMarker -eq $line.Length -or $line[$afterMarker] -eq ';' -or [char]::IsWhiteSpace($line[$afterMarker])) {
+                    $sessionLivenessTimeoutCount++
+                }
+            }
+
+            $recentRecoveryMarkers.Enqueue($hasRecoveryMarker)
+            if ($hasRecoveryMarker) {
+                $recentRecoveryMarkerCount++
+            }
+            if ($recentRecoveryMarkers.Count -gt 150) {
+                if ($recentRecoveryMarkers.Dequeue()) {
+                    $recentRecoveryMarkerCount--
+                }
+            }
+        }
+    }
+    finally {
+        if ($null -ne $reader) {
+            $reader.Dispose()
+        }
+        elseif ($null -ne $stream) {
+            $stream.Dispose()
+        }
+    }
+
+    $index = [pscustomobject]@{
+        exists = $true
+        path = $resolvedPath
+        sha256 = $authoritativeSha256
+        lineVisitCount = $lineVisitCount
+        hasDevLocalTransport = $hasDevLocalTransport
+        hasNknTransport = $hasNknTransport
+        hasFileTunaV6 = $hasFileTunaV6
+        hasForbiddenV6Route = $hasForbiddenV6Route
+        hasReceiveRecoveryResumed = $hasReceiveRecoveryResumed
+        hasMaxRestartExhaustion = $hasMaxRestartExhaustion
+        hasRegularV4UnprovenEscalation = $hasRegularV4UnprovenEscalation
+        hasUnprovenRecoveryCompletion = $hasUnprovenRecoveryCompletion
+        hasRegularV4StartupLocalOnlyNoAck = $hasRegularV4StartupLocalOnlyNoAck
+        hasV4SenderFailed = $hasV4SenderFailed
+        hasPeerDisconnected = $hasPeerDisconnected
+        hasV4FeedbackBothFailed = $hasV4FeedbackBothFailed
+        sessionLivenessTimeoutCount = $sessionLivenessTimeoutCount
+        measuredWindowBridgeRecoveryCount = $measuredWindowBridgeRecoveryCount
+    }
+    $script:RouteAcceptanceRetainedMarkerIndexCache[$cacheKey] = $index
+    return $index
+}
+
 function Assert-RouteAcceptanceRegularNknTransportEvidence {
     param([Parameter(Mandatory = $true)]$Result)
 
@@ -1421,12 +1954,12 @@ function Assert-RouteAcceptanceRegularNknTransportEvidence {
         return
     }
 
-    $retainedText = Get-Content -LiteralPath $retainedLogPath -Raw
-    if ($retainedText -match '(?i)(Active transport selected:\s*DevLocal|transport=devlocal|address=devlocal\.|target=devlocal\.|helper_identity=devlocal\.)') {
+    $markerIndex = Get-RouteAcceptanceRetainedMarkerIndex -LogPath $retainedLogPath
+    if ($markerIndex.hasDevLocalTransport) {
         Add-RouteAcceptanceFailure -Result $Result -Message 'regular NKN artifact used DevLocal transport; rerun with NLINK_TRANSPORT=NKN'
     }
 
-    if ($retainedText -notmatch '(?i)(Active transport selected:\s*NKN|NLINK_TRANSPORT=NKN|transport=nkn|transport_profile=nkn|transport_profile=conservative_nkn_startup)') {
+    if (-not $markerIndex.hasNknTransport) {
         Add-RouteAcceptanceFailure -Result $Result -Message 'regular NKN artifact lacks positive NKN transport evidence'
     }
 }
@@ -2030,49 +2563,8 @@ function Get-RouteAcceptanceReportInt {
 function Get-RouteAcceptanceMeasuredWindowBridgeRecoveryCount {
     param([Parameter(Mandatory = $true)][string]$ArtifactDir)
 
-    $logPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'
-    if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) {
-        return 0
-    }
-
-    $lines = @(Get-Content -LiteralPath $logPath)
-    $routeStartIndex = -1
-    $terminalIndex = -1
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        $line = [string]$lines[$i]
-        if ($routeStartIndex -lt 0 -and
-            $line.IndexOf('event=filetransfer_route_selected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-            $line.IndexOf('route=file_tuna_v4', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            $routeStartIndex = $i
-            continue
-        }
-
-        if ($routeStartIndex -ge 0 -and
-            $line.IndexOf('event=transfer_terminal', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-            $line.IndexOf('route=file_tuna_v4', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            $terminalIndex = $i
-            break
-        }
-    }
-
-    if ($routeStartIndex -lt 0) {
-        return 0
-    }
-
-    $windowStart = [Math]::Max(0, $routeStartIndex - 150)
-    $windowEnd = if ($terminalIndex -ge 0) { $terminalIndex } else { $lines.Count - 1 }
-    $count = 0
-    for ($i = $windowStart; $i -le $windowEnd; $i++) {
-        $line = [string]$lines[$i]
-        if ($line.IndexOf('event=nkn_bridge_receive_stall_detected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-            $line.IndexOf('event=nkn_bridge_receive_stall_recovery_started', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-            $line.IndexOf('event=nkn_bridge_receive_stall_recovery_completed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-            $line.IndexOf('event=nkn_bridge_receive_stall_recovery_receive_resumed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            $count++
-        }
-    }
-
-    return $count
+    $markerIndex = Get-RouteAcceptanceRetainedMarkerIndex -ArtifactDir $ArtifactDir
+    return [int]$markerIndex.measuredWindowBridgeRecoveryCount
 }
 
 function Set-Phase4MeasurementContamination {
@@ -3100,8 +3592,8 @@ function Try-ApplySecondTransferSplitProofAcceptance {
 
     $secondRetainedPath = Join-Path $Result.artifactDir 'filetransfer-second-transfer-retained-log-slice.log'
     if (Test-Path -LiteralPath $secondRetainedPath -PathType Leaf) {
-        $secondRetainedText = Get-Content -LiteralPath $secondRetainedPath -Raw
-        if ([regex]::IsMatch($secondRetainedText, '(?i)\broute\s*=\s*(file_tuna_v6|diagnostic_regular_nkn_v6)\b')) {
+        $secondMarkerIndex = Get-RouteAcceptanceRetainedMarkerIndex -LogPath $secondRetainedPath
+        if ($secondMarkerIndex.hasForbiddenV6Route) {
             return $false
         }
     }
@@ -3220,6 +3712,18 @@ function Get-RouteAcceptanceTunaGuiSetupBootstrapFailure {
     }
 }
 
+function Test-RouteAcceptanceSemanticAnalysisUnavailableFailure {
+    param(
+        [AllowEmptyString()][string]$FailurePhase = '',
+        [AllowEmptyString()][string]$FailureReason = '',
+        [AllowEmptyString()][string]$ErrorMessage = ''
+    )
+
+    $combined = @($FailurePhase, $FailureReason, $ErrorMessage) -join "`n"
+    return $combined.IndexOf('retained_analysis_timeout', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('evidence_enrichment_timeout', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+}
+
 function Assert-Phase4ScenarioRun {
     param(
         [Parameter(Mandatory = $true)]$Scenario,
@@ -3283,9 +3787,8 @@ function Assert-Phase4ScenarioRun {
 
     $retainedLogPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'
     if (Test-Path -LiteralPath $retainedLogPath -PathType Leaf) {
-        $retainedText = Get-Content -LiteralPath $retainedLogPath -Raw
-        if (-not [string]::IsNullOrEmpty($retainedText) -and
-            $retainedText.IndexOf('file_tuna_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $markerIndex = Get-RouteAcceptanceRetainedMarkerIndex -LogPath $retainedLogPath
+        if ($markerIndex.hasFileTunaV6) {
             Add-RouteAcceptanceFailure -Result $result -Message 'active file_tuna_v6 evidence was observed'
         }
     }
@@ -3368,15 +3871,24 @@ function Assert-Phase4ScenarioRun {
                 $result.guiReportedFailurePhase = $failurePhase
                 $result.guiReportedFailureReason = $failureReason
                 $result.guiReportedFailureError = $errorMessage
-                # Preserve the harness' legacy setup classification until Phase 5 has
-                # enough retained runtime evidence to reclassify it. The raw GUI fields
-                # above remain immutable even when the setup fields are cleared later.
-                $result.setupFailurePhase = $failurePhase
-                $result.setupFailureReason = $failureReason
-                Add-RouteAcceptanceFailure -Result $result -Message ("Tuna GUI setup failure: phase={0}; reason={1}; error={2}" -f `
-                    ($(if ([string]::IsNullOrWhiteSpace($failurePhase)) { '(unknown)' } else { $failurePhase })),
-                    ($(if ([string]::IsNullOrWhiteSpace($failureReason)) { '(unknown)' } else { $failureReason })),
-                    ($(if ([string]::IsNullOrWhiteSpace($errorMessage)) { '(none)' } else { $errorMessage })))
+                if (Test-RouteAcceptanceSemanticAnalysisUnavailableFailure -FailurePhase $failurePhase -FailureReason $failureReason -ErrorMessage $errorMessage) {
+                    $result.semanticFailureDomain = 'unavailable'
+                    Add-RouteAcceptanceFailure -Result $result -Message ("Tuna GUI semantic analysis unavailable: phase={0}; reason={1}; error={2}" -f `
+                        ($(if ([string]::IsNullOrWhiteSpace($failurePhase)) { '(unknown)' } else { $failurePhase })),
+                        ($(if ([string]::IsNullOrWhiteSpace($failureReason)) { '(unknown)' } else { $failureReason })),
+                        ($(if ([string]::IsNullOrWhiteSpace($errorMessage)) { '(none)' } else { $errorMessage })))
+                }
+                else {
+                    # Preserve the harness' legacy setup classification until Phase 5 has
+                    # enough retained runtime evidence to reclassify it. The raw GUI fields
+                    # above remain immutable even when the setup fields are cleared later.
+                    $result.setupFailurePhase = $failurePhase
+                    $result.setupFailureReason = $failureReason
+                    Add-RouteAcceptanceFailure -Result $result -Message ("Tuna GUI setup failure: phase={0}; reason={1}; error={2}" -f `
+                        ($(if ([string]::IsNullOrWhiteSpace($failurePhase)) { '(unknown)' } else { $failurePhase })),
+                        ($(if ([string]::IsNullOrWhiteSpace($failureReason)) { '(unknown)' } else { $failureReason })),
+                        ($(if ([string]::IsNullOrWhiteSpace($errorMessage)) { '(none)' } else { $errorMessage })))
+                }
             }
             catch {
                 Add-RouteAcceptanceFailure -Result $result -Message ("Tuna GUI setup failure artifact could not be parsed: {0}" -f $_.Exception.Message)
@@ -5044,13 +5556,16 @@ function Write-RouteAcceptanceRetainedAnalysisTimeoutArtifacts {
         [string]::Equals($guiIntegrityOk, 'True', [System.StringComparison]::OrdinalIgnoreCase)
     $terminalSuccessWithProof = $terminalSuccess -and $routeProofOk
     $failureClass = if ($terminalSuccessWithProof) { 'retained_analysis_timeout_after_terminal_success' } else { 'retained_analysis_timeout' }
-    $acceptanceFailureClass = if ($terminalSuccessWithProof) { 'none' } else { 'setup' }
-    $operatorVerdict = if ($terminalSuccessWithProof) { 'PASS' } else { 'INVALID_SETUP' }
+    $acceptanceFailureClass = 'incomplete_proof'
+    $operatorVerdict = 'INCONCLUSIVE'
     $warningKinds = if ($terminalSuccessWithProof) { 'retained_analysis_timeout_after_terminal_success' } else { '(none)' }
 
     $dto = [ordered]@{
         failure_class = $failureClass
         acceptance_failure_class = $acceptanceFailureClass
+        semantic_failure_domain = 'unavailable'
+        retained_analysis_completed = 0
+        retained_analysis_status = 'timed_out'
         timed_out = 1
         timeout_seconds = $TimeoutSeconds
         process_id = $ProcessId
@@ -5086,14 +5601,17 @@ function Write-RouteAcceptanceRetainedAnalysisTimeoutArtifacts {
     Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-operator-verdict.txt') -Value @(
         ('verdict={0}' -f $operatorVerdict),
         ('acceptance_failure_class={0}' -f $acceptanceFailureClass),
+        'semantic_failure_domain=unavailable',
+        'retained_analysis_completed=0',
+        'retained_analysis_status=timed_out',
         ('failure_class={0}' -f $failureClass),
-        ('hard_failure_count={0}' -f ($(if ($terminalSuccessWithProof) { 0 } else { 1 }))),
+        'hard_failure_count=1',
         ('warning_kinds={0}' -f $warningKinds),
         ('timeout_seconds={0}' -f $TimeoutSeconds),
         ('log_path={0}' -f $LogPath)
     ) -Encoding UTF8
 
-    return $terminalSuccessWithProof
+    return $false
 }
 
 function Test-RouteAcceptanceRetainedAnalysisCompletedProofArtifacts {
@@ -5274,16 +5792,13 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
                 live_route_proof_mode = $LiveRouteProofMode
             }
             $diagnostics | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $analysisDiagnosticsPath -Encoding UTF8
-            $terminalSuccessTimeout = Write-RouteAcceptanceRetainedAnalysisTimeoutArtifacts `
+            Write-RouteAcceptanceRetainedAnalysisTimeoutArtifacts `
                 -ArtifactDir $ArtifactDir `
                 -LogPath $logPath `
                 -TimeoutSeconds $analysisTimeoutSeconds `
                 -ProcessId $process.Id `
                 -StartedUtc $startedUtc.ToString('O') `
-                -LiveRouteProofMode $LiveRouteProofMode
-            if ($terminalSuccessTimeout) {
-                return
-            }
+                -LiveRouteProofMode $LiveRouteProofMode | Out-Null
 
             throw "FileTransfer-Ops retained analysis timed out after ${analysisTimeoutSeconds}s for $ArtifactDir"
         }
@@ -7217,6 +7732,106 @@ function Test-RouteAcceptanceEvidenceFinalizationTimedOut {
         (Test-Path -LiteralPath (Join-Path $ArtifactDir 'filetransfer-gui-evidence-finalization-timeout.json') -PathType Leaf)
 }
 
+function Get-RouteAcceptanceDirectAttemptManifestPath {
+    param([Parameter(Mandatory = $true)][string]$ArtifactDir)
+
+    $tunaManifestPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-evidence-manifest.json'
+    if (Test-Path -LiteralPath $tunaManifestPath -PathType Leaf) {
+        return $tunaManifestPath
+    }
+
+    $genericManifestPath = Join-Path $ArtifactDir 'filetransfer-route-attempt-evidence-manifest.json'
+    if (Test-Path -LiteralPath $genericManifestPath -PathType Leaf) {
+        return $genericManifestPath
+    }
+
+    return ''
+}
+
+function Get-RouteAcceptanceAttemptFinalization {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)][string]$AcceptanceRunId,
+        [Parameter(Mandatory = $true)][string]$ScenarioRunId
+    )
+
+    $manifestPath = Get-RouteAcceptanceDirectAttemptManifestPath -ArtifactDir $ArtifactDir
+    $result = [ordered]@{
+        ManifestPath = $manifestPath
+        ArtifactFinalized = $false
+        CurrentRuntimeProof = $false
+        IdentityMatches = $false
+        IsFinalized = $false
+    }
+    if ([string]::IsNullOrWhiteSpace($manifestPath) -or
+        (Test-RouteAcceptanceEvidenceFinalizationTimedOut -ArtifactDir $ArtifactDir)) {
+        return [pscustomobject]$result
+    }
+
+    try {
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        $artifactFinalizedProperty = $manifest.PSObject.Properties['artifactFinalized']
+        $currentRuntimeProofProperty = $manifest.PSObject.Properties['currentRuntimeProof']
+        $acceptanceRunIdProperty = $manifest.PSObject.Properties['acceptanceRunId']
+        $scenarioRunIdProperty = $manifest.PSObject.Properties['scenarioRunId']
+        $result.ArtifactFinalized = $null -ne $artifactFinalizedProperty -and
+            $artifactFinalizedProperty.Value -is [bool] -and
+            $artifactFinalizedProperty.Value -eq $true
+        $result.CurrentRuntimeProof = $null -ne $currentRuntimeProofProperty -and
+            $currentRuntimeProofProperty.Value -is [bool] -and
+            $currentRuntimeProofProperty.Value -eq $true
+        $result.IdentityMatches = $null -ne $acceptanceRunIdProperty -and
+            $null -ne $scenarioRunIdProperty -and
+            [string]::Equals([string]$acceptanceRunIdProperty.Value, $AcceptanceRunId, [System.StringComparison]::Ordinal) -and
+            [string]::Equals([string]$scenarioRunIdProperty.Value, $ScenarioRunId, [System.StringComparison]::Ordinal)
+        $result.IsFinalized = $result.ArtifactFinalized -and
+            $result.CurrentRuntimeProof -and
+            $result.IdentityMatches
+    }
+    catch {
+        $result.IsFinalized = $false
+    }
+
+    return [pscustomobject]$result
+}
+
+function Test-RouteAcceptanceAttemptFinalized {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)][string]$AcceptanceRunId,
+        [Parameter(Mandatory = $true)][string]$ScenarioRunId
+    )
+
+    $finalization = Get-RouteAcceptanceAttemptFinalization `
+        -ArtifactDir $ArtifactDir `
+        -AcceptanceRunId $AcceptanceRunId `
+        -ScenarioRunId $ScenarioRunId
+    return [bool]$finalization.IsFinalized
+}
+
+function TrySelect-RouteAcceptanceScenarioAttemptEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScenarioName,
+        [Parameter(Mandatory = $true)][int]$AttemptIndex,
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)][string]$AcceptanceRunId,
+        [Parameter(Mandatory = $true)][string]$ScenarioRunId
+    )
+
+    if (-not (Test-RouteAcceptanceAttemptFinalized `
+            -ArtifactDir $ArtifactDir `
+            -AcceptanceRunId $AcceptanceRunId `
+            -ScenarioRunId $ScenarioRunId)) {
+        return $false
+    }
+
+    Select-RouteAcceptanceScenarioAttemptEvidence `
+        -ScenarioName $ScenarioName `
+        -AttemptIndex $AttemptIndex `
+        -ArtifactDir $ArtifactDir
+    return $true
+}
+
 function Test-Phase4RerunnableMeasurementFailure {
     param([Parameter(Mandatory = $true)]$Result)
 
@@ -7612,23 +8227,20 @@ function Test-Phase5CanonicalRuntimeUnlockReceiveRecoveryExhaustion {
         return $false
     }
 
-    $retainedText = Get-Content -LiteralPath $retainedPath -Raw
-    if ($retainedText.IndexOf('event=nkn_bridge_receive_stall_recovery_receive_resumed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+    $markerIndex = Get-RouteAcceptanceRetainedMarkerIndex -LogPath $retainedPath
+    if ($markerIndex.hasReceiveRecoveryResumed) {
         return $false
     }
 
-    $hasMaxRestartExhaustion = [regex]::IsMatch($retainedText, 'event=nkn_bridge_receive_stall_recovery_failed;[^\r\n]*reason=max_restarts_reached', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    $hasRegularV4UnprovenEscalation = $retainedText.IndexOf('regular_v4_unproven_recovery_escalation', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
-    $hasUnprovenRecoveryCompletion = [regex]::IsMatch($retainedText, 'event=nkn_bridge_receive_stall_recovery_completed;[^\r\n]*stall_reason=regular_v4_unproven_recovery_escalation', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    if (-not $hasRegularV4UnprovenEscalation) {
+    if (-not $markerIndex.hasRegularV4UnprovenEscalation) {
         return $false
     }
 
     if ($recoveryClass -eq 'runtime_unlock_offer_observation_blocked_by_receive_recovery') {
-        return $observationBlocked -gt 0 -and ($hasMaxRestartExhaustion -or $hasUnprovenRecoveryCompletion)
+        return $observationBlocked -gt 0 -and ($markerIndex.hasMaxRestartExhaustion -or $markerIndex.hasUnprovenRecoveryCompletion)
     }
 
-    return $hasUnprovenRecoveryCompletion -or $hasMaxRestartExhaustion
+    return $markerIndex.hasUnprovenRecoveryCompletion -or $markerIndex.hasMaxRestartExhaustion
 }
 
 function Set-Phase5CanonicalRuntimeUnlockReceiveRecoveryExhaustion {
@@ -7697,18 +8309,12 @@ function Test-Phase5RegularNknStartupPeerDisconnect {
         return $false
     }
 
-    $retainedText = Get-Content -LiteralPath $retainedPath -Raw
-    foreach ($required in @(
-            'regular_v4_startup_local_only_no_ack',
-            'event=filetransfer_v4_sender_failed',
-            'error_code=peer_disconnected')) {
-        if ($retainedText.IndexOf($required, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
-            return $false
-        }
-    }
-
-    if ($retainedText.IndexOf('event=filetransfer_v4_feedback_both_failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-        [regex]::IsMatch($retainedText, '(?i)\broute\s*=\s*(file_tuna_v6|diagnostic_regular_nkn_v6)\b')) {
+    $markerIndex = Get-RouteAcceptanceRetainedMarkerIndex -LogPath $retainedPath
+    if (-not $markerIndex.hasRegularV4StartupLocalOnlyNoAck -or
+        -not $markerIndex.hasV4SenderFailed -or
+        -not $markerIndex.hasPeerDisconnected -or
+        $markerIndex.hasV4FeedbackBothFailed -or
+        $markerIndex.hasForbiddenV6Route) {
         return $false
     }
 
@@ -8101,8 +8707,8 @@ function Assert-Phase5ScenarioRun {
     elseif ($Result.bridgeLivenessIntegrationVerdict -eq 'none') {
         $retainedLogPath = Join-Path $Result.artifactDir 'filetransfer-retained-log-slice.log'
         if (Test-Path -LiteralPath $retainedLogPath -PathType Leaf) {
-            $retainedText = Get-Content -LiteralPath $retainedLogPath -Raw
-            $Result.sessionLivenessTimeoutCount = [regex]::Matches($retainedText, 'event=session_liveness_timeout(?:;|\s)').Count
+            $markerIndex = Get-RouteAcceptanceRetainedMarkerIndex -LogPath $retainedLogPath
+            $Result.sessionLivenessTimeoutCount = [int]$markerIndex.sessionLivenessTimeoutCount
             if ($Result.sessionLivenessTimeoutCount -gt 0) {
                 Add-RouteAcceptanceFailure -Result $Result -Message ("bridge liveness integration verdict is none but session_liveness_timeout_count={0}" -f $Result.sessionLivenessTimeoutCount)
             }
@@ -8246,6 +8852,21 @@ function Invoke-Phase4RouteAcceptanceScenario {
             }
         }
 
+        $attemptEvidence = Add-RouteAcceptanceScenarioAttemptEvidence -ScenarioName ([string]$Scenario.Name) -AttemptIndex 1 -ArtifactDir $artifactDir
+        if ($script:RouteAcceptanceExecutionMode -eq 'fake') {
+            Write-RouteAcceptanceFakeCursorEvidence -Attempt $attemptEvidence
+        }
+        elseif (-not $FakeMode -and $Scenario.Kind -eq 'regular') {
+            Write-RouteAcceptanceDirectAttemptManifest -Attempt $attemptEvidence
+        }
+        TrySelect-RouteAcceptanceScenarioAttemptEvidence `
+            -ScenarioName ([string]$Scenario.Name) `
+            -AttemptIndex 1 `
+            -ArtifactDir $artifactDir `
+            -AcceptanceRunId $script:RouteAcceptanceRunId `
+            -ScenarioRunId ([string]$attemptEvidence.ScenarioRunId) | Out-Null
+        Checkpoint-RouteAcceptanceRunEvidence -RepoRoot $RepoRoot -RunRoot $RunRoot
+
         try {
             $result = Assert-Phase4ScenarioRun -Scenario $Scenario -ArtifactDir $artifactDir
         }
@@ -8266,6 +8887,16 @@ function Invoke-Phase4RouteAcceptanceScenario {
             Set-RouteAcceptanceScenarioIsolationResult -Result $result -IsolationResult $scenarioIsolationResult
         }
     }
+    else {
+        $attemptEvidence = Add-RouteAcceptanceScenarioAttemptEvidence -ScenarioName ([string]$Scenario.Name) -AttemptIndex 1 -ArtifactDir $artifactDir
+        TrySelect-RouteAcceptanceScenarioAttemptEvidence `
+            -ScenarioName ([string]$Scenario.Name) `
+            -AttemptIndex 1 `
+            -ArtifactDir $artifactDir `
+            -AcceptanceRunId $script:RouteAcceptanceRunId `
+            -ScenarioRunId ([string]$attemptEvidence.ScenarioRunId) | Out-Null
+        Checkpoint-RouteAcceptanceRunEvidence -RepoRoot $RepoRoot -RunRoot $RunRoot
+    }
     if (-not [string]::IsNullOrWhiteSpace($scenarioExecutionFailure) -and
         -not [string]::Equals([string]$result.setupFailurePhase, 'preflight_bridge_bootstrap', [System.StringComparison]::OrdinalIgnoreCase)) {
         Add-RouteAcceptanceFailure -Result $result -Message ("scenario execution failed: {0}" -f $scenarioExecutionFailure)
@@ -8277,7 +8908,6 @@ function Invoke-Phase4RouteAcceptanceScenario {
         Set-Phase5PostTerminalGuiCleanupWarning -Scenario $Scenario -Result $result | Out-Null
         Clear-Phase5StaleSetupFailureAfterRuntimeEvidence -Result $result | Out-Null
     }
-    Add-RouteAcceptanceScenarioAttemptEvidence -ScenarioName ([string]$Scenario.Name) -AttemptIndex 1 -ArtifactDir $artifactDir
     $phase5CanonicalReceiveRecoveryExhaustion = $false
     if ($AcceptancePhase -eq 'phase5') {
         $phase5CanonicalReceiveRecoveryExhaustion = Set-Phase5CanonicalRuntimeUnlockReceiveRecoveryExhaustion -Scenario $Scenario -Result $result
@@ -8401,10 +9031,29 @@ function Invoke-Phase4RouteAcceptanceScenario {
                     }
                 }
 
+                $rerunAttemptEvidence = Add-RouteAcceptanceScenarioAttemptEvidence -ScenarioName ([string]$Scenario.Name) -AttemptIndex ($rerun + 1) -ArtifactDir $rerunDir
+                if ($script:RouteAcceptanceExecutionMode -eq 'fake') {
+                    Write-RouteAcceptanceFakeCursorEvidence -Attempt $rerunAttemptEvidence
+                }
+                elseif (-not $FakeMode -and $Scenario.Kind -eq 'regular') {
+                    Write-RouteAcceptanceDirectAttemptManifest -Attempt $rerunAttemptEvidence
+                }
+                TrySelect-RouteAcceptanceScenarioAttemptEvidence `
+                    -ScenarioName ([string]$Scenario.Name) `
+                    -AttemptIndex ($rerun + 1) `
+                    -ArtifactDir $rerunDir `
+                    -AcceptanceRunId $script:RouteAcceptanceRunId `
+                    -ScenarioRunId ([string]$rerunAttemptEvidence.ScenarioRunId) | Out-Null
+                Checkpoint-RouteAcceptanceRunEvidence -RepoRoot $RepoRoot -RunRoot $RunRoot
+
                 $rerunResult = Assert-Phase4ScenarioRun -Scenario $Scenario -ArtifactDir $rerunDir
                 if ($null -ne $rerunIsolationResult) {
                     Set-RouteAcceptanceScenarioIsolationResult -Result $rerunResult -IsolationResult $rerunIsolationResult
                 }
+            }
+            else {
+                $rerunAttemptEvidence = Add-RouteAcceptanceScenarioAttemptEvidence -ScenarioName ([string]$Scenario.Name) -AttemptIndex ($rerun + 1) -ArtifactDir $rerunDir
+                Checkpoint-RouteAcceptanceRunEvidence -RepoRoot $RepoRoot -RunRoot $RunRoot
             }
             if (-not [string]::IsNullOrWhiteSpace($rerunExecutionFailure)) {
                 Add-RouteAcceptanceFailure -Result $rerunResult -Message ("scenario rerun execution failed: {0}" -f $rerunExecutionFailure)
@@ -8417,17 +9066,16 @@ function Invoke-Phase4RouteAcceptanceScenario {
                 Set-Phase5CanonicalRuntimeUnlockReceiveRecoveryExhaustion -Scenario $Scenario -Result $rerunResult | Out-Null
                 Clear-Phase5StaleSetupFailureAfterRuntimeEvidence -Result $rerunResult | Out-Null
             }
-            Add-RouteAcceptanceScenarioAttemptEvidence -ScenarioName ([string]$Scenario.Name) -AttemptIndex ($rerun + 1) -ArtifactDir $rerunDir
             $requiresFinalizedAttemptSelection = $AcceptancePhase -eq 'phase5' -and
                 [string]::Equals(
                     [string]$Scenario.Name,
                     'regular-v4-live-activation-off-on-off-256mb',
                     [System.StringComparison]::OrdinalIgnoreCase)
             $rerunArtifactFinalized = $requiresFinalizedAttemptSelection -and
-                (Test-Path -LiteralPath (Join-Path $rerunDir 'filetransfer-gui-log-ledger.json') -PathType Leaf) -and
-                (Test-Path -LiteralPath (Join-Path $rerunDir 'filetransfer-retained-analysis-stage-diagnostics.json') -PathType Leaf) -and
-                (Test-Path -LiteralPath (Join-Path $rerunDir 'filetransfer-retained-log-slice.log') -PathType Leaf) -and
-                -not (Test-RouteAcceptanceEvidenceFinalizationTimedOut -ArtifactDir $rerunDir)
+                (Test-RouteAcceptanceAttemptFinalized `
+                    -ArtifactDir $rerunDir `
+                    -AcceptanceRunId $script:RouteAcceptanceRunId `
+                    -ScenarioRunId ([string]$rerunAttemptEvidence.ScenarioRunId))
             $rerunResult.attemptCount = $rerun + 1
             $rerunResult.retryUsed = $true
             $rerunResult.selectedAttempt = if ($rerunResult.failures.Count -eq 0) { $rerun + 1 } else { 0 }
@@ -8513,6 +9161,24 @@ function Invoke-Phase4RouteAcceptanceScenario {
                 break
             }
         }
+    }
+
+    $selectedAttemptEvidence = @($script:RouteAcceptanceScenarioAttempts.ToArray() | Where-Object {
+            [string]::Equals([string]$_.ScenarioName, [string]$Scenario.Name, [System.StringComparison]::OrdinalIgnoreCase) -and
+            [string]::Equals(
+                [System.IO.Path]::GetFullPath([string]$_.ArtifactDir),
+                [System.IO.Path]::GetFullPath([string]$result.artifactDir),
+                [System.StringComparison]::OrdinalIgnoreCase)
+        } | Sort-Object -Property Attempt -Descending | Select-Object -First 1)
+    if ($selectedAttemptEvidence.Count -eq 1) {
+        $selectedAttemptArtifactDir = [string]$selectedAttemptEvidence[0].ArtifactDir
+        TrySelect-RouteAcceptanceScenarioAttemptEvidence `
+            -ScenarioName ([string]$Scenario.Name) `
+            -AttemptIndex ([int]$selectedAttemptEvidence[0].Attempt) `
+            -ArtifactDir $selectedAttemptArtifactDir `
+            -AcceptanceRunId $script:RouteAcceptanceRunId `
+            -ScenarioRunId ([string]$selectedAttemptEvidence[0].ScenarioRunId) | Out-Null
+        Checkpoint-RouteAcceptanceRunEvidence -RepoRoot $RepoRoot -RunRoot $RunRoot
     }
 
     $script:RunResults.Add($result) | Out-Null

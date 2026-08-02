@@ -181,6 +181,16 @@ catch [System.IO.IOException] {
 }
 Assert-True $secondWriteFailed 'FileMode.CreateNew must reject a second manifest write'
 
+$setFirst = Set-RouteAcceptanceEvidenceManifest -Path $manifestPath -Manifest $dryRun
+$setSecond = Set-RouteAcceptanceEvidenceManifest -Path $manifestPath -Manifest $dryRun
+Assert-Equal $setFirst.validation.verdict 'PASS' 'atomic manifest checkpoint validation'
+Assert-Equal $setSecond.validation.verdict 'PASS' 'idempotent final manifest validation'
+Assert-Equal $setFirst.sha256 $setSecond.sha256 'identical manifest updates must preserve content SHA-256'
+Assert-Equal @(
+    Get-ChildItem -LiteralPath $fixture.ArtifactDir -File |
+        Where-Object { $_.Name -like 'route-acceptance-run-manifest.json.*.tmp' -or $_.Name -like 'route-acceptance-run-manifest.json.*.bak' }
+).Count 0 'atomic manifest update must not leave temporary files'
+
 $missing = Test-RouteAcceptanceEvidenceManifestFile -Path (Join-Path $fixture.ArtifactDir 'missing.json')
 Assert-Equal $missing.verdict 'FAIL' 'missing manifest verdict'
 Assert-Contains $missing.reasons 'manifest_missing' 'missing manifest reason'
