@@ -20995,13 +20995,25 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 answerTimeoutScheduled: true);
             InvokePrivateMethod(
                 host,
+                "ApplyRuntimeUnlockTransaction",
+                RuntimeUnlockTransactionEventKind.ObservedSend,
+                sessionId,
+                6L,
+                "offer_observed_send",
+                "control_to_bulk_endpoint");
+            InvokePrivateMethod(
+                host,
                 "ArmRuntimeUnlockRetryAfterRecovery",
                 5L,
                 sessionId,
                 "runtime_unlock_offer_send_not_observed",
                 "tuna_activation_offer_send_timeout");
-            InvokePrivateMethod(host, "MarkFileTransferTunaActivationBridgeRecoverySettled", "test_recovery_settled");
-            InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
+            InvokePrivateMethod(
+                host,
+                "MarkRuntimeUnlockRecoveryContractRetryDispatched",
+                "runtime_unlock",
+                null,
+                false);
             Assert.True(BindRuntimeUnlockRetryDispatchOfferAliasAndObserveForTests(
                 host,
                 6L,
@@ -21126,11 +21138,6 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 preservedTail,
                 StringComparison.Ordinal);
 
-            SetPrivateField(host, "outboundAccelerationOfferNonce", "be11223344556677889900aabbccddee");
-            SetPrivateField(host, "outboundAccelerationOfferTrigger", "runtime_unlock");
-            SetPrivateField(host, "outboundAccelerationOfferPayerDecisionId", 12L);
-            SetPrivateField(host, "outboundAccelerationOfferGeneration", 7L);
-
             var answer = CreateAnswerPayload(
                 sessionId,
                 nonce,
@@ -21152,11 +21159,41 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     "event=tuna_acceleration_retired_offer_answer_accepted;",
                     StringComparison.Ordinal),
                 TimeSpan.FromSeconds(6));
+            await WaitUntilAsync(
+                () =>
+                {
+                    var tail = ReadOperationalLogTail(logStart);
+                    return tail.Contains(
+                               "event=runtime_unlock_precommit_probe_launch_requested;",
+                               StringComparison.Ordinal) &&
+                           tail.Contains(
+                               "responder_waiting_for_peer_probe=0",
+                               StringComparison.Ordinal);
+                },
+                TimeSpan.FromSeconds(6));
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("reason=runtime_unlock_offer_peer_response_timeout_pending_runtime_unlock_answer", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_runtime_unlock_offer_peer_response_timeout;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=runtime_unlock_offer_peer_response_timeout_pending_answer_preserved;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_retired_offer_answer_accepted;", logTail, StringComparison.Ordinal);
+            Assert.Contains(
+                "event=runtime_unlock_retired_pending_answer_transaction_handoff_decided;",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "decision_status=accepted; decision_reason=retired_pending_answer_promoted",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=runtime_unlock_transaction_answer_received;",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.Contains("state=answerreceived;", logTail, StringComparison.Ordinal);
+            Assert.Single(
+                Regex.Matches(
+                    logTail,
+                    "event=runtime_unlock_precommit_probe_launch_requested;[^\\r\\n]*responder_waiting_for_peer_probe=0",
+                    RegexOptions.CultureInvariant));
             Assert.Contains(
                 "event=runtime_unlock_offer_authority_boundary_decided; boundary=answer_received; authority_mode=InitialActivation; decision_status=accepted;",
                 logTail,

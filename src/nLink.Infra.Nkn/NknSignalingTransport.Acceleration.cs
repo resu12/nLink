@@ -19824,6 +19824,164 @@ public sealed partial class NknSignalingTransport
         }
     }
 
+    private bool TryPromoteRetiredPendingRuntimeUnlockAnswer(
+        RuntimeUnlockOfferAuthorityBoundary expectedBoundary,
+        string sessionId,
+        long payerDecisionId,
+        string nonce,
+        string source)
+    {
+        RuntimeUnlockTransactionDecision? transactionDecision = null;
+        var accepted = false;
+        var status = "rejected";
+        var decisionReason = "retired_pending_answer_not_current";
+        var priorState = RuntimeUnlockTransactionState.Idle;
+        var resultingState = RuntimeUnlockTransactionState.Idle;
+        var retirementReason = "(none)";
+        var retainedDeadlineUtcMs = 0L;
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId)
+            ? string.Empty
+            : sessionId.Trim();
+        var normalizedNonce = string.IsNullOrWhiteSpace(nonce)
+            ? string.Empty
+            : nonce.Trim();
+        lock (accelerationGate)
+        {
+            var proof = runtimeUnlockOfferProofState;
+            var transaction = runtimeUnlockTransactionState;
+            var lease = runtimeUnlockTunaPathLeaseState;
+            priorState = transaction.State;
+            resultingState = transaction.State;
+            retirementReason = proof?.RetiredReason ?? "(none)";
+            retainedDeadlineUtcMs = proof?.RetiredAnswerExpiresUtcMs ?? 0;
+            var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+            if (expectedBoundary.Mode !=
+                    RuntimeUnlockOfferAuthorityMode.InitialActivation ||
+                expectedBoundary.InstallReceipt is not null)
+            {
+                decisionReason = "retired_pending_answer_not_initial_activation";
+            }
+            else if (retiredRuntimeUnlockOfferAuthorityBoundary !=
+                         expectedBoundary ||
+                     outboundRuntimeUnlockOfferAuthorityBoundary is not null ||
+                     !string.IsNullOrWhiteSpace(outboundAccelerationOfferNonce))
+            {
+                decisionReason = "retired_pending_answer_authority_replaced";
+            }
+            else if (proof is not
+                     {
+                         AuthorityMode:
+                             RuntimeUnlockOfferAuthorityMode.InitialActivation,
+                         Retired: true,
+                     } ||
+                     proof.Generation != expectedBoundary.OfferGeneration ||
+                     proof.PayerDecisionId != payerDecisionId ||
+                     !string.Equals(
+                         proof.SessionId,
+                         normalizedSessionId,
+                         StringComparison.Ordinal) ||
+                     !string.Equals(
+                         proof.Nonce,
+                         normalizedNonce,
+                         StringComparison.Ordinal) ||
+                     !string.Equals(
+                         expectedBoundary.SessionId,
+                         normalizedSessionId,
+                         StringComparison.Ordinal) ||
+                     expectedBoundary.PayerDecisionId != payerDecisionId ||
+                     !string.Equals(
+                         expectedBoundary.Nonce,
+                         normalizedNonce,
+                         StringComparison.Ordinal))
+            {
+                decisionReason = "retired_pending_answer_tuple_mismatch";
+            }
+            else if (!IsRuntimeUnlockPendingAnswerRetiredReason(
+                         proof.RetiredReason))
+            {
+                decisionReason = "retired_pending_answer_reason_unauthorized";
+            }
+            else if (proof.RetiredAnswerExpiresUtcMs <= 0 ||
+                     retiredAccelerationOfferExpiresUtcMs !=
+                         proof.RetiredAnswerExpiresUtcMs ||
+                     nowMs >= proof.RetiredAnswerExpiresUtcMs)
+            {
+                decisionReason = "retired_pending_answer_deadline_expired";
+            }
+            else if (transaction.IsTerminal ||
+                     transaction.TransactionGeneration !=
+                         expectedBoundary.TransactionGeneration ||
+                     transaction.OfferGeneration !=
+                         expectedBoundary.OfferGeneration ||
+                     !string.Equals(
+                         transaction.SessionId,
+                         expectedBoundary.SessionId,
+                         StringComparison.Ordinal) ||
+                     transaction.State is not (
+                         RuntimeUnlockTransactionState.OfferSentObserved or
+                         RuntimeUnlockTransactionState.PeerReceived or
+                         RuntimeUnlockTransactionState.AnswerReceived))
+            {
+                decisionReason = "retired_pending_answer_transaction_not_current";
+            }
+            else if (lease.LeaseGeneration !=
+                         expectedBoundary.TunaPathLeaseGeneration ||
+                     !lease.IsCurrent ||
+                     lease.PayerDecisionId != payerDecisionId ||
+                     !string.Equals(
+                         lease.ListenerRunId,
+                         expectedBoundary.TunaPathLeaseListenerRunId,
+                         StringComparison.Ordinal) ||
+                     !RuntimeUnlockTunaPathLease.IsApplicableToOffer(
+                         lease,
+                         expectedBoundary.SessionId,
+                         expectedBoundary.TransactionGeneration,
+                         expectedBoundary.OfferGeneration))
+            {
+                decisionReason = "retired_pending_answer_tuna_path_lease_not_current";
+            }
+            else if (transaction.AnswerReceived)
+            {
+                accepted = true;
+                status = "idempotent";
+                decisionReason = "retired_pending_answer_already_promoted";
+            }
+            else
+            {
+                transactionDecision = ApplyRuntimeUnlockTransactionUnsafe(
+                    RuntimeUnlockTransactionEventKind.AnswerReceived,
+                    expectedBoundary.SessionId,
+                    expectedBoundary.OfferGeneration,
+                    source,
+                    transactionGeneration:
+                        expectedBoundary.TransactionGeneration);
+                resultingState = transactionDecision.State.State;
+                accepted = transactionDecision.State.AnswerReceived &&
+                    transactionDecision.State.PeerReceived &&
+                    transactionDecision.State.TransactionGeneration ==
+                        expectedBoundary.TransactionGeneration &&
+                    transactionDecision.State.OfferGeneration ==
+                        expectedBoundary.OfferGeneration;
+                status = accepted ? "accepted" : "rejected";
+                decisionReason = accepted
+                    ? "retired_pending_answer_promoted"
+                    : "retired_pending_answer_transaction_apply_rejected";
+            }
+        }
+
+        if (transactionDecision is not null && accepted)
+        {
+            LogRuntimeUnlockTransactionDecision(
+                RuntimeUnlockTransactionEventKind.AnswerReceived,
+                transactionDecision);
+        }
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_retired_pending_answer_transaction_handoff_decided; session_id={SanitizeLogToken(expectedBoundary.SessionId)}; transfer_id={SanitizeLogToken(expectedBoundary.TransferId ?? "(none)")}; direction={expectedBoundary.Direction.ToString().ToLowerInvariant()}; authority_mode={expectedBoundary.Mode}; nonce={SanitizeLogToken(expectedBoundary.Nonce)}; payer_decision_id={expectedBoundary.PayerDecisionId}; offer_generation={expectedBoundary.OfferGeneration}; transaction_generation={expectedBoundary.TransactionGeneration}; tuna_path_lease_generation={expectedBoundary.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={SanitizeLogToken(expectedBoundary.TunaPathLeaseListenerRunId ?? "(none)")}; retirement_reason={SanitizeLogToken(retirementReason)}; retained_answer_deadline_utc_ms={retainedDeadlineUtcMs}; prior_transaction_state={priorState.ToString().ToLowerInvariant()}; resulting_transaction_state={resultingState.ToString().ToLowerInvariant()}; decision_status={status}; decision_reason={SanitizeLogToken(decisionReason)}");
+        return accepted;
+    }
+
     private bool TryPromoteRuntimeUnlockObservedSendFromPeerAnswer(
         string sessionId,
         string nonce,
@@ -27209,7 +27367,8 @@ public sealed partial class NknSignalingTransport
                 expectedOfferAuthorityBoundary =
                     retiredRuntimeUnlockOfferAuthorityBoundary;
                 expectedPayerDecisionId = retiredAccelerationOfferPayerDecisionId;
-                expectedOfferGeneration = runtimeUnlockOfferProofState?.Generation ?? 0;
+                expectedOfferGeneration =
+                    expectedOfferAuthorityBoundary?.OfferGeneration ?? 0;
                 matchedRetiredOffer = true;
                 var state = runtimeUnlockOfferProofState;
                 matchedRetiredRuntimeUnlockGeneration =
@@ -27492,13 +27651,27 @@ public sealed partial class NknSignalingTransport
                     return;
                 }
 
-                if (expectedOfferAuthorityBoundary?.Mode !=
-                        RuntimeUnlockOfferAuthorityMode.InstalledRetry ||
-                    !MarkRuntimeUnlockCutThroughAnswerReceived(
-                    answer.SessionId,
-                    answer.PayerDecisionId,
-                    expectedOfferGeneration,
-                    "transport_acceleration_answer"))
+                if (matchedRetiredOffer &&
+                    expectedOfferAuthorityBoundary?.Mode ==
+                        RuntimeUnlockOfferAuthorityMode.InitialActivation)
+                {
+                    if (!TryPromoteRetiredPendingRuntimeUnlockAnswer(
+                            expectedOfferAuthorityBoundary,
+                            answer.SessionId,
+                            answer.PayerDecisionId,
+                            answerNonce,
+                            "transport_acceleration_answer"))
+                    {
+                        return;
+                    }
+                }
+                else if (expectedOfferAuthorityBoundary?.Mode !=
+                             RuntimeUnlockOfferAuthorityMode.InstalledRetry ||
+                         !MarkRuntimeUnlockCutThroughAnswerReceived(
+                             answer.SessionId,
+                             answer.PayerDecisionId,
+                             expectedOfferGeneration,
+                             "transport_acceleration_answer"))
                 {
                     MarkRuntimeUnlockAnswerReceivedIfCurrent(
                         answer.SessionId,
