@@ -207,7 +207,8 @@ function Reset-FileTransferRetainedEventIndex {
 function New-FileTransferRetainedEventIndex {
     param(
         [object[]]$Events = @(),
-        [string[]]$LogFiles = @()
+        [string[]]$LogFiles = @(),
+        [bool]$IncludeFieldStatistics = $true
     )
 
     $eventsByName = @{}
@@ -267,7 +268,7 @@ function New-FileTransferRetainedEventIndex {
         $eventCounts[$name] = [int]$eventCounts[$name] + 1
         $lastByName[$name] = $event
 
-        if ($null -ne $event.Fields) {
+        if ($IncludeFieldStatistics -and $null -ne $event.Fields) {
             foreach ($fieldName in @($event.Fields.Keys)) {
                 $numericValue = 0L
                 if (-not [long]::TryParse([string]$event.Fields[$fieldName], [ref]$numericValue)) {
@@ -314,6 +315,10 @@ function New-FileTransferRetainedEventIndex {
 
     return [pscustomobject]@{
         LogFiles = @($LogFiles)
+        # Preserve the parser's canonical sequence order so compact consumers
+        # can select several event kinds in one pass instead of repeatedly
+        # concatenating large name buckets and sorting the result again.
+        AllEvents = @($Events)
         AllEventsScopeKey = Get-FileTransferEventScopeKey -Events $Events
         EventCount = @($Events).Count
         EventsByName = $eventsByName
@@ -331,11 +336,15 @@ function New-FileTransferRetainedEventIndex {
 function Initialize-FileTransferRetainedEventIndex {
     param(
         [object[]]$Events = @(),
-        [string[]]$LogFiles = @()
+        [string[]]$LogFiles = @(),
+        [bool]$IncludeFieldStatistics = $true
     )
 
     $script:FileTransferRetainedEventQueryCache = @{}
-    $script:FileTransferRetainedEventIndex = New-FileTransferRetainedEventIndex -Events $Events -LogFiles $LogFiles
+    $script:FileTransferRetainedEventIndex = New-FileTransferRetainedEventIndex `
+        -Events $Events `
+        -LogFiles $LogFiles `
+        -IncludeFieldStatistics:$IncludeFieldStatistics
     return $script:FileTransferRetainedEventIndex
 }
 

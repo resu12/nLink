@@ -118,6 +118,55 @@ function Write-FileTransferRetainedAnalysisStageDiagnostics {
     $Diagnostics | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
 }
 
+function Write-FileTransferIndexedRawEvidenceArtifact {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)]$Index
+    )
+
+    $transferIds = @($Index.PSObject.Properties['TransferIds'].Value)
+    $transferIdText = if ($transferIds.Count -gt 0) { $transferIds -join ',' } else { '(none)' }
+    $highValueEventNames = @(
+        'runtime_unlock_retired_pending_answer_transaction_handoff_decided',
+        'runtime_unlock_precommit_probe_acked',
+        'filetransfer_route_transition_prepared',
+        'filetransfer_route_transition_draining',
+        'filetransfer_route_transition_drain_receipt_applied',
+        'filetransfer_route_transition_committed',
+        'filetransfer_route_transition_disposition_applied',
+        'filetransfer_fallback_v6_proof_bootstrap_observed',
+        'filetransfer_fallback_v6_proof_bootstrap_decided',
+        'filetransfer_fallback_v6_proof_bootstrap_issued',
+        'filetransfer_fallback_v6_proof_bootstrap_execution_completed',
+        'filetransfer_fallback_v6_proof_bootstrap_receipt_applied',
+        'filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided',
+        'filetransfer_route_selected',
+        'filetransfer_live_route_epoch_started',
+        'filetransfer_live_route_epoch_recovered',
+        'file_transfer_inbound_terminal',
+        'file_transfer_outbound_terminal',
+        'transfer_terminal'
+    )
+    $rawEvidenceEvents = @(
+        Get-FileTransferCompactIndexEventsByNamesOrdered `
+            -Index $Index `
+            -Names $highValueEventNames |
+            Select-Object -First 250
+    )
+    $rawEvidenceLines = @(Get-FileTransferArtifactEvidenceLines -Events $rawEvidenceEvents -Limit 250)
+    $rawLines = @(
+        ("transfer_id={0}" -f $transferIdText),
+        'selection=indexed_high_value_semantic_events',
+        '',
+        'matched_evidence:'
+    ) + ($(if ($rawEvidenceLines.Count -gt 0) { $rawEvidenceLines } else { @('(none)') }))
+
+    Write-FileTransferArtifact `
+        -ArtifactDir $ArtifactDir `
+        -FileName 'raw-log-slices.txt' `
+        -Lines $rawLines | Out-Null
+}
+
 function Get-FileTransferCompactIndexEventsByName {
     param(
         [Parameter(Mandatory = $true)]$Index,
@@ -136,6 +185,39 @@ function Get-FileTransferCompactIndexEventsByName {
     }
 
     return @($events.ToArray())
+}
+
+function Get-FileTransferCompactIndexEventsByNamesOrdered {
+    param(
+        [Parameter(Mandatory = $true)]$Index,
+        [Parameter(Mandatory = $true)][string[]]$Names
+    )
+
+    $allEventsProperty = $Index.PSObject.Properties['AllEvents']
+    if ($null -eq $allEventsProperty) {
+        [object[]]$fallback = @(
+            foreach ($name in $Names) {
+                Get-FileTransferCompactIndexEventsByName -Index $Index -Name $name
+            }
+        )
+        return @($fallback | Sort-Object Sequence, LineNumber)
+    }
+
+    $selectedNames = New-Object 'System.Collections.Generic.HashSet[string]' `
+        ([System.StringComparer]::Ordinal)
+    foreach ($name in $Names) {
+        if (-not [string]::IsNullOrWhiteSpace($name)) {
+            $selectedNames.Add($name) | Out-Null
+        }
+    }
+
+    $selected = New-Object System.Collections.Generic.List[object]
+    foreach ($event in $allEventsProperty.Value) {
+        if ($null -ne $event -and $selectedNames.Contains([string]$event.EventName)) {
+            $selected.Add($event) | Out-Null
+        }
+    }
+    return @($selected.ToArray())
 }
 
 function Get-FileTransferCompactIndexEventCount {
@@ -886,11 +968,109 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
         [Parameter(Mandatory = $true)]$Index,
+        [System.Collections.IDictionary]$StageDiagnostics = $null,
         [ValidateSet('None', 'SwitchOff', 'MultiToggle', 'RegularActivationCycle')]
         [string]$LiveRouteProofMode = 'None'
     )
 
     New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
+
+    function Invoke-FileTransferCompactCorrelator {
+        param(
+            [Parameter(Mandatory = $true)][string]$Name,
+            [Parameter(Mandatory = $true)][int64]$InputCount,
+            [Parameter(Mandatory = $true)][scriptblock]$Action
+        )
+
+        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        $historyEntry = $null
+        if ($null -ne $StageDiagnostics) {
+            $correlatorHistory = $StageDiagnostics['correlator_history']
+            if ($correlatorHistory -isnot [System.Collections.Generic.List[object]]) {
+                $existingHistory = @($correlatorHistory)
+                $correlatorHistory =
+                    New-Object System.Collections.Generic.List[object]
+                foreach ($existingEntry in $existingHistory) {
+                    if ($null -ne $existingEntry) {
+                        $correlatorHistory.Add($existingEntry) | Out-Null
+                    }
+                }
+                $StageDiagnostics['correlator_history'] = $correlatorHistory
+            }
+            $startedUtc =
+                [datetime]::UtcNow.ToString('O', [System.Globalization.CultureInfo]::InvariantCulture)
+            $historyEntry = [ordered]@{
+                name = $Name
+                input_count = $InputCount
+                visit_count = 'unavailable'
+                lookup_count = 'unavailable'
+                started_utc = $startedUtc
+                completed_utc = ''
+                elapsed_ms = 0
+                status = 'started'
+            }
+            $correlatorHistory.Add($historyEntry) | Out-Null
+            $StageDiagnostics['current_correlator'] = $Name
+            $StageDiagnostics['correlator_status'] = 'started'
+            $StageDiagnostics['correlator_input_count'] = $InputCount
+            $StageDiagnostics['correlator_visit_count'] = 'unavailable'
+            $StageDiagnostics['correlator_lookup_count'] = 'unavailable'
+            $StageDiagnostics['correlator_started_utc'] = $startedUtc
+            $StageDiagnostics['correlator_completed_utc'] = ''
+            $StageDiagnostics['correlator_elapsed_ms'] = 0
+            Write-FileTransferRetainedAnalysisStageDiagnostics `
+                -ArtifactDir $ArtifactDir `
+                -Diagnostics $StageDiagnostics
+        }
+
+        try {
+            $result = & $Action
+            $stopwatch.Stop()
+            if ($null -ne $StageDiagnostics) {
+                $completedUtc =
+                    [datetime]::UtcNow.ToString('O', [System.Globalization.CultureInfo]::InvariantCulture)
+                $StageDiagnostics['correlator_status'] = 'completed'
+                $StageDiagnostics['correlator_completed_utc'] = $completedUtc
+                $StageDiagnostics['correlator_elapsed_ms'] = $stopwatch.ElapsedMilliseconds
+                if ($null -ne $result -and
+                    $null -ne $result.PSObject.Properties['IndexBuildVisitCount']) {
+                    $StageDiagnostics['correlator_visit_count'] =
+                        $result.PSObject.Properties['IndexBuildVisitCount'].Value
+                }
+                if ($null -ne $result -and
+                    $null -ne $result.PSObject.Properties['BoundedLookupVisitCount']) {
+                    $StageDiagnostics['correlator_lookup_count'] =
+                        $result.PSObject.Properties['BoundedLookupVisitCount'].Value
+                }
+                $historyEntry['visit_count'] = $StageDiagnostics['correlator_visit_count']
+                $historyEntry['lookup_count'] = $StageDiagnostics['correlator_lookup_count']
+                $historyEntry['completed_utc'] = $completedUtc
+                $historyEntry['elapsed_ms'] = $stopwatch.ElapsedMilliseconds
+                $historyEntry['status'] = 'completed'
+                Write-FileTransferRetainedAnalysisStageDiagnostics `
+                    -ArtifactDir $ArtifactDir `
+                    -Diagnostics $StageDiagnostics
+            }
+            return $result
+        }
+        catch {
+            $stopwatch.Stop()
+            if ($null -ne $StageDiagnostics) {
+                $completedUtc =
+                    [datetime]::UtcNow.ToString('O', [System.Globalization.CultureInfo]::InvariantCulture)
+                $StageDiagnostics['correlator_status'] = 'failed'
+                $StageDiagnostics['correlator_completed_utc'] = $completedUtc
+                $StageDiagnostics['correlator_elapsed_ms'] = $stopwatch.ElapsedMilliseconds
+                $historyEntry['completed_utc'] = $completedUtc
+                $historyEntry['elapsed_ms'] = $stopwatch.ElapsedMilliseconds
+                $historyEntry['status'] = 'failed'
+                Write-FileTransferRetainedAnalysisStageDiagnostics `
+                    -ArtifactDir $ArtifactDir `
+                    -Diagnostics $StageDiagnostics
+            }
+            throw
+        }
+    }
 
     $gui = Read-FileTransferCompactGuiSummary -ArtifactDir $ArtifactDir
     $guiCompleted = [bool](Get-FileTransferCompactObjectProperty -Object $gui -Name 'completed' -Default $false)
@@ -1229,8 +1409,6 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_authority_granted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_settlement_accepted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_physical_send_lease_registered') +
-        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_outbound_physical_send_lease_retired') +
-        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_physical_send_lease_retired') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_bridge_recovery_payload_submission_held') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_bridge_recovery_payload_submission_resumed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_peer_reachability_observed') +
@@ -1258,70 +1436,200 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_outbound_terminal') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_terminalized')
     )
+    # Physical-send retirement streams are intentionally kept out of the shared
+    # receive-recovery input. Large transfers can contain hundreds of thousands
+    # of these events, while only the submission-barrier drain correlator needs
+    # them. Feeding them to every recovery correlator turns otherwise bounded
+    # operation lookups into repeated whole-slice scans.
+    [object[]]$bridgeRecoveryExecutionSubmissionBarrierDrainRetirementEvents = @(
+        @(Get-FileTransferCompactIndexEventsByName `
+            -Index $Index `
+            -Name 'filetransfer_route_transition_physical_send_lease_retired') +
+        @(Get-FileTransferCompactIndexEventsByName `
+            -Index $Index `
+            -Name 'filetransfer_outbound_physical_send_lease_retired')
+    )
+    $bridgeRecoveryExecutionSubmissionBarrierDrainIndex =
+        New-FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainIndex `
+            -SemanticEvents $runtimeUnlockRegularV4RecoveryLeaseEvents `
+            -RetirementEvents $bridgeRecoveryExecutionSubmissionBarrierDrainRetirementEvents
+    [object[]]$runtimeUnlockRegularV4RecoveryOrderedEvents = @(
+        $runtimeUnlockRegularV4RecoveryLeaseEvents |
+            Where-Object { $null -ne $_ } |
+            Sort-Object Sequence, LineNumber
+    )
+    $fileTransferReceiveRecoveryOperationInput = @(
+        $runtimeUnlockRegularV4RecoveryLeaseEvents +
+        $runtimeUnlockRetryDispatchInstallEvents
+    )
     $fileTransferReceiveRecoveryOperationProof =
-        Get-FileTransferReceiveRecoveryOperationCorrelation `
-            -Events @(
-                $runtimeUnlockRegularV4RecoveryLeaseEvents +
-                $runtimeUnlockRetryDispatchInstallEvents
-            )
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'receive_recovery_operation' `
+            -InputCount $fileTransferReceiveRecoveryOperationInput.Count `
+            -Action {
+                Get-FileTransferReceiveRecoveryOperationCorrelation `
+                    -Events $fileTransferReceiveRecoveryOperationInput
+            }
     $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof =
-        Get-FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldCorrelation `
-            -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'receive_recovery_completed_unproven_payload_hold' `
+            -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
+            -Action {
+                Get-FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldCorrelation `
+                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof =
-        Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCorrelation `
-            -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'receive_recovery_completed_retained_proof_state_publication' `
+            -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
+            -Action {
+                Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCorrelation `
+                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     $fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressionProof =
-        Get-FileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressionCorrelation `
-            -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'receive_recovery_proof_state_recheck_heartbeat_suppression' `
+            -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
+            -Action {
+                Get-FileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressionCorrelation `
+                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     $fileTransferReceiveRecoveryCompletedUnprovenSuccessorProof =
-        Get-FileTransferReceiveRecoveryCompletedUnprovenSuccessorCorrelation `
-            -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'receive_recovery_completed_unproven_successor' `
+            -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
+            -Action {
+                Get-FileTransferReceiveRecoveryCompletedUnprovenSuccessorCorrelation `
+                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     $fileTransferReceiveRecoveryCompletedProvenSuccessorProof =
-        Get-FileTransferReceiveRecoveryCompletedProvenSuccessorCorrelation `
-            -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
-    [object[]]$legacyRuntimeUnlockRegularV4RecoveryLeaseEvents =
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'receive_recovery_completed_proven_successor' `
+            -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
+            -Action {
+                Get-FileTransferReceiveRecoveryCompletedProvenSuccessorCorrelation `
+                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
+    [object[]]$legacyRuntimeUnlockRegularV4RecoveryLeaseEvents = @(
         Remove-FileTransferLegacyReceiveRecoveryEventsCoveredByOperations `
-            -Events $runtimeUnlockRegularV4RecoveryLeaseEvents `
-            -OperationEvents $runtimeUnlockRegularV4RecoveryLeaseEvents
+            -Events $runtimeUnlockRegularV4RecoveryOrderedEvents `
+            -OperationEvents $runtimeUnlockRegularV4RecoveryOrderedEvents)
     $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof =
-        Get-FileTransferRuntimeUnlockRegularV4RecoveryLeaseCorrelation `
-            -Events $legacyRuntimeUnlockRegularV4RecoveryLeaseEvents `
-            -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'runtime_unlock_regular_v4_recovery_lease' `
+            -InputCount $legacyRuntimeUnlockRegularV4RecoveryLeaseEvents.Count `
+            -Action {
+                Get-FileTransferRuntimeUnlockRegularV4RecoveryLeaseCorrelation `
+                    -Events $legacyRuntimeUnlockRegularV4RecoveryLeaseEvents `
+                    -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     $bridgeRecoveryExecutionSoftToHardHandoffProof =
-        Get-FileTransferBridgeRecoveryExecutionSoftToHardHandoffCorrelation `
-            -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'bridge_recovery_soft_to_hard_handoff' `
+            -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
+            -Action {
+                Get-FileTransferBridgeRecoveryExecutionSoftToHardHandoffCorrelation `
+                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     $bridgeRecoveryExecutionStartupPayloadIsolationProof =
-        Get-FileTransferBridgeRecoveryExecutionStartupPayloadIsolationCorrelation `
-            -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'bridge_recovery_startup_payload_isolation' `
+            -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
+            -Action {
+                Get-FileTransferBridgeRecoveryExecutionStartupPayloadIsolationCorrelation `
+                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     $bridgeRecoveryExecutionPayloadHoldProof =
-        Get-FileTransferBridgeRecoveryExecutionPayloadHoldCorrelation `
-            -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'bridge_recovery_payload_hold' `
+            -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
+            -Action {
+                Get-FileTransferBridgeRecoveryExecutionPayloadHoldCorrelation `
+                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     $bridgeRecoveryExecutionSubmissionBarrierDrainProof =
-        Get-FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainCorrelation `
-            -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'bridge_recovery_submission_barrier_drain' `
+            -InputCount ($runtimeUnlockRegularV4RecoveryLeaseEvents.Count +
+                $bridgeRecoveryExecutionSubmissionBarrierDrainRetirementEvents.Count) `
+            -Action {
+                Get-FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainCorrelation `
+                    -Index $bridgeRecoveryExecutionSubmissionBarrierDrainIndex
+            }
     $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof =
-        Get-FileTransferRuntimeUnlockRegularV4RecoveryClosureOfferTimeoutCorrelation `
-            -Events $runtimeUnlockRegularV4RecoveryLeaseEvents `
-            -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'runtime_unlock_regular_v4_recovery_closure_offer_timeout' `
+            -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
+            -Action {
+                Get-FileTransferRuntimeUnlockRegularV4RecoveryClosureOfferTimeoutCorrelation `
+                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents `
+                    -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     $runtimeUnlockInitialOfferRetryLifecycleHandoffProof =
-        Get-FileTransferRuntimeUnlockInitialOfferRetryLifecycleHandoffCorrelation `
-            -Events $runtimeUnlockRegularV4RecoveryLeaseEvents `
-            -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'runtime_unlock_initial_offer_retry_lifecycle_handoff' `
+            -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
+            -Action {
+                Get-FileTransferRuntimeUnlockInitialOfferRetryLifecycleHandoffCorrelation `
+                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents `
+                    -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     $runtimeUnlockInitialActivationAnswerPeerDeliveryProof =
-        Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrelation `
-            -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'runtime_unlock_initial_activation_answer_peer_delivery' `
+            -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
+            -Action {
+                Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrelation `
+                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     $runtimeUnlockInitialOfferReceiveRecoveryHoldProof =
-        Get-FileTransferRuntimeUnlockInitialOfferReceiveRecoveryHoldCorrelation `
-            -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'runtime_unlock_initial_offer_receive_recovery_hold' `
+            -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
+            -Action {
+                Get-FileTransferRuntimeUnlockInitialOfferReceiveRecoveryHoldCorrelation `
+                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof =
-        Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryCorrelation `
-            -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery' `
+            -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
+            -Action {
+                Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryCorrelation `
+                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof =
-        Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredCorrelation `
-            -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired' `
+            -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
+            -Action {
+                Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredCorrelation `
+                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof =
-        Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredCorrelation `
-            -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired' `
+            -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
+            -Action {
+                Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredCorrelation `
+                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     [object[]]$runtimeUnlockRetryDispatchAuthorityTupleMismatchEvents = @(
         $runtimeUnlockRetryDispatchInstallEvents +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_decision_tuple_rejected') +
@@ -1426,43 +1734,123 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_inbound_terminal') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_outbound_terminal')
     )
+    [object[]]$regularV4FrontierRepairProjectionOrderedEvents = @(
+        $regularV4FrontierRepairProjectionEvents |
+            Where-Object { $null -ne $_ } |
+            Sort-Object Sequence, LineNumber
+    )
+    # Bulk send-result evidence is required only by the frontier-stall lifecycle
+    # correlator. Keep it out of every other repair correlator so each semantic
+    # pass remains bounded by repair/control evidence rather than payload volume.
+    [object[]]$regularV4FrontierRepairSemanticOrderedEvents = @(
+        $regularV4FrontierRepairProjectionOrderedEvents |
+            Where-Object { $_.EventName -ne 'filetransfer_data_path_send_result' }
+    )
     $regularV4FrontierRepairMissingRangePreservationProof =
-        Get-FileTransferRegularV4MissingRangePreservationProof `
-            -Events $regularV4FrontierRepairProjectionEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'regular_v4_missing_range_preservation' `
+            -InputCount $regularV4FrontierRepairSemanticOrderedEvents.Count `
+            -Action {
+                Get-FileTransferRegularV4MissingRangePreservationProof `
+                    -Events $regularV4FrontierRepairSemanticOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     $regularV4FrontierTailRepairStatePublicationProof =
-        Get-FileTransferRegularV4FrontierTailRepairStatePublicationProof `
-            -Events $regularV4FrontierRepairProjectionEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'regular_v4_frontier_tail_repair_state_publication' `
+            -InputCount $regularV4FrontierRepairSemanticOrderedEvents.Count `
+            -Action {
+                Get-FileTransferRegularV4FrontierTailRepairStatePublicationProof `
+                    -Events $regularV4FrontierRepairSemanticOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     $regularV4FrontierRepairProjectionReauthorizationProof =
-        Get-FileTransferRegularV4RepairProjectionReauthorizationProof `
-            -Events $regularV4FrontierRepairProjectionEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'regular_v4_repair_projection_reauthorization' `
+            -InputCount $regularV4FrontierRepairSemanticOrderedEvents.Count `
+            -Action {
+                Get-FileTransferRegularV4RepairProjectionReauthorizationProof `
+                    -Events $regularV4FrontierRepairSemanticOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     $regularV4PeerSilenceReplayMissingDispatchRangeProof =
-        Get-FileTransferRegularV4PeerSilenceReplayMissingDispatchRangeProof `
-            -Events $regularV4FrontierRepairProjectionEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'regular_v4_peer_silence_replay_missing_dispatch_range' `
+            -InputCount $regularV4FrontierRepairSemanticOrderedEvents.Count `
+            -Action {
+                Get-FileTransferRegularV4PeerSilenceReplayMissingDispatchRangeProof `
+                    -Events $regularV4FrontierRepairSemanticOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     $regularV4PeerSilenceReplayInstalledAuthorityDispatchProof =
-        Get-FileTransferRegularV4PeerSilenceReplayInstalledAuthorityDispatchProof `
-            -Events $regularV4FrontierRepairProjectionEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'regular_v4_peer_silence_replay_installed_authority_dispatch' `
+            -InputCount $regularV4FrontierRepairSemanticOrderedEvents.Count `
+            -Action {
+                Get-FileTransferRegularV4PeerSilenceReplayInstalledAuthorityDispatchProof `
+                    -Events $regularV4FrontierRepairSemanticOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     $regularV4FrontierRepairSettlementDispositionProof =
-        Get-FileTransferRegularV4FrontierRepairSettlementDispositionProof `
-            -Events $regularV4FrontierRepairProjectionEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'regular_v4_frontier_repair_settlement_disposition' `
+            -InputCount $regularV4FrontierRepairSemanticOrderedEvents.Count `
+            -Action {
+                Get-FileTransferRegularV4FrontierRepairSettlementDispositionProof `
+                    -Events $regularV4FrontierRepairSemanticOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
+    [object[]]$regularV4FrontierRepairLifecycleOrderedEvents = @(
+        @($regularV4FrontierRepairProjectionOrderedEvents) +
+        @($runtimeUnlockRegularV4RecoveryOrderedEvents) |
+            Sort-Object Sequence, LineNumber
+    )
     $regularV4FrontierRepairLifecycleProof =
-        Get-FileTransferRegularV4FrontierRepairLifecycleProof `
-            -Events @(
-                $regularV4FrontierRepairProjectionEvents +
-                $runtimeUnlockRegularV4RecoveryLeaseEvents
-            ) `
-            -SettlementDispositionProof $regularV4FrontierRepairSettlementDispositionProof
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'regular_v4_frontier_repair_lifecycle' `
+            -InputCount $regularV4FrontierRepairLifecycleOrderedEvents.Count `
+            -Action {
+                Get-FileTransferRegularV4FrontierRepairLifecycleProof `
+                    -Events $regularV4FrontierRepairLifecycleOrderedEvents `
+                    -SettlementDispositionProof $regularV4FrontierRepairSettlementDispositionProof `
+                    -AlreadyChronologicallyOrdered
+            }
     $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof =
-        Get-FileTransferRegularV4FrontierRepairPressureAuthorityLifecycleSplitProof `
-            -Events $regularV4FrontierRepairProjectionEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'regular_v4_frontier_repair_pressure_authority_lifecycle_split' `
+            -InputCount $regularV4FrontierRepairSemanticOrderedEvents.Count `
+            -Action {
+                Get-FileTransferRegularV4FrontierRepairPressureAuthorityLifecycleSplitProof `
+                    -Events $regularV4FrontierRepairSemanticOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     $regularV4FrontierRepairPressureRecoveryHandoffProof =
-        Get-FileTransferRegularV4FrontierRepairPressureRecoveryHandoffProof `
-            -Events $regularV4FrontierRepairProjectionEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'regular_v4_frontier_repair_pressure_recovery_handoff' `
+            -InputCount $regularV4FrontierRepairSemanticOrderedEvents.Count `
+            -Action {
+                Get-FileTransferRegularV4FrontierRepairPressureRecoveryHandoffProof `
+                    -Events $regularV4FrontierRepairSemanticOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     $regularV4FrontierRepairSuccessorPressureInstallProof =
-        Get-FileTransferRegularV4FrontierRepairSuccessorPressureInstallProof `
-            -Events $regularV4FrontierRepairProjectionEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'regular_v4_frontier_repair_successor_pressure_install' `
+            -InputCount $regularV4FrontierRepairSemanticOrderedEvents.Count `
+            -Action {
+                Get-FileTransferRegularV4FrontierRepairSuccessorPressureInstallProof `
+                    -Events $regularV4FrontierRepairSemanticOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     $regularV4FrontierRepairInitialPressureInstallProof =
-        Get-FileTransferRegularV4FrontierRepairInitialPressureInstallProof `
-            -Events $regularV4FrontierRepairProjectionEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'regular_v4_frontier_repair_initial_pressure_install' `
+            -InputCount $regularV4FrontierRepairSemanticOrderedEvents.Count `
+            -Action {
+                Get-FileTransferRegularV4FrontierRepairInitialPressureInstallProof `
+                    -Events $regularV4FrontierRepairSemanticOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
     [object[]]$runtimeUnlockRetryFallbackTailUnblockRecheckEvents = @(
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_authority_held') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_authority_hold_preserved') +
@@ -1707,6 +2095,51 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $fallbackTailTransportEpochReauthorizationProof.CoordinatorAggregateProof
     $fallbackTailYieldAuthorityRejectedCount +=
         $fallbackTailCoordinatorAggregateProof.InvalidUnresolvedCount
+    [string[]]$fileTunaV4DataPathEventNames = @(
+        Get-FileTransferFileTunaV4DataPathEventNames
+    )
+    [object[]]$fileTunaV4DataPathDownstreamEvents = @()
+    $fileTunaV4RegisteredLeaseEvents = $null
+    $fileTunaV4RetiredLeaseEvents = $null
+    if ($null -ne $Index.PSObject.Properties['AllEvents']) {
+        [string[]]$fileTunaV4PhysicalLeaseEventNames = @(
+            'filetransfer_route_transition_physical_send_lease_registered',
+            'filetransfer_route_transition_physical_send_lease_retired',
+            'filetransfer_route_transition_physical_send_lease_rejected'
+        )
+        $fileTunaV4SemanticEventList =
+            New-Object System.Collections.Generic.List[object]
+        foreach ($eventName in @($fileTunaV4DataPathEventNames)) {
+            if ($eventName -in $fileTunaV4PhysicalLeaseEventNames) {
+                continue
+            }
+            foreach ($event in @(
+                    Get-FileTransferCompactIndexEventsByName `
+                        -Index $Index `
+                        -Name $eventName)) {
+                $fileTunaV4SemanticEventList.Add($event) | Out-Null
+            }
+        }
+        $fileTunaV4DataPathDownstreamEvents = @(
+            $fileTunaV4SemanticEventList.ToArray() |
+                Sort-Object Sequence, LineNumber
+        )
+        [object[]]$fileTunaV4DataPathEvents =
+            @($fileTunaV4DataPathDownstreamEvents)
+        $eventsByName =
+            [System.Collections.IDictionary]$Index.PSObject.Properties['EventsByName'].Value
+        if ($eventsByName.Contains('filetransfer_route_transition_physical_send_lease_registered') -or
+            $eventsByName.ContainsKey('filetransfer_route_transition_physical_send_lease_registered')) {
+            $fileTunaV4RegisteredLeaseEvents = $eventsByName.Item(
+                'filetransfer_route_transition_physical_send_lease_registered')
+        }
+        if ($eventsByName.Contains('filetransfer_route_transition_physical_send_lease_retired') -or
+            $eventsByName.ContainsKey('filetransfer_route_transition_physical_send_lease_retired')) {
+            $fileTunaV4RetiredLeaseEvents = $eventsByName.Item(
+                'filetransfer_route_transition_physical_send_lease_retired')
+        }
+    }
+    else {
     [object[]]$fileTunaV4DataPathEvents = @(
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_data_path_send_result') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_data_path_receive_result') +
@@ -1755,6 +2188,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_v6_proof_bootstrap_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_v6_proof_bootstrap_execution_completed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_v6_proof_bootstrap_receipt_applied') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_post_tuna_fallback_v6_route_consumed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_selected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_hint_authorized_publication_accepted') +
@@ -1775,35 +2209,94 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_terminalized') |
             Sort-Object Sequence, LineNumber
     )
+    }
+    $fileTunaV4RouteTransitionInputCount = [int64]$fileTunaV4DataPathEvents.Count
+    if ($null -ne $fileTunaV4RegisteredLeaseEvents) {
+        $fileTunaV4RouteTransitionInputCount +=
+            [int64]$fileTunaV4RegisteredLeaseEvents.Count
+    }
+    if ($null -ne $fileTunaV4RetiredLeaseEvents) {
+        $fileTunaV4RouteTransitionInputCount +=
+            [int64]$fileTunaV4RetiredLeaseEvents.Count
+    }
     $dataPathCorrelationStopwatch =
         [System.Diagnostics.Stopwatch]::StartNew()
     $fileTransferRouteTransitionProof =
-        Get-FileTransferRouteTransitionCorrelation -Events $fileTunaV4DataPathEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'filetransfer_route_transition' `
+            -InputCount $fileTunaV4RouteTransitionInputCount `
+            -Action {
+                Get-FileTransferRouteTransitionCorrelation `
+                    -Events $fileTunaV4DataPathEvents `
+                    -RegisteredLeaseEvents $fileTunaV4RegisteredLeaseEvents `
+                    -RetiredLeaseEvents $fileTunaV4RetiredLeaseEvents `
+                    -AlreadyChronologicallyOrdered
+            }
+    if ($fileTunaV4DataPathDownstreamEvents.Count -eq 0) {
+        $fileTunaV4DataPathDownstreamEvents = @(
+            $fileTunaV4DataPathEvents | Where-Object {
+                $_.EventName -notin @(
+                    'filetransfer_route_transition_physical_send_lease_registered',
+                    'filetransfer_route_transition_physical_send_lease_retired',
+                    'filetransfer_route_transition_physical_send_lease_rejected')
+            }
+        )
+    }
     $fileTransferGuiLiveFallbackFaultWindowProof =
-        Get-FileTransferGuiLiveFallbackFaultWindowCorrelation `
-            -Events $fileTunaV4DataPathEvents `
-            -LiveRouteProofMode $LiveRouteProofMode
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'filetransfer_gui_live_fallback_fault_window' `
+            -InputCount $fileTunaV4DataPathDownstreamEvents.Count `
+            -Action {
+                Get-FileTransferGuiLiveFallbackFaultWindowCorrelation `
+                    -Events $fileTunaV4DataPathDownstreamEvents `
+                    -LiveRouteProofMode $LiveRouteProofMode
+            }
     $fileTransferRouteTransitionLiveEpochProjectionProof =
-        Get-FileTransferRouteTransitionLiveEpochProjectionCorrelation `
-            -Events $fileTunaV4DataPathEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'filetransfer_route_transition_live_epoch_projection' `
+            -InputCount $fileTunaV4DataPathDownstreamEvents.Count `
+            -Action {
+                Get-FileTransferRouteTransitionLiveEpochProjectionCorrelation `
+                    -Events $fileTunaV4DataPathDownstreamEvents
+            }
     $fileTransferRouteTransitionDrainingTransportGraceProof =
-        Get-FileTransferRouteTransitionDrainingTransportGraceCorrelation `
-            -Events $fileTunaV4DataPathEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'filetransfer_route_transition_draining_transport_grace' `
+            -InputCount $fileTunaV4DataPathDownstreamEvents.Count `
+            -Action {
+                Get-FileTransferRouteTransitionDrainingTransportGraceCorrelation `
+                    -Events $fileTunaV4DataPathDownstreamEvents
+            }
     $dataPathIndexStopwatch =
         [System.Diagnostics.Stopwatch]::StartNew()
     $fileTunaV4DataPathCorrelationIndex =
-        New-FileTransferFileTunaV4DataPathCorrelationIndex `
-            -Events $fileTunaV4DataPathEvents
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'filetransfer_data_path_index' `
+            -InputCount $fileTunaV4DataPathDownstreamEvents.Count `
+            -Action {
+                New-FileTransferFileTunaV4DataPathCorrelationIndex `
+                    -Events $fileTunaV4DataPathDownstreamEvents
+            }
     $dataPathIndexStopwatch.Stop()
     $runtimeUnlockRegularV4RouteCommitSendDrainProof =
-        Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation `
-            -Events $fileTunaV4DataPathEvents `
-            -DataPathIndex $fileTunaV4DataPathCorrelationIndex
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'runtime_unlock_regular_v4_route_commit_send_drain' `
+            -InputCount $fileTunaV4DataPathDownstreamEvents.Count `
+            -Action {
+                Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation `
+                    -Events $fileTunaV4DataPathDownstreamEvents `
+                    -DataPathIndex $fileTunaV4DataPathCorrelationIndex
+            }
     $fileTunaV4DataPathMismatchProof =
-        Get-FileTransferFileTunaV4DataPathMismatchProof `
-            -Events $fileTunaV4DataPathEvents `
-            -RouteCommitSendDrainProof $runtimeUnlockRegularV4RouteCommitSendDrainProof `
-            -DataPathIndex $fileTunaV4DataPathCorrelationIndex
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'filetransfer_tuna_v4_data_path_mismatch' `
+            -InputCount $fileTunaV4DataPathDownstreamEvents.Count `
+            -Action {
+                Get-FileTransferFileTunaV4DataPathMismatchProof `
+                    -Events $fileTunaV4DataPathDownstreamEvents `
+                    -RouteCommitSendDrainProof $runtimeUnlockRegularV4RouteCommitSendDrainProof `
+                    -DataPathIndex $fileTunaV4DataPathCorrelationIndex
+            }
     $dataPathCorrelationStopwatch.Stop()
     $validFallbackTerminalProofCount =
         @($fallbackTailBridgeRecoveryPairingProof.ValidTerminalProofEvents).Count
@@ -4279,6 +4772,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         data_path_correlation_total_ms = $dataPathCorrelationStopwatch.ElapsedMilliseconds
         data_path_correlation_index_build_visit_count = [int64]$fileTunaV4DataPathCorrelationIndex.Statistics.build_visit_count
         data_path_correlation_bounded_lookup_visit_count = [int64]$fileTunaV4DataPathCorrelationIndex.Statistics.bounded_lookup_visit_count
+        bridge_recovery_submission_barrier_drain_index_build_visit_count =
+            [int64]$bridgeRecoveryExecutionSubmissionBarrierDrainProof.IndexBuildVisitCount
+        bridge_recovery_submission_barrier_drain_semantic_index_build_visit_count =
+            [int64]$bridgeRecoveryExecutionSubmissionBarrierDrainProof.SemanticIndexBuildVisitCount
+        bridge_recovery_submission_barrier_drain_retirement_index_build_visit_count =
+            [int64]$bridgeRecoveryExecutionSubmissionBarrierDrainProof.RetirementIndexBuildVisitCount
+        bridge_recovery_submission_barrier_drain_bounded_lookup_visit_count =
+            [int64]$bridgeRecoveryExecutionSubmissionBarrierDrainProof.BoundedLookupVisitCount
     }
     $compactDto | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-compact-summary.json') -Encoding UTF8
 
@@ -4293,11 +4794,19 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             [int64]$fileTunaV4DataPathCorrelationIndex.Statistics.build_visit_count
         DataPathCorrelationBoundedLookupVisitCount =
             [int64]$fileTunaV4DataPathCorrelationIndex.Statistics.bounded_lookup_visit_count
+        BridgeRecoverySubmissionBarrierDrainIndexBuildVisitCount =
+            [int64]$bridgeRecoveryExecutionSubmissionBarrierDrainProof.IndexBuildVisitCount
+        BridgeRecoverySubmissionBarrierDrainBoundedLookupVisitCount =
+            [int64]$bridgeRecoveryExecutionSubmissionBarrierDrainProof.BoundedLookupVisitCount
     }
 }
 
 function Get-FileTransferEfficiencyAllEventsFromIndex {
     param($Index)
+
+    if ($null -ne $Index -and $null -ne $Index.PSObject.Properties['AllEvents']) {
+        return @($Index.PSObject.Properties['AllEvents'].Value)
+    }
 
     $items = New-Object System.Collections.Generic.List[object]
     if ($null -eq $Index -or $null -eq $Index.PSObject.Properties['EventsByName']) {
@@ -4341,6 +4850,250 @@ function Get-FileTransferEfficiencyAllEventsFromIndex {
     return @($items.ToArray() | Sort-Object Sequence)
 }
 
+function Get-FileTransferEfficiencySemanticEventsFromIndex {
+    param([Parameter(Mandatory = $true)]$Index)
+
+    $eventsByNameProperty = $Index.PSObject.Properties['EventsByName']
+    if ($null -eq $eventsByNameProperty) {
+        return [pscustomobject]@{
+            Events = @()
+            NameLookupCount = 0L
+            EventVisitCount = 0L
+        }
+    }
+
+    $eventsByName = [System.Collections.IDictionary]$eventsByNameProperty.Value
+    $selectedNames = New-Object 'System.Collections.Generic.HashSet[string]' `
+        ([System.StringComparer]::Ordinal)
+    foreach ($name in @(
+            'filetransfer_route_selected',
+            'filetransfer_route_transitioned',
+            'filetransfer_live_route_epoch_started',
+            'file_transfer_inbound_terminal',
+            'file_transfer_outbound_terminal',
+            'transfer_terminal',
+            'filetransfer_v4_throughput_summary',
+            'filetransfer_v4_sender_throughput_summary',
+            'filetransfer_v4_receiver_throughput_summary',
+            'filetransfer_v4_efficiency_summary',
+            'filetransfer_v4_sender_pump_summary',
+            'filetransfer_receiver_sparse_commit_summary',
+            'filetransfer_v4_sparse_write_committed',
+            'filetransfer_v6_sparse_write_committed',
+            'filetransfer_v6_receiver_state_sent',
+            'filetransfer_v6_receiver_state_received',
+            'filetransfer_frontier_stall_repair_due',
+            'filetransfer_v4_frontier_stall_missing_range_due',
+            'filetransfer_v6_post_tuna_fallback_frontier_progress_state_forced',
+            'filetransfer_v4_state_sent',
+            'filetransfer_v4_state_received',
+            'filetransfer_v6_receiver_state_deferred',
+            'filetransfer_v6_receiver_state_coalesced',
+            'filetransfer_v6_frontier_request_sent',
+            'session_liveness_recovery_deferred',
+            'session_liveness_timeout_deferred',
+            'session_liveness_timeout_deferred_for_filetransfer_recovery',
+            'session_liveness_timeout_deferred_for_bridge_filetransfer_recovery',
+            'filetransfer_liveness_deferral_granted',
+            'filetransfer_runtime_owner_stale_update_rejected',
+            'filetransfer_fallback_tail_retired_owner_update_suppressed',
+            'filetransfer_fallback_tail_recovery_owner_retired_after_yield',
+            'filetransfer_control_plane_send_retired_stale_generation',
+            'filetransfer_fallback_tail_quiescent_yield_granted',
+            'filetransfer_fallback_tail_terminal_proof_consumed',
+            'filetransfer_post_tuna_fallback_control_plane_pressure_marked',
+            'filetransfer_post_tuna_fallback_control_plane_pressure_recovered',
+            'filetransfer_fallback_checkpoint_exchange_started',
+            'filetransfer_fallback_checkpoint_reissue_requested',
+            'filetransfer_fallback_checkpoint_exchange_retired',
+            'filetransfer_control_plane_delivery_result',
+            'filetransfer_control_plane_delivery_observed',
+            'filetransfer_runtime_owned_workers_retired',
+            'filetransfer_fallback_control_plane_owner_retired',
+            'filetransfer_fallback_tail_progress_coalesced',
+            'session_liveness_timeout',
+            'filetransfer_live_progress_timeout')) {
+        $selectedNames.Add($name) | Out-Null
+    }
+
+    # The fallback-tail treadmill metric intentionally treats these families
+    # as semantic recovery activity. Select their name buckets without walking
+    # the parser's complete (and potentially very large) event array.
+    foreach ($key in @($eventsByName.Keys)) {
+        $name = [string]$key
+        if ($name -like '*state_refresh*' -or
+            $name -like '*bridge_recovery*' -or
+            $name -like '*receive_stall_recovery*') {
+            $selectedNames.Add($name) | Out-Null
+        }
+    }
+
+    $events = New-Object System.Collections.Generic.List[object]
+    $seenSequences = New-Object 'System.Collections.Generic.HashSet[int]'
+    $nameLookupCount = 0L
+    $eventVisitCount = 0L
+    foreach ($name in @($selectedNames)) {
+        $nameLookupCount++
+        if (-not $eventsByName.Contains($name) -and -not $eventsByName.ContainsKey($name)) {
+            continue
+        }
+
+        foreach ($event in $eventsByName.Item($name)) {
+            $eventVisitCount++
+            if ($null -ne $event -and $seenSequences.Add([int]$event.Sequence)) {
+                $events.Add($event) | Out-Null
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        Events = @($events.ToArray() | Sort-Object Sequence, LineNumber)
+        NameLookupCount = $nameLookupCount
+        EventVisitCount = $eventVisitCount
+    }
+}
+
+function Get-FileTransferEfficiencyIndexedMetrics {
+    param([Parameter(Mandatory = $true)]$Index)
+
+    $liveEpochEvents = @(
+        Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_started' |
+            Sort-Object Sequence, LineNumber
+    )
+    $epochMetrics = New-Object System.Collections.Generic.List[object]
+    foreach ($liveEvent in $liveEpochEvents) {
+        $epochMetrics.Add([ordered]@{
+            StartSequence = [int]$liveEvent.Sequence
+            MinTimestampUtc = $null
+            MaxTimestampUtc = $null
+            MaxProgressBytes = 0L
+            FallbackProgressBytes = 0L
+        }) | Out-Null
+    }
+
+    $allEventsProperty = $Index.PSObject.Properties['AllEvents']
+    $allEvents = if ($null -ne $allEventsProperty) { $allEventsProperty.Value } else { @() }
+    $candidateFields = @(
+        'bytes_transferred',
+        'bytes_committed',
+        'contiguous_bytes_committed',
+        'raw_bytes_received',
+        'raw_bytes_sent',
+        'total_bytes_received',
+        'total_bytes_sent',
+        'received_bytes',
+        'sent_bytes',
+        'file_size',
+        'payload_bytes_sent',
+        'payload_bytes_received'
+    )
+    $fallbackFields = @('raw_bytes', 'raw_chunk_bytes', 'bytes_written')
+    $minTimestampUtc = $null
+    $maxTimestampUtc = $null
+    $maxSequence = 0
+    $epochIndex = -1
+    $visitCount = 0L
+    foreach ($event in $allEvents) {
+        $visitCount++
+        if ($null -eq $event) {
+            continue
+        }
+
+        $sequence = [int]$event.Sequence
+        if ($sequence -gt $maxSequence) {
+            $maxSequence = $sequence
+        }
+        while (($epochIndex + 1) -lt $liveEpochEvents.Count -and
+            [int]$liveEpochEvents[$epochIndex + 1].Sequence -le $sequence) {
+            $epochIndex++
+        }
+
+        if ($null -ne $event.TimestampUtc) {
+            if ($null -eq $minTimestampUtc -or $event.TimestampUtc -lt $minTimestampUtc) {
+                $minTimestampUtc = $event.TimestampUtc
+            }
+            if ($null -eq $maxTimestampUtc -or $event.TimestampUtc -gt $maxTimestampUtc) {
+                $maxTimestampUtc = $event.TimestampUtc
+            }
+
+            if ($epochIndex -ge 0) {
+                $epoch = $epochMetrics[$epochIndex]
+                if ($null -eq $epoch.MinTimestampUtc -or $event.TimestampUtc -lt $epoch.MinTimestampUtc) {
+                    $epoch.MinTimestampUtc = $event.TimestampUtc
+                }
+                if ($null -eq $epoch.MaxTimestampUtc -or $event.TimestampUtc -gt $epoch.MaxTimestampUtc) {
+                    $epoch.MaxTimestampUtc = $event.TimestampUtc
+                }
+            }
+        }
+
+        if ($epochIndex -lt 0) {
+            continue
+        }
+
+        $epoch = $epochMetrics[$epochIndex]
+        $fields = $event.Fields
+        if ($null -eq $fields) {
+            continue
+        }
+        foreach ($fieldName in $candidateFields) {
+            if (-not $fields.ContainsKey($fieldName)) {
+                continue
+            }
+            $value = 0L
+            if (-not [long]::TryParse([string]$fields[$fieldName], [ref]$value)) {
+                continue
+            }
+            if ($value -gt [long]$epoch.MaxProgressBytes) {
+                $epoch.MaxProgressBytes = $value
+            }
+        }
+        foreach ($fieldName in $fallbackFields) {
+            if (-not $fields.ContainsKey($fieldName)) {
+                continue
+            }
+            $value = 0L
+            if ([long]::TryParse([string]$fields[$fieldName], [ref]$value)) {
+                $epoch.FallbackProgressBytes = [long]$epoch.FallbackProgressBytes + $value
+            }
+        }
+    }
+
+    $overallDurationMs = if ($null -ne $minTimestampUtc -and $null -ne $maxTimestampUtc) {
+        [long][Math]::Max(0, ($maxTimestampUtc - $minTimestampUtc).TotalMilliseconds)
+    }
+    else {
+        0L
+    }
+    $rows = @(
+        foreach ($epoch in $epochMetrics) {
+            $durationMs = if ($null -ne $epoch.MinTimestampUtc -and $null -ne $epoch.MaxTimestampUtc) {
+                [long][Math]::Max(0, ($epoch.MaxTimestampUtc - $epoch.MinTimestampUtc).TotalMilliseconds)
+            }
+            else {
+                0L
+            }
+            [pscustomobject]@{
+                StartSequence = [int]$epoch.StartSequence
+                DurationMs = $durationMs
+                BytesAttributed = if ([long]$epoch.MaxProgressBytes -gt 0) {
+                    [long]$epoch.MaxProgressBytes
+                }
+                else {
+                    [long]$epoch.FallbackProgressBytes
+                }
+            }
+        }
+    )
+
+    return [pscustomobject]@{
+        OverallDurationMs = $overallDurationMs
+        MaxSequence = $maxSequence
+        Epochs = $rows
+        EventVisitCount = $visitCount
+    }
+}
+
 function Get-FileTransferEfficiencyEventsByName {
     param(
         $Index,
@@ -4348,8 +5101,8 @@ function Get-FileTransferEfficiencyEventsByName {
         [Parameter(Mandatory = $true)][object[]]$Names
     )
 
-    $items = New-Object System.Collections.Generic.List[object]
     $normalizedNames = @($Names | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $items = New-Object System.Collections.Generic.List[object]
     foreach ($event in @($Events)) {
         if ($normalizedNames -contains $event.EventName) {
             $items.Add($event) | Out-Null
@@ -4553,7 +5306,8 @@ function Get-FileTransferEfficiencyMaxProgressBytes {
 function Get-FileTransferEfficiencyRouteEpochRows {
     param(
         [object[]]$Events,
-        [string[]]$RouteSequence
+        [string[]]$RouteSequence,
+        $IndexedMetrics = $null
     )
 
     $liveEvents = @(Get-FileTransferEfficiencyEventsByName -Index $null -Events $Events -Names @('filetransfer_live_route_epoch_started'))
@@ -4567,7 +5321,12 @@ function Get-FileTransferEfficiencyRouteEpochRows {
 
     $rows = New-Object System.Collections.Generic.List[object]
     if ($liveEvents.Count -eq 0 -and $RouteSequence.Count -gt 0) {
-        $duration = Get-FileTransferEfficiencyDurationMs -Events $Events
+        $duration = if ($null -ne $IndexedMetrics) {
+            [long]$IndexedMetrics.OverallDurationMs
+        }
+        else {
+            Get-FileTransferEfficiencyDurationMs -Events $Events
+        }
         $route = [string]$RouteSequence[0]
         $rows.Add([pscustomobject][ordered]@{
             epoch_index = 0
@@ -4586,10 +5345,12 @@ function Get-FileTransferEfficiencyRouteEpochRows {
     }
 
     $sorted = @($liveEvents | Sort-Object Sequence)
-    $maxSequence = 0
-    foreach ($event in @($Events)) {
-        if ($event.Sequence -gt $maxSequence) {
-            $maxSequence = [int]$event.Sequence
+    $maxSequence = if ($null -ne $IndexedMetrics) { [int]$IndexedMetrics.MaxSequence } else { 0 }
+    if ($null -eq $IndexedMetrics) {
+        foreach ($event in @($Events)) {
+            if ($event.Sequence -gt $maxSequence) {
+                $maxSequence = [int]$event.Sequence
+            }
         }
     }
 
@@ -4598,9 +5359,15 @@ function Get-FileTransferEfficiencyRouteEpochRows {
         $nextEvent = if ($i + 1 -lt $sorted.Count) { $sorted[$i + 1] } else { $null }
         $startSequence = [int]$startEvent.Sequence
         $endSequence = if ($null -ne $nextEvent) { [int]$nextEvent.Sequence - 1 } else { $maxSequence }
-        $epochEvents = @($Events | Where-Object { [int]$_.Sequence -ge $startSequence -and [int]$_.Sequence -le $endSequence })
-        $durationMs = Get-FileTransferEfficiencyDurationMs -Events $epochEvents
-        $bytesAttributed = Get-FileTransferEfficiencyMaxProgressBytes -Events $epochEvents
+        if ($null -ne $IndexedMetrics -and $i -lt @($IndexedMetrics.Epochs).Count) {
+            $durationMs = [long]$IndexedMetrics.Epochs[$i].DurationMs
+            $bytesAttributed = [long]$IndexedMetrics.Epochs[$i].BytesAttributed
+        }
+        else {
+            $epochEvents = @($Events | Where-Object { [int]$_.Sequence -ge $startSequence -and [int]$_.Sequence -le $endSequence })
+            $durationMs = Get-FileTransferEfficiencyDurationMs -Events $epochEvents
+            $bytesAttributed = Get-FileTransferEfficiencyMaxProgressBytes -Events $epochEvents
+        }
         $goodput = if ($durationMs -gt 0 -and $bytesAttributed -gt 0) {
             [double]$bytesAttributed / ([double]$durationMs / 1000.0)
         }
@@ -4900,14 +5667,48 @@ function Write-FileTransferEfficiencySummaryArtifacts {
         $Index,
         [AllowNull()][object]$Events = $null,
         $Summary = $null,
-        $GateResult = $null
+        $GateResult = $null,
+        [System.Collections.IDictionary]$StageDiagnostics = $null
     )
 
     New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
 
-    $Events = @($Events | Where-Object { $null -ne $_ })
-    if ($Events.Count -eq 0 -and $null -ne $Index) {
-        $Events = @(Get-FileTransferEfficiencyAllEventsFromIndex -Index $Index)
+    $efficiencyStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    if ($null -ne $StageDiagnostics) {
+        $StageDiagnostics['current_correlator'] = 'efficiency_summary'
+        $StageDiagnostics['correlator_status'] = 'started'
+        $StageDiagnostics['correlator_input_count'] = if ($null -ne $Index -and $null -ne $Index.PSObject.Properties['EventCount']) {
+            [int64]$Index.EventCount
+        }
+        else {
+            [int64]@($Events).Count
+        }
+        $StageDiagnostics['correlator_visit_count'] = 0
+        $StageDiagnostics['correlator_lookup_count'] = 0
+        $StageDiagnostics['correlator_started_utc'] =
+            [datetime]::UtcNow.ToString('O', [System.Globalization.CultureInfo]::InvariantCulture)
+        $StageDiagnostics['correlator_completed_utc'] = ''
+        $StageDiagnostics['correlator_elapsed_ms'] = 0
+        Write-FileTransferRetainedAnalysisStageDiagnostics -ArtifactDir $ArtifactDir -Diagnostics $StageDiagnostics
+    }
+
+    $indexedMetrics = $null
+    if ($null -ne $Index) {
+        $semanticSelection = Get-FileTransferEfficiencySemanticEventsFromIndex -Index $Index
+        $indexedMetrics = Get-FileTransferEfficiencyIndexedMetrics -Index $Index
+        $Events = @($semanticSelection.Events)
+        if ($null -ne $StageDiagnostics) {
+            $StageDiagnostics['correlator_input_count'] = $Events.Count
+            $StageDiagnostics['correlator_visit_count'] =
+                [int64]$semanticSelection.EventVisitCount + [int64]$indexedMetrics.EventVisitCount
+            $StageDiagnostics['correlator_lookup_count'] = [int64]$semanticSelection.NameLookupCount
+            $StageDiagnostics['efficiency_summary_all_events_single_pass_visit_count'] =
+                [int64]$indexedMetrics.EventVisitCount
+            $StageDiagnostics['efficiency_summary_semantic_event_count'] = $Events.Count
+        }
+    }
+    else {
+        $Events = @($Events | Where-Object { $null -ne $_ })
     }
 
     $gui = Read-FileTransferCompactGuiSummary -ArtifactDir $ArtifactDir
@@ -4958,7 +5759,12 @@ function Write-FileTransferEfficiencySummaryArtifacts {
         Get-FileTransferEfficiencyShaOk -Events $Events
     }
 
-    $overallDurationMs = Get-FileTransferEfficiencyDurationMs -Events $Events
+    $overallDurationMs = if ($null -ne $indexedMetrics) {
+        [long]$indexedMetrics.OverallDurationMs
+    }
+    else {
+        Get-FileTransferEfficiencyDurationMs -Events $Events
+    }
     $goodput = 0.0
     $guiGoodput = if ($null -ne $gui) { Get-FileTransferCompactObjectProperty -Object $gui -Name 'goodputBytesPerSecond' -Default '0' } else { '0' }
     if (-not [double]::TryParse([string]$guiGoodput, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$goodput)) {
@@ -5048,7 +5854,7 @@ function Write-FileTransferEfficiencySummaryArtifacts {
         $efficiencyFailureClass = 'efficiency_warning'
     }
 
-    $epochRows = @(Get-FileTransferEfficiencyRouteEpochRows -Events $Events -RouteSequence $routeSequence)
+    $epochRows = @(Get-FileTransferEfficiencyRouteEpochRows -Events $Events -RouteSequence $routeSequence -IndexedMetrics $indexedMetrics)
     $dto = [ordered]@{
         transfer_id = $transferId
         route_sequence = if ($routeSequence.Count -gt 0) { $routeSequence -join ',' } else { '(none)' }
@@ -5101,6 +5907,15 @@ function Write-FileTransferEfficiencySummaryArtifacts {
 
     Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-efficiency-summary.txt') -Value $lines.ToArray() -Encoding UTF8
     $dto | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-efficiency-summary.json') -Encoding UTF8
+
+    $efficiencyStopwatch.Stop()
+    if ($null -ne $StageDiagnostics) {
+        $StageDiagnostics['correlator_status'] = 'completed'
+        $StageDiagnostics['correlator_completed_utc'] =
+            [datetime]::UtcNow.ToString('O', [System.Globalization.CultureInfo]::InvariantCulture)
+        $StageDiagnostics['correlator_elapsed_ms'] = $efficiencyStopwatch.ElapsedMilliseconds
+        Write-FileTransferRetainedAnalysisStageDiagnostics -ArtifactDir $ArtifactDir -Diagnostics $StageDiagnostics
+    }
 }
 
 function Invoke-FileTransferRetainedAnalysis {
@@ -5137,12 +5952,22 @@ function Invoke-FileTransferRetainedAnalysis {
         total_ms = 0
         event_count = 0
         indexed_event_count = 0
+        field_statistics_mode = 'not_decided'
         log_file_count = 0
         compact_mode = 0
         compact_requested = 0
         compact_for_large_slice = 0
+        large_full_indexed = 0
         compact_selection_reason = 'not_selected'
         artifact_write_started = 0
+        current_correlator = ''
+        correlator_status = 'not_started'
+        correlator_input_count = 0
+        correlator_visit_count = 'unavailable'
+        correlator_lookup_count = 'unavailable'
+        correlator_started_utc = ''
+        correlator_completed_utc = ''
+        correlator_elapsed_ms = 0
         artifact_dir = $resolvedArtifactDir
     }
 
@@ -5161,22 +5986,42 @@ function Invoke-FileTransferRetainedAnalysis {
         $stageDiagnostics['total_ms'] = $totalStopwatch.ElapsedMilliseconds
         Write-FileTransferRetainedAnalysisStageDiagnostics -ArtifactDir $resolvedArtifactDir -Diagnostics $stageDiagnostics
 
+        $compactRequested = [string]::Equals($env:NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT, '1', [System.StringComparison]::OrdinalIgnoreCase)
+        $compactForLargeSlice = $eventsForArtifacts.Count -gt 25000 -and -not $IncludeRawSlices
+        $largeFullIndexed = $eventsForArtifacts.Count -gt 25000 -and $IncludeRawSlices -and -not $compactRequested
+        # FieldMax/FieldSum are acceleration caches only. Eagerly parsing every
+        # field in a large raw slice duplicates the work and memory retained by
+        # the canonical event index before full analysis can begin. Large full
+        # analyses use the existing per-scope, per-field lazy cache instead.
+        $deferEagerFieldStatistics = $eventsForArtifacts.Count -gt 25000
+        $includeEagerFieldStatistics = -not ($compactRequested -or $deferEagerFieldStatistics)
+        $stageDiagnostics['field_statistics_mode'] = if ($includeEagerFieldStatistics) {
+            'eager_all_fields'
+        }
+        else {
+            'deferred_per_scope'
+        }
         $indexStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-        $index = Initialize-FileTransferRetainedEventIndex -Events $eventsForArtifacts -LogFiles $logFiles
+        $index = Initialize-FileTransferRetainedEventIndex `
+            -Events $eventsForArtifacts `
+            -LogFiles $logFiles `
+            -IncludeFieldStatistics:$includeEagerFieldStatistics
         $indexStopwatch.Stop()
         $stageDiagnostics['index_ms'] = $indexStopwatch.ElapsedMilliseconds
         $stageDiagnostics['indexed_event_count'] = Get-FileTransferCompactIndexTotalEventCount -Index $index
         $stageDiagnostics['total_ms'] = $totalStopwatch.ElapsedMilliseconds
         Write-FileTransferRetainedAnalysisStageDiagnostics -ArtifactDir $resolvedArtifactDir -Diagnostics $stageDiagnostics
 
-        $compactRequested = [string]::Equals($env:NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT, '1', [System.StringComparison]::OrdinalIgnoreCase)
-        $compactForLargeSlice = $eventsForArtifacts.Count -gt 25000 -and -not $IncludeRawSlices
         $stageDiagnostics['compact_requested'] = if ($compactRequested) { 1 } else { 0 }
         $stageDiagnostics['compact_for_large_slice'] = if ($compactForLargeSlice) { 1 } else { 0 }
-        if ($compactRequested -or $compactForLargeSlice) {
-            $stageDiagnostics['compact_mode'] = 1
+        $stageDiagnostics['large_full_indexed'] = if ($largeFullIndexed) { 1 } else { 0 }
+        if ($compactRequested -or $compactForLargeSlice -or $largeFullIndexed) {
+            $stageDiagnostics['compact_mode'] = if ($largeFullIndexed) { 0 } else { 1 }
             $stageDiagnostics['compact_selection_reason'] = if ($compactRequested) {
                 'environment_requested'
+            }
+            elseif ($largeFullIndexed) {
+                'large_full_indexed_semantics'
             }
             else {
                 'large_slice_without_raw_slices'
@@ -5188,9 +6033,19 @@ function Invoke-FileTransferRetainedAnalysis {
             $compactArtifactArgs = @{
                 ArtifactDir = $resolvedArtifactDir
                 Index = $index
+                StageDiagnostics = $stageDiagnostics
                 LiveRouteProofMode = $LiveRouteProofMode
             }
             $compactResult = Write-FileTransferCompactRetainedAnalysisArtifacts @compactArtifactArgs
+            if ($largeFullIndexed) {
+                Copy-Item `
+                    -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-retained-compact-summary.json') `
+                    -Destination (Join-Path $resolvedArtifactDir 'filetransfer-retained-full-summary.json') `
+                    -Force
+                Write-FileTransferIndexedRawEvidenceArtifact `
+                    -ArtifactDir $resolvedArtifactDir `
+                    -Index $index
+            }
             $stageDiagnostics['data_path_correlation_index_ms'] =
                 $compactResult.DataPathCorrelationIndexMilliseconds
             $stageDiagnostics['data_path_correlation_total_ms'] =
@@ -5202,6 +6057,7 @@ function Invoke-FileTransferRetainedAnalysis {
             $efficiencyArtifactArgs = @{
                 ArtifactDir = $resolvedArtifactDir
                 Index = $index
+                StageDiagnostics = $stageDiagnostics
             }
             Write-FileTransferEfficiencySummaryArtifacts @efficiencyArtifactArgs
             $artifactStopwatch.Stop()
@@ -5243,7 +6099,7 @@ function Invoke-FileTransferRetainedAnalysis {
 
         $artifactStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         Write-FileTransferDiagnosticsArtifacts -ArtifactDir $resolvedArtifactDir -Summary $summary -GateResult $gate -LiveRouteProofMode $LiveRouteProofMode -IncludeRawSlices:$IncludeRawSlices
-        Write-FileTransferEfficiencySummaryArtifacts -ArtifactDir $resolvedArtifactDir -Index $index -Events $eventsForArtifacts -Summary $summary -GateResult $gate
+        Write-FileTransferEfficiencySummaryArtifacts -ArtifactDir $resolvedArtifactDir -Index $index -Events $eventsForArtifacts -Summary $summary -GateResult $gate -StageDiagnostics $stageDiagnostics
         $artifactStopwatch.Stop()
         $stageDiagnostics['artifact_write_ms'] = $artifactStopwatch.ElapsedMilliseconds
         $stageDiagnostics['artifact_write_started'] = 0

@@ -1089,6 +1089,251 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
     }
 
+    [Fact]
+    public async Task ReceiveRecoveryOperationCorrelation_IndexesSemanticInputOnceAndUsesBoundedOperationLookups()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string scriptText = """
+            param([string]$RepoRoot)
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            . (Join-Path $RepoRoot 'tools/FileTransferSoak/LogParsing.ps1')
+            . (Join-Path $RepoRoot 'tools/FileTransferSoak/ArtifactWriters.ps1')
+
+            function New-TestEvent {
+                param([string]$Name, [long]$Sequence, [hashtable]$Fields)
+                return [pscustomobject]@{
+                    EventName = $Name
+                    Sequence = $Sequence
+                    LineNumber = $Sequence
+                    Fields = $Fields
+                }
+            }
+
+            $operationCount = 16
+            $unrelatedCount = 50000
+            $eventsPerOperation = 4
+            [object[]]$events = [object[]]::new(
+                ($operationCount * $eventsPerOperation) + $unrelatedCount)
+            $cursor = 0
+            for ($generation = 1; $generation -le $operationCount; $generation++) {
+                $scope = @{
+                    receive_recovery_operation_generation = [string]$generation
+                    receive_recovery_operation_authority_id = "receive-recovery-$generation"
+                    observation_identity = "observation-$generation"
+                    observation_generation = [string]$generation
+                    observation_source = 'synthetic_test'
+                    observation_reason = 'synthetic_recovery'
+                    observation_utc_ms = [string](1000 + $generation)
+                    session_id = 'session-recovery-index'
+                    transfer_id = "transfer-recovery-index-$generation"
+                    direction = 'inbound'
+                    route = 'post_tuna_fallback_v6'
+                    protocol_version = '6'
+                    live_route_epoch = '1'
+                    route_publication_generation = '2'
+                    route_commit_generation = '1'
+                    route_commit_transaction_generation = '1'
+                    route_commit_offer_generation = '1'
+                    route_commit_path_lease_generation = '1'
+                    route_commit_probe_ack_id = "probe-$generation"
+                    runtime_generation = '3'
+                    terminal_generation = '0'
+                    leg_generation = '4'
+                    transport_epoch = '2'
+                    bridge_recovery_generation = '1'
+                    bridge_decision_generation = [string](10 + $generation)
+                    checkpoint_request_id = "checkpoint-$generation"
+                    data_session_identity = "data-session-$generation"
+                    data_session_generation = '1'
+                    recovery_liveness_lease_authority_id = '(none)'
+                    recovery_liveness_lease_generation = '0'
+                }
+                $issued = $scope.Clone()
+                $issued.operation_state = 'Issued'
+                $events[$cursor++] = New-TestEvent `
+                    'filetransfer_receive_recovery_operation_issued' `
+                    ($generation * 10L) `
+                    $issued
+
+                $started = $scope.Clone()
+                $started.execution_start_status = 'Started'
+                $events[$cursor++] = New-TestEvent `
+                    'filetransfer_receive_recovery_operation_execution_start_decided' `
+                    (($generation * 10L) + 1L) `
+                    $started
+
+                $receipt = $scope.Clone()
+                $receipt.execution_outcome = 'Completed'
+                $receipt.execution_mode = 'hard'
+                $events[$cursor++] = New-TestEvent `
+                    'filetransfer_receive_recovery_operation_execution_receipt_applied' `
+                    (($generation * 10L) + 2L) `
+                    $receipt
+
+                $proof = $scope.Clone()
+                $proof.proof_identity = "receive-proof-$generation"
+                $proof.proof_observed_utc_ms = [string](2000 + $generation)
+                $events[$cursor++] = New-TestEvent `
+                    'filetransfer_receive_recovery_operation_proof_observed' `
+                    (($generation * 10L) + 3L) `
+                    $proof
+            }
+
+            $unrelated = New-TestEvent `
+                'session_liveness_heartbeat_sent' `
+                1000000L `
+                @{
+                    session_id = 'unrelated-session'
+                    trigger = 'periodic'
+                }
+            while ($cursor -lt $events.Length) {
+                $events[$cursor++] = $unrelated
+            }
+
+            $result = Get-FileTransferReceiveRecoveryOperationCorrelation -Events $events
+            $expectedInputCount = [long]$events.Length
+            $maximumBoundedLookups = [long]$operationCount * 64L
+            if ([long]$result.RawCount -ne $operationCount -or
+                [long]$result.DistinctCount -ne $operationCount -or
+                [long]$result.RecoveredCount -ne $operationCount -or
+                [long]$result.UnresolvedCount -ne 0L -or
+                [long]$result.IndexBuildVisitCount -ne $expectedInputCount -or
+                [long]$result.BoundedLookupVisitCount -gt $maximumBoundedLookups) {
+                throw "unexpected receive-recovery index result: $($result | ConvertTo-Json -Compress)"
+            }
+            Write-Output 'receive-recovery-operation-index-bounded-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, [FindRepoRoot()]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Receive-recovery operation index test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "receive-recovery-operation-index-bounded-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ReceiveRecoverySemanticCorrelators_ReuseOneChronologicalInput_WithParity()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string scriptText = """
+            param([string]$RepoRoot)
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            . (Join-Path $RepoRoot 'tools/FileTransferSoak/LogParsing.ps1')
+            . (Join-Path $RepoRoot 'tools/FileTransferSoak/ArtifactWriters.ps1')
+
+            function New-TestEvent {
+                param([long]$Sequence)
+                return [pscustomobject]@{
+                    EventName = 'synthetic_receive_recovery_diagnostic'
+                    Sequence = $Sequence
+                    LineNumber = $Sequence
+                    FilePath = 'synthetic-recovery-semantic.log'
+                    Fields = @{
+                        session_id = 'session-semantic-order'
+                        transfer_id = 'transfer-semantic-order'
+                        direction = 'outbound'
+                    }
+                }
+            }
+
+            [object[]]$events = @(
+                (New-TestEvent 30),
+                (New-TestEvent 10),
+                (New-TestEvent 20))
+            [object[]]$ordered = @($events | Sort-Object Sequence, LineNumber)
+            [string[]]$functions = @(
+                'Get-FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldCorrelation',
+                'Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCorrelation',
+                'Get-FileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressionCorrelation',
+                'Get-FileTransferReceiveRecoveryCompletedUnprovenSuccessorCorrelation',
+                'Get-FileTransferReceiveRecoveryCompletedProvenSuccessorCorrelation',
+                'Get-FileTransferRuntimeUnlockRegularV4RecoveryLeaseCorrelation',
+                'Get-FileTransferBridgeRecoveryExecutionSoftToHardHandoffCorrelation',
+                'Get-FileTransferBridgeRecoveryExecutionStartupPayloadIsolationCorrelation',
+                'Get-FileTransferBridgeRecoveryExecutionPayloadHoldCorrelation',
+                'Get-FileTransferRuntimeUnlockRegularV4RecoveryClosureOfferTimeoutCorrelation',
+                'Get-FileTransferRuntimeUnlockInitialOfferRetryLifecycleHandoffCorrelation',
+                'Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrelation',
+                'Get-FileTransferRuntimeUnlockInitialOfferReceiveRecoveryHoldCorrelation',
+                'Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryCorrelation',
+                'Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredCorrelation',
+                'Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredCorrelation')
+
+            foreach ($functionName in $functions) {
+                $command = Get-Command $functionName -CommandType Function
+                if (-not $command.Parameters.ContainsKey('AlreadyChronologicallyOrdered')) {
+                    throw "$functionName does not expose the shared-order boundary"
+                }
+                $baseline = & $functionName -Events $events
+                $optimized = & $functionName `
+                    -Events $ordered `
+                    -AlreadyChronologicallyOrdered
+                $baselineJson = $baseline | ConvertTo-Json -Depth 20 -Compress
+                $optimizedJson = $optimized | ConvertTo-Json -Depth 20 -Compress
+                if ($baselineJson -cne $optimizedJson) {
+                    throw "$functionName changed output under shared chronological input"
+                }
+            }
+
+            $orchestration = Get-Content `
+                -LiteralPath (Join-Path $RepoRoot 'tools/FileTransferOps/AnalyzerOrchestration.ps1') `
+                -Raw
+            $start = $orchestration.IndexOf(
+                '[object[]]$runtimeUnlockRegularV4RecoveryOrderedEvents',
+                [System.StringComparison]::Ordinal)
+            $end = $orchestration.IndexOf(
+                '[object[]]$runtimeUnlockRetryDispatchAuthorityTupleMismatchEvents',
+                $start,
+                [System.StringComparison]::Ordinal)
+            if ($start -lt 0 -or $end -le $start) {
+                throw 'shared receive-recovery orchestration boundary missing'
+            }
+            $boundary = $orchestration.Substring($start, $end - $start)
+            foreach ($functionName in $functions) {
+                $functionOffset = $boundary.IndexOf($functionName, [System.StringComparison]::Ordinal)
+                if ($functionOffset -lt 0) {
+                    throw "$functionName is missing from the shared-order boundary"
+                }
+                $callEnd = [Math]::Min($boundary.Length, $functionOffset + 500)
+                $callText = $boundary.Substring($functionOffset, $callEnd - $functionOffset)
+                if ($callText.IndexOf(
+                        '-AlreadyChronologicallyOrdered',
+                        [System.StringComparison]::Ordinal) -lt 0) {
+                    throw "$functionName does not consume the shared chronological input"
+                }
+            }
+            if ([regex]::Matches(
+                    $boundary,
+                    'Sort-Object Sequence, LineNumber',
+                    [System.Text.RegularExpressions.RegexOptions]::CultureInvariant).Count -ne 1) {
+                throw 'receive-recovery semantic boundary must sort its shared input exactly once'
+            }
+            Write-Output 'receive-recovery-semantic-shared-order-parity-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, [FindRepoRoot()]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Receive-recovery semantic shared-order test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "receive-recovery-semantic-shared-order-parity-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

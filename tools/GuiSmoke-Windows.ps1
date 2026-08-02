@@ -5071,6 +5071,328 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         }
     }
 
+    function Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure {
+        param(
+            [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+        )
+
+        $committedTunaScopes = @{}
+        $observations = @{}
+        $commands = @{}
+        $commandsByAuthorityGeneration = @{}
+        $visits = 0L
+
+        function Get-FallbackV6BootstrapGuiCommandKey {
+            param([Parameter(Mandatory = $true)][string]$Line)
+
+            $values = New-Object System.Collections.Generic.List[string]
+            foreach ($fieldName in @(
+                    'log_writer_id',
+                    'session_id',
+                    'transfer_id',
+                    'direction',
+                    'authority_id',
+                    'bootstrap_generation',
+                    'fallback_epoch',
+                    'source_route',
+                    'source_protocol_version',
+                    'source_live_route_epoch',
+                    'source_runtime_generation',
+                    'source_route_publication_generation',
+                    'source_route_commit_generation',
+                    'source_terminal_generation',
+                    'source_leg_generation',
+                    'source_transport_epoch',
+                    'source_bridge_recovery_generation',
+                    'source_data_session_generation',
+                    'target_route',
+                    'target_protocol_version',
+                    'target_transport',
+                    'target_transport_epoch',
+                    'frame_kind')) {
+                $value = Get-TunaGuiLogLineFieldValue -Line $Line -Name $fieldName
+                if ([string]::IsNullOrWhiteSpace($value) -or $value -in @('(none)', 'none')) {
+                    return ''
+                }
+                $values.Add($value.ToLowerInvariant()) | Out-Null
+            }
+            return [string]::Join('|', $values)
+        }
+
+        function Test-FallbackV6BootstrapGuiPreparedScopeMatch {
+            param(
+                [Parameter(Mandatory = $true)]$Command,
+                [Parameter(Mandatory = $true)][string]$PreparedLine
+            )
+
+            foreach ($fieldName in @(
+                    'log_writer_id',
+                    'session_id',
+                    'transfer_id',
+                    'direction',
+                    'source_route',
+                    'source_protocol_version',
+                    'source_live_route_epoch',
+                    'source_runtime_generation',
+                    'source_route_publication_generation',
+                    'source_route_commit_generation',
+                    'source_terminal_generation',
+                    'source_leg_generation',
+                    'source_transport_epoch',
+                    'source_bridge_recovery_generation',
+                    'source_data_session_generation',
+                    'target_route',
+                    'target_protocol_version',
+                    'target_transport')) {
+                $expected = Get-TunaGuiLogLineFieldValue -Line $Command.CommandLine -Name $fieldName
+                $actual = Get-TunaGuiLogLineFieldValue -Line $PreparedLine -Name $fieldName
+                if ([string]::IsNullOrWhiteSpace($expected) -or
+                    [string]::IsNullOrWhiteSpace($actual) -or
+                    -not [string]::Equals(
+                        $expected,
+                        $actual,
+                        [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $false
+                }
+            }
+            return $true
+        }
+        foreach ($line in $Lines) {
+            $visits++
+            $eventName = Get-TunaGuiLogLineFieldValue -Line $line -Name 'event'
+            if ([string]::IsNullOrWhiteSpace($eventName)) {
+                continue
+            }
+
+            $writer = Get-TunaGuiLogLineFieldValue -Line $line -Name 'log_writer_id'
+            $sessionId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'session_id'
+            $transferId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'transfer_id'
+            $direction = Get-TunaGuiLogLineFieldValue -Line $line -Name 'direction'
+            $fallbackEpoch = Get-TunaGuiLogLineFieldValue -Line $line -Name 'fallback_epoch'
+
+            if ($eventName -eq 'filetransfer_route_transition_committed' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'target_route') -eq 'file_tuna_v4' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -eq 'Committed' -and
+                -not [string]::IsNullOrWhiteSpace($writer) -and
+                -not [string]::IsNullOrWhiteSpace($sessionId) -and
+                -not [string]::IsNullOrWhiteSpace($transferId) -and
+                -not [string]::IsNullOrWhiteSpace($direction)) {
+                $scopeKey = "$writer|$sessionId|$transferId|$direction".ToLowerInvariant()
+                $committedTunaScopes[$scopeKey] = [pscustomobject]@{
+                    TargetLiveRouteEpoch = Get-TunaGuiLogLineFieldValue -Line $line -Name 'target_live_route_epoch'
+                    TargetRuntimeGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'target_runtime_generation'
+                    TargetPublicationGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'target_route_publication_generation'
+                    TargetRouteCommitGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'target_route_commit_generation'
+                    TargetTerminalGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'target_terminal_generation'
+                    TargetLegGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'target_leg_generation'
+                }
+                continue
+            }
+
+            if ($eventName -eq 'filetransfer_fallback_v6_proof_bootstrap_observed' -and
+                -not [string]::IsNullOrWhiteSpace($writer) -and
+                -not [string]::IsNullOrWhiteSpace($sessionId) -and
+                -not [string]::IsNullOrWhiteSpace($direction) -and
+                -not [string]::IsNullOrWhiteSpace($fallbackEpoch)) {
+                $observationKey = "$writer|$sessionId|$direction|$fallbackEpoch".ToLowerInvariant()
+                $observations[$observationKey] = $true
+                continue
+            }
+
+            if ($eventName -eq 'filetransfer_fallback_v6_proof_bootstrap_decided' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -in @('Issued', 'Idempotent') -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'frame_kind') -eq 'FrontierRequest' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_route') -eq 'file_tuna_v4' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'target_route') -eq 'post_tuna_fallback_v6' -and
+                -not [string]::IsNullOrWhiteSpace($writer) -and
+                -not [string]::IsNullOrWhiteSpace($sessionId) -and
+                -not [string]::IsNullOrWhiteSpace($transferId) -and
+                -not [string]::IsNullOrWhiteSpace($direction) -and
+                -not [string]::IsNullOrWhiteSpace($fallbackEpoch)) {
+                $authorityId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id'
+                $bootstrapGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'bootstrap_generation'
+                if ([string]::IsNullOrWhiteSpace($authorityId) -or
+                    [string]::IsNullOrWhiteSpace($bootstrapGeneration)) {
+                    continue
+                }
+
+                $scopeKey = "$writer|$sessionId|$transferId|$direction".ToLowerInvariant()
+                $observationKey = "$writer|$sessionId|$direction|$fallbackEpoch".ToLowerInvariant()
+                if (-not $committedTunaScopes.ContainsKey($scopeKey) -or
+                    -not $observations.ContainsKey($observationKey)) {
+                    continue
+                }
+                $committed = $committedTunaScopes[$scopeKey]
+                if ($committed.TargetLiveRouteEpoch -ne (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_live_route_epoch') -or
+                    $committed.TargetRuntimeGeneration -ne (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_runtime_generation') -or
+                    $committed.TargetPublicationGeneration -ne (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_route_publication_generation') -or
+                    $committed.TargetRouteCommitGeneration -ne (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_route_commit_generation') -or
+                    $committed.TargetTerminalGeneration -ne (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_terminal_generation') -or
+                    $committed.TargetLegGeneration -ne (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_leg_generation')) {
+                    continue
+                }
+
+                $commandKey = Get-FallbackV6BootstrapGuiCommandKey -Line $line
+                if ([string]::IsNullOrWhiteSpace($commandKey)) {
+                    continue
+                }
+                if ($commands.ContainsKey($commandKey)) {
+                    continue
+                }
+                $command = [pscustomobject]@{
+                    CommandLine = $line
+                    CommandKey = $commandKey
+                    Writer = $writer
+                    SessionId = $sessionId
+                    TransferId = $transferId
+                    Direction = $direction
+                    FallbackEpoch = $fallbackEpoch
+                    AuthorityId = $authorityId
+                    BootstrapGeneration = $bootstrapGeneration
+                    TargetTransportEpoch = Get-TunaGuiLogLineFieldValue -Line $line -Name 'target_transport_epoch'
+                    FrameKind = Get-TunaGuiLogLineFieldValue -Line $line -Name 'frame_kind'
+                    ExecutionRejected = $false
+                    ReceiptApplied = $false
+                    Delivered = $false
+                    DeliveredReceiptApplied = $false
+                    PeerAccepted = $false
+                    Prepared = $false
+                    LegacyRejected = $false
+                }
+                $commands[$commandKey] = $command
+                $authorityGenerationKey = "$authorityId|$bootstrapGeneration".ToLowerInvariant()
+                if (-not $commandsByAuthorityGeneration.ContainsKey($authorityGenerationKey)) {
+                    $commandsByAuthorityGeneration[$authorityGenerationKey] =
+                        New-Object System.Collections.Generic.List[object]
+                }
+                $commandsByAuthorityGeneration[$authorityGenerationKey].Add($command) | Out-Null
+                continue
+            }
+
+            if ($eventName -eq 'filetransfer_route_transition_prepared') {
+                foreach ($command in $commands.Values) {
+                    if (Test-FallbackV6BootstrapGuiPreparedScopeMatch `
+                            -Command $command `
+                            -PreparedLine $line) {
+                        $command.Prepared = $true
+                    }
+                }
+                continue
+            }
+
+            $authorityId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id'
+            $bootstrapGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'bootstrap_generation'
+            if ([string]::IsNullOrWhiteSpace($authorityId) -or
+                [string]::IsNullOrWhiteSpace($bootstrapGeneration)) {
+                continue
+            }
+
+            $commandKey = Get-FallbackV6BootstrapGuiCommandKey -Line $line
+            $command = if (-not [string]::IsNullOrWhiteSpace($commandKey) -and
+                $commands.ContainsKey($commandKey)) {
+                $commands[$commandKey]
+            }
+            else {
+                $authorityGenerationKey = "$authorityId|$bootstrapGeneration".ToLowerInvariant()
+                $matchingCommand = $null
+                $matchingCommandCount = 0
+                if ($commandsByAuthorityGeneration.ContainsKey($authorityGenerationKey)) {
+                    foreach ($candidate in $commandsByAuthorityGeneration[$authorityGenerationKey]) {
+                        if ($candidate.Writer -eq $writer -and
+                            $candidate.SessionId -eq $sessionId -and
+                            $candidate.TransferId -eq $transferId -and
+                            $candidate.Direction -eq $direction -and
+                            $candidate.FallbackEpoch -eq $fallbackEpoch -and
+                            $candidate.FrameKind -eq
+                                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'frame_kind') -and
+                            $candidate.TargetTransportEpoch -eq
+                                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'target_transport_epoch')) {
+                            $matchingCommand = $candidate
+                            $matchingCommandCount++
+                        }
+                    }
+                }
+                if ($matchingCommandCount -eq 1) { $matchingCommand } else { $null }
+            }
+            if ($null -eq $command) {
+                continue
+            }
+            if ($eventName -eq 'filetransfer_fallback_v6_proof_bootstrap_execution_completed') {
+                $fingerprint = Get-TunaGuiLogLineFieldValue -Line $line -Name 'frame_fingerprint'
+                $status = Get-TunaGuiLogLineFieldValue -Line $line -Name 'receipt_status'
+                if ($status -eq 'Rejected' -and $fingerprint -in @('none', '(none)', '')) {
+                    $reasonCode = Get-TunaGuiLogLineFieldValue -Line $line -Name 'reason_code'
+                    if ([string]::IsNullOrWhiteSpace($reasonCode)) {
+                        $reasonCode = Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_reason'
+                    }
+                    if ($reasonCode -eq 'execution_invalid') {
+                        $command.ExecutionRejected = $true
+                    }
+                    elseif ([string]::IsNullOrWhiteSpace($reasonCode) -or
+                        $reasonCode -in @('[redacted]', '(redacted)')) {
+                        $command.ExecutionRejected = $true
+                        $command.LegacyRejected = $true
+                    }
+                }
+                elseif ($status -eq 'Delivered') {
+                    $command.Delivered = $true
+                }
+            }
+            elseif ($eventName -eq 'filetransfer_fallback_v6_proof_bootstrap_receipt_applied' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'receipt_status') -eq 'Delivered' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'application_status') -in @('Applied', 'Idempotent')) {
+                $command.DeliveredReceiptApplied = $true
+            }
+            elseif ($eventName -eq 'filetransfer_fallback_v6_proof_bootstrap_receipt_applied' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'receipt_status') -eq 'Rejected' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'application_status') -in @('Applied', 'Idempotent')) {
+                $reasonCode = Get-TunaGuiLogLineFieldValue -Line $line -Name 'reason_code'
+                if ([string]::IsNullOrWhiteSpace($reasonCode)) {
+                    $reasonCode = Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_reason'
+                }
+                if ($reasonCode -eq 'execution_invalid' -or
+                    [string]::IsNullOrWhiteSpace($reasonCode) -or
+                    $reasonCode -in @('[redacted]', '(redacted)')) {
+                    $command.ReceiptApplied = $true
+                    if ($reasonCode -ne 'execution_invalid') {
+                        $command.LegacyRejected = $true
+                    }
+                }
+            }
+            elseif ($eventName -eq 'filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -in @('Accepted', 'Idempotent')) {
+                $command.PeerAccepted = $true
+            }
+        }
+
+        $legacyIntervalCounts = @{}
+        foreach ($command in @($commands.Values | Where-Object {
+                    $_.ExecutionRejected -and $_.ReceiptApplied -and $_.LegacyRejected
+                })) {
+            $intervalKey = "$($command.Writer)|$($command.SessionId)|$($command.TransferId)|$($command.Direction)".ToLowerInvariant()
+            if (-not $legacyIntervalCounts.ContainsKey($intervalKey)) {
+                $legacyIntervalCounts[$intervalKey] = 0
+            }
+            $legacyIntervalCounts[$intervalKey]++
+        }
+
+        return [pscustomobject]@{
+            Unresolved = @($commands.Values | Where-Object {
+                $legacyIntervalKey = "$($_.Writer)|$($_.SessionId)|$($_.TransferId)|$($_.Direction)".ToLowerInvariant()
+                $legacyUnique = -not $_.LegacyRejected -or
+                    ($legacyIntervalCounts.ContainsKey($legacyIntervalKey) -and
+                     [int]$legacyIntervalCounts[$legacyIntervalKey] -eq 1)
+                $_.ExecutionRejected -and $_.ReceiptApplied -and $legacyUnique -and
+                    -not ($_.Delivered -and $_.DeliveredReceiptApplied -and $_.PeerAccepted -and $_.Prepared)
+            }).Count -gt 0
+            LineVisits = $visits
+            CommandCount = $commands.Count
+            ExecutionRejectedCount = @($commands.Values | Where-Object { $_.ExecutionRejected }).Count
+            ReceiptAppliedCount = @($commands.Values | Where-Object { $_.ReceiptApplied }).Count
+            LegacyRejectedCount = @($commands.Values | Where-Object { $_.LegacyRejected }).Count
+        }
+    }
+
     $retiredPendingAnswerFastPath =
         Get-TunaGuiRetiredPendingAnswerHandoffFailure -Lines ([string[]]$evidenceLines)
     if ($retiredPendingAnswerFastPath.Unresolved) {
@@ -5090,6 +5412,25 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
         $result.InitialActivationRetiredPendingAnswerHandoffMissing = $true
         return $result
+    }
+
+    $fallbackV6InvalidFrontierFastPath =
+        Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure -Lines ([string[]]$evidenceLines)
+    if ($fallbackV6InvalidFrontierFastPath.Unresolved) {
+        if ($null -ne $TestMetrics) {
+            $TestMetrics.evidenceLineVisitCount = [long]$fallbackV6InvalidFrontierFastPath.LineVisits
+            $TestMetrics.evidenceLookupCount = 0L
+            $TestMetrics.classificationSource = "${classificationSource}_fallback_v6_bootstrap_index"
+        }
+        return New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'route_transition' `
+            -Reason 'outbound_proof_only_frontier_request_rejected_by_ordinary_repair_codec' `
+            -RouteMode $RouteMode `
+            -ClassificationSource "${classificationSource}_fallback_v6_bootstrap_index" `
+            -EvidenceLineVisitCount ([long]$fallbackV6InvalidFrontierFastPath.LineVisits) `
+            -EvidenceParsedRecordCount 0L `
+            -EvidenceLookupCount 0L `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
     }
 
     function Test-TunaGuiLogLineHasEvent {

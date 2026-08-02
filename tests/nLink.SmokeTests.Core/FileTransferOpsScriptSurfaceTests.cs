@@ -87,10 +87,145 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
         Assert.Contains("filetransfer-efficiency-summary.json", orchestrationText, StringComparison.Ordinal);
         Assert.Contains("filetransfer-efficiency-summary.txt", orchestrationText, StringComparison.Ordinal);
         Assert.Contains("Write-FileTransferEfficiencySummaryArtifacts", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("-AlreadyChronologicallyOrdered", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("fileTunaV4DataPathDownstreamEvents", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer_route_transition_physical_send_lease_registered", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer_route_transition_physical_send_lease_retired", orchestrationText, StringComparison.Ordinal);
         Assert.Contains("retained_analysis_timeout", tunaWrapperText, StringComparison.Ordinal);
         Assert.Contains("filetransfer-retained-analysis-timeout-summary.json", tunaWrapperText, StringComparison.Ordinal);
         Assert.Contains("retained_analysis_timeout", routeWrapperText, StringComparison.Ordinal);
         Assert.Contains("filetransfer-retained-analysis-timeout-summary.json", routeWrapperText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FileTransferOps_CompactCorrelatorHistoryAndRepairOrderingReuseRemainExplicit()
+    {
+        var repoRoot = FindRepoRoot();
+        var orchestrationText = File.ReadAllText(
+            Path.Combine(repoRoot, "tools", "FileTransferOps", "AnalyzerOrchestration.ps1"));
+
+        Assert.Contains("correlator_history", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("$correlatorHistory.Add($historyEntry)", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("regularV4FrontierRepairProjectionOrderedEvents", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("regularV4FrontierRepairSemanticOrderedEvents", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains(
+            "$_.EventName -ne 'filetransfer_data_path_send_result'",
+            orchestrationText,
+            StringComparison.Ordinal);
+        Assert.Contains("regular_v4_frontier_repair_settlement_disposition", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("regular_v4_frontier_repair_pressure_authority_lifecycle_split", orchestrationText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FileTransferOps_EfficiencySummaryUsesBoundedSemanticNameIndex()
+    {
+        var repoRoot = FindRepoRoot();
+        var orchestrationText = File.ReadAllText(Path.Combine(repoRoot, "tools", "FileTransferOps", "AnalyzerOrchestration.ps1"));
+        var start = orchestrationText.IndexOf("function Write-FileTransferEfficiencySummaryArtifacts", StringComparison.Ordinal);
+        var end = orchestrationText.IndexOf("function Invoke-FileTransferRetainedAnalysis", start, StringComparison.Ordinal);
+
+        Assert.True(start >= 0 && end > start, "Expected the efficiency-summary implementation boundary.");
+        var implementation = orchestrationText[start..end];
+        Assert.Contains("Get-FileTransferEfficiencySemanticEventsFromIndex", implementation, StringComparison.Ordinal);
+        Assert.Contains("Get-FileTransferEfficiencyIndexedMetrics", implementation, StringComparison.Ordinal);
+        Assert.DoesNotContain("Get-FileTransferEfficiencyAllEventsFromIndex", implementation, StringComparison.Ordinal);
+        Assert.Contains("efficiency_summary_all_events_single_pass_visit_count", implementation, StringComparison.Ordinal);
+        Assert.Contains("$StageDiagnostics['current_correlator'] = 'efficiency_summary'", implementation, StringComparison.Ordinal);
+        Assert.Contains("$StageDiagnostics['correlator_status'] = 'started'", implementation, StringComparison.Ordinal);
+        Assert.Contains("$StageDiagnostics['correlator_status'] = 'completed'", implementation, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FileTransferOps_LargeRawAnalysisDefersAllFieldStatisticsAndLazyAggregatesPreserveResults()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var orchestrationText = File.ReadAllText(
+            Path.Combine(repoRoot, "tools", "FileTransferOps", "AnalyzerOrchestration.ps1"));
+
+        Assert.Contains("$deferEagerFieldStatistics = $eventsForArtifacts.Count -gt 25000", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("$includeEagerFieldStatistics = -not ($compactRequested -or $deferEagerFieldStatistics)", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("-IncludeFieldStatistics:$includeEagerFieldStatistics", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("field_statistics_mode = 'not_decided'", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("'deferred_per_scope'", orchestrationText, StringComparison.Ordinal);
+
+        const string script = """
+            param([string]$RepoRoot)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $RepoRoot 'tools/FileTransferSoak/LogParsing.ps1')
+            . (Join-Path $RepoRoot 'tools/FileTransferSoak/SoakSummaryExtraction.ps1')
+
+            $events = @(
+                [pscustomobject]@{ EventName = 'sample'; Sequence = 1L; TransferId = 'transfer'; Fields = @{ metric = '7'; total = '4' } },
+                [pscustomobject]@{ EventName = 'sample'; Sequence = 2L; TransferId = 'transfer'; Fields = @{ metric = '11'; total = '6' } },
+                [pscustomobject]@{ EventName = 'sample'; Sequence = 3L; TransferId = 'transfer'; Fields = @{ metric = '-3'; total = '9' } }
+            )
+
+            Reset-FileTransferRetainedEventIndex
+            $eager = Initialize-FileTransferRetainedEventIndex -Events $events -IncludeFieldStatistics:$true
+            $eagerMax = Get-FileTransferMaxField -Events $events -FieldName 'metric'
+            $eagerSum = Get-FileTransferSumField -Events $events -FieldName 'total'
+
+            Reset-FileTransferRetainedEventIndex
+            $deferred = Initialize-FileTransferRetainedEventIndex -Events $events -IncludeFieldStatistics:$false
+            if ($deferred.FieldMax.Count -ne 0 -or $deferred.FieldSum.Count -ne 0) {
+                throw 'Deferred index unexpectedly computed eager field aggregates.'
+            }
+            $deferredMax = Get-FileTransferMaxField -Events $events -FieldName 'metric'
+            $deferredSum = Get-FileTransferSumField -Events $events -FieldName 'total'
+
+            if ($eagerMax -ne 11L -or $deferredMax -ne $eagerMax -or
+                $eagerSum -ne 19L -or $deferredSum -ne $eagerSum) {
+                throw "Field aggregate mismatch: eager=$eagerMax/$eagerSum deferred=$deferredMax/$deferredSum"
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(script, [repoRoot]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Deferred field aggregate parity failed.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+    }
+
+    [Fact]
+    public void FileTransferOps_LargeFullAnalysisUsesIndexedSemanticsAndBoundedRawEvidence()
+    {
+        var repoRoot = FindRepoRoot();
+        var orchestrationText = File.ReadAllText(
+            Path.Combine(repoRoot, "tools", "FileTransferOps", "AnalyzerOrchestration.ps1"));
+
+        Assert.Contains(
+            "$largeFullIndexed = $eventsForArtifacts.Count -gt 25000 -and $IncludeRawSlices -and -not $compactRequested",
+            orchestrationText,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "if ($compactRequested -or $compactForLargeSlice -or $largeFullIndexed)",
+            orchestrationText,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$stageDiagnostics['compact_mode'] = if ($largeFullIndexed) { 0 } else { 1 }",
+            orchestrationText,
+            StringComparison.Ordinal);
+        Assert.Contains("'large_full_indexed_semantics'", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("Write-FileTransferCompactRetainedAnalysisArtifacts @compactArtifactArgs", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer-retained-full-summary.json", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("Write-FileTransferIndexedRawEvidenceArtifact", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("Get-FileTransferCompactIndexEventsByNamesOrdered", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("Select-Object -First 250", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("selection=indexed_high_value_semantic_events", orchestrationText, StringComparison.Ordinal);
+
+        var indexedBranch = orchestrationText.IndexOf(
+            "if ($compactRequested -or $compactForLargeSlice -or $largeFullIndexed)",
+            StringComparison.Ordinal);
+        var legacySummary = orchestrationText.IndexOf(
+            "$summary = New-FileTransferRetainedSummary",
+            indexedBranch,
+            StringComparison.Ordinal);
+        Assert.True(indexedBranch >= 0 && legacySummary > indexedBranch, "Expected the small-full legacy summary to remain after the bounded indexed branch.");
     }
 
     [Fact]

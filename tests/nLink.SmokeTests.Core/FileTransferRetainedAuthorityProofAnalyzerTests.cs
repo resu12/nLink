@@ -2550,6 +2550,933 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
     [InlineData(false)]
     [InlineData(true)]
     [Trait("RetainedAuthorityProofSuite", "FileTransferRouteTransition")]
+    public async Task AnalyzeRetained_FallbackV6ProofBootstrapInvalidFrontier_HasFullCompactParity(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_v6_proof_bootstrap_invalid_frontier";
+        const string common =
+            "session_id=sess_a; transfer_id=" + transferId +
+            "; direction=outbound; authority_id=bootstrap-frontier-1; bootstrap_generation=1; " +
+            "fallback_epoch=1; target_transport_epoch=1; frame_kind=FrontierRequest; " +
+            "source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch=1; " +
+            "source_runtime_generation=2; source_route_publication_generation=2; " +
+            "source_route_commit_generation=1; source_terminal_generation=0; " +
+            "source_leg_generation=2; source_transport_epoch=0; " +
+            "source_bridge_recovery_generation=0; source_data_session_generation=1; " +
+            "target_route=post_tuna_fallback_v6; target_protocol_version=6; " +
+            "target_transport=regular_nkn; log_writer_id=writer_route_transition";
+        var lines = BuildFileTunaV4DataPathProofFixture(
+            transferId,
+            $"event=filetransfer_fallback_v6_proof_bootstrap_decided; {common}; " +
+            "decision_status=Issued; log_writer_sequence=101",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_execution_completed; {common}; " +
+            "receipt_status=Rejected; frame_fingerprint=none; " +
+            "reason_code=execution_invalid; " +
+            "log_writer_sequence=102",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; {common}; " +
+            "receipt_status=Rejected; application_status=Applied; " +
+            "reason_code=execution_invalid; " +
+            "log_writer_sequence=103");
+
+        var result = compact
+            ? await RunAnalyzeFixtureAsync(
+                lines,
+                environment: new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                })
+            : await RunAnalyzeFixtureAsync(lines);
+        Assert.Equal(0, result.Script.ExitCode);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal(
+            "1",
+            verdict["filetransfer_fallback_v6_proof_bootstrap_missing_distinct_count"]);
+        Assert.Equal(
+            "filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing",
+            verdict["first_proof_chain_failure_class"]);
+        Assert.Equal(
+            "outbound_proof_only_frontier_request_rejected_by_ordinary_repair_codec",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+        Assert.Equal("fail", verdict["runtime_correctness_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false, "1")]
+    [InlineData(true, "0")]
+    [Trait("RetainedAuthorityProofSuite", "FileTransferRouteTransition")]
+    public async Task AnalyzeRetained_FallbackV6ProofBootstrapInvalidFrontier_CollapsesExactDuplicatesAndRequiresExactRecovery(
+        bool recovered,
+        string expectedUnresolvedCount)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_v6_bootstrap_duplicate_identity";
+        const string common =
+            "session_id=sess_a; transfer_id=" + transferId +
+            "; direction=outbound; authority_id=bootstrap-frontier-duplicate; bootstrap_generation=3; " +
+            "fallback_epoch=2; target_transport_epoch=4; frame_kind=FrontierRequest; " +
+            "source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch=5; " +
+            "source_runtime_generation=7; source_route_publication_generation=8; " +
+            "source_route_commit_generation=6; source_terminal_generation=0; " +
+            "source_leg_generation=9; source_transport_epoch=3; " +
+            "source_bridge_recovery_generation=2; source_data_session_generation=11; " +
+            "target_route=post_tuna_fallback_v6; target_protocol_version=6; " +
+            "target_transport=regular_nkn; log_writer_id=writer_route_transition";
+        var messages = new List<string>
+        {
+            $"event=filetransfer_fallback_v6_proof_bootstrap_decided; {common}; decision_status=Issued; log_writer_sequence=101",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_decided; {common}; decision_status=Idempotent; log_writer_sequence=102",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_execution_completed; {common}; receipt_status=Rejected; frame_fingerprint=none; reason_code=execution_invalid; log_writer_sequence=103",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; {common}; receipt_status=Rejected; application_status=Applied; reason_code=execution_invalid; log_writer_sequence=104",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; {common}; receipt_status=Rejected; application_status=Idempotent; reason_code=execution_invalid; log_writer_sequence=105"
+        };
+        if (recovered)
+        {
+            messages.Add($"event=filetransfer_fallback_v6_proof_bootstrap_execution_completed; {common}; receipt_status=Delivered; frame_fingerprint=ABC123; reason_code=delivered; log_writer_sequence=106");
+            messages.Add($"event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; {common}; receipt_status=Delivered; application_status=Applied; frame_fingerprint=ABC123; reason_code=delivered; log_writer_sequence=107");
+            messages.Add($"event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; {common}; receipt_status=Delivered; application_status=Idempotent; frame_fingerprint=ABC123; reason_code=delivered; log_writer_sequence=108");
+            messages.Add(
+                "event=filetransfer_route_transition_prepared; session_id=sess_a; transfer_id=" + transferId +
+                "; direction=outbound; authority_id=transition-authority-unrelated; transition_generation=17; " +
+                "transition_kind=TunaV4ToPostTunaFallbackV6; source_route=file_tuna_v4; source_protocol_version=4; " +
+                "source_live_route_epoch=5; source_runtime_generation=7; source_route_publication_generation=8; " +
+                "source_route_commit_generation=6; source_terminal_generation=0; source_leg_generation=9; " +
+                "source_transport_epoch=3; source_bridge_recovery_generation=2; source_data_session_generation=11; " +
+                "target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; " +
+                "decision_status=Prepared; log_writer_id=writer_route_transition; log_writer_sequence=109");
+            messages.Add($"event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; {common}; frame_type=filetransfer.receiver_state.v6; frame_transport_epoch=4; frame_fingerprint=DEF456; decision_status=Accepted; reason_code=exact_bootstrap_boundary; log_writer_sequence=110");
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildFileTunaV4DataPathProofFixture(transferId, messages.ToArray()),
+            environment: new Dictionary<string, string>
+            {
+                ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+            });
+        Assert.Equal(0, result.Script.ExitCode);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal(
+            expectedUnresolvedCount,
+            verdict["filetransfer_fallback_v6_proof_bootstrap_missing_unresolved_count"]);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "FileTransferRouteTransition")]
+    public async Task AnalyzeRetained_FallbackV6ProofBootstrapInvalidFrontier_RejectsNonCodecFailureReason()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_v6_bootstrap_wrong_reason";
+        const string common =
+            "session_id=sess_a; transfer_id=" + transferId +
+            "; direction=outbound; authority_id=bootstrap-frontier-wrong-reason; bootstrap_generation=1; " +
+            "fallback_epoch=1; target_transport_epoch=1; frame_kind=FrontierRequest; " +
+            "source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch=1; " +
+            "source_runtime_generation=2; source_route_publication_generation=2; " +
+            "source_route_commit_generation=1; source_terminal_generation=0; source_leg_generation=2; " +
+            "source_transport_epoch=0; source_bridge_recovery_generation=0; source_data_session_generation=1; " +
+            "target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; " +
+            "log_writer_id=writer_route_transition";
+        var lines = BuildFileTunaV4DataPathProofFixture(
+            transferId,
+            $"event=filetransfer_fallback_v6_proof_bootstrap_decided; {common}; decision_status=Issued; log_writer_sequence=101",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_execution_completed; {common}; receipt_status=Rejected; frame_fingerprint=none; reason_code=physical_send_failed; log_writer_sequence=102",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; {common}; receipt_status=Rejected; application_status=Applied; reason_code=physical_send_failed; log_writer_sequence=103");
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: new Dictionary<string, string>
+            {
+                ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+            });
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("0", verdict["filetransfer_fallback_v6_proof_bootstrap_missing_unresolved_count"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedAuthorityProofSuite", "FileTransferRouteTransition")]
+    public async Task AnalyzeRetained_FallbackV6ProofBootstrapInvalidFrontier_DoesNotRecoverFromRejectedDeliveredReceipt(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_v6_bootstrap_rejected_delivered_receipt";
+        const string common =
+            "session_id=sess_a; transfer_id=" + transferId +
+            "; direction=outbound; authority_id=bootstrap-frontier-rejected-delivered; bootstrap_generation=4; " +
+            "fallback_epoch=3; target_transport_epoch=6; frame_kind=FrontierRequest; " +
+            "source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch=7; " +
+            "source_runtime_generation=9; source_route_publication_generation=10; " +
+            "source_route_commit_generation=8; source_terminal_generation=0; " +
+            "source_leg_generation=11; source_transport_epoch=5; " +
+            "source_bridge_recovery_generation=3; source_data_session_generation=12; " +
+            "target_route=post_tuna_fallback_v6; target_protocol_version=6; " +
+            "target_transport=regular_nkn; log_writer_id=writer_route_transition";
+        var messages = new[]
+        {
+            $"event=filetransfer_fallback_v6_proof_bootstrap_decided; {common}; decision_status=Issued; log_writer_sequence=201",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_execution_completed; {common}; receipt_status=Rejected; frame_fingerprint=none; reason_code=execution_invalid; log_writer_sequence=202",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; {common}; receipt_status=Rejected; application_status=Applied; reason_code=execution_invalid; log_writer_sequence=203",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_execution_completed; {common}; receipt_status=Delivered; frame_fingerprint=ABC123; reason_code=delivered; log_writer_sequence=204",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; {common}; receipt_status=Delivered; application_status=Rejected; frame_fingerprint=ABC123; reason_code=stale_command; log_writer_sequence=205",
+            "event=filetransfer_route_transition_prepared; session_id=sess_a; transfer_id=" + transferId +
+            "; direction=outbound; authority_id=transition-authority-unrelated; transition_generation=19; " +
+            "transition_kind=TunaV4ToPostTunaFallbackV6; source_route=file_tuna_v4; source_protocol_version=4; " +
+            "source_live_route_epoch=7; source_runtime_generation=9; source_route_publication_generation=10; " +
+            "source_route_commit_generation=8; source_terminal_generation=0; source_leg_generation=11; " +
+            "source_transport_epoch=5; source_bridge_recovery_generation=3; source_data_session_generation=12; " +
+            "target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; " +
+            "decision_status=Prepared; log_writer_id=writer_route_transition; log_writer_sequence=206",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; {common}; frame_type=filetransfer.receiver_state.v6; frame_transport_epoch=6; frame_fingerprint=DEF456; decision_status=Accepted; reason_code=exact_bootstrap_boundary; log_writer_sequence=207"
+        };
+
+        var environment = compact
+            ? new Dictionary<string, string>
+            {
+                ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+            }
+            : null;
+        var result = await RunAnalyzeFixtureAsync(
+            BuildFileTunaV4DataPathProofFixture(transferId, messages),
+            environment: environment);
+        Assert.Equal(0, result.Script.ExitCode);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal(
+            "1",
+            verdict["filetransfer_fallback_v6_proof_bootstrap_missing_unresolved_count"]);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "SettlementDisposition")]
+    public async Task FrontierRepairSettlementDispositionIndex_BoundsExactBindingLookup()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var scriptText = """
+            param([string]$RepoRoot)
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            . (Join-Path $RepoRoot 'tools/FileTransferSoak/LogParsing.ps1')
+            . (Join-Path $RepoRoot 'tools/FileTransferSoak/ArtifactWriters.ps1')
+
+            function New-TestEvent {
+                param([string]$Name, [long]$Sequence, [hashtable]$Fields)
+                return [pscustomobject]@{
+                    EventName = $Name
+                    Sequence = $Sequence
+                    LineNumber = $Sequence
+                    Fields = $Fields
+                }
+            }
+
+            $scope = @{
+                session_id = 'session-settlement-index'
+                transfer_id = 'transfer-settlement-index'
+                direction = 'outbound'
+                route = 'regular_nkn_v4_fast'
+                protocol_version = '4'
+                live_route_epoch = '0'
+                runtime_generation = '1'
+                terminal_generation = '0'
+                leg_generation = '1'
+                transport_epoch = '0'
+                bridge_recovery_generation = '0'
+                bridge_decision_generation = '1'
+                route_publication_generation = '1'
+                route_commit_generation = '0'
+                target_transport = 'regular_nkn'
+                repair_request_key = 'repair-settlement-index'
+                install_generation = '1'
+            }
+
+            $events = New-Object System.Collections.Generic.List[object]
+            for ($ordinal = 1; $ordinal -le 10000; $ordinal++) {
+                $fields = $scope.Clone()
+                $fields.authority_id = "authority-unrelated-$ordinal"
+                $events.Add((New-TestEvent `
+                    'filetransfer_regular_v4_frontier_repair_pressure_binding_committed' `
+                    $ordinal `
+                    $fields)) | Out-Null
+            }
+
+            $exactBindingFields = $scope.Clone()
+            $exactBindingFields.authority_id = 'authority-exact'
+            $events.Add((New-TestEvent `
+                'filetransfer_regular_v4_frontier_repair_pressure_binding_committed' `
+                10001 `
+                $exactBindingFields)) | Out-Null
+
+            $acceptedFields = $scope.Clone()
+            $acceptedFields.authority_id = 'authority-exact'
+            $acceptedFields.outcome = 'TransferTerminal'
+            $acceptedFields.settlement_reason = 'terminal_state'
+            $events.Add((New-TestEvent `
+                'filetransfer_regular_v4_frontier_repair_settlement_accepted' `
+                10002 `
+                $acceptedFields)) | Out-Null
+
+            $result = Get-FileTransferRegularV4FrontierRepairSettlementDispositionProof `
+                -Events $events.ToArray() `
+                -AlreadyChronologicallyOrdered
+            if ([long]$result.IndexBuildVisitCount -ne 10001L -or
+                [long]$result.BoundedLookupVisitCount -ne 2L -or
+                @($result.DistinctAcceptedEvents).Count -ne 1) {
+                throw "unexpected settlement binding index result: $($result | ConvertTo-Json -Compress)"
+            }
+            Write-Output 'settlement-binding-index-bounded-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, [FindRepoRoot()]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Settlement binding index test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("settlement-binding-index-bounded-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "FileTransferRouteTransition")]
+    public async Task RouteTransitionLeaseIndex_VisitsLargeUnrelatedLeaseSetsOnceAndFindsExactLateLeases()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var scriptText = """
+            param([string]$RepoRoot)
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            . (Join-Path $RepoRoot 'tools/FileTransferSoak/LogParsing.ps1')
+            . (Join-Path $RepoRoot 'tools/FileTransferSoak/ArtifactWriters.ps1')
+
+            function New-TestEvent {
+                param(
+                    [string]$Name,
+                    [long]$Sequence,
+                    [hashtable]$Fields
+                )
+
+                return [pscustomobject]@{
+                    EventName = $Name
+                    Sequence = $Sequence
+                    LineNumber = $Sequence
+                    Fields = $Fields
+                }
+            }
+
+            function Copy-Fields {
+                param([hashtable]$Fields)
+
+                return $Fields.Clone()
+            }
+
+            $scope = @{
+                session_id = 'session-route-index'
+                transfer_id = 'transfer-route-index'
+                direction = 'outbound'
+                transition_generation = '1'
+                authority_id = 'transition-route-index-1'
+                transition_kind = 'RegularV4ToTunaV4'
+                source_route = 'regular_nkn_v4_fast'
+                source_protocol_version = '4'
+                source_live_route_epoch = '0'
+                source_runtime_generation = '1'
+                source_route_publication_generation = '1'
+                source_terminal_generation = '0'
+                source_leg_generation = '1'
+                source_transport_epoch = '0'
+                source_bridge_recovery_generation = '0'
+                source_data_session_generation = '1'
+                target_route = 'file_tuna_v4'
+                target_protocol_version = '4'
+                target_transport = 'tuna'
+            }
+            $preparedFields = Copy-Fields $scope
+            $preparedFields.status = 'Prepared'
+            $pauseFields = Copy-Fields $scope
+            $pauseFields.status = 'Installed'
+            $drainingFields = Copy-Fields $scope
+            $drainingFields.status = 'Draining'
+            $receiptFields = Copy-Fields $scope
+            $receiptFields.status = 'Accepted'
+            $receiptFields.outcome = 'Completed'
+            $receiptFields.captured_send_count = '0'
+            $receiptFields.completed_send_count = '0'
+            $receiptFields.captured_send_fingerprint = 'empty'
+            $receiptFields.completed_send_fingerprint = 'empty'
+            $commitFields = Copy-Fields $scope
+            $commitFields.status = 'Committed'
+            $dispositionFields = Copy-Fields $scope
+            $dispositionFields.status = 'Committed'
+            $dispositionFields.disposition = 'committed'
+
+            $unrelatedLeaseFields = Copy-Fields $scope
+            $unrelatedLeaseFields.transfer_id = 'transfer-route-index-unrelated'
+            $unrelatedLeaseFields.source_route = 'file_tuna_v4'
+            $unrelatedLeaseFields.source_live_route_epoch = '1'
+            $unrelatedLeaseFields.source_runtime_generation = '2'
+            $unrelatedLeaseFields.source_route_publication_generation = '2'
+            $unrelatedLeaseFields.source_leg_generation = '2'
+
+            $unrelatedRegistered = New-TestEvent `
+                'filetransfer_route_transition_physical_send_lease_registered' `
+                4 `
+                $unrelatedLeaseFields
+            $unrelatedRetired = New-TestEvent `
+                'filetransfer_route_transition_physical_send_lease_retired' `
+                4 `
+                $unrelatedLeaseFields
+            [object[]]$registeredLeases = [object[]]::new(110000)
+            [object[]]$retiredLeases = [object[]]::new(110000)
+            for ($ordinal = 0; $ordinal -lt 110000; $ordinal++) {
+                $registeredLeases[$ordinal] = $unrelatedRegistered
+                $retiredLeases[$ordinal] = $unrelatedRetired
+            }
+            $semanticEvents = @(
+                (New-TestEvent 'filetransfer_route_transition_prepared' 1 $preparedFields),
+                (New-TestEvent 'filetransfer_route_transition_pause_bound' 2 $pauseFields),
+                (New-TestEvent 'filetransfer_route_transition_draining' 3 $drainingFields),
+                (New-TestEvent 'filetransfer_route_transition_drain_receipt_decided' 5 $receiptFields),
+                (New-TestEvent 'filetransfer_route_transition_committed' 6 $commitFields),
+                (New-TestEvent 'filetransfer_route_transition_disposition_applied' 7 $dispositionFields)
+            )
+
+            $result = Get-FileTransferRouteTransitionCorrelation `
+                -Events $semanticEvents `
+                -RegisteredLeaseEvents $registeredLeases `
+                -RetiredLeaseEvents $retiredLeases `
+                -AlreadyChronologicallyOrdered
+            if ([long]$result.IndexBuildVisitCount -ne 220006L -or
+                [long]$result.LeaseIndexBuildVisitCount -ne 220000L -or
+                [long]$result.RegisteredLeaseIndexBuildVisitCount -ne 110000L -or
+                [long]$result.RetiredLeaseIndexBuildVisitCount -ne 110000L -or
+                [long]$result.BoundedLookupVisitCount -gt 64L -or
+                [long]$result.UnresolvedCount -ne 0L) {
+                throw "unexpected route-transition lease index result: $($result | ConvertTo-Json -Compress)"
+            }
+
+            $sameTransferWrongScopeFields = Copy-Fields $scope
+            $sameTransferWrongScopeFields.source_route = 'file_tuna_v4'
+            $sameTransferWrongScopeFields.source_live_route_epoch = '1'
+            $sameTransferWrongScopeFields.source_runtime_generation = '2'
+            $sameTransferWrongScopeFields.source_route_publication_generation = '2'
+            $sameTransferWrongScopeFields.source_leg_generation = '2'
+            $sameTransferWrongScopeEvents = @(
+                (New-TestEvent 'filetransfer_route_transition_prepared' 1 $preparedFields),
+                (New-TestEvent 'filetransfer_route_transition_pause_bound' 2 $pauseFields),
+                (New-TestEvent 'filetransfer_route_transition_draining' 3 $drainingFields),
+                (New-TestEvent 'filetransfer_route_transition_physical_send_lease_registered' 4 $sameTransferWrongScopeFields),
+                (New-TestEvent 'filetransfer_route_transition_drain_receipt_decided' 5 $receiptFields),
+                (New-TestEvent 'filetransfer_route_transition_committed' 6 $commitFields),
+                (New-TestEvent 'filetransfer_route_transition_physical_send_lease_retired' 7 $sameTransferWrongScopeFields),
+                (New-TestEvent 'filetransfer_route_transition_disposition_applied' 8 $dispositionFields)
+            )
+            $sameTransferWrongScope = Get-FileTransferRouteTransitionCorrelation `
+                -Events $sameTransferWrongScopeEvents `
+                -AlreadyChronologicallyOrdered
+            if ([long]$sameTransferWrongScope.UnresolvedCount -ne 0L -or
+                [long]$sameTransferWrongScope.LeaseExactScopeValidationCount -ne 0L) {
+                throw "same-transfer wrong source scope matched: $($sameTransferWrongScope | ConvertTo-Json -Compress)"
+            }
+
+            $exactLeaseFields = Copy-Fields $scope
+            $lateRegistrationEvents = @(
+                (New-TestEvent 'filetransfer_route_transition_prepared' 1 $preparedFields),
+                (New-TestEvent 'filetransfer_route_transition_pause_bound' 2 $pauseFields),
+                (New-TestEvent 'filetransfer_route_transition_draining' 3 $drainingFields),
+                (New-TestEvent 'filetransfer_route_transition_physical_send_lease_registered' 4 $exactLeaseFields),
+                (New-TestEvent 'filetransfer_route_transition_drain_receipt_decided' 5 $receiptFields),
+                (New-TestEvent 'filetransfer_route_transition_committed' 6 $commitFields),
+                (New-TestEvent 'filetransfer_route_transition_disposition_applied' 7 $dispositionFields)
+            )
+            $lateRegistration = Get-FileTransferRouteTransitionCorrelation `
+                -Events $lateRegistrationEvents `
+                -EventNamePartitionsChronologicallyOrdered
+            if ([long]$lateRegistration.UnresolvedCount -ne 1L -or
+                $lateRegistration.CandidateRecords[0].Reason -ne
+                    'source_payload_lease_registered_after_route_transition_draining') {
+                throw "exact late registration was not detected: $($lateRegistration | ConvertTo-Json -Compress)"
+            }
+
+            $lateRetirementEvents = @(
+                (New-TestEvent 'filetransfer_route_transition_prepared' 1 $preparedFields),
+                (New-TestEvent 'filetransfer_route_transition_pause_bound' 2 $pauseFields),
+                (New-TestEvent 'filetransfer_route_transition_draining' 3 $drainingFields),
+                (New-TestEvent 'filetransfer_route_transition_drain_receipt_decided' 4 $receiptFields),
+                (New-TestEvent 'filetransfer_route_transition_committed' 5 $commitFields),
+                (New-TestEvent 'filetransfer_route_transition_physical_send_lease_retired' 6 $exactLeaseFields),
+                (New-TestEvent 'filetransfer_route_transition_disposition_applied' 7 $dispositionFields)
+            )
+            $lateRetirement = Get-FileTransferRouteTransitionCorrelation `
+                -Events $lateRetirementEvents `
+                -EventNamePartitionsChronologicallyOrdered
+            if ([long]$lateRetirement.UnresolvedCount -ne 1L -or
+                $lateRetirement.CandidateRecords[0].Reason -ne
+                    'old_scope_physical_send_completed_after_successor_owner_install') {
+                throw "exact late retirement was not detected: $($lateRetirement | ConvertTo-Json -Compress)"
+            }
+
+            Write-Output 'route-transition-lease-index-bounded-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, [FindRepoRoot()]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Route-transition lease index test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("route-transition-lease-index-bounded-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "BridgeRecoverySubmissionBarrierDrain")]
+    public async Task SubmissionBarrierDrainIndex_VisitsHighVolumeRetirementsOnceAndUsesBoundedLookup()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var scriptText = """
+            param([string]$RepoRoot)
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            . (Join-Path $RepoRoot 'tools/FileTransferSoak/LogParsing.ps1')
+            . (Join-Path $RepoRoot 'tools/FileTransferSoak/ArtifactWriters.ps1')
+
+            function New-TestEvent {
+                param([string]$Name, [long]$Sequence, [hashtable]$Fields)
+                return [pscustomobject]@{
+                    EventName = $Name
+                    Sequence = $Sequence
+                    LineNumber = $Sequence
+                    Fields = $Fields
+                }
+            }
+
+            $scope = @{
+                session_id = 'session-index'
+                transfer_id = 'transfer-index'
+                direction = 'outbound'
+                route = 'regular_nkn_v4_fast'
+                protocol_version = '4'
+                live_route_epoch = '0'
+                runtime_generation = '1'
+                terminal_generation = '0'
+                leg_generation = '1'
+                transport_epoch = '0'
+                bridge_recovery_generation = '0'
+                bridge_decision_generation = '1'
+                recovery_liveness_lease_generation = '1'
+                log_writer_id = 'writer-index'
+            }
+            $semantic = New-Object System.Collections.Generic.List[object]
+            $semantic.Add((New-TestEvent 'filetransfer_bridge_recovery_execution_command_issued' 1 $scope)) | Out-Null
+            $semantic.Add((New-TestEvent 'nkn_bridge_recovery_execution_started' 2 $scope)) | Out-Null
+            $barrierFields = $scope.Clone()
+            $barrierFields.submission_epoch = '2'
+            $barrierFields.source_process_epoch = '1'
+            $barrierFields.source_process_id = '4242'
+            $semantic.Add((New-TestEvent 'nkn_bridge_recovery_submission_barrier_closed' 3 $barrierFields)) | Out-Null
+            $heldFields = $scope.Clone()
+            $heldFields.recovery_execution_state = 'Running'
+            $semantic.Add((New-TestEvent 'filetransfer_bridge_recovery_payload_submission_held' 4 $heldFields)) | Out-Null
+            $invalidatedFields = $barrierFields.Clone()
+            $invalidatedFields.process_epoch = '1'
+            $invalidatedFields.process_id = '4242'
+            $invalidatedFields.reason = 'bridge_recovery_execution_restart_not_ready'
+            $semantic.Add((New-TestEvent 'nkn_bridge_recovery_submission_barrier_invalidated' 300010 $invalidatedFields)) | Out-Null
+            $completionFields = $scope.Clone()
+            $completionFields.lease_generation = '1'
+            $completionFields.outcome = 'exhausted'
+            $completionFields.physical_execution_terminated = '1'
+            $completionFields.total_deadline_expired = '1'
+            $completionFields.reason = 'bridge_recovery_execution_timeout'
+            $semantic.Add((New-TestEvent 'nkn_bridge_recovery_execution_completed' 300011 $completionFields)) | Out-Null
+            $receiptFields = $scope.Clone()
+            $receiptFields.execution_outcome = 'exhausted'
+            $receiptFields.accepted = '1'
+            $receiptFields.disposition = 'accepted'
+            $semantic.Add((New-TestEvent 'filetransfer_bridge_recovery_execution_receipt_decision_observed' 300012 $receiptFields)) | Out-Null
+            $terminalFields = @{
+                session_id = 'session-index'
+                transfer_id = 'transfer-index'
+                direction = 'outbound'
+                log_writer_id = 'writer-index'
+            }
+            $semantic.Add((New-TestEvent 'file_transfer_outbound_terminal' 300013 $terminalFields)) | Out-Null
+
+            $retirementFields = @{
+                session_id = 'session-index'
+                transfer_id = 'transfer-index'
+                direction = 'outbound'
+                source_route = 'regular_nkn_v4_fast'
+                source_protocol_version = '4'
+                source_live_route_epoch = '0'
+                source_runtime_generation = '1'
+                source_terminal_generation = '0'
+                source_leg_generation = '1'
+                source_transport_epoch = '0'
+                source_bridge_recovery_generation = '0'
+                registered_send_count = '144'
+                retired_send_count = '144'
+                log_writer_id = 'writer-index'
+            }
+            $retirement = [pscustomobject]@{
+                EventName = 'filetransfer_outbound_physical_send_lease_retired'
+                Sequence = 10L
+                LineNumber = 10L
+                Fields = $retirementFields
+            }
+            [object[]]$retirements = [object[]]::new(220000)
+            for ($ordinal = 0; $ordinal -lt $retirements.Length; $ordinal++) {
+                $retirements[$ordinal] = $retirement
+            }
+
+            $index = New-FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainIndex `
+                -SemanticEvents $semantic.ToArray() `
+                -RetirementEvents $retirements
+            $result = Get-FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainCorrelation -Index $index
+            if ([long]$result.IndexBuildVisitCount -ne 220008L -or
+                [long]$result.RetirementIndexBuildVisitCount -ne 220000L -or
+                [long]$result.SemanticIndexBuildVisitCount -ne 8L -or
+                [long]$result.BoundedLookupVisitCount -gt 32L -or
+                [long]$result.UnresolvedCount -ne 1L) {
+                throw "unexpected drain index result: $($result | ConvertTo-Json -Compress)"
+            }
+            Write-Output 'submission-barrier-drain-index-bounded-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, [FindRepoRoot()]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Submission-barrier drain index test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("submission-barrier-drain-index-bounded-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "BridgeRecoverySubmissionBarrierDrain")]
+    public async Task SubmissionBarrierDrainIndex_MixedSchemaUsesExactLegacyRetirement()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var scriptText = """
+            param([string]$RepoRoot)
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            . (Join-Path $RepoRoot 'tools/FileTransferSoak/LogParsing.ps1')
+            . (Join-Path $RepoRoot 'tools/FileTransferSoak/ArtifactWriters.ps1')
+
+            function New-TestEvent {
+                param([string]$Name, [long]$Sequence, [hashtable]$Fields)
+                return [pscustomobject]@{
+                    EventName = $Name
+                    Sequence = $Sequence
+                    LineNumber = $Sequence
+                    Fields = $Fields
+                }
+            }
+
+            $commandFields = @{
+                session_id = 'session-mixed-schema'
+                transfer_id = 'transfer-mixed-schema'
+                direction = 'outbound'
+                route = 'regular_nkn_v4_fast'
+                protocol_version = '4'
+                live_route_epoch = '0'
+                runtime_generation = '1'
+                terminal_generation = '0'
+                leg_generation = '1'
+                transport_epoch = '0'
+                bridge_recovery_generation = '0'
+                log_writer_id = 'writer-mixed-schema'
+            }
+            $command = New-TestEvent `
+                'filetransfer_bridge_recovery_execution_command_issued' `
+                1 `
+                $commandFields
+
+            $unrelatedCanonicalFields = @{
+                session_id = 'session-mixed-schema'
+                transfer_id = 'other-transfer'
+                direction = 'outbound'
+                source_route = 'regular_nkn_v4_fast'
+                source_protocol_version = '4'
+                source_live_route_epoch = '0'
+                source_runtime_generation = '1'
+                source_terminal_generation = '0'
+                source_leg_generation = '1'
+                source_transport_epoch = '0'
+                source_bridge_recovery_generation = '0'
+                registered_send_count = '144'
+                retired_send_count = '144'
+                log_writer_id = 'writer-mixed-schema'
+            }
+            $exactLegacyFields = $unrelatedCanonicalFields.Clone()
+            $exactLegacyFields.transfer_id = 'transfer-mixed-schema'
+            $unrelatedCanonical = New-TestEvent `
+                'filetransfer_route_transition_physical_send_lease_retired' `
+                5 `
+                $unrelatedCanonicalFields
+            $exactLegacy = New-TestEvent `
+                'filetransfer_outbound_physical_send_lease_retired' `
+                6 `
+                $exactLegacyFields
+
+            $index = New-FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainIndex `
+                -SemanticEvents @($command) `
+                -RetirementEvents @($unrelatedCanonical, $exactLegacy)
+            $match = @(
+                Find-FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainRetirement `
+                    -Index $index `
+                    -Command $command `
+                    -AfterSequence 1 `
+                    -BeforeSequence 20)
+            if ($match.Count -ne 1 -or
+                $match[0].EventName -ne 'filetransfer_outbound_physical_send_lease_retired' -or
+                [long]$index.RetirementIndexBuildVisitCount -ne 2L -or
+                [long]$index.BoundedLookupVisitCount -gt 4L) {
+                throw "mixed-schema exact retirement mismatch: $($index | ConvertTo-Json -Compress)"
+            }
+
+            $orchestration = Get-Content `
+                -LiteralPath (Join-Path $RepoRoot 'tools/FileTransferOps/AnalyzerOrchestration.ps1') `
+                -Raw
+            $start = $orchestration.IndexOf(
+                '[object[]]$bridgeRecoveryExecutionSubmissionBarrierDrainRetirementEvents',
+                [System.StringComparison]::Ordinal)
+            $end = $orchestration.IndexOf(
+                '$bridgeRecoveryExecutionSubmissionBarrierDrainIndex',
+                $start,
+                [System.StringComparison]::Ordinal)
+            if ($start -lt 0 -or $end -le $start) {
+                throw 'compact drain retirement boundary missing'
+            }
+            $boundary = $orchestration.Substring($start, $end - $start)
+            foreach ($eventName in @(
+                    'filetransfer_route_transition_physical_send_lease_retired',
+                    'filetransfer_outbound_physical_send_lease_retired')) {
+                if ($boundary.IndexOf($eventName, [System.StringComparison]::Ordinal) -lt 0) {
+                    throw "compact drain retirement boundary omitted $eventName"
+                }
+            }
+            Write-Output 'submission-barrier-drain-mixed-schema-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, [FindRepoRoot()]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Submission-barrier mixed-schema test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("submission-barrier-drain-mixed-schema-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "BridgeRecoverySubmissionBarrierDrain")]
+    public async Task SubmissionBarrierDrainIndex_UnrelatedScopeRetirementsHaveBoundedNoMatchLookup()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var scriptText = """
+            param([string]$RepoRoot)
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            . (Join-Path $RepoRoot 'tools/FileTransferSoak/LogParsing.ps1')
+            . (Join-Path $RepoRoot 'tools/FileTransferSoak/ArtifactWriters.ps1')
+
+            $command = [pscustomobject]@{
+                EventName = 'filetransfer_bridge_recovery_execution_command_issued'
+                Sequence = 1L
+                LineNumber = 1L
+                Fields = @{
+                    session_id = 'session-no-match'
+                    transfer_id = 'transfer-no-match'
+                    direction = 'outbound'
+                    route = 'regular_nkn_v4_fast'
+                    protocol_version = '4'
+                    live_route_epoch = '0'
+                    runtime_generation = '1'
+                    terminal_generation = '0'
+                    leg_generation = '1'
+                    transport_epoch = '0'
+                    bridge_recovery_generation = '0'
+                    log_writer_id = 'writer-no-match'
+                }
+            }
+            $unrelatedRetirement = [pscustomobject]@{
+                EventName = 'filetransfer_route_transition_physical_send_lease_retired'
+                Sequence = 10L
+                LineNumber = 10L
+                Fields = @{
+                    session_id = 'session-no-match'
+                    transfer_id = 'unrelated-transfer'
+                    direction = 'outbound'
+                    source_route = 'regular_nkn_v4_fast'
+                    source_protocol_version = '4'
+                    source_live_route_epoch = '0'
+                    source_runtime_generation = '1'
+                    source_terminal_generation = '0'
+                    source_leg_generation = '1'
+                    source_transport_epoch = '0'
+                    source_bridge_recovery_generation = '0'
+                    registered_send_count = '144'
+                    retired_send_count = '144'
+                    log_writer_id = 'writer-no-match'
+                }
+            }
+            [object[]]$retirements = [object[]]::new(220000)
+            for ($ordinal = 0; $ordinal -lt $retirements.Length; $ordinal++) {
+                $retirements[$ordinal] = $unrelatedRetirement
+            }
+
+            $index = New-FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainIndex `
+                -SemanticEvents @($command) `
+                -RetirementEvents $retirements
+            $match = @(
+                Find-FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainRetirement `
+                    -Index $index `
+                    -Command $command `
+                    -AfterSequence 1 `
+                    -BeforeSequence 300000)
+            if ($match.Count -ne 0 -or
+                [long]$index.IndexBuildVisitCount -ne 220001L -or
+                [long]$index.SemanticIndexBuildVisitCount -ne 1L -or
+                [long]$index.RetirementIndexBuildVisitCount -ne 220000L -or
+                [long]$index.BoundedLookupVisitCount -gt 2L) {
+                throw "unrelated-scope lookup was not bounded: $($index | ConvertTo-Json -Compress)"
+            }
+            Write-Output 'submission-barrier-drain-unrelated-scope-bounded-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, [FindRepoRoot()]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Submission-barrier unrelated-scope test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "submission-barrier-drain-unrelated-scope-bounded-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "FileTransferRouteTransition")]
+    public async Task GuiFallbackV6ProofBootstrapFastPath_RequiresCodecReasonAndRecognizesPreparedByScope()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = guiText
+            .Replace("\r\n    ", "\r\n", StringComparison.Ordinal)
+            .Replace("\n    ", "\n", StringComparison.Ordinal);
+        var fieldBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Get-TunaGuiRetiredPendingAnswerHandoffFailure");
+        var fastPathMatch = System.Text.RegularExpressions.Regex.Match(
+            nestedFunctionText,
+            @"(?s)function\s+Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure\s*\{(?<body>.*?)\r?\n\}\s*\r?\n\s*\$retiredPendingAnswerFastPath");
+        Assert.True(fastPathMatch.Success, "Could not extract the fallback-V6 bootstrap GUI fast path.");
+        var fastPathBody = fastPathMatch.Groups["body"].Value;
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldBody}} }
+            function Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure { {{fastPathBody}} }
+
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-bootstrap-scope-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $common = 'session_id=sess; transfer_id=transfer; direction=outbound; fallback_epoch=1; authority_id=bootstrap; bootstrap_generation=1; source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch=1; source_runtime_generation=2; source_route_publication_generation=2; source_route_commit_generation=1; source_terminal_generation=0; source_leg_generation=2; source_transport_epoch=0; source_bridge_recovery_generation=0; source_data_session_generation=1; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; target_transport_epoch=1; frame_kind=FrontierRequest; log_writer_id=writer'
+                $prefix = @(
+                    'event=filetransfer_route_transition_committed; authority_id=transition; transition_generation=1; session_id=sess; transfer_id=transfer; direction=outbound; target_route=file_tuna_v4; target_live_route_epoch=1; target_runtime_generation=2; target_route_publication_generation=2; target_route_commit_generation=1; target_terminal_generation=0; target_leg_generation=2; decision_status=Committed; log_writer_id=writer',
+                    'event=filetransfer_fallback_v6_proof_bootstrap_observed; session_id=sess; direction=outbound; observation_generation=1; fallback_epoch=1; proof_kind=file_transfer_v4_state_frame_received; log_writer_id=writer',
+                    "event=filetransfer_fallback_v6_proof_bootstrap_decided; $common; decision_status=Issued"
+                )
+
+                $wrongReasonPath = Join-Path $tempRoot 'wrong-reason.log'
+                @($prefix + @(
+                    "event=filetransfer_fallback_v6_proof_bootstrap_execution_completed; $common; frame_fingerprint=none; receipt_status=Rejected; reason_code=physical_send_failed",
+                    "event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; $common; frame_fingerprint=(none); receipt_status=Rejected; application_status=Applied; reason_code=physical_send_failed"
+                )) | Set-Content -LiteralPath $wrongReasonPath
+                $wrongReason = Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure -Lines @(Get-Content -LiteralPath $wrongReasonPath)
+                if ($wrongReason.Unresolved) {
+                    throw 'non-codec rejection entered the bootstrap fast path'
+                }
+
+                $rejectedDeliveredReceiptPath = Join-Path $tempRoot 'rejected-delivered-receipt.log'
+                @($prefix + @(
+                    "event=filetransfer_fallback_v6_proof_bootstrap_execution_completed; $common; frame_fingerprint=none; receipt_status=Rejected; reason_code=execution_invalid",
+                    "event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; $common; frame_fingerprint=(none); receipt_status=Rejected; application_status=Applied; reason_code=execution_invalid",
+                    "event=filetransfer_fallback_v6_proof_bootstrap_execution_completed; $common; frame_fingerprint=ABC123; receipt_status=Delivered; reason_code=delivered",
+                    "event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; $common; frame_fingerprint=ABC123; receipt_status=Delivered; application_status=Rejected; reason_code=stale_command",
+                    'event=filetransfer_route_transition_prepared; authority_id=transition-unrelated; transition_generation=9; transition_kind=TunaV4ToPostTunaFallbackV6; session_id=sess; transfer_id=transfer; direction=outbound; source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch=1; source_runtime_generation=2; source_route_publication_generation=2; source_route_commit_generation=1; source_terminal_generation=0; source_leg_generation=2; source_transport_epoch=0; source_bridge_recovery_generation=0; source_data_session_generation=1; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; decision_status=Prepared; log_writer_id=writer',
+                    "event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; $common; frame_type=filetransfer.receiver_state.v6; frame_transport_epoch=1; frame_fingerprint=DEF456; decision_status=Accepted; reason_code=exact_bootstrap_boundary"
+                )) | Set-Content -LiteralPath $rejectedDeliveredReceiptPath
+                $rejectedDeliveredReceipt = Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure -Lines @(Get-Content -LiteralPath $rejectedDeliveredReceiptPath)
+                if (-not $rejectedDeliveredReceipt.Unresolved) {
+                    throw 'application_status=Rejected incorrectly recovered the bootstrap fast path'
+                }
+
+                $recoveredPath = Join-Path $tempRoot 'recovered.log'
+                @($prefix + @(
+                    "event=filetransfer_fallback_v6_proof_bootstrap_execution_completed; $common; frame_fingerprint=none; receipt_status=Rejected; reason_code=execution_invalid",
+                    "event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; $common; frame_fingerprint=(none); receipt_status=Rejected; application_status=Applied; reason_code=execution_invalid",
+                    "event=filetransfer_fallback_v6_proof_bootstrap_execution_completed; $common; frame_fingerprint=ABC123; receipt_status=Delivered; reason_code=delivered",
+                    "event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; $common; frame_fingerprint=ABC123; receipt_status=Delivered; application_status=Idempotent; reason_code=delivered",
+                    'event=filetransfer_route_transition_prepared; authority_id=transition-unrelated; transition_generation=9; transition_kind=TunaV4ToPostTunaFallbackV6; session_id=sess; transfer_id=transfer; direction=outbound; source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch=1; source_runtime_generation=2; source_route_publication_generation=2; source_route_commit_generation=1; source_terminal_generation=0; source_leg_generation=2; source_transport_epoch=0; source_bridge_recovery_generation=0; source_data_session_generation=1; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; decision_status=Prepared; log_writer_id=writer',
+                    "event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; $common; frame_type=filetransfer.receiver_state.v6; frame_transport_epoch=1; frame_fingerprint=DEF456; decision_status=Accepted; reason_code=exact_bootstrap_boundary"
+                )) | Set-Content -LiteralPath $recoveredPath
+                $recovered = Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure -Lines @(Get-Content -LiteralPath $recoveredPath)
+                if ($recovered.Unresolved) {
+                    throw 'exact Prepared recovery remained unresolved'
+                }
+                Write-Output 'gui-bootstrap-scope-recovery-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"GUI bootstrap scope test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-bootstrap-scope-recovery-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedAuthorityProofSuite", "FileTransferRouteTransition")]
     public async Task AnalyzeRetained_FileTransferRouteTransitionLiveEpochProjection_MissingIsPrecise(
         bool compact)
     {
