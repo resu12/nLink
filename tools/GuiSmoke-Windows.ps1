@@ -5334,7 +5334,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
 
             if ($eventName -eq 'filetransfer_fallback_v6_proof_bootstrap_decided' -and
                 (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -in @('Issued', 'Idempotent') -and
-                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'frame_kind') -eq 'FrontierRequest' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'frame_kind') -in @('FrontierRequest', 'ReceiverState') -and
                 (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_route') -eq 'file_tuna_v4' -and
                 (Get-TunaGuiLogLineFieldValue -Line $line -Name 'target_route') -eq 'post_tuna_fallback_v6' -and
                 -not [string]::IsNullOrWhiteSpace($writer) -and
@@ -5389,6 +5389,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     Delivered = $false
                     DeliveredReceiptApplied = $false
                     PeerAccepted = $false
+                    PeerBoundaryBound = $false
                     Prepared = $false
                     LegacyRejected = $false
                 }
@@ -5458,11 +5459,15 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     if ([string]::IsNullOrWhiteSpace($reasonCode)) {
                         $reasonCode = Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_reason'
                     }
-                    if ($reasonCode -eq 'execution_invalid') {
+                    if ($command.Direction -eq 'outbound' -and
+                        $command.FrameKind -eq 'FrontierRequest' -and
+                        $reasonCode -eq 'execution_invalid') {
                         $command.ExecutionRejected = $true
                     }
-                    elseif ([string]::IsNullOrWhiteSpace($reasonCode) -or
-                        $reasonCode -in @('[redacted]', '(redacted)')) {
+                    elseif ($command.Direction -eq 'outbound' -and
+                        $command.FrameKind -eq 'FrontierRequest' -and
+                        ([string]::IsNullOrWhiteSpace($reasonCode) -or
+                        $reasonCode -in @('[redacted]', '(redacted)'))) {
                         $command.ExecutionRejected = $true
                         $command.LegacyRejected = $true
                     }
@@ -5496,6 +5501,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -in @('Accepted', 'Idempotent')) {
                 $command.PeerAccepted = $true
             }
+            elseif ($eventName -eq 'filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -in @('Bound', 'Idempotent') -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'peer_proof_generation') -notin @('', '0')) {
+                $command.PeerBoundaryBound = $true
+            }
         }
 
         $legacyIntervalCounts = @{}
@@ -5509,20 +5519,32 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             $legacyIntervalCounts[$intervalKey]++
         }
 
-        return [pscustomobject]@{
-            Unresolved = @($commands.Values | Where-Object {
+        [object[]]$unresolvedInvalid = @($commands.Values | Where-Object {
                 $legacyIntervalKey = "$($_.Writer)|$($_.SessionId)|$($_.TransferId)|$($_.Direction)".ToLowerInvariant()
                 $legacyUnique = -not $_.LegacyRejected -or
                     ($legacyIntervalCounts.ContainsKey($legacyIntervalKey) -and
                      [int]$legacyIntervalCounts[$legacyIntervalKey] -eq 1)
                 $_.ExecutionRejected -and $_.ReceiptApplied -and $legacyUnique -and
                     -not ($_.Delivered -and $_.DeliveredReceiptApplied -and $_.PeerAccepted -and $_.Prepared)
-            }).Count -gt 0
+            })
+        [object[]]$unresolvedMerge = @($commands.Values | Where-Object {
+                $_.Delivered -and $_.DeliveredReceiptApplied -and $_.PeerAccepted -and
+                    -not ($_.PeerBoundaryBound -and $_.Prepared)
+            })
+        return [pscustomobject]@{
+            Unresolved = $unresolvedInvalid.Count -gt 0 -or $unresolvedMerge.Count -gt 0
+            Reason = if ($unresolvedMerge.Count -gt 0) {
+                'accepted_bootstrap_peer_frame_not_bound_to_coordinator_proof_frame_pair'
+            }
+            else {
+                'outbound_proof_only_frontier_request_rejected_by_ordinary_repair_codec'
+            }
             LineVisits = $visits
             CommandCount = $commands.Count
             ExecutionRejectedCount = @($commands.Values | Where-Object { $_.ExecutionRejected }).Count
             ReceiptAppliedCount = @($commands.Values | Where-Object { $_.ReceiptApplied }).Count
             LegacyRejectedCount = @($commands.Values | Where-Object { $_.LegacyRejected }).Count
+            PeerBoundaryMissingCount = $unresolvedMerge.Count
         }
     }
 
@@ -5578,7 +5600,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         }
         return New-TunaGuiFileTransferFailureClassificationResult `
             -Phase 'route_transition' `
-            -Reason 'outbound_proof_only_frontier_request_rejected_by_ordinary_repair_codec' `
+            -Reason $fallbackV6InvalidFrontierFastPath.Reason `
             -RouteMode $RouteMode `
             -ClassificationSource "${classificationSource}_fallback_v6_bootstrap_index" `
             -EvidenceLineVisitCount ([long]$fallbackV6InvalidFrontierFastPath.LineVisits) `

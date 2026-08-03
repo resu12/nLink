@@ -1509,6 +1509,55 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
     [InlineData(false)]
     [InlineData(true)]
     [Trait("RetainedV4Suite", "SettlementDisposition")]
+    public async Task AnalyzeRetained_ExactSettledStalledDispositionBeforeDiagnosticRecoversStall(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_settled_before_stall_diagnostic";
+        const string authorityId = "fta2-repair_replay-settled-before-diagnostic";
+        const string repairKey = "27:9:27:9";
+        const string scope =
+            $"session_id=sess_a; transfer_id={transferId}; direction=inbound; " +
+            "route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; " +
+            "runtime_generation=1; terminal_generation=0; leg_generation=1; " +
+            "transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; " +
+            "route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; {scope}; runtime_profile=regular_nkn_v4_fast; frame_family=v4"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_binding_committed; {scope}; authority_id={authorityId}; predecessor_authority_id=(none); repair_request_key={repairKey}; frontier_chunk_index=27; pending_repair_count=9; repair_generation=3; install_generation=3; binding_state=Installed"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_settlement_accepted; {scope}; authority_id={authorityId}; successor_authority_id=(none); successor_install_generation=3; repair_request_key={repairKey}; frontier_chunk_index=27; requested_chunk_count=9; decision_generation=3; outcome=SettledStalled; settlement_reason=receiver_state_coalesced_without_dispatch; settlement_disposition=accepted"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided; session_id=sess_a; transfer_id={transferId}; direction=inbound; authority_id={authorityId}; install_generation=3; settlement_outcome=SettledStalled; apply_status=Applied; current_authority_cleared=1; retained_predecessor_cleared=0"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_binding_retired; {scope}; authority_id={authorityId}; predecessor_authority_id=(none); repair_request_key={repairKey}; frontier_chunk_index=27; pending_repair_count=9; repair_generation=3; install_generation=3; binding_state=Installed; install_boundary=settlement"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_contract_settled; session_id=sess_a; transfer_id={transferId}; direction=inbound; authority_id={authorityId}; successor_authority_id=(none); repair_request_key={repairKey}; settlement_outcome=SettledStalled; dispatch_observed=1"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_stalled; {scope}; authority_id={authorityId}; install_generation=3; repair_request_key={repairKey}; frontier_chunk_index=27; durable_received_highest_chunk_index=35; requested_chunk_count=9; reason=receiver_state_coalesced_without_dispatch"),
+            LogLine($"event=file_transfer_inbound_terminal; session_id=sess_a; transfer_id={transferId}; direction=inbound; state=Completed; error_code=(none); integrity_ok=1")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_stalled_distinct_count"]);
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_stalled_recovered_count"]);
+        Assert.Equal("0", verdict["regular_v4_frontier_repair_stalled_unresolved_count"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedV4Suite", "SettlementDisposition")]
     public async Task AnalyzeRetained_CurrentPressureSettlementRejectsAmbiguousRedactedApply(
         bool compact)
     {

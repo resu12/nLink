@@ -2608,6 +2608,58 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedAuthorityProofSuite", "FileTransferRouteTransition")]
+    public async Task AnalyzeRetained_FallbackV6ProofBootstrapAcceptedFrameWithoutProofMerge_HasFullCompactParity(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_v6_bootstrap_peer_merge";
+        const string scope =
+            "source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch=5; " +
+            "source_runtime_generation=7; source_route_publication_generation=8; " +
+            "source_route_commit_generation=6; source_terminal_generation=0; " +
+            "source_leg_generation=9; source_transport_epoch=3; " +
+            "source_bridge_recovery_generation=2; source_data_session_generation=11; " +
+            "target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn";
+        var messages = new[]
+        {
+            $"event=filetransfer_fallback_v6_proof_bootstrap_decided; session_id=sess_a; transfer_id={transferId}; direction=outbound; authority_id=bootstrap-out; bootstrap_generation=3; fallback_epoch=2; target_transport_epoch=4; frame_kind=FrontierRequest; {scope}; decision_status=Issued; log_writer_id=writer_out; log_writer_sequence=101",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_execution_completed; session_id=sess_a; transfer_id={transferId}; direction=outbound; authority_id=bootstrap-out; bootstrap_generation=3; fallback_epoch=2; target_transport_epoch=4; frame_kind=FrontierRequest; receipt_status=Delivered; frame_fingerprint=LOCALOUT; {scope}; log_writer_id=writer_out; log_writer_sequence=102",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; session_id=sess_a; transfer_id={transferId}; direction=outbound; authority_id=bootstrap-out; bootstrap_generation=3; fallback_epoch=2; target_transport_epoch=4; frame_kind=FrontierRequest; receipt_status=Delivered; application_status=Applied; frame_fingerprint=LOCALOUT; {scope}; log_writer_id=writer_out; log_writer_sequence=103",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; session_id=sess_a; transfer_id={transferId}; direction=outbound; authority_id=bootstrap-out; bootstrap_generation=3; fallback_epoch=2; target_transport_epoch=4; frame_kind=FrontierRequest; frame_type=filetransfer.receiver_state.v6; frame_transport_epoch=4; frame_fingerprint=PEEROUT; decision_status=Accepted; {scope}; log_writer_id=writer_out; log_writer_sequence=104",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; session_id=sess_a; transfer_id={transferId}; direction=outbound; authority_id=bootstrap-out; bootstrap_generation=3; fallback_epoch=2; target_transport_epoch=4; frame_kind=FrontierRequest; frame_type=filetransfer.receiver_state.v6; frame_transport_epoch=4; frame_fingerprint=PEEROUT; decision_status=Idempotent; {scope}; log_writer_id=writer_out; log_writer_sequence=105",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_decided; session_id=sess_a; transfer_id={transferId}; direction=inbound; authority_id=bootstrap-in; bootstrap_generation=4; fallback_epoch=2; target_transport_epoch=4; frame_kind=ReceiverState; {scope}; decision_status=Issued; log_writer_id=writer_in; log_writer_sequence=201",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_execution_completed; session_id=sess_a; transfer_id={transferId}; direction=inbound; authority_id=bootstrap-in; bootstrap_generation=4; fallback_epoch=2; target_transport_epoch=4; frame_kind=ReceiverState; receipt_status=Delivered; frame_fingerprint=LOCALIN; {scope}; log_writer_id=writer_in; log_writer_sequence=202",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; session_id=sess_a; transfer_id={transferId}; direction=inbound; authority_id=bootstrap-in; bootstrap_generation=4; fallback_epoch=2; target_transport_epoch=4; frame_kind=ReceiverState; receipt_status=Delivered; application_status=Applied; frame_fingerprint=LOCALIN; {scope}; log_writer_id=writer_in; log_writer_sequence=203",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; session_id=sess_a; transfer_id={transferId}; direction=inbound; authority_id=bootstrap-in; bootstrap_generation=4; fallback_epoch=2; target_transport_epoch=4; frame_kind=ReceiverState; frame_type=filetransfer.frontier_request.v6; frame_transport_epoch=4; frame_fingerprint=PEERIN; decision_status=Accepted; {scope}; log_writer_id=writer_in; log_writer_sequence=204"
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildFileTunaV4DataPathProofFixture(transferId, messages),
+            environment: compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+        Assert.Equal(0, result.Script.ExitCode);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("3", verdict["filetransfer_fallback_v6_proof_bootstrap_missing_raw_count"]);
+        Assert.Equal("2", verdict["filetransfer_fallback_v6_proof_bootstrap_missing_distinct_count"]);
+        Assert.Equal("0", verdict["filetransfer_route_transition_incomplete_distinct_count"]);
+        Assert.Equal(
+            "accepted_bootstrap_peer_frame_not_bound_to_coordinator_proof_frame_pair",
+            verdict["first_proof_chain_failure_reason"]);
+    }
+
+    [Theory]
     [InlineData(false, "1")]
     [InlineData(true, "0")]
     [Trait("RetainedAuthorityProofSuite", "FileTransferRouteTransition")]
@@ -2645,6 +2697,8 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
             messages.Add($"event=filetransfer_fallback_v6_proof_bootstrap_execution_completed; {common}; receipt_status=Delivered; frame_fingerprint=ABC123; reason_code=delivered; log_writer_sequence=106");
             messages.Add($"event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; {common}; receipt_status=Delivered; application_status=Applied; frame_fingerprint=ABC123; reason_code=delivered; log_writer_sequence=107");
             messages.Add($"event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; {common}; receipt_status=Delivered; application_status=Idempotent; frame_fingerprint=ABC123; reason_code=delivered; log_writer_sequence=108");
+            messages.Add($"event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; {common}; frame_type=filetransfer.receiver_state.v6; frame_transport_epoch=4; frame_fingerprint=DEF456; decision_status=Accepted; reason_code=exact_bootstrap_boundary; log_writer_sequence=109");
+            messages.Add($"event=filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound; {common}; frame_type=filetransfer.receiver_state.v6; frame_transport_epoch=4; frame_fingerprint=DEF456; peer_proof_generation=3; peer_proof_transport_epoch=4; peer_proof_kind=fallback_v6_proof_bootstrap_peer_frame; decision_status=Bound; log_writer_sequence=110");
             messages.Add(
                 "event=filetransfer_route_transition_prepared; session_id=sess_a; transfer_id=" + transferId +
                 "; direction=outbound; authority_id=transition-authority-unrelated; transition_generation=17; " +
@@ -2653,8 +2707,9 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
                 "source_route_commit_generation=6; source_terminal_generation=0; source_leg_generation=9; " +
                 "source_transport_epoch=3; source_bridge_recovery_generation=2; source_data_session_generation=11; " +
                 "target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; " +
-                "decision_status=Prepared; log_writer_id=writer_route_transition; log_writer_sequence=109");
-            messages.Add($"event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; {common}; frame_type=filetransfer.receiver_state.v6; frame_transport_epoch=4; frame_fingerprint=DEF456; decision_status=Accepted; reason_code=exact_bootstrap_boundary; log_writer_sequence=110");
+                "peer_proof_generation=3; peer_proof_transport_epoch=4; peer_proof_kind=fallback_v6_proof_bootstrap_peer_frame; " +
+                "retained_frame_type=filetransfer.receiver_state.v6; retained_frame_transport_epoch=4; retained_frame_fingerprint=DEF456; " +
+                "decision_status=Prepared; log_writer_id=writer_route_transition; log_writer_sequence=111");
         }
 
         var result = await RunAnalyzeFixtureAsync(
@@ -3404,7 +3459,7 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
             "Get-TunaGuiRetiredPendingAnswerHandoffFailure");
         var fastPathMatch = System.Text.RegularExpressions.Regex.Match(
             nestedFunctionText,
-            @"(?s)function\s+Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure\s*\{(?<body>.*?)\r?\n\}\s*\r?\n\s*\$retiredPendingAnswerFastPath");
+            @"(?s)function\s+Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure\s*\{(?<body>.*?)\r?\n\}\s*\r?\n\s*\$responderPeerProbeFastPath");
         Assert.True(fastPathMatch.Success, "Could not extract the fallback-V6 bootstrap GUI fast path.");
         var fastPathBody = fastPathMatch.Groups["body"].Value;
         var scriptText = $$"""
@@ -3452,8 +3507,9 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
                     "event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; $common; frame_fingerprint=(none); receipt_status=Rejected; application_status=Applied; reason_code=execution_invalid",
                     "event=filetransfer_fallback_v6_proof_bootstrap_execution_completed; $common; frame_fingerprint=ABC123; receipt_status=Delivered; reason_code=delivered",
                     "event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; $common; frame_fingerprint=ABC123; receipt_status=Delivered; application_status=Idempotent; reason_code=delivered",
-                    'event=filetransfer_route_transition_prepared; authority_id=transition-unrelated; transition_generation=9; transition_kind=TunaV4ToPostTunaFallbackV6; session_id=sess; transfer_id=transfer; direction=outbound; source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch=1; source_runtime_generation=2; source_route_publication_generation=2; source_route_commit_generation=1; source_terminal_generation=0; source_leg_generation=2; source_transport_epoch=0; source_bridge_recovery_generation=0; source_data_session_generation=1; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; decision_status=Prepared; log_writer_id=writer',
-                    "event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; $common; frame_type=filetransfer.receiver_state.v6; frame_transport_epoch=1; frame_fingerprint=DEF456; decision_status=Accepted; reason_code=exact_bootstrap_boundary"
+                    "event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; $common; frame_type=filetransfer.receiver_state.v6; frame_transport_epoch=1; frame_fingerprint=DEF456; decision_status=Accepted; reason_code=exact_bootstrap_boundary",
+                    "event=filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound; $common; frame_type=filetransfer.receiver_state.v6; frame_transport_epoch=1; frame_fingerprint=DEF456; peer_proof_generation=1; decision_status=Bound; reason_code=exact_bootstrap_boundary",
+                    'event=filetransfer_route_transition_prepared; authority_id=transition-unrelated; transition_generation=9; transition_kind=TunaV4ToPostTunaFallbackV6; session_id=sess; transfer_id=transfer; direction=outbound; source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch=1; source_runtime_generation=2; source_route_publication_generation=2; source_route_commit_generation=1; source_terminal_generation=0; source_leg_generation=2; source_transport_epoch=0; source_bridge_recovery_generation=0; source_data_session_generation=1; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; decision_status=Prepared; log_writer_id=writer'
                 )) | Set-Content -LiteralPath $recoveredPath
                 $recovered = Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure -Lines @(Get-Content -LiteralPath $recoveredPath)
                 if ($recovered.Unresolved) {

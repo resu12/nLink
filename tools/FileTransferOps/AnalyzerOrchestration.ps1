@@ -140,6 +140,7 @@ function Write-FileTransferIndexedRawEvidenceArtifact {
         'filetransfer_fallback_v6_proof_bootstrap_execution_completed',
         'filetransfer_fallback_v6_proof_bootstrap_receipt_applied',
         'filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided',
+        'filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound',
         'filetransfer_route_selected',
         'filetransfer_live_route_epoch_started',
         'filetransfer_live_route_epoch_recovered',
@@ -2207,6 +2208,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_v6_proof_bootstrap_execution_completed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_v6_proof_bootstrap_receipt_applied') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_post_tuna_fallback_v6_route_consumed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_selected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_hint_authorized_publication_accepted') +

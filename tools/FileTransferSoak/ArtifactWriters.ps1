@@ -8625,6 +8625,7 @@ function Get-FileTransferFileTunaV4DataPathEventNames {
         'filetransfer_fallback_v6_proof_bootstrap_execution_completed',
         'filetransfer_fallback_v6_proof_bootstrap_receipt_applied',
         'filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided',
+        'filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound',
         'filetransfer_post_tuna_fallback_v6_route_consumed',
         'filetransfer_route_selected',
         'filetransfer_route_hint_authorized_publication_accepted',
@@ -9805,6 +9806,7 @@ function Get-FileTransferRouteTransitionCorrelation {
     $bootstrapAllReceiptEventList = New-Object System.Collections.Generic.List[object]
     $bootstrapExecutionEventList = New-Object System.Collections.Generic.List[object]
     $bootstrapPeerFrameDecisionEventList = New-Object System.Collections.Generic.List[object]
+    $bootstrapPeerBoundaryBoundEventList = New-Object System.Collections.Generic.List[object]
     $bootstrapPhysicalSendEventList = New-Object System.Collections.Generic.List[object]
     $routeTransitionIndexBuildVisitCount = 0L
     $routeTransitionLeaseIndexBuildVisitCount = 0L
@@ -9946,6 +9948,9 @@ function Get-FileTransferRouteTransitionCorrelation {
             'filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided' {
                 $bootstrapPeerFrameDecisionEventList.Add($event) | Out-Null
             }
+            'filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound' {
+                $bootstrapPeerBoundaryBoundEventList.Add($event) | Out-Null
+            }
             'filetransfer_data_path_send_result' {
                 if ((Get-RouteTransitionField -Event $event -Name 'frame_type') -eq
                     'filetransfer.frontier_request.v6') {
@@ -10018,6 +10023,7 @@ function Get-FileTransferRouteTransitionCorrelation {
     [object[]]$bootstrapExecutionEvents = @($bootstrapExecutionEventList.ToArray())
     [object[]]$bootstrapAllReceiptEvents = @($bootstrapAllReceiptEventList.ToArray())
     [object[]]$bootstrapPeerFrameDecisionEvents = @($bootstrapPeerFrameDecisionEventList.ToArray())
+    [object[]]$bootstrapPeerBoundaryBoundEvents = @($bootstrapPeerBoundaryBoundEventList.ToArray())
     [object[]]$bootstrapPhysicalSendEvents = @($bootstrapPhysicalSendEventList.ToArray())
 
     $rawRecords = New-Object System.Collections.Generic.List[object]
@@ -10680,6 +10686,109 @@ function Get-FileTransferRouteTransitionCorrelation {
             -Class 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing'
     }
 
+    # A reciprocal bootstrap frame admitted by the exact command scope is not
+    # yet a usable route-transition boundary.  It must be bound to the
+    # coordinator-derived proof for that same immutable frame.
+    foreach ($peerFrame in @($bootstrapPeerFrameDecisionEvents | Where-Object {
+                (Get-RouteTransitionField -Event $_ -Name 'status') -in
+                    @('Accepted', 'Idempotent') -and
+                -not [string]::IsNullOrWhiteSpace(
+                    (Get-RouteTransitionField -Event $_ -Name 'frame_fingerprint'))
+            })) {
+        $routeTransitionBoundedLookupVisitCount += [int64](
+            $bootstrapDecisionEvents.Count + $bootstrapExecutionEvents.Count +
+            $bootstrapReceiptEvents.Count + $bootstrapPeerBoundaryBoundEvents.Count +
+            $preparedEvents.Count)
+
+        [object[]]$matchingCommands = @($bootstrapDecisionEvents | Where-Object {
+                [int64]$_.Sequence -lt [int64]$peerFrame.Sequence -and
+                (Test-FallbackV6ProofBootstrapTupleMatch `
+                    -Command $_ `
+                    -Candidate $peerFrame `
+                    -RequireWriter `
+                    -AllowAuthorityBoundSparse)
+            } | Sort-Object Sequence, LineNumber)
+        $commandIdentities = @{}
+        foreach ($matchingCommand in $matchingCommands) {
+            $identityKey = Get-FallbackV6ProofBootstrapDistinctIdentityKey `
+                -Event $matchingCommand `
+                -IncludeWriter `
+                -Disposition 'command'
+            if (-not [string]::IsNullOrWhiteSpace($identityKey) -and
+                -not $commandIdentities.ContainsKey($identityKey)) {
+                $commandIdentities[$identityKey] = $matchingCommand
+            }
+        }
+        if ($commandIdentities.Count -ne 1) {
+            continue
+        }
+        $command = @($commandIdentities.Values)[0]
+
+        [object[]]$deliveredExecutions = @($bootstrapExecutionEvents | Where-Object {
+                (Test-FallbackV6ProofBootstrapTupleMatch `
+                    -Command $command `
+                    -Candidate $_ `
+                    -RequireWriter `
+                    -AllowAuthorityBoundSparse) -and
+                (Get-RouteTransitionField -Event $_ -Name 'receipt_status') -eq 'Delivered' -and
+                -not [string]::IsNullOrWhiteSpace(
+                    (Get-RouteTransitionField -Event $_ -Name 'frame_fingerprint'))
+            } | Sort-Object Sequence, LineNumber)
+        [object[]]$deliveredReceipts = @($bootstrapReceiptEvents | Where-Object {
+                (Test-FallbackV6ProofBootstrapTupleMatch `
+                    -Command $command `
+                    -Candidate $_ `
+                    -RequireWriter `
+                    -AllowAuthorityBoundSparse)
+            } | Sort-Object Sequence, LineNumber)
+        if ($deliveredExecutions.Count -eq 0 -or $deliveredReceipts.Count -eq 0) {
+            continue
+        }
+
+        $frameFingerprint = Get-RouteTransitionField -Event $peerFrame -Name 'frame_fingerprint'
+        [object[]]$bound = @($bootstrapPeerBoundaryBoundEvents | Where-Object {
+                (Test-FallbackV6ProofBootstrapTupleMatch `
+                    -Command $command `
+                    -Candidate $_ `
+                    -RequireWriter `
+                    -AllowAuthorityBoundSparse) -and
+                (Get-RouteTransitionField -Event $_ -Name 'status') -in
+                    @('Bound', 'Idempotent') -and
+                (Get-RouteTransitionField -Event $_ -Name 'frame_fingerprint') -eq
+                    $frameFingerprint -and
+                (Get-RouteTransitionField -Event $_ -Name 'peer_proof_generation') -notin
+                    @('', '0')
+            } | Sort-Object Sequence, LineNumber)
+        [object[]]$prepared = @($preparedEvents | Where-Object {
+                $bound.Count -gt 0 -and
+                [int64]$_.Sequence -gt [int64]$bound[0].Sequence -and
+                (Test-FallbackV6ProofBootstrapPreparedScopeMatch `
+                    -Command $command `
+                    -Prepared $_) -and
+                (Get-RouteTransitionField -Event $_ -Name 'retained_frame_fingerprint') -eq
+                    $frameFingerprint -and
+                (Get-RouteTransitionField -Event $_ -Name 'peer_proof_generation') -notin
+                    @('', '0')
+            } | Sort-Object Sequence, LineNumber)
+        if ($bound.Count -gt 0 -and $prepared.Count -gt 0) {
+            continue
+        }
+
+        $candidateKey = Get-FallbackV6ProofBootstrapDistinctIdentityKey `
+            -Event $peerFrame `
+            -IncludeWriter `
+            -AllowAuthorityBoundSparse `
+            -Disposition "accepted-peer-frame-$frameFingerprint"
+        if ([string]::IsNullOrWhiteSpace($candidateKey)) {
+            continue
+        }
+        Add-RouteTransitionCandidate `
+            -Event $peerFrame `
+            -Key ("fallback-v6-proof-bootstrap-peer-merge|$candidateKey") `
+            -Reason 'accepted_bootstrap_peer_frame_not_bound_to_coordinator_proof_frame_pair' `
+            -Class 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing'
+    }
+
     foreach ($skip in $fallbackBootstrapSkipEvents) {
         $routeTransitionBoundedLookupVisitCount += [int64](
             $commitEvents.Count + $fallbackStartedEvents.Count +
@@ -10726,6 +10835,24 @@ function Get-FileTransferRouteTransitionCorrelation {
         $fallbackEpoch = Get-RouteTransitionField -Event $starts[-1] -Name 'fallback_epoch'
         $transferId = Get-RouteTransitionField -Event $commit -Name 'transfer_id'
         $direction = Get-RouteTransitionField -Event $commit -Name 'direction'
+        $deliveredBootstrap = @($bootstrapReceiptEvents | Where-Object {
+                [int64]$_.Sequence -gt $skipSequence -and
+                (Get-RouteTransitionField -Event $_ -Name 'session_id') -eq $sessionId -and
+                (Get-RouteTransitionField -Event $_ -Name 'transfer_id') -eq $transferId -and
+                (Get-RouteTransitionField -Event $_ -Name 'direction') -eq $direction
+            } | Select-Object -First 1)
+        $acceptedBootstrapFrame = @($bootstrapPeerFrameDecisionEvents | Where-Object {
+                $deliveredBootstrap.Count -gt 0 -and
+                [int64]$_.Sequence -gt [int64]$deliveredBootstrap[0].Sequence -and
+                (Get-RouteTransitionField -Event $_ -Name 'session_id') -eq $sessionId -and
+                (Get-RouteTransitionField -Event $_ -Name 'transfer_id') -eq $transferId -and
+                (Get-RouteTransitionField -Event $_ -Name 'direction') -eq $direction -and
+                (Get-RouteTransitionField -Event $_ -Name 'status') -in
+                    @('Accepted', 'Idempotent')
+            } | Select-Object -First 1)
+        if ($deliveredBootstrap.Count -gt 0 -and $acceptedBootstrapFrame.Count -gt 0) {
+            continue
+        }
         [object[]]$recoveryPrepared = @($preparedEvents | Where-Object {
                 [int64]$_.Sequence -gt $skipSequence -and
                 (Get-RouteTransitionField -Event $_ -Name 'session_id') -eq $sessionId -and
@@ -10788,12 +10915,18 @@ function Get-FileTransferRouteTransitionCorrelation {
         }
     }
 
+    [object[]]$genericRawRecords = @($rawRecords | Where-Object {
+            $_.Class -eq 'filetransfer_route_transition_incomplete'
+        })
+    [object[]]$genericDistinctRecords = @($distinctRecords | Where-Object {
+            $_.Class -eq 'filetransfer_route_transition_incomplete'
+        })
     return [pscustomobject]@{
-        RawCount = $rawRecords.Count
-        DistinctCount = $distinctRecords.Count
+        RawCount = $genericRawRecords.Count
+        DistinctCount = $genericDistinctRecords.Count
         RecoveredCount = 0
-        UnresolvedCount = $distinctRecords.Count
-        Verdict = if ($distinctRecords.Count -gt 0) { 'fail' } else { 'pass' }
+        UnresolvedCount = $genericDistinctRecords.Count
+        Verdict = if ($genericDistinctRecords.Count -gt 0) { 'fail' } else { 'pass' }
         RawCandidateRecords = @($rawRecords.ToArray())
         CandidateRecords = @($distinctRecords.ToArray())
         UnresolvedCandidateRecords = @($distinctRecords.ToArray())
@@ -38034,16 +38167,26 @@ function Get-FileTransferRegularV4FrontierRepairLifecycleProof {
         $seen[$key] = $true
         $distinct.Add($stalled) | Out-Null
 
-        $resolution = @(
+        $laterResolution = @(
             # A later authority rejection is not proof that an earlier stalled
             # repair lifecycle completed.  Only progress or the exact accepted
             # settlement/projection handoff may resolve the stalled attempt.
-            @($progressEvents + $resolvedSettledStalledEvents + $resolvedAtomicPressureRecoveryEvents) | Where-Object {
+            @($progressEvents + $resolvedAtomicPressureRecoveryEvents) | Where-Object {
                 [int64]$_.Sequence -gt [int64]$stalled.Sequence -and
                 (Test-FileTransferRegularV4FrontierRepairLifecycleMatch -Source $stalled -Candidate $_)
             } | Sort-Object Sequence, LineNumber | Select-Object -First 1
         )
-        if ($resolution.Count -gt 0 -or
+        # Settlement callbacks may be logged after the exact atomic disposition
+        # already closed the contract.  The shared disposition correlator has
+        # proven that immutable chain, so chronology relative to the diagnostic
+        # stall callback is not an additional authority requirement.
+        $exactClosedDisposition = @($resolvedSettledStalledEvents | Where-Object {
+                (Test-FileTransferRegularV4FrontierRepairLifecycleMatch `
+                    -Source $stalled `
+                    -Candidate $_)
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($laterResolution.Count -gt 0 -or
+            $exactClosedDisposition.Count -gt 0 -or
             (Test-RegularV4FutureTailCaughtUp -Stall $stalled)) {
             $recovered.Add($stalled) | Out-Null
         }
