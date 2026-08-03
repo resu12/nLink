@@ -7383,6 +7383,8 @@ public sealed class FileTransferCoordinatorTests
     [Fact]
     public void RuntimeUnlockInitialActivationOfferEnvelopeRefresh_HeldReleaseCommitsOneExactSuccessorEnvelope()
     {
+        Assert.False(typeof(FileTransferReceiveRecoverySubstate).IsValueType);
+
         var fixture = CreateReceiveRecoveryOperationFixture();
         var authority =
             Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
@@ -9614,6 +9616,151 @@ public sealed class FileTransferCoordinatorTests
                 proofThenReceipt.State),
             FileTransferCoordinator.GetReceiveRecoverySubstate(
                 receiptThenProof.State));
+    }
+
+    [Fact]
+    public void FileTransferReceiveRecoveryFallbackCheckpoint_ChildPreservesRunningOperationAndConvergesAfterProof()
+    {
+        var fixture = CreateNonRegularV4ReceiveRecoveryOperationFixture();
+        var authority =
+            Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+                fixture.Decision.Authority);
+        var receipt = new FileTransferBridgeRecoveryExecutionReceipt(
+            authority.ExecutionCommand,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            "soft",
+            "bridge_recovery_completed");
+        var started = FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(
+            fixture.Decision.State,
+            new FileTransferBridgeRecoveryExecutionStartResult(
+                authority.ExecutionCommand,
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                "bridge_recovery_execution_started",
+                Task.FromResult(receipt)),
+            observedUtcMs: 10);
+        Assert.True(started.Accepted, started.Reason);
+
+        var leg = Assert.IsType<FileTransferLeg>(started.State.CurrentLeg);
+        var frame = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = started.State.SessionId,
+            TransferId = started.State.TransferId,
+            TransportEpoch = leg.TransportEpochId,
+            RepairRequestId = "v6-regular-nkn-state-refresh:1",
+            RequestCorrelationId =
+                $"receive-recovery-fallback-checkpoint:{authority.OperationGeneration}:v6-regular-nkn-state-refresh:1",
+            MissingRanges =
+            [
+                new FileTransferRangeV4
+                {
+                    StartChunkIndex = 7,
+                    ChunkCount = 1,
+                },
+            ],
+            Priority = "state_refresh",
+            RecoveryMode = "post_tuna_fallback_state_refresh",
+        };
+        Assert.True(
+            PostTunaFallbackPeerProofFrameIdentity.TryCreate(
+                frame,
+                out var frameIdentity));
+        var bindingRequest =
+            new FileTransferReceiveRecoveryFallbackCheckpointBindingRequest(
+                authority,
+                authority.Observation.CheckpointRequestId,
+                leg.CheckpointGeneration,
+                frame.RepairRequestId,
+                leg.CheckpointGeneration + 1,
+                frameIdentity,
+                frame.RequestCorrelationId,
+                "frng-checkpoint-child",
+                frame.Priority,
+                frame.TransportEpoch);
+        var fallback = FileTransferRouteResolver.Resolve(
+            FileTransferRoute.PostTunaFallbackV6);
+        var requested = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.FallbackCheckpointRequested,
+                fallback,
+                reason: "checkpoint_requested",
+                state: FileTransferLegState.CheckpointPending,
+                canSendData: false,
+                transportEpoch: frame.TransportEpoch,
+                checkpointRequestId: frame.RepairRequestId,
+                checkpointPriority: frame.Priority) with
+            {
+                ReceiveRecoveryFallbackCheckpointBindingRequest =
+                    bindingRequest,
+            },
+            started.State);
+
+        Assert.Null(requested.MutationRejectedReason);
+        var recovery = FileTransferCoordinator.GetReceiveRecoverySubstate(
+            requested.State);
+        Assert.Equal(
+            authority,
+            Assert.IsType<FileTransferReceiveRecoveryOperation>(
+                recovery.CurrentOperation).Authority);
+        var binding =
+            Assert.IsType<FileTransferReceiveRecoveryFallbackCheckpointBinding>(
+                recovery.CurrentFallbackCheckpointBinding);
+        Assert.Equal(
+            FileTransferReceiveRecoveryFallbackCheckpointBindingState.Pending,
+            binding.State);
+        var command =
+            Assert.IsType<FileTransferReceiveRecoveryFallbackCheckpointDeliveryCommand>(
+                requested.ReceiveRecoveryFallbackCheckpointDeliveryCommand);
+        var held = FileTransferCoordinator
+            .ApplyReceiveRecoveryFallbackCheckpointDeliveryReceipt(
+                requested.State,
+                new FileTransferReceiveRecoveryFallbackCheckpointDeliveryReceipt(
+                    command,
+                    FileTransferReceiveRecoveryFallbackCheckpointDeliveryState
+                        .Held,
+                    frameIdentity.Sha256,
+                    "submission_barrier_closed"));
+        Assert.True(held.Accepted, held.Reason);
+        Assert.Equal(
+            command,
+            FileTransferCoordinator.GetReceiveRecoverySubstate(held.State)
+                .PendingFallbackCheckpointDeliveryCommand);
+
+        var completed = FileTransferCoordinator
+            .ObserveReceiveRecoveryExecutionReceipt(
+                held.State,
+                receipt,
+                observedUtcMs: 20);
+        Assert.True(completed.Accepted, completed.Reason);
+        var proof = FileTransferCoordinator.ObserveReceiveRecoveryProof(
+            completed.State,
+            new FileTransferReceiveRecoveryProof(
+                authority,
+                "post-fallback-checkpoint-proof",
+                "receive_proof_observed",
+                21));
+        Assert.True(proof.Accepted, proof.Reason);
+        Assert.NotNull(
+            FileTransferCoordinator.GetReceiveRecoverySubstate(proof.State)
+                .CurrentOperation);
+
+        var accepted = AcceptFallbackCheckpoint(
+            proof.State,
+            fallback,
+            frame.RepairRequestId,
+            frame.TransportEpoch,
+            committedChunk: 7,
+            highestObservedChunk: 7);
+        var terminalRecovery = FileTransferCoordinator
+            .GetReceiveRecoverySubstate(accepted.State);
+        Assert.Null(terminalRecovery.CurrentOperation);
+        Assert.Equal(
+            authority,
+            Assert.IsType<FileTransferReceiveRecoveryOperation>(
+                terminalRecovery.LastTerminalOperation).Authority);
+        Assert.Equal(
+            FileTransferReceiveRecoveryFallbackCheckpointBindingState.Accepted,
+            Assert.IsType<FileTransferReceiveRecoveryFallbackCheckpointBinding>(
+                terminalRecovery.LastTerminalFallbackCheckpointBinding).State);
     }
 
     [Fact]
