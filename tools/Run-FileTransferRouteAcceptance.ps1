@@ -798,6 +798,10 @@ function Complete-RouteAcceptanceRunEvidence {
                     -ArtifactDir $artifactDir `
                     -AcceptanceRunId $script:RouteAcceptanceRunId `
                     -ScenarioRunId ([string]$attempt.ScenarioRunId)
+                $directManifestSha256 = if (-not [string]::IsNullOrWhiteSpace([string]$attemptFinalization.ManifestPath)) {
+                    Get-RouteAcceptanceEvidenceSha256 -Path ([string]$attemptFinalization.ManifestPath)
+                }
+                else { '' }
                 $artifactFinalized = [bool]$attemptFinalization.IsFinalized
                 $selectedRecord = if ($script:RouteAcceptanceSelectedScenarioAttempts.ContainsKey([string]$attempt.ScenarioName)) {
                     $script:RouteAcceptanceSelectedScenarioAttempts[[string]$attempt.ScenarioName]
@@ -831,7 +835,8 @@ function Complete-RouteAcceptanceRunEvidence {
                     -SelectionDisposition $selectionDisposition `
                     -LogLedgerPath $ledgerPath `
                     -AnalyzerDiagnosticsPath $diagnosticsPath `
-                    -AnalyzerInputPath $analyzerInputPath
+                    -AnalyzerInputPath $analyzerInputPath `
+                    -DirectManifestSha256 $directManifestSha256
             }
         )
 
@@ -854,7 +859,7 @@ function Complete-RouteAcceptanceRunEvidence {
             -FinalSnapshot $finalSnapshot `
             -ScenarioAttempts $scenarioEvidence
         $writeResult = Set-RouteAcceptanceEvidenceManifest -Path $manifestPath -Manifest $manifest
-        $validation = Test-RouteAcceptanceEvidenceManifestFile -Path $manifestPath
+        $validation = $writeResult.validation
         $script:RouteAcceptanceManifestPath = [System.IO.Path]::GetFullPath($manifestPath)
         $script:RouteAcceptanceManifestSha256 = [string]$writeResult.sha256
         $script:RouteAcceptanceEvidence = [pscustomobject]@{

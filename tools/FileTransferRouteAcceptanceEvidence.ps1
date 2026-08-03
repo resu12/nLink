@@ -1,5 +1,9 @@
 Set-StrictMode -Version Latest
 
+$script:RouteAcceptanceEvidencePhysicalSnapshotCache = @{}
+$script:RouteAcceptanceEvidencePhysicalSnapshotVisitCount = 0L
+$script:RouteAcceptanceEvidencePhysicalSnapshotCacheHitCount = 0L
+
 function Get-RouteAcceptanceEvidencePropertyValue {
     param(
         [AllowNull()]$Object,
@@ -121,26 +125,100 @@ function Get-RouteAcceptanceEvidenceTextSha256 {
     return Get-RouteAcceptanceEvidenceSha256Bytes -Bytes ([System.Text.Encoding]::UTF8.GetBytes($Value))
 }
 
-function Get-RouteAcceptanceEvidenceSha256 {
-    param([Parameter(Mandatory = $true)][string]$Path)
+function Get-RouteAcceptanceEvidencePhysicalSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$DirectManifestSha256 = ''
+    )
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw ("Route acceptance evidence file is missing: {0}" -f $Path)
     }
 
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $file = Get-Item -LiteralPath $fullPath
+    $baseCacheKey = '{0}|{1}|{2}' -f `
+        $fullPath.ToLowerInvariant(),
+        $file.Length,
+        $file.LastWriteTimeUtc.Ticks
+    $cacheKey = '{0}|{1}' -f `
+        $baseCacheKey,
+        ([string]$DirectManifestSha256).Trim().ToLowerInvariant()
+    if ($script:RouteAcceptanceEvidencePhysicalSnapshotCache.ContainsKey($cacheKey)) {
+        $script:RouteAcceptanceEvidencePhysicalSnapshotCacheHitCount++
+        return $script:RouteAcceptanceEvidencePhysicalSnapshotCache[$cacheKey]
+    }
+    if ($script:RouteAcceptanceEvidencePhysicalSnapshotCache.ContainsKey($baseCacheKey)) {
+        $script:RouteAcceptanceEvidencePhysicalSnapshotCacheHitCount++
+        $cachedSnapshot = $script:RouteAcceptanceEvidencePhysicalSnapshotCache[$baseCacheKey]
+        $script:RouteAcceptanceEvidencePhysicalSnapshotCache[$cacheKey] = $cachedSnapshot
+        return $cachedSnapshot
+    }
+
     $stream = [System.IO.File]::Open(
-        [System.IO.Path]::GetFullPath($Path),
+        $fullPath,
         [System.IO.FileMode]::Open,
         [System.IO.FileAccess]::Read,
         [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
     $sha = [System.Security.Cryptography.SHA256]::Create()
+    $buffer = [byte[]]::new(1024 * 1024)
+    $lineCount = 0L
+    $byteCount = 0L
+    $lastByte = -1
+    $hashBytes = $null
     try {
-        return ([System.BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLowerInvariant()
+        while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            [void]$sha.TransformBlock($buffer, 0, $read, $null, 0)
+            for ($index = 0; $index -lt $read; $index++) {
+                if ($buffer[$index] -eq 10) {
+                    $lineCount++
+                }
+            }
+            $lastByte = [int]$buffer[$read - 1]
+            $byteCount += $read
+        }
+        [void]$sha.TransformFinalBlock([byte[]]::new(0), 0, 0)
+        $hashBytes = $sha.Hash
     }
     finally {
         $sha.Dispose()
         $stream.Dispose()
     }
+
+    $currentFile = Get-Item -LiteralPath $fullPath
+    if ($currentFile.Length -ne $file.Length -or
+        $currentFile.LastWriteTimeUtc.Ticks -ne $file.LastWriteTimeUtc.Ticks) {
+        throw ("Route acceptance evidence file changed during physical validation: {0}" -f $fullPath)
+    }
+    if ($byteCount -gt 0 -and $lastByte -ne 10) {
+        $lineCount++
+    }
+
+    $script:RouteAcceptanceEvidencePhysicalSnapshotVisitCount++
+    $snapshot = [pscustomobject][ordered]@{
+        path = $fullPath
+        length = [long]$currentFile.Length
+        lastWriteUtcTicks = [long]$currentFile.LastWriteTimeUtc.Ticks
+        directManifestSha256 = ([string]$DirectManifestSha256).Trim().ToLowerInvariant()
+        sha256 = ([System.BitConverter]::ToString($hashBytes) -replace '-', '').ToLowerInvariant()
+        lineCount = $lineCount
+        physicalVisit = $script:RouteAcceptanceEvidencePhysicalSnapshotVisitCount
+    }
+    $script:RouteAcceptanceEvidencePhysicalSnapshotCache[$baseCacheKey] = $snapshot
+    $script:RouteAcceptanceEvidencePhysicalSnapshotCache[$cacheKey] = $snapshot
+    return $snapshot
+}
+
+function Get-RouteAcceptanceEvidenceSha256 {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$DirectManifestSha256 = ''
+    )
+
+    $snapshot = Get-RouteAcceptanceEvidencePhysicalSnapshot `
+        -Path $Path `
+        -DirectManifestSha256 $DirectManifestSha256
+    return [string]$snapshot.sha256
 }
 
 function Test-RouteAcceptanceEvidenceSha256Value {
@@ -356,17 +434,8 @@ function Get-RouteAcceptanceEvidenceWriterId {
 function Get-RouteAcceptanceEvidenceLineCount {
     param([Parameter(Mandatory = $true)][string]$Path)
 
-    $reader = [System.IO.File]::OpenText([System.IO.Path]::GetFullPath($Path))
-    $count = 0L
-    try {
-        while ($null -ne $reader.ReadLine()) {
-            $count++
-        }
-    }
-    finally {
-        $reader.Dispose()
-    }
-    return $count
+    $snapshot = Get-RouteAcceptanceEvidencePhysicalSnapshot -Path $Path
+    return [long]$snapshot.lineCount
 }
 
 function Get-RouteAcceptanceOperationalLogWriteFailureMarkerCount {
@@ -1274,6 +1343,7 @@ function Get-RouteAcceptanceScenarioEvidence {
         [Parameter(Mandatory = $true)][string]$LogLedgerPath,
         [Parameter(Mandatory = $true)][string]$AnalyzerDiagnosticsPath,
         [Parameter(Mandatory = $true)][string]$AnalyzerInputPath,
+        [string]$DirectManifestSha256 = '',
         [bool]$Selected = $true,
         [string]$SelectionDisposition = 'selected_finalized_attempt'
     )
@@ -1398,8 +1468,16 @@ function Get-RouteAcceptanceScenarioEvidence {
         analyzerInput = [pscustomobject][ordered]@{
             path = $resolvedAnalyzerInputPath
             exists = $analyzerInputExists
-            sha256 = if ($analyzerInputExists) { Get-RouteAcceptanceEvidenceSha256 -Path $resolvedAnalyzerInputPath } else { '' }
-            lineCount = if ($analyzerInputExists) { Get-RouteAcceptanceEvidenceLineCount -Path $resolvedAnalyzerInputPath } else { -1 }
+            sha256 = if ($analyzerInputExists) {
+                Get-RouteAcceptanceEvidenceSha256 -Path $resolvedAnalyzerInputPath -DirectManifestSha256 $DirectManifestSha256
+            }
+            else { '' }
+            lineCount = if ($analyzerInputExists) {
+                [long](Get-RouteAcceptanceEvidencePhysicalSnapshot `
+                    -Path $resolvedAnalyzerInputPath `
+                    -DirectManifestSha256 $DirectManifestSha256).lineCount
+            }
+            else { -1 }
             diagnosticsPath = $cursor.diagnosticsPath
             diagnosticsSha256 = $cursor.diagnosticsSha256
             eventCount = $cursor.eventCount
@@ -1597,6 +1675,8 @@ function Get-RouteAcceptanceEvidenceFinalizationTimeoutValidation {
 function Get-RouteAcceptanceEvidenceManifestValidation {
     param([Parameter(Mandatory = $true)]$Manifest)
 
+    $physicalVisitCountAtStart = $script:RouteAcceptanceEvidencePhysicalSnapshotVisitCount
+    $physicalCacheHitCountAtStart = $script:RouteAcceptanceEvidencePhysicalSnapshotCacheHitCount
     $structuralReasons = New-Object System.Collections.Generic.List[string]
     $provenanceReasons = New-Object System.Collections.Generic.List[string]
     $cursorReasons = New-Object System.Collections.Generic.List[string]
@@ -2152,6 +2232,9 @@ function Get-RouteAcceptanceEvidenceManifestValidation {
         structuralReasons = $structural
         provenanceReasons = $provenance
         cursorIntegrityReasons = $cursor
+        physicalArtifactVisitCount = $script:RouteAcceptanceEvidencePhysicalSnapshotVisitCount - $physicalVisitCountAtStart
+        physicalArtifactCacheHitCount = $script:RouteAcceptanceEvidencePhysicalSnapshotCacheHitCount - $physicalCacheHitCountAtStart
+        physicalArtifactCacheEntryCount = $script:RouteAcceptanceEvidencePhysicalSnapshotCache.Count
     }
 }
 

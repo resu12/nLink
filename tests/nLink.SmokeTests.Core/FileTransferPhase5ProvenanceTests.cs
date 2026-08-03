@@ -823,6 +823,39 @@ Assert-False (Test-RouteAcceptanceEvidenceGitCommitValue -Value ('a' * 39)) 'inv
         AssertScriptPassed(result);
     }
 
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task EvidencePhysicalSnapshot_HashAndLineCountShareOneVisitAndMutationRevalidates()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunEvidenceScriptAsync(
+            FixturePrelude +
+            """
+$path = Join-Path $script:EvidenceTempRoot 'physical-snapshot.log'
+[System.IO.File]::WriteAllText($path, "one`ntwo", [System.Text.UTF8Encoding]::new($false))
+$directManifestSha = ('a' * 64)
+$visitsBefore = $script:RouteAcceptanceEvidencePhysicalSnapshotVisitCount
+$first = Get-RouteAcceptanceEvidencePhysicalSnapshot -Path $path -DirectManifestSha256 $directManifestSha
+$hash = Get-RouteAcceptanceEvidenceSha256 -Path $path -DirectManifestSha256 $directManifestSha
+$lines = (Get-RouteAcceptanceEvidencePhysicalSnapshot -Path $path -DirectManifestSha256 $directManifestSha).lineCount
+Assert-Equal $first.sha256 $hash 'cached physical hash'
+Assert-Equal $lines 2 'cached physical line count'
+Assert-Equal ($script:RouteAcceptanceEvidencePhysicalSnapshotVisitCount - $visitsBefore) 1 'hash and line count share one physical visit'
+
+[System.IO.File]::AppendAllText($path, "`nthree", [System.Text.UTF8Encoding]::new($false))
+$second = Get-RouteAcceptanceEvidencePhysicalSnapshot -Path $path -DirectManifestSha256 $directManifestSha
+Assert-Equal $second.lineCount 3 'mutated line count'
+Assert-False ([string]::Equals($first.sha256, $second.sha256, [System.StringComparison]::OrdinalIgnoreCase)) 'mutation changes physical hash'
+Assert-Equal ($script:RouteAcceptanceEvidencePhysicalSnapshotVisitCount - $visitsBefore) 2 'mutation forces one revalidation'
+""");
+
+        AssertScriptPassed(result);
+    }
+
     private static async Task<ScriptResult> RunEvidenceScriptAsync(string script)
     {
         var helperPath = Path.Combine(FindRepoRoot(), "tools", "FileTransferRouteAcceptanceEvidence.ps1");
