@@ -13416,14 +13416,17 @@ public sealed partial class NknSignalingTransport
 
     private bool ApplyRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
         RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision,
-        string source)
+        string source,
+        RuntimeUnlockInitialActivationReceiveRecoveryFallbackCheckpointBinding?
+            fallbackCheckpointBinding = null)
     {
         if (decision.IsDefault)
         {
             return false;
         }
         if (!RuntimeUnlockInitialActivationReceiveRecoveryHoldDecisionMatchesRequest(
-                decision))
+                decision,
+                fallbackCheckpointBinding))
         {
             return false;
         }
@@ -13939,9 +13942,11 @@ public sealed partial class NknSignalingTransport
             $"event=runtime_unlock_initial_activation_receive_recovery_hold_answer_deadline_rebased; {FormatRuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(request)}; answer_deadline_utc_ms={rebasedDeadlineUtcMs}; decision_reason=same_generation_answer_window_resumed");
     }
 
-    private static bool
+    private bool
         RuntimeUnlockInitialActivationReceiveRecoveryHoldDecisionMatchesRequest(
-            RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision)
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision,
+            RuntimeUnlockInitialActivationReceiveRecoveryFallbackCheckpointBinding?
+                fallbackCheckpointBinding = null)
     {
         if (decision.ReceiveRecoveryOperation is not { } operation)
         {
@@ -13955,7 +13960,12 @@ public sealed partial class NknSignalingTransport
         var observation = authority.Observation;
         var publication = observation.RoutePublication;
         var expectedPublication = expected.SourcePublicationAuthority;
-        return expectedPublication is not null &&
+        if (expectedPublication is null)
+        {
+            return false;
+        }
+
+        var operationMatches =
                string.Equals(
                    request.SessionId,
                    observation.SessionId,
@@ -14017,6 +14027,45 @@ public sealed partial class NknSignalingTransport
                    expected.DataSessionIdentity,
                    StringComparison.Ordinal) &&
                observation.DataSessionGeneration ==
+                   expected.DataSessionGeneration;
+        if (!operationMatches ||
+            fallbackCheckpointBinding is not { } checkpointBinding)
+        {
+            return operationMatches;
+        }
+
+        if (checkpointBinding.IsDefault ||
+            checkpointBinding.ParentAuthorityId != authority.AuthorityId ||
+            checkpointBinding.ParentOperationGeneration !=
+                authority.OperationGeneration ||
+            !string.Equals(
+                checkpointBinding.ParentCheckpointRequestId,
+                expected.CheckpointRequestId,
+                StringComparison.Ordinal) ||
+            checkpointBinding.TransportEpoch != expected.TransportEpoch ||
+            !TryCaptureRuntimeUnlockInitialActivationReceiveRecoveryExpectedScope(
+                expectedPublication,
+                out var currentExpectedScope,
+                out _))
+        {
+            return false;
+        }
+
+        return currentExpectedScope.SourcePublicationAuthority ==
+                   expected.SourcePublicationAuthority &&
+               currentExpectedScope.TransportEpoch ==
+                   checkpointBinding.TransportEpoch &&
+               currentExpectedScope.BridgeRecoveryGeneration ==
+                   expected.BridgeRecoveryGeneration &&
+               string.Equals(
+                   currentExpectedScope.CheckpointRequestId,
+                   checkpointBinding.EffectiveCheckpointRequestId,
+                   StringComparison.Ordinal) &&
+               string.Equals(
+                   currentExpectedScope.DataSessionIdentity,
+                   expected.DataSessionIdentity,
+                   StringComparison.Ordinal) &&
+               currentExpectedScope.DataSessionGeneration ==
                    expected.DataSessionGeneration;
     }
 
@@ -14692,6 +14741,16 @@ public sealed partial class NknSignalingTransport
         => ApplyRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
             decision,
             "coordinator_transition");
+
+    bool IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge
+        .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision,
+            RuntimeUnlockInitialActivationReceiveRecoveryFallbackCheckpointBinding
+                fallbackCheckpointBinding)
+        => ApplyRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+            decision,
+            "coordinator_transition_checkpoint_child",
+            fallbackCheckpointBinding);
 
     event EventHandler<RuntimeUnlockRetryDispatchInitialEvaluationRequestedEventArgs>?
         IRuntimeUnlockRetryDispatchAuthorityBridge

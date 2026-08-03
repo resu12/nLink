@@ -1768,7 +1768,9 @@ internal sealed record FileTransferReceiveRecoveryProofStatePublicationSubstate(
     FileTransferReceiveRecoveryProofStatePublicationRecheckArm?
         PendingRecheckArm = null,
     FileTransferReceiveRecoveryProofStatePublicationRecheckEvidence?
-        LastRecheckEvidence = null)
+        LastRecheckEvidence = null,
+    FileTransferReceiveRecoveryFallbackCheckpointSubstate?
+        FallbackCheckpoint = null)
 {
     internal static
         FileTransferReceiveRecoveryProofStatePublicationSubstate Empty { get; }
@@ -1867,6 +1869,23 @@ internal sealed record FileTransferReceiveRecoveryFallbackCheckpointDeliveryRece
         string.IsNullOrWhiteSpace(Reason);
 }
 
+internal sealed record FileTransferReceiveRecoveryFallbackCheckpointSubstate(
+    FileTransferReceiveRecoveryFallbackCheckpointBinding?
+        CurrentBinding = null,
+    FileTransferReceiveRecoveryFallbackCheckpointBinding?
+        LastTerminalBinding = null,
+    FileTransferReceiveRecoveryFallbackCheckpointDeliveryCommand?
+        PendingDeliveryCommand = null,
+    FileTransferReceiveRecoveryFallbackCheckpointDeliveryReceipt?
+        LastDeliveryReceipt = null,
+    long LastBindingGeneration = 0,
+    long LastDeliveryGeneration = 0)
+{
+    internal static
+        FileTransferReceiveRecoveryFallbackCheckpointSubstate Empty { get; }
+        = new();
+}
+
 internal readonly record struct FileTransferReceiveRecoveryOperation(
     FileTransferReceiveRecoveryOperationAuthority Authority,
     FileTransferReceiveRecoveryExecutionState ExecutionState,
@@ -1938,18 +1957,42 @@ internal sealed record FileTransferReceiveRecoverySubstate(
         LastInitialActivationEnvelopeRefreshReceipt = null,
     long LastInitialActivationEnvelopeRefreshGeneration = 0,
     FileTransferReceiveRecoveryProofStatePublicationSubstate?
-        ProofStatePublication = null,
-    FileTransferReceiveRecoveryFallbackCheckpointBinding?
-        CurrentFallbackCheckpointBinding = null,
-    FileTransferReceiveRecoveryFallbackCheckpointBinding?
-        LastTerminalFallbackCheckpointBinding = null,
-    FileTransferReceiveRecoveryFallbackCheckpointDeliveryCommand?
-        PendingFallbackCheckpointDeliveryCommand = null,
-    FileTransferReceiveRecoveryFallbackCheckpointDeliveryReceipt?
-        LastFallbackCheckpointDeliveryReceipt = null,
-    long LastFallbackCheckpointBindingGeneration = 0,
-    long LastFallbackCheckpointDeliveryGeneration = 0)
+        ProofStatePublication = null)
 {
+    internal FileTransferReceiveRecoveryFallbackCheckpointBinding?
+        CurrentFallbackCheckpointBinding =>
+        (ProofStatePublication?.FallbackCheckpoint ??
+            FileTransferReceiveRecoveryFallbackCheckpointSubstate.Empty)
+        .CurrentBinding;
+
+    internal FileTransferReceiveRecoveryFallbackCheckpointBinding?
+        LastTerminalFallbackCheckpointBinding =>
+        (ProofStatePublication?.FallbackCheckpoint ??
+            FileTransferReceiveRecoveryFallbackCheckpointSubstate.Empty)
+        .LastTerminalBinding;
+
+    internal FileTransferReceiveRecoveryFallbackCheckpointDeliveryCommand?
+        PendingFallbackCheckpointDeliveryCommand =>
+        (ProofStatePublication?.FallbackCheckpoint ??
+            FileTransferReceiveRecoveryFallbackCheckpointSubstate.Empty)
+        .PendingDeliveryCommand;
+
+    internal FileTransferReceiveRecoveryFallbackCheckpointDeliveryReceipt?
+        LastFallbackCheckpointDeliveryReceipt =>
+        (ProofStatePublication?.FallbackCheckpoint ??
+            FileTransferReceiveRecoveryFallbackCheckpointSubstate.Empty)
+        .LastDeliveryReceipt;
+
+    internal long LastFallbackCheckpointBindingGeneration =>
+        (ProofStatePublication?.FallbackCheckpoint ??
+            FileTransferReceiveRecoveryFallbackCheckpointSubstate.Empty)
+        .LastBindingGeneration;
+
+    internal long LastFallbackCheckpointDeliveryGeneration =>
+        (ProofStatePublication?.FallbackCheckpoint ??
+            FileTransferReceiveRecoveryFallbackCheckpointSubstate.Empty)
+        .LastDeliveryGeneration;
+
     internal static FileTransferReceiveRecoverySubstate Empty { get; } = new();
 }
 
@@ -2370,9 +2413,7 @@ internal readonly record struct FileTransferCoordinatorEvent(
     FallbackTailYieldTransportEpochReauthorizationRequest?
         FallbackTailYieldTransportEpochReauthorizationRequest = null,
     FallbackTailYieldTransportEpochReauthorization?
-        FallbackTailYieldTransportEpochReauthorization = null,
-    FileTransferReceiveRecoveryFallbackCheckpointBindingRequest?
-        ReceiveRecoveryFallbackCheckpointBindingRequest = null);
+        FallbackTailYieldTransportEpochReauthorization = null);
 
 internal readonly record struct FileTransferCoordinatorActionRequest(
     FileTransferCoordinatorActionKind Kind,
@@ -6879,7 +6920,10 @@ internal static class FileTransferCoordinator
                     reason,
                     "filetransfer_route_transition_commit_required"),
             FileTransferCoordinatorEventKind.FallbackCheckpointRequested =>
-                MarkFallbackCheckpointRequested(coordinatorEvent, workingState, reason),
+                MarkFallbackCheckpointRequested(
+                    coordinatorEvent,
+                    workingState,
+                    reason),
             FileTransferCoordinatorEventKind.FallbackCheckpointAccepted =>
                 MarkFallbackCheckpointAccepted(coordinatorEvent, workingState, reason),
             FileTransferCoordinatorEventKind.FallbackCheckpointRetired =>
@@ -6931,6 +6975,60 @@ internal static class FileTransferCoordinator
         }
 
         return ForwardFallbackRoutePublicationAuthorityAfterLegMutation(state, decision, reason);
+    }
+
+    internal static FileTransferCoordinatorDecision
+        ApplyReceiveRecoveryFallbackCheckpointBinding(
+            FileTransferCoordinatorEvent coordinatorEvent,
+            FileTransferCoordinatorState state,
+            FileTransferReceiveRecoveryFallbackCheckpointBindingRequest
+                bindingRequest)
+    {
+        state = InvalidateFallbackTailYieldForDataSessionReplacement(state);
+        var reason = NormalizeReason(coordinatorEvent.Reason);
+        if (state.IsTerminal)
+        {
+            return MutationRejected(
+                state,
+                reason,
+                "terminal_state",
+                terminalMutationRejected: true);
+        }
+
+        if (coordinatorEvent.Kind !=
+            FileTransferCoordinatorEventKind.FallbackCheckpointRequested)
+        {
+            return MutationRejected(
+                state,
+                reason,
+                "fallback_checkpoint_child_binding_event_invalid");
+        }
+
+        var workingState = CloneCoordinatorStateGraph(state);
+        var decision = MarkFallbackCheckpointRequested(
+            coordinatorEvent,
+            workingState,
+            reason,
+            bindingRequest);
+        if (decision.TerminalMutationRejected ||
+            decision.MutationRejectedReason is not null)
+        {
+            decision = decision with
+            {
+                State = state,
+                StartedLiveRouteEpoch = null,
+                RecoveredLiveRouteEpoch = null,
+                StartedLeg = null,
+                FrozenLeg = null,
+                AcceptedCheckpointLeg = null,
+                MutatedLeg = null,
+            };
+        }
+
+        return ForwardFallbackRoutePublicationAuthorityAfterLegMutation(
+            state,
+            decision,
+            reason);
     }
 
     private static bool RequiresClonedCoordinatorGraph(FileTransferCoordinatorEventKind kind)
@@ -9130,19 +9228,6 @@ internal static class FileTransferCoordinator
                         Reason = invalidationReason,
                     }
                     : (RuntimeUnlockInitialActivationReceiveRecoveryHold?)null;
-            var terminalCheckpointBinding =
-                recoveryState.CurrentFallbackCheckpointBinding is
-                    { } currentCheckpointBinding &&
-                currentCheckpointBinding.ParentAuthority ==
-                    currentOperation.Authority
-                    ? currentCheckpointBinding with
-                    {
-                        State =
-                            FileTransferReceiveRecoveryFallbackCheckpointBindingState
-                                .Invalidated,
-                        Reason = invalidationReason,
-                    }
-                    : null;
             recoveryState = recoveryState with
             {
                 CurrentOperation = null,
@@ -9154,15 +9239,12 @@ internal static class FileTransferCoordinator
                 LastInitialActivationHold =
                     terminalOfferHold ??
                     recoveryState.LastInitialActivationHold,
-                CurrentFallbackCheckpointBinding =
-                    terminalCheckpointBinding is null
-                        ? recoveryState.CurrentFallbackCheckpointBinding
-                        : null,
-                LastTerminalFallbackCheckpointBinding =
-                    terminalCheckpointBinding ??
-                    recoveryState.LastTerminalFallbackCheckpointBinding,
-                PendingFallbackCheckpointDeliveryCommand = null,
             };
+            recoveryState =
+                InvalidateReceiveRecoveryFallbackCheckpointBinding(
+                    recoveryState,
+                    currentOperation.Authority,
+                    invalidationReason);
         }
 
         var retryLifecycleWithoutRepairRelease =
@@ -9182,6 +9264,38 @@ internal static class FileTransferCoordinator
             },
         };
         return invalidated;
+    }
+
+    private static FileTransferReceiveRecoverySubstate
+        InvalidateReceiveRecoveryFallbackCheckpointBinding(
+            in FileTransferReceiveRecoverySubstate recoveryState,
+            in FileTransferReceiveRecoveryOperationAuthority parentAuthority,
+            string invalidationReason)
+    {
+        var fallbackCheckpoint =
+            GetReceiveRecoveryFallbackCheckpointSubstate(recoveryState);
+        var terminalBinding = fallbackCheckpoint.CurrentBinding is
+                { } currentBinding &&
+            currentBinding.ParentAuthority == parentAuthority
+                ? currentBinding with
+                {
+                    State =
+                        FileTransferReceiveRecoveryFallbackCheckpointBindingState
+                            .Invalidated,
+                    Reason = invalidationReason,
+                }
+                : null;
+        return WithReceiveRecoveryFallbackCheckpointSubstate(
+            recoveryState,
+            fallbackCheckpoint with
+            {
+                CurrentBinding = terminalBinding is null
+                    ? fallbackCheckpoint.CurrentBinding
+                    : null,
+                LastTerminalBinding = terminalBinding ??
+                    fallbackCheckpoint.LastTerminalBinding,
+                PendingDeliveryCommand = null,
+            });
     }
 
     private static bool
@@ -15297,6 +15411,28 @@ internal static class FileTransferCoordinator
         GetReceiveRecoverySubstate(FileTransferCoordinatorState state)
         => state.PersistentState.FileTransferReceiveRecovery;
 
+    private static FileTransferReceiveRecoveryFallbackCheckpointSubstate
+        GetReceiveRecoveryFallbackCheckpointSubstate(
+            in FileTransferReceiveRecoverySubstate recoveryState)
+        => recoveryState.ProofStatePublication?.FallbackCheckpoint ??
+           FileTransferReceiveRecoveryFallbackCheckpointSubstate.Empty;
+
+    private static FileTransferReceiveRecoverySubstate
+        WithReceiveRecoveryFallbackCheckpointSubstate(
+            in FileTransferReceiveRecoverySubstate recoveryState,
+            FileTransferReceiveRecoveryFallbackCheckpointSubstate
+                fallbackCheckpoint)
+        => recoveryState with
+        {
+            ProofStatePublication =
+                (recoveryState.ProofStatePublication ??
+                 FileTransferReceiveRecoveryProofStatePublicationSubstate.Empty)
+                with
+                {
+                    FallbackCheckpoint = fallbackCheckpoint,
+                },
+        };
+
     internal static
         RuntimeUnlockInitialActivationReceiveRecoveryHoldCoordinatorDecision
         EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
@@ -16997,7 +17133,7 @@ internal static class FileTransferCoordinator
             LastTerminalOperation = keepCurrent
                 ? recoveryState.LastTerminalOperation
                 : completed,
-            ProofStatePublication = regularV4Closure
+            ProofStatePublication = regularV4Closure || checkpointChildPending
                 ? recoveryState.ProofStatePublication
                 : null,
             LastClosureGeneration = Math.Max(
@@ -17009,13 +17145,17 @@ internal static class FileTransferCoordinator
                 { } terminalCheckpointBinding &&
             terminalCheckpointBinding.ParentAuthority == current.Authority)
         {
-            nextRecoveryState = nextRecoveryState with
-            {
-                CurrentFallbackCheckpointBinding = null,
-                LastTerminalFallbackCheckpointBinding =
-                    terminalCheckpointBinding,
-                PendingFallbackCheckpointDeliveryCommand = null,
-            };
+            var fallbackCheckpoint =
+                GetReceiveRecoveryFallbackCheckpointSubstate(recoveryState);
+            nextRecoveryState =
+                WithReceiveRecoveryFallbackCheckpointSubstate(
+                    nextRecoveryState,
+                    fallbackCheckpoint with
+                    {
+                        CurrentBinding = null,
+                        LastTerminalBinding = terminalCheckpointBinding,
+                        PendingDeliveryCommand = null,
+                    });
         }
         var nextState = state with
         {
@@ -17889,20 +18029,26 @@ internal static class FileTransferCoordinator
             LastTerminalOperation = nonRegularCompletion
                 ? observed
                 : recoveryState.LastTerminalOperation,
-            ProofStatePublication = null,
+            ProofStatePublication = checkpointChildPending
+                ? recoveryState.ProofStatePublication
+                : null,
         };
         if (nonRegularCompletion &&
             recoveryState.CurrentFallbackCheckpointBinding is
                 { } terminalCheckpointBinding &&
             terminalCheckpointBinding.ParentAuthority == current.Authority)
         {
-            nextRecoveryState = nextRecoveryState with
-            {
-                CurrentFallbackCheckpointBinding = null,
-                LastTerminalFallbackCheckpointBinding =
-                    terminalCheckpointBinding,
-                PendingFallbackCheckpointDeliveryCommand = null,
-            };
+            var fallbackCheckpoint =
+                GetReceiveRecoveryFallbackCheckpointSubstate(recoveryState);
+            nextRecoveryState =
+                WithReceiveRecoveryFallbackCheckpointSubstate(
+                    nextRecoveryState,
+                    fallbackCheckpoint with
+                    {
+                        CurrentBinding = null,
+                        LastTerminalBinding = terminalCheckpointBinding,
+                        PendingDeliveryCommand = null,
+                    });
         }
         var nextState = state with
         {
@@ -20842,7 +20988,9 @@ internal static class FileTransferCoordinator
     private static FileTransferCoordinatorDecision MarkFallbackCheckpointRequested(
         FileTransferCoordinatorEvent coordinatorEvent,
         FileTransferCoordinatorState state,
-        string reason)
+        string reason,
+        FileTransferReceiveRecoveryFallbackCheckpointBindingRequest?
+            bindingRequest = null)
     {
         var leg = state.CurrentLeg;
         if (!IsCurrentPostTunaFallbackLeg(leg))
@@ -20882,8 +21030,6 @@ internal static class FileTransferCoordinator
                 "runtime_unlock_retry_scope_invalidation_required");
         }
 
-        var bindingRequest =
-            coordinatorEvent.ReceiveRecoveryFallbackCheckpointBindingRequest;
         if (bindingRequest is not null &&
             state.PersistentState.FileTransferReceiveRecovery is
             {
@@ -20999,20 +21145,22 @@ internal static class FileTransferCoordinator
                 new FileTransferReceiveRecoveryFallbackCheckpointDeliveryCommand(
                     binding,
                     deliveryGeneration);
+            var fallbackCheckpoint =
+                GetReceiveRecoveryFallbackCheckpointSubstate(recoveryState) with
+                {
+                    CurrentBinding = binding,
+                    PendingDeliveryCommand = deliveryCommand,
+                    LastBindingGeneration = bindingGeneration,
+                    LastDeliveryGeneration = deliveryGeneration,
+                };
             nextState = nextState with
             {
                 PersistentState = nextState.PersistentState with
                 {
-                    FileTransferReceiveRecovery = recoveryState with
-                    {
-                        CurrentFallbackCheckpointBinding = binding,
-                        PendingFallbackCheckpointDeliveryCommand =
-                            deliveryCommand,
-                        LastFallbackCheckpointBindingGeneration =
-                            bindingGeneration,
-                        LastFallbackCheckpointDeliveryGeneration =
-                            deliveryGeneration,
-                    },
+                    FileTransferReceiveRecovery =
+                        WithReceiveRecoveryFallbackCheckpointSubstate(
+                            recoveryState,
+                            fallbackCheckpoint),
                 },
             };
         }
@@ -21283,12 +21431,17 @@ internal static class FileTransferCoordinator
 
         var preservePending = receipt.State ==
             FileTransferReceiveRecoveryFallbackCheckpointDeliveryState.Held;
-        var nextRecoveryState = recoveryState with
-        {
-            PendingFallbackCheckpointDeliveryCommand =
-                preservePending ? pending : null,
-            LastFallbackCheckpointDeliveryReceipt = receipt,
-        };
+        var fallbackCheckpoint =
+            GetReceiveRecoveryFallbackCheckpointSubstate(recoveryState) with
+            {
+                PendingDeliveryCommand =
+                    preservePending ? pending : null,
+                LastDeliveryReceipt = receipt,
+            };
+        var nextRecoveryState =
+            WithReceiveRecoveryFallbackCheckpointSubstate(
+                recoveryState,
+                fallbackCheckpoint);
         var nextState = state with
         {
             PersistentState = state.PersistentState with
@@ -21543,28 +21696,34 @@ internal static class FileTransferCoordinator
                 FileTransferBridgeRecoveryExecutionOutcome.Completed &&
             operation.ReceiveProof is not null &&
             operation.Authority.RecoveryLivenessLease is null;
+        var fallbackCheckpoint =
+            GetReceiveRecoveryFallbackCheckpointSubstate(recoveryState) with
+            {
+                CurrentBinding = terminalizeParent ? null : advanced,
+                LastTerminalBinding = terminalizeParent
+                    ? advanced
+                    : recoveryState.LastTerminalFallbackCheckpointBinding,
+                PendingDeliveryCommand = terminalizeParent
+                    ? null
+                    : recoveryState
+                        .PendingFallbackCheckpointDeliveryCommand,
+            };
+        var nextRecoveryState = recoveryState with
+        {
+            CurrentOperation = terminalizeParent ? null : operation,
+            LastTerminalOperation = terminalizeParent
+                ? operation
+                : recoveryState.LastTerminalOperation,
+        };
+        nextRecoveryState =
+            WithReceiveRecoveryFallbackCheckpointSubstate(
+                nextRecoveryState,
+                fallbackCheckpoint);
         nextState = state with
         {
             PersistentState = state.PersistentState with
             {
-                FileTransferReceiveRecovery = recoveryState with
-                {
-                    CurrentOperation = terminalizeParent ? null : operation,
-                    LastTerminalOperation = terminalizeParent
-                        ? operation
-                        : recoveryState.LastTerminalOperation,
-                    CurrentFallbackCheckpointBinding = terminalizeParent
-                        ? null
-                        : advanced,
-                    LastTerminalFallbackCheckpointBinding = terminalizeParent
-                        ? advanced
-                        : recoveryState.LastTerminalFallbackCheckpointBinding,
-                    PendingFallbackCheckpointDeliveryCommand =
-                        terminalizeParent
-                            ? null
-                            : recoveryState
-                                .PendingFallbackCheckpointDeliveryCommand,
-                },
+                FileTransferReceiveRecovery = nextRecoveryState,
             },
         };
         return true;

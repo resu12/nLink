@@ -5285,6 +5285,9 @@ public sealed partial class SessionFileTransferService
                 context,
                 request,
                 "queue_state_refresh");
+            request = BindOutboundPostTunaFallbackStateRefreshCorrelationToReceiveRecoveryLocked(
+                context,
+                request);
 
             if (ShouldSuppressOutboundFallbackCheckpointSendForDeliveryRecoveryLocked(
                     context,
@@ -5847,6 +5850,8 @@ public sealed partial class SessionFileTransferService
         IFileTransferDataSession? requiredDataSession)
     {
         var retiredSendObserved = false;
+        FileTransferReceiveRecoveryFallbackCheckpointDeliveryCommand?
+            checkpointDeliveryCommand = null;
         try
         {
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(context.LifetimeCts.Token);
@@ -5886,8 +5891,28 @@ public sealed partial class SessionFileTransferService
                     return;
                 }
 
+                if (FileTransferCoordinator
+                    .TryGetReceiveRecoveryFallbackCheckpointDeliveryCommand(
+                        CreateCoordinatorStateLocked(context),
+                        out var currentCheckpointDeliveryCommand,
+                        out _) &&
+                    currentCheckpointDeliveryCommand.Binding.FrameIdentity
+                        .Matches(request))
+                {
+                    checkpointDeliveryCommand =
+                        currentCheckpointDeliveryCommand;
+                }
+                else if (IsV6RegularNknStateRefreshRequest(request) &&
+                         context.CoordinatorPersistentState
+                             .FileTransferReceiveRecovery
+                             .CurrentFallbackCheckpointBinding is not null)
+                {
+                    return;
+                }
+
                 if (ReferenceEquals(outboundTransfer, context) &&
                     !context.IsTerminal &&
+                    checkpointDeliveryCommand is null &&
                     ShouldUseFallbackControlPlaneForOutboundFrame(context, request))
                 {
                     controlPlaneRequest = CreateOutboundControlPlaneDeliveryRequestLocked(
@@ -5976,9 +6001,27 @@ public sealed partial class SessionFileTransferService
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_v6_regular_nkn_state_refresh_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; request_id={FormatProtocolLogValue(request.RepairRequestId)}; generation={sendGeneration}; reused_pending_checkpoint={(reusedPendingCheckpoint ? 1 : 0)}; transport_epoch={request.TransportEpoch}; remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; credit_until_chunk_index_exclusive={context.RemoteGrantedUntilExclusive}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}");
+            if (checkpointDeliveryCommand is not null)
+            {
+                ApplyOutboundReceiveRecoveryFallbackCheckpointDeliveryReceipt(
+                    context,
+                    checkpointDeliveryCommand,
+                    FileTransferReceiveRecoveryFallbackCheckpointDeliveryState
+                        .Delivered,
+                    "fallback_checkpoint_control_delivered");
+            }
         }
         catch (OperationCanceledException) when (!context.LifetimeCts.IsCancellationRequested)
         {
+            if (checkpointDeliveryCommand is not null &&
+                TryHoldOutboundReceiveRecoveryFallbackCheckpointDelivery(
+                    context,
+                    request,
+                    checkpointDeliveryCommand,
+                    "fallback_checkpoint_delivery_barrier_not_ready"))
+            {
+                return;
+            }
             if (requiredInstall is not null &&
                 !TryValidateOutboundSparseStateRefreshInstall(
                     context,
@@ -6043,6 +6086,15 @@ public sealed partial class SessionFileTransferService
         }
         catch (Exception ex)
         {
+            if (checkpointDeliveryCommand is not null &&
+                TryHoldOutboundReceiveRecoveryFallbackCheckpointDelivery(
+                    context,
+                    request,
+                    checkpointDeliveryCommand,
+                    "fallback_checkpoint_delivery_barrier_not_ready"))
+            {
+                return;
+            }
             if (requiredInstall is not null &&
                 !TryValidateOutboundSparseStateRefreshInstall(
                     context,
@@ -6130,6 +6182,119 @@ public sealed partial class SessionFileTransferService
                 }
             }
         }
+    }
+
+    private bool TryHoldOutboundReceiveRecoveryFallbackCheckpointDelivery(
+        OutboundTransferContext context,
+        FileTransferFrontierRequestFrameV6 request,
+        FileTransferReceiveRecoveryFallbackCheckpointDeliveryCommand command,
+        string reason)
+    {
+        lock (gate)
+        {
+            if (!ReferenceEquals(outboundTransfer, context) ||
+                context.IsTerminal ||
+                !FileTransferCoordinator
+                    .TryGetReceiveRecoveryFallbackCheckpointDeliveryCommand(
+                        CreateCoordinatorStateLocked(context),
+                        out var current,
+                        out _) ||
+                current != command)
+            {
+                return false;
+            }
+
+            if (!ApplyOutboundReceiveRecoveryFallbackCheckpointDeliveryReceiptLocked(
+                    context,
+                    command,
+                    FileTransferReceiveRecoveryFallbackCheckpointDeliveryState
+                        .Held,
+                    reason))
+            {
+                return false;
+            }
+
+            context.V6RegularNknDeferredStateRefreshRequest = request;
+            context.V6RegularNknDeferredStateRefreshReason = reason;
+            context.V6RegularNknDeferredStateRefreshCreatedUtc ??=
+                DateTimeOffset.UtcNow;
+            context.PullTransportResumeRequestPending = true;
+            return true;
+        }
+    }
+
+    private void ApplyOutboundReceiveRecoveryFallbackCheckpointDeliveryReceipt(
+        OutboundTransferContext context,
+        FileTransferReceiveRecoveryFallbackCheckpointDeliveryCommand command,
+        FileTransferReceiveRecoveryFallbackCheckpointDeliveryState state,
+        string reason)
+    {
+        lock (gate)
+        {
+            ApplyOutboundReceiveRecoveryFallbackCheckpointDeliveryReceiptLocked(
+                context,
+                command,
+                state,
+                reason);
+        }
+    }
+
+    private bool ApplyOutboundReceiveRecoveryFallbackCheckpointDeliveryReceiptLocked(
+        OutboundTransferContext context,
+        FileTransferReceiveRecoveryFallbackCheckpointDeliveryCommand command,
+        FileTransferReceiveRecoveryFallbackCheckpointDeliveryState state,
+        string reason)
+    {
+        if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
+        {
+            return false;
+        }
+
+        var receipt =
+            new FileTransferReceiveRecoveryFallbackCheckpointDeliveryReceipt(
+                command,
+                state,
+                command.Binding.FrameIdentity.Sha256,
+                reason);
+        var previousReceipt = context.CoordinatorPersistentState
+            .FileTransferReceiveRecovery
+            .LastFallbackCheckpointDeliveryReceipt;
+        var decision = FileTransferCoordinator
+            .ApplyReceiveRecoveryFallbackCheckpointDeliveryReceipt(
+                CreateCoordinatorStateLocked(context),
+                receipt);
+        if (decision.Status ==
+            FileTransferReceiveRecoveryTransitionStatus.Rejected)
+        {
+            return false;
+        }
+
+        context.CoordinatorPersistentState = decision.State.PersistentState;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; recovery_operation_authority_id={FormatProtocolLogValue(command.Binding.ParentAuthority.AuthorityId.ToString())}; recovery_operation_generation={command.Binding.ParentAuthority.OperationGeneration}; root_checkpoint_request_id={FormatProtocolLogValue(command.Binding.ParentCheckpointRequestId ?? "(none)")}; effective_checkpoint_request_id={FormatProtocolLogValue(command.Binding.EffectiveCheckpointRequestId)}; checkpoint_binding_generation={command.Binding.BindingGeneration}; checkpoint_delivery_generation={command.DeliveryGeneration}; frame_fingerprint={FormatProtocolLogValue(command.Binding.FrameIdentity.Sha256)}; delivery_state={state.ToString().ToLowerInvariant()}; decision_status={decision.Status.ToString().ToLowerInvariant()}; decision_reason={FormatProtocolLogValue(decision.Reason)}");
+        var lifecycleEvent = state switch
+        {
+            FileTransferReceiveRecoveryFallbackCheckpointDeliveryState.Held =>
+                "filetransfer_receive_recovery_fallback_checkpoint_delivery_held",
+            FileTransferReceiveRecoveryFallbackCheckpointDeliveryState.Delivered
+                when previousReceipt is
+                {
+                    State:
+                        FileTransferReceiveRecoveryFallbackCheckpointDeliveryState
+                            .Held,
+                } heldReceipt &&
+                heldReceipt.Command == command =>
+                "filetransfer_receive_recovery_fallback_checkpoint_delivery_resumed",
+            _ => null,
+        };
+        if (lifecycleEvent is not null)
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event={lifecycleEvent}; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; recovery_operation_authority_id={FormatProtocolLogValue(command.Binding.ParentAuthority.AuthorityId.ToString())}; recovery_operation_generation={command.Binding.ParentAuthority.OperationGeneration}; root_checkpoint_request_id={FormatProtocolLogValue(command.Binding.ParentCheckpointRequestId ?? "(none)")}; effective_checkpoint_request_id={FormatProtocolLogValue(command.Binding.EffectiveCheckpointRequestId)}; checkpoint_binding_generation={command.Binding.BindingGeneration}; checkpoint_delivery_generation={command.DeliveryGeneration}; frame_fingerprint={FormatProtocolLogValue(command.Binding.FrameIdentity.Sha256)}; physical_epoch={command.Binding.TransportEpoch}; hold_state={state.ToString().ToLowerInvariant()}; outcome={decision.Status.ToString().ToLowerInvariant()}; decision_reason={FormatProtocolLogValue(decision.Reason)}");
+        }
+        return true;
     }
 
     private bool TryRetireOutboundPostTunaFallbackStaleStateRefreshSendLocked(

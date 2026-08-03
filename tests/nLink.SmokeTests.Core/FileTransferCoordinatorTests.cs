@@ -1,3 +1,4 @@
+using System.Reflection;
 using NLink.Core.FileTransfer;
 
 namespace NLink.SmokeTests;
@@ -9678,7 +9679,8 @@ public sealed class FileTransferCoordinatorTests
                 frame.TransportEpoch);
         var fallback = FileTransferRouteResolver.Resolve(
             FileTransferRoute.PostTunaFallbackV6);
-        var requested = FileTransferCoordinator.Apply(
+        var requested = FileTransferCoordinator
+            .ApplyReceiveRecoveryFallbackCheckpointBinding(
             CoordinatorEvent(
                 FileTransferCoordinatorEventKind.FallbackCheckpointRequested,
                 fallback,
@@ -9687,12 +9689,9 @@ public sealed class FileTransferCoordinatorTests
                 canSendData: false,
                 transportEpoch: frame.TransportEpoch,
                 checkpointRequestId: frame.RepairRequestId,
-                checkpointPriority: frame.Priority) with
-            {
-                ReceiveRecoveryFallbackCheckpointBindingRequest =
-                    bindingRequest,
-            },
-            started.State);
+                checkpointPriority: frame.Priority),
+            started.State,
+            bindingRequest);
 
         Assert.Null(requested.MutationRejectedReason);
         var recovery = FileTransferCoordinator.GetReceiveRecoverySubstate(
@@ -9761,6 +9760,22 @@ public sealed class FileTransferCoordinatorTests
             FileTransferReceiveRecoveryFallbackCheckpointBindingState.Accepted,
             Assert.IsType<FileTransferReceiveRecoveryFallbackCheckpointBinding>(
                 terminalRecovery.LastTerminalFallbackCheckpointBinding).State);
+        var projectBinding = Assert.IsAssignableFrom<MethodInfo>(
+            typeof(SessionFileTransferService).GetMethod(
+                "FindReceiveRecoveryFallbackCheckpointBindingForDirective",
+                BindingFlags.Static | BindingFlags.NonPublic));
+        var projected = Assert.IsType<
+            RuntimeUnlockInitialActivationReceiveRecoveryFallbackCheckpointBinding>(
+                projectBinding.Invoke(
+                    null,
+                    [terminalRecovery, authority]));
+        Assert.Equal(authority.AuthorityId, projected.ParentAuthorityId);
+        Assert.Equal(
+            frame.RepairRequestId,
+            projected.EffectiveCheckpointRequestId);
+        Assert.Equal(
+            FileTransferReceiveRecoveryFallbackCheckpointBindingState.Accepted,
+            projected.State);
     }
 
     [Fact]

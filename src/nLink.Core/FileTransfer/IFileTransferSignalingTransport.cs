@@ -1963,6 +1963,27 @@ internal enum RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
 }
 
 internal readonly record struct
+    RuntimeUnlockInitialActivationReceiveRecoveryFallbackCheckpointBinding(
+        FileTransferAuthorityId ParentAuthorityId,
+        long ParentOperationGeneration,
+        string? ParentCheckpointRequestId,
+        string EffectiveCheckpointRequestId,
+        int EffectiveCheckpointGeneration,
+        long TransportEpoch,
+        FileTransferReceiveRecoveryFallbackCheckpointBindingState State)
+{
+    public bool IsDefault =>
+        ParentAuthorityId.IsDefault ||
+        ParentOperationGeneration <= 0 ||
+        string.IsNullOrWhiteSpace(EffectiveCheckpointRequestId) ||
+        EffectiveCheckpointGeneration <= 0 ||
+        TransportEpoch <= 0 ||
+        State ==
+            FileTransferReceiveRecoveryFallbackCheckpointBindingState
+                .Invalidated;
+}
+
+internal readonly record struct
     RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
         RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest Request,
         RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus Status,
@@ -2147,6 +2168,13 @@ internal interface IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge
 
     bool ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
         RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision);
+
+    bool ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision,
+        RuntimeUnlockInitialActivationReceiveRecoveryFallbackCheckpointBinding
+            fallbackCheckpointBinding)
+        => ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+            decision);
 }
 
 public interface IFileTransferSessionContextProvider
