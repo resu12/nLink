@@ -17943,6 +17943,91 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public void RuntimeUnlockResponderPeerProbe_ExactStartedAndAckedEvidenceSelectsAdoptionRoles()
+    {
+        var transportType = typeof(NknSignalingTransport);
+        var evidenceType = transportType.GetNestedType(
+            "RuntimeUnlockResponderPeerProbeHandoffEvidence",
+            BindingFlags.NonPublic)!;
+        var authorityModeType = transportType.GetNestedType(
+            "RuntimeUnlockOfferAuthorityMode",
+            BindingFlags.NonPublic)!;
+        var resolver = transportType.GetMethod(
+            "TryResolveRuntimeUnlockPreCommitProbeLaunchRole",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        var authorityMode = Enum.Parse(authorityModeType, "InitialActivation");
+
+        static RuntimeUnlockTransactionSnapshot CreateSnapshot(RuntimeUnlockPathProbeState state, long ackedUtcMs) => new(
+            SessionId: "session_responder_adoption",
+            TransferId: "transfer_responder_adoption",
+            TransactionGeneration: 3,
+            OfferGeneration: 7,
+            State: RuntimeUnlockTransactionState.RouteCommitPending,
+            CreatedUtcMs: 1,
+            UpdatedUtcMs: 2,
+            DeadlineUtcMs: 1000,
+            ListenerReady: true,
+            ListenerUnavailable: false,
+            ObservedSend: true,
+            ObservedLane: "peer_answer",
+            PeerReceived: true,
+            AnswerReceived: true,
+            PathProbeId: "probe-responder-adoption",
+            PathProbeState: state,
+            PathProbeTransport: FileTransferTransportKind.Tuna,
+            PathProbeAckedUtcMs: ackedUtcMs,
+            PathProbeFailureReason: null,
+            RouteCommitPending: true,
+            RouteCommitted: false,
+            FailureReason: null,
+            RetiredReason: null,
+            TunaPathLeaseGeneration: 5,
+            TunaPathLeaseState: RuntimeUnlockTunaPathLeaseState.ListenerReady,
+            TunaPathLeaseListenerRunId: "peer-offer-dialer-5",
+            TunaPathLeaseCurrent: true,
+            TunaPathLeaseFailureReason: null);
+
+        object CreateEvidence(RuntimeUnlockPathProbeState state, long ackedUtcMs, string probeId = "probe-responder-adoption") =>
+            Activator.CreateInstance(
+                evidenceType,
+                "session_responder_adoption",
+                "transfer_responder_adoption",
+                3L,
+                7L,
+                9L,
+                authorityMode,
+                4L,
+                "answer-ack-message",
+                "peer-fingerprint",
+                5L,
+                "peer-offer-dialer-5",
+                probeId,
+                state,
+                FileTransferTransportKind.Tuna,
+                ackedUtcMs)!;
+
+        foreach (var (state, ackedUtcMs, expectedRole) in new[]
+        {
+            (RuntimeUnlockPathProbeState.Started, 0L, "ResponderAdoptingStartedPeerProbe"),
+            (RuntimeUnlockPathProbeState.Acked, 123L, "ResponderAdoptingAckedPeerProbe"),
+        })
+        {
+            var args = new object?[] { CreateSnapshot(state, ackedUtcMs), CreateEvidence(state, ackedUtcMs), null };
+            Assert.True(Assert.IsType<bool>(resolver.Invoke(null, args)));
+            Assert.Equal(expectedRole, args[2]!.ToString());
+        }
+
+        var mutatedArgs = new object?[]
+        {
+            CreateSnapshot(RuntimeUnlockPathProbeState.Acked, 123L),
+            CreateEvidence(RuntimeUnlockPathProbeState.Acked, 123L, "mutated-probe"),
+            null,
+        };
+        Assert.False(Assert.IsType<bool>(resolver.Invoke(null, mutatedArgs)));
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task TransportAccelerationAnswerAck_RuntimeUnlockTimeoutSchedulesRuntimeUnlockRetry()
     {
         FakeNknClient.ResetNetwork();
