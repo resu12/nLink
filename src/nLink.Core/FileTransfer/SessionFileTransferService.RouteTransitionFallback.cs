@@ -112,6 +112,7 @@ public sealed partial class SessionFileTransferService
         OutboundTransferContext context,
         FileTransferDataFrame frame,
         string reason,
+        PostTunaFallbackPeerProofEvidence? coordinatorEvidence,
         out SessionFileTransferSnapshot? snapshot,
         out bool frameRetained)
     {
@@ -143,7 +144,7 @@ public sealed partial class SessionFileTransferService
                 current,
                 dataSession,
                 context.DataSessionGeneration,
-                evidence: null,
+                coordinatorEvidence,
                 frame,
                 reason,
                 out var merged,
@@ -263,6 +264,7 @@ public sealed partial class SessionFileTransferService
         InboundTransferContext context,
         FileTransferDataFrame frame,
         string reason,
+        PostTunaFallbackPeerProofEvidence? coordinatorEvidence,
         out SessionFileTransferSnapshot? snapshot,
         out bool frameRetained)
     {
@@ -294,7 +296,7 @@ public sealed partial class SessionFileTransferService
                 current,
                 dataSession,
                 context.DataSessionGeneration,
-                evidence: null,
+                coordinatorEvidence,
                 frame,
                 reason,
                 out var merged,

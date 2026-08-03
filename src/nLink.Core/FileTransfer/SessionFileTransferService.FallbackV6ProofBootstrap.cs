@@ -294,7 +294,17 @@ public sealed partial class SessionFileTransferService
             }
 
             outbound.CoordinatorPersistentState = decision.State.PersistentState;
-            snapshot = CreateSnapshotLocked();
+            if (receipt.Status == FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered &&
+                TryBindOutboundFallbackV6ProofBootstrapRetainedPeerFrameLocked(
+                    outbound,
+                    out var boundSnapshot))
+            {
+                snapshot = boundSnapshot ?? CreateSnapshotLocked();
+            }
+            else
+            {
+                snapshot = CreateSnapshotLocked();
+            }
             return true;
         }
 
@@ -313,11 +323,103 @@ public sealed partial class SessionFileTransferService
             }
 
             inbound.CoordinatorPersistentState = decision.State.PersistentState;
-            snapshot = CreateSnapshotLocked();
+            if (receipt.Status == FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered &&
+                TryBindInboundFallbackV6ProofBootstrapRetainedPeerFrameLocked(
+                    inbound,
+                    out var boundSnapshot))
+            {
+                snapshot = boundSnapshot ?? CreateSnapshotLocked();
+            }
+            else
+            {
+                snapshot = CreateSnapshotLocked();
+            }
             return true;
         }
 
         return false;
+    }
+
+    private bool TryBindOutboundFallbackV6ProofBootstrapRetainedPeerFrameLocked(
+        OutboundTransferContext context,
+        out SessionFileTransferSnapshot? snapshot)
+    {
+        snapshot = null;
+        if (!ReferenceEquals(outboundTransfer, context) ||
+            context.IsTerminal ||
+            context.DataSession is not { } dataSession ||
+            context.FileTransferRouteTransitionExecution?.RetainedPeerFrame is not
+                { } retainedFrame ||
+            !FileTransferCoordinator
+                .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerProofBoundary(
+                    CreateCoordinatorStateLocked(context),
+                    retainedFrame,
+                    out var boundary,
+                    out _))
+        {
+            return false;
+        }
+
+        var duplicate = context.FileTransferRouteTransitionExecution?.PeerProof ==
+            boundary.PeerProofEvidence;
+        if (!TryRetainOutboundFileTransferRouteTransitionPeerProofLocked(
+                context,
+                dataSession,
+                boundary.PeerProofEvidence,
+                "coordinator_fallback_v6_proof_bootstrap_peer_frame",
+                out snapshot))
+        {
+            return false;
+        }
+
+        LogFallbackV6ProofBootstrapPeerBoundaryBound(
+            boundary,
+            duplicate ? "Idempotent" : "Bound",
+            duplicate
+                ? "bootstrap_peer_frame_binding_duplicate"
+                : "bootstrap_peer_frame_bound_after_delivery");
+        return true;
+    }
+
+    private bool TryBindInboundFallbackV6ProofBootstrapRetainedPeerFrameLocked(
+        InboundTransferContext context,
+        out SessionFileTransferSnapshot? snapshot)
+    {
+        snapshot = null;
+        if (!ReferenceEquals(inboundTransfer, context) ||
+            context.IsTerminal ||
+            context.DataSession is not { } dataSession ||
+            context.FileTransferRouteTransitionExecution?.RetainedPeerFrame is not
+                { } retainedFrame ||
+            !FileTransferCoordinator
+                .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerProofBoundary(
+                    CreateCoordinatorStateLocked(context),
+                    retainedFrame,
+                    out var boundary,
+                    out _))
+        {
+            return false;
+        }
+
+        var duplicate = context.FileTransferRouteTransitionExecution?.PeerProof ==
+            boundary.PeerProofEvidence;
+        if (!TryRetainInboundFileTransferRouteTransitionPeerProofLocked(
+                context,
+                dataSession,
+                boundary.PeerProofEvidence,
+                "coordinator_fallback_v6_proof_bootstrap_peer_frame",
+                out snapshot))
+        {
+            return false;
+        }
+
+        LogFallbackV6ProofBootstrapPeerBoundaryBound(
+            boundary,
+            duplicate ? "Idempotent" : "Bound",
+            duplicate
+                ? "bootstrap_peer_frame_binding_duplicate"
+                : "bootstrap_peer_frame_bound_after_delivery");
+        return true;
     }
 
     private static FileTransferFallbackV6ProofBootstrapObservation

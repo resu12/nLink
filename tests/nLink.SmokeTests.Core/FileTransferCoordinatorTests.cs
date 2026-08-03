@@ -15759,6 +15759,14 @@ public sealed class FileTransferCoordinatorTests
                     out var pendingReason));
         Assert.Equal(outboundCommand, pendingBoundary);
         Assert.Equal("exact_bootstrap_boundary", pendingReason);
+        Assert.False(
+            FileTransferCoordinator
+                .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerProofBoundary(
+                    outbound.State,
+                    receiverState,
+                    out _,
+                    out var pendingProofReason));
+        Assert.Equal("bootstrap_local_delivery_pending", pendingProofReason);
         Assert.Equal(
             outboundCommand,
             FileTransferCoordinator
@@ -15781,6 +15789,14 @@ public sealed class FileTransferCoordinatorTests
                     out var heldReason));
         Assert.Equal(outboundCommand, heldBoundary);
         Assert.Equal("exact_bootstrap_boundary", heldReason);
+        Assert.False(
+            FileTransferCoordinator
+                .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerProofBoundary(
+                    held.State,
+                    receiverState,
+                    out _,
+                    out var heldProofReason));
+        Assert.Equal("bootstrap_local_delivery_pending", heldProofReason);
         Assert.Equal(
             "data_session_unavailable",
             FileTransferProtocol.GetFallbackV6ProofBootstrapReceiptReasonCode(
@@ -15805,6 +15821,28 @@ public sealed class FileTransferCoordinatorTests
                     out var deliveredReason));
         Assert.Equal(outboundCommand, deliveredBoundary);
         Assert.Equal("exact_bootstrap_boundary", deliveredReason);
+        Assert.True(
+            FileTransferCoordinator
+                .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerProofBoundary(
+                    delivered.State,
+                    receiverState,
+                    out var exactProofBoundary,
+                    out var exactProofReason));
+        Assert.Equal("exact_bootstrap_peer_proof_boundary", exactProofReason);
+        Assert.Equal(outboundCommand, exactProofBoundary.Command);
+        Assert.Equal(delivered.Receipt, exactProofBoundary.LocalDeliveryReceipt);
+        Assert.Equal(
+            PostTunaFallbackPeerProofFrameIdentity.Create(receiverState),
+            exactProofBoundary.PeerFrameIdentity);
+        Assert.Equal(
+            outboundCommand.BootstrapGeneration,
+            exactProofBoundary.PeerProofEvidence.ProofGeneration);
+        Assert.Equal(
+            "fallback_v6_proof_bootstrap_peer_frame",
+            exactProofBoundary.PeerProofEvidence.ProofKind);
+        Assert.Equal(
+            exactProofBoundary.PeerFrameIdentity,
+            exactProofBoundary.PeerProofEvidence.FrameIdentity);
         Assert.Equal(
             "delivered",
             FileTransferProtocol.GetFallbackV6ProofBootstrapReceiptReasonCode(

@@ -1168,6 +1168,36 @@ internal sealed record FileTransferFallbackV6ProofBootstrapReceipt(
          FrameIdentity is not { IsComplete: true });
 }
 
+internal sealed record FileTransferFallbackV6ProofBootstrapPeerBoundary(
+    FileTransferFallbackV6ProofBootstrapCommand Command,
+    FileTransferFallbackV6ProofBootstrapReceipt LocalDeliveryReceipt,
+    PostTunaFallbackPeerProofFrameIdentity PeerFrameIdentity,
+    PostTunaFallbackPeerProofEvidence PeerProofEvidence)
+{
+    public bool IsDefault =>
+        Command.IsDefault ||
+        LocalDeliveryReceipt is not
+        {
+            IsDefault: false,
+            Status: FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered,
+        } ||
+        LocalDeliveryReceipt.Command != Command ||
+        PeerFrameIdentity is not { IsComplete: true } ||
+        PeerProofEvidence is not { IsComplete: true, IsExactFrameBound: true } ||
+        PeerProofEvidence.FrameIdentity != PeerFrameIdentity ||
+        !string.Equals(
+            PeerProofEvidence.SessionId,
+            Command.Observation.SessionId,
+            StringComparison.Ordinal) ||
+        !string.Equals(
+            PeerProofEvidence.TransferId,
+            Command.Observation.TransferId,
+            StringComparison.Ordinal) ||
+        PeerProofEvidence.Direction != Command.Observation.Direction ||
+        PeerProofEvidence.ProofGeneration != Command.BootstrapGeneration ||
+        PeerProofEvidence.TransportEpoch != Command.TargetTransportEpoch;
+}
+
 internal enum FileTransferFallbackV6ProofBootstrapDecisionStatus
 {
     Issued,
@@ -5335,6 +5365,69 @@ internal static class FileTransferCoordinator
                 reasonCode = "peer_frame_kind_mismatch";
                 return false;
         }
+    }
+
+    internal static bool
+        TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerProofBoundary(
+            FileTransferCoordinatorState state,
+            FileTransferDataFrame peerFrame,
+            out FileTransferFallbackV6ProofBootstrapPeerBoundary boundary,
+            out string reasonCode)
+    {
+        boundary = null!;
+        if (!TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerBoundary(
+                state,
+                peerFrame,
+                out var command,
+                out reasonCode))
+        {
+            return false;
+        }
+
+        var receipt = state.PersistentState.FileTransferRouteTransition
+            .LastFallbackV6ProofBootstrapReceipt;
+        if (receipt is not
+            {
+                IsDefault: false,
+                Status: FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered,
+            } delivered ||
+            delivered.Command != command)
+        {
+            reasonCode = "bootstrap_local_delivery_pending";
+            return false;
+        }
+
+        if (!PostTunaFallbackPeerProofFrameIdentity.TryCreate(
+                peerFrame,
+                out var frameIdentity))
+        {
+            reasonCode = "peer_frame_identity_invalid";
+            return false;
+        }
+
+        var proof = new PostTunaFallbackPeerProofEvidence(
+            command.Observation.SessionId,
+            command.Observation.TransferId,
+            command.Observation.Direction,
+            command.BootstrapGeneration,
+            command.TargetTransportEpoch,
+            "fallback_v6_proof_bootstrap_peer_frame",
+            "coordinator_fallback_v6_proof_bootstrap_peer_frame",
+            frameIdentity);
+        boundary = new FileTransferFallbackV6ProofBootstrapPeerBoundary(
+            command,
+            delivered,
+            frameIdentity,
+            proof);
+        if (boundary.IsDefault)
+        {
+            boundary = null!;
+            reasonCode = "peer_proof_boundary_invalid";
+            return false;
+        }
+
+        reasonCode = "exact_bootstrap_peer_proof_boundary";
+        return true;
     }
 
     private static bool
