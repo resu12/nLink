@@ -22279,6 +22279,9 @@ public sealed partial class SessionFileTransferService :
         public FileTransferRouteTransitionExecutionShadow?
             FileTransferRouteTransitionExecution { get; set; }
 
+        public FileTransferDataFrame?
+            PendingFallbackV6ProofBootstrapPeerFrameEvidence { get; set; }
+
         public HashSet<string>
             FileTransferRouteTransitionCompatibilityProjectionKeys { get; } =
                 new(StringComparer.Ordinal);
@@ -23497,6 +23500,9 @@ public sealed partial class SessionFileTransferService :
 
         public FileTransferRouteTransitionExecutionShadow?
             FileTransferRouteTransitionExecution { get; set; }
+
+        public FileTransferDataFrame?
+            PendingFallbackV6ProofBootstrapPeerFrameEvidence { get; set; }
 
         public HashSet<string>
             FileTransferRouteTransitionCompatibilityProjectionKeys { get; } =

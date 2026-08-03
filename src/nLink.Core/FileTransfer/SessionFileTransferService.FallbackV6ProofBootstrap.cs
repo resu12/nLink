@@ -173,6 +173,9 @@ public sealed partial class SessionFileTransferService
 
             context.CoordinatorPersistentState = decision.State.PersistentState;
             command = issued;
+            TryAdmitOutboundStagedFallbackV6ProofBootstrapPeerFrameLocked(
+                context,
+                command);
             dataSession = currentDataSession;
             epochFrame = CreateFallbackV6ProofBootstrapEpochFrame(command);
             proofFrame = new FileTransferFrontierRequestFrameV6
@@ -240,6 +243,9 @@ public sealed partial class SessionFileTransferService
 
         inbound.CoordinatorPersistentState = inboundDecision.State.PersistentState;
         command = inboundCommand;
+        TryAdmitInboundStagedFallbackV6ProofBootstrapPeerFrameLocked(
+            inbound,
+            command);
         dataSession = inboundDataSession;
         epochFrame = CreateFallbackV6ProofBootstrapEpochFrame(command);
         proofFrame = new FileTransferReceiverStateFrameV6
@@ -420,6 +426,195 @@ public sealed partial class SessionFileTransferService
                 ? "bootstrap_peer_frame_binding_duplicate"
                 : "bootstrap_peer_frame_bound_after_delivery");
         return true;
+    }
+
+    private static bool TryStageOutboundFallbackV6ProofBootstrapPeerFrameLocked(
+        OutboundTransferContext context,
+        FileTransferDataFrame frame,
+        out string reason)
+    {
+        reason = "peer_frame_profile_mismatch";
+        if (!context.RouteRuntime.UsesFileTunaV4Runtime ||
+            context.FileTransferRouteTransitionExecution is not null ||
+            context.CoordinatorPersistentState.FileTransferRouteTransition
+                .CurrentOperation is not null ||
+            frame is not FileTransferReceiverStateFrameV6 receiverState ||
+            !FileTransferProtocol.IsFallbackV6ProofBootstrapReceiverState(
+                receiverState) ||
+            !PostTunaFallbackPeerProofFrameIdentity.TryCreate(
+                frame,
+                out var candidateIdentity))
+        {
+            return false;
+        }
+
+        if (context.PendingFallbackV6ProofBootstrapPeerFrameEvidence is
+            { } existing)
+        {
+            if (!PostTunaFallbackPeerProofFrameIdentity.TryCreate(
+                    existing,
+                    out var existingIdentity) ||
+                existingIdentity != candidateIdentity)
+            {
+                reason = "precommand_peer_frame_conflict";
+                return false;
+            }
+
+            reason = "precommand_peer_frame_duplicate";
+            return true;
+        }
+
+        context.PendingFallbackV6ProofBootstrapPeerFrameEvidence = frame;
+        reason = "precommand_peer_frame_staged";
+        return true;
+    }
+
+    private static bool TryStageInboundFallbackV6ProofBootstrapPeerFrameLocked(
+        InboundTransferContext context,
+        FileTransferDataFrame frame,
+        out string reason)
+    {
+        reason = "peer_frame_profile_mismatch";
+        if (!context.RouteRuntime.UsesFileTunaV4Runtime ||
+            context.FileTransferRouteTransitionExecution is not null ||
+            context.CoordinatorPersistentState.FileTransferRouteTransition
+                .CurrentOperation is not null ||
+            frame is not FileTransferFrontierRequestFrameV6 frontierRequest ||
+            !FileTransferProtocol.TryGetFallbackV6ProofBootstrapGeneration(
+                frontierRequest,
+                out _) ||
+            !PostTunaFallbackPeerProofFrameIdentity.TryCreate(
+                frame,
+                out var candidateIdentity))
+        {
+            return false;
+        }
+
+        if (context.PendingFallbackV6ProofBootstrapPeerFrameEvidence is
+            { } existing)
+        {
+            if (!PostTunaFallbackPeerProofFrameIdentity.TryCreate(
+                    existing,
+                    out var existingIdentity) ||
+                existingIdentity != candidateIdentity)
+            {
+                reason = "precommand_peer_frame_conflict";
+                return false;
+            }
+
+            reason = "precommand_peer_frame_duplicate";
+            return true;
+        }
+
+        context.PendingFallbackV6ProofBootstrapPeerFrameEvidence = frame;
+        reason = "precommand_peer_frame_staged";
+        return true;
+    }
+
+    private void TryAdmitOutboundStagedFallbackV6ProofBootstrapPeerFrameLocked(
+        OutboundTransferContext context,
+        FileTransferFallbackV6ProofBootstrapCommand command)
+    {
+        if (context.PendingFallbackV6ProofBootstrapPeerFrameEvidence is not
+            { } frame)
+        {
+            return;
+        }
+
+        var coordinatorState = CreateCoordinatorStateLocked(context);
+        if (!FileTransferCoordinator
+                .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerBoundary(
+                    coordinatorState,
+                    frame,
+                    out var currentCommand,
+                    out var reasonCode) ||
+            currentCommand != command)
+        {
+            context.PendingFallbackV6ProofBootstrapPeerFrameEvidence = null;
+            LogFallbackV6ProofBootstrapPeerFrameDecision(
+                context.SessionId,
+                context.TransferId,
+                FileTransferDirection.Outbound,
+                frame,
+                command,
+                "rejected",
+                reasonCode,
+                "none");
+            return;
+        }
+
+        var handled = TryRetainOutboundFileTransferRouteTransitionPeerFrameLocked(
+            context,
+            frame,
+            "coordinator_fallback_v6_proof_bootstrap_precommand_peer_frame",
+            coordinatorEvidence: null,
+            out _,
+            out var retained);
+        context.PendingFallbackV6ProofBootstrapPeerFrameEvidence = null;
+        LogFallbackV6ProofBootstrapPeerFrameDecision(
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            frame,
+            command,
+            handled && retained ? "accepted" : "rejected",
+            handled && retained
+                ? "precommand_peer_frame_admitted"
+                : "peer_frame_retention_rejected",
+            handled && retained ? "peer_frame_retention_only" : "none");
+    }
+
+    private void TryAdmitInboundStagedFallbackV6ProofBootstrapPeerFrameLocked(
+        InboundTransferContext context,
+        FileTransferFallbackV6ProofBootstrapCommand command)
+    {
+        if (context.PendingFallbackV6ProofBootstrapPeerFrameEvidence is not
+            { } frame)
+        {
+            return;
+        }
+
+        var coordinatorState = CreateCoordinatorStateLocked(context);
+        if (!FileTransferCoordinator
+                .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerBoundary(
+                    coordinatorState,
+                    frame,
+                    out var currentCommand,
+                    out var reasonCode) ||
+            currentCommand != command)
+        {
+            context.PendingFallbackV6ProofBootstrapPeerFrameEvidence = null;
+            LogFallbackV6ProofBootstrapPeerFrameDecision(
+                context.SessionId,
+                context.TransferId,
+                FileTransferDirection.Inbound,
+                frame,
+                command,
+                "rejected",
+                reasonCode,
+                "none");
+            return;
+        }
+
+        var handled = TryRetainInboundFileTransferRouteTransitionPeerFrameLocked(
+            context,
+            frame,
+            "coordinator_fallback_v6_proof_bootstrap_precommand_peer_frame",
+            coordinatorEvidence: null,
+            out _,
+            out var retained);
+        context.PendingFallbackV6ProofBootstrapPeerFrameEvidence = null;
+        LogFallbackV6ProofBootstrapPeerFrameDecision(
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            frame,
+            command,
+            handled && retained ? "accepted" : "rejected",
+            handled && retained
+                ? "precommand_peer_frame_admitted"
+                : "peer_frame_retention_rejected",
+            handled && retained ? "peer_frame_retention_only" : "none");
     }
 
     private static FileTransferFallbackV6ProofBootstrapObservation

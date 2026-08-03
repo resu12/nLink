@@ -304,6 +304,27 @@ public sealed partial class SessionFileTransferService
                 !IsFreshPostReactivationFallbackV6Proof(context, frame) &&
                 !bootstrapPeerBoundary)
             {
+                if (string.Equals(
+                        bootstrapReasonCode,
+                        "bootstrap_not_current",
+                        StringComparison.Ordinal) &&
+                    TryStageOutboundFallbackV6ProofBootstrapPeerFrameLocked(
+                        context,
+                        frame,
+                        out var stagingReason))
+                {
+                    LogFallbackV6ProofBootstrapPeerFrameDecision(
+                        context.SessionId,
+                        context.TransferId,
+                        FileTransferDirection.Outbound,
+                        frame,
+                        bootstrapCommand,
+                        "staged",
+                        stagingReason,
+                        "evidence_only");
+                    return true;
+                }
+
                 LogFallbackV6ProofBootstrapPeerFrameDecision(
                     context.SessionId,
                     context.TransferId,
@@ -431,6 +452,27 @@ public sealed partial class SessionFileTransferService
                 !IsFreshPostReactivationFallbackV6Proof(context, frame) &&
                 !bootstrapPeerBoundary)
             {
+                if (string.Equals(
+                        bootstrapReasonCode,
+                        "bootstrap_not_current",
+                        StringComparison.Ordinal) &&
+                    TryStageInboundFallbackV6ProofBootstrapPeerFrameLocked(
+                        context,
+                        frame,
+                        out var stagingReason))
+                {
+                    LogFallbackV6ProofBootstrapPeerFrameDecision(
+                        context.SessionId,
+                        context.TransferId,
+                        FileTransferDirection.Inbound,
+                        frame,
+                        bootstrapCommand,
+                        "staged",
+                        stagingReason,
+                        "evidence_only");
+                    return true;
+                }
+
                 LogFallbackV6ProofBootstrapPeerFrameDecision(
                     context.SessionId,
                     context.TransferId,

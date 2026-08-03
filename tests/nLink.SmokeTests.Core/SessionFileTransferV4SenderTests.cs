@@ -8534,6 +8534,189 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "FileTransferRouteTransition")]
+    public void FileTunaV4_ExactBootstrapPeerRequestBeforeLocalCommand_IsStagedUntilDelivered()
+    {
+        const string transferId =
+            "transfer_file_tuna_v4_bootstrap_peer_request_before_command";
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        var context = CreateFileTunaV4InboundContext(transferId);
+        SetPrivateProperty(context, "V4StateEpoch", 1);
+        SetPrivateProperty(
+            context,
+            "V4LastStateDurableHighestChunkIndex",
+            99);
+        serviceType
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var createState = serviceType
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(method =>
+                method.Name == "CreateCoordinatorStateLocked" &&
+                method.GetParameters()[0].ParameterType == context.GetType());
+        var state = Assert.IsType<FileTransferCoordinatorState>(
+            createState.Invoke(null, [context]));
+        var createCheckpoint = serviceType
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(method =>
+                method.Name ==
+                    "CreateInboundFileTransferRouteTransitionCheckpoint" &&
+                method.GetParameters()[0].ParameterType == context.GetType());
+        var checkpoint = Assert.IsType<FileTransferRouteTransitionDurableCheckpoint>(
+            createCheckpoint.Invoke(
+                null,
+                [context,
+                 state.CurrentRuntimeOwner!.Value,
+                 state.CurrentRoutePublicationToken!.Value,
+                 state.CurrentLeg!]));
+        var issued =
+            FileTransferCoordinator.IssueFileTransferFallbackV6ProofBootstrap(
+                state,
+                new FileTransferFallbackV6ProofBootstrapObservation(
+                    state.SessionId,
+                    state.TransferId,
+                    FileTransferDirection.Inbound,
+                    ObservationGeneration: 1,
+                    FallbackEpoch: 1,
+                    Source: "test_precommand_peer_frame",
+                    ProofKind: "file_transfer_v4_frontier_request_received",
+                    ObservedUtcMilliseconds:
+                        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    checkpoint));
+        var command = Assert.IsType<
+            FileTransferFallbackV6ProofBootstrapCommand>(issued.Command);
+        var recoveredEpoch = new LiveRouteEpoch
+        {
+            EpochId = state.CurrentLiveRouteEpoch!.EpochId,
+            RouteSelection = state.RouteSelection,
+            HandoffKind =
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+            TargetTransport = FileTransferTransportKind.Tuna,
+            Reason = "test_precommand_peer_frame",
+            State = "recovered",
+        };
+        SetPrivateProperty(context, "CurrentLiveRouteEpoch", recoveredEpoch);
+        SetPrivateProperty(
+            context,
+            "LastRecoveredV6TransportEpoch",
+            command.TargetTransportEpoch + 1);
+        SetPrivateProperty(
+            context,
+            "LastRecoveredV6TransportEpochKind",
+            FileTransferTransportHandoffKind.NormalToTunaActivation);
+        SetPrivateProperty(
+            context,
+            "LastRecoveredV6TransportTargetTransport",
+            FileTransferTransportKind.Tuna);
+
+        var peerRequest = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = state.SessionId,
+            TransferId = state.TransferId,
+            TransportEpoch = command.TargetTransportEpoch,
+            RequestCorrelationId =
+                FileTransferProtocol.CreateFallbackV6ProofBootstrapCorrelationId(
+                    command.BootstrapGeneration),
+            MissingRanges = [],
+            Priority = FileTransferProtocol.FallbackV6ProofBootstrapPriority,
+            RecoveryMode =
+                FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
+        };
+        var promote = serviceType.GetMethod(
+            "TryPromoteInboundFileTunaV4FallbackFromPeerV6Proof",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var logStart = GetOperationalLogLength();
+
+        Assert.True((bool)promote.Invoke(
+            service,
+            [context, peerRequest, null])!);
+        Assert.Same(
+            peerRequest,
+            GetPrivatePropertyValue(
+                context,
+                "PendingFallbackV6ProofBootstrapPeerFrameEvidence"));
+        Assert.Null(
+            GetPrivatePropertyValue(
+                context,
+                "FileTransferRouteTransitionExecution"));
+
+        Assert.Equal(peerRequest.TransportEpoch, command.TargetTransportEpoch);
+        SetPrivateProperty(
+            context,
+            "CoordinatorPersistentState",
+            issued.State.PersistentState);
+        serviceType.GetMethod(
+                "TryAdmitInboundStagedFallbackV6ProofBootstrapPeerFrameLocked",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, command]);
+
+        Assert.Null(
+            GetPrivatePropertyValue(
+                context,
+                "PendingFallbackV6ProofBootstrapPeerFrameEvidence"));
+        var retainedExecution = GetPrivatePropertyValue(
+            context,
+            "FileTransferRouteTransitionExecution");
+        Assert.NotNull(retainedExecution);
+        Assert.Same(
+            peerRequest,
+            GetPrivatePropertyValue(retainedExecution, "RetainedPeerFrame"));
+        Assert.Null(GetPrivatePropertyValue(retainedExecution, "PeerProof"));
+
+        var localState = new FileTransferReceiverStateFrameV6
+        {
+            SessionId = state.SessionId,
+            TransferId = state.TransferId,
+            Epoch = 2,
+            ContiguousCommittedChunkIndex = checkpoint.ContiguousCommittedChunkIndex,
+            DurableReceivedHighestChunkIndex = checkpoint.DurableHighestChunkIndex,
+            CreditUntilChunkIndexExclusive = checkpoint.ContiguousCommittedChunkIndex,
+            MissingRanges = [],
+            BytesCommitted = 0,
+            TransferPaused = true,
+            TransferPauseReason =
+                FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
+            TransportEpoch = command.TargetTransportEpoch,
+            Priority = FileTransferProtocol.FallbackV6ProofBootstrapPriority,
+            RecoveryMode =
+                FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
+        };
+        var receipt = new FileTransferFallbackV6ProofBootstrapReceipt(
+            command,
+            FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered,
+            PostTunaFallbackPeerProofFrameIdentity.Create(localState),
+            "filetransfer_fallback_v6_proof_bootstrap_delivered");
+        object?[] receiptArgs = [command, receipt, null];
+        Assert.True((bool)serviceType.GetMethod(
+                "TryApplyFallbackV6ProofBootstrapReceiptLocked",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, receiptArgs)!);
+
+        retainedExecution = GetPrivatePropertyValue(
+            context,
+            "FileTransferRouteTransitionExecution");
+        Assert.NotNull(retainedExecution);
+        var proof = Assert.IsType<PostTunaFallbackPeerProofEvidence>(
+            GetPrivatePropertyValue(retainedExecution, "PeerProof"));
+        Assert.Equal(command.BootstrapGeneration, proof.ProofGeneration);
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains(
+            "decision_status=staged; reason_code=precommand_peer_frame_staged; authority_effect=evidence_only",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "reason_code=precommand_peer_frame_admitted; authority_effect=peer_frame_retention_only",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "event=filetransfer_route_transition_prepared;",
+            log,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void FileTunaV4_FreshFallbackV6ReceiverStateAfterReactivationPromotes()
     {
         const string transferId = "transfer_file_tuna_v4_fresh_fallback_v6_proof_after_reactivation";
