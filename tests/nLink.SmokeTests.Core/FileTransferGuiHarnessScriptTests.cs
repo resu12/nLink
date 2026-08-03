@@ -1055,7 +1055,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     -ArtifactDir $successArtifact `
                     -ExePath 'unused.exe' `
                     -TimeoutSeconds 1
-                if ($completed.TimedOut -or [int]$completed.ExitCode -ne 0) {
+                if ($completed.TimedOut -or
+                    ($completed.ExitCodeAvailable -and [int]$completed.ExitCode -ne 0) -or
+                    (-not $completed.ExitCodeAvailable -and [int]$completed.ExitCode -ne -1)) {
                     throw "natural child exit lost the timeout race: $($completed | ConvertTo-Json -Compress)"
                 }
                 if (Test-Path -LiteralPath (Join-Path $successArtifact 'filetransfer-gui-evidence-finalization-timeout.json')) {
@@ -1064,7 +1066,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $successState = Get-Content -LiteralPath (Join-Path $successArtifact 'filetransfer-gui-evidence-finalization-state.json') -Raw | ConvertFrom-Json
                 if ($successState.lastCompletedStage -ne 'gui_child_exited' -or
                     $successState.timedOut -or
-                    [int]$successState.exitCode -ne 0) {
+                    [bool]$successState.exitCodeAvailable -ne [bool]$completed.ExitCodeAvailable -or
+                    [int]$successState.exitCode -ne [int]$completed.ExitCode) {
                     throw "natural child state was invalid: $($successState | ConvertTo-Json -Compress)"
                 }
 
@@ -4940,11 +4943,14 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("Get-RouteAcceptanceEvidenceSha256 -Path $directManifestPath", completionBody, StringComparison.Ordinal);
 
         var wrapperMain = wrapperText[wrapperText.IndexOf("$guiSmokeResult = Invoke-TunaGuiSmokeWithHardDeadline", StringComparison.Ordinal)..];
-        var minimalSummaryCheckpoint = wrapperMain.IndexOf("$summaryMissingAfterGuiChild", StringComparison.Ordinal);
+        var minimalSummaryCheckpoint = wrapperMain.IndexOf("$summaryMissingFromChild", StringComparison.Ordinal);
         var directManifestCheckpoint = wrapperMain.IndexOf("Write-TunaGuiDirectEvidenceManifest", StringComparison.Ordinal);
         var retainedAnalysis = wrapperMain.IndexOf("Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort", StringComparison.Ordinal);
         Assert.True(minimalSummaryCheckpoint >= 0 && minimalSummaryCheckpoint < retainedAnalysis);
         Assert.True(directManifestCheckpoint >= 0 && directManifestCheckpoint < retainedAnalysis);
+        Assert.Contains("$summaryCurrentValid", wrapperMain, StringComparison.Ordinal);
+        Assert.DoesNotContain("$summaryMissingAfterGuiChild", wrapperMain, StringComparison.Ordinal);
+        Assert.Contains("guiExitCodeAvailable", wrapperText, StringComparison.Ordinal);
         Assert.Contains("retainedAnalysisCompleted", wrapperText, StringComparison.Ordinal);
         Assert.Contains("retainedAnalysisStatus", wrapperText, StringComparison.Ordinal);
     }

@@ -339,6 +339,7 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
             lastCompletedStage = 'gui_child_starting'
             timedOut = $false
             exitCode = $null
+            exitCodeAvailable = $false
             updatedUtc = [DateTimeOffset]::UtcNow.ToString('O')
         }
         Write-TunaGuiAtomicJson -Path $statePath -Value $state
@@ -460,6 +461,7 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
                 captureSha256 = $captureSha256
                 captureLineCount = $captureLineCount
                 exitCode = 124
+                exitCodeAvailable = $true
                 reason = 'gui_evidence_finalization_hard_deadline_exceeded'
             }
             Write-TunaGuiAtomicJson -Path $timeoutPath -Value $timeout
@@ -487,16 +489,32 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
                 captureLineCount = $captureLineCount
                 timedOut = $true
                 exitCode = 124
+                exitCodeAvailable = $true
                 updatedUtc = $endedUtc.ToString('O')
             }
             Write-TunaGuiAtomicJson -Path $statePath -Value $state
             return [pscustomobject]@{
                 ExitCode = 124
+                ExitCodeAvailable = $true
                 TimedOut = $true
             }
         }
 
         $process.WaitForExit()
+        $process.Refresh()
+        $exitCode = -1
+        $exitCodeAvailable = $false
+        try {
+            $capturedExitCode = $process.ExitCode
+            if ($process.HasExited -and $null -ne $capturedExitCode) {
+                $exitCode = [int]$capturedExitCode
+                $exitCodeAvailable = $true
+            }
+        }
+        catch {
+            $exitCode = -1
+            $exitCodeAvailable = $false
+        }
         $endedUtc = [DateTimeOffset]::UtcNow
         $capturePath = ''
         $captureSha256 = ''
@@ -544,12 +562,14 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
             captureSha256 = $captureSha256
             captureLineCount = $captureLineCount
             timedOut = $false
-            exitCode = $process.ExitCode
+            exitCode = $exitCode
+            exitCodeAvailable = $exitCodeAvailable
             updatedUtc = $endedUtc.ToString('O')
         }
         Write-TunaGuiAtomicJson -Path $statePath -Value $state
         return [pscustomobject]@{
-            ExitCode = [int]$process.ExitCode
+            ExitCode = $exitCode
+            ExitCodeAvailable = $exitCodeAvailable
             TimedOut = $false
         }
     }
@@ -1635,7 +1655,8 @@ function Write-TunaGuiDirectEvidenceManifest {
         [Parameter(Mandatory = $true)][string]$RepoRoot,
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
         [AllowEmptyString()][string]$ExePath = '',
-        [int]$GuiExitCode = -1
+        [int]$GuiExitCode = -1,
+        [bool]$GuiExitCodeAvailable = $false
     )
 
     if ([string]::IsNullOrWhiteSpace($ArtifactDir) -or -not (Test-Path -LiteralPath $ArtifactDir -PathType Container)) {
@@ -1749,6 +1770,7 @@ function Write-TunaGuiDirectEvidenceManifest {
         sourceCommit = $sourceCommit.Trim()
         sourceDirty = $sourceDirty
         guiExitCode = $GuiExitCode
+        guiExitCodeAvailable = $GuiExitCodeAvailable
         routeMode = $RouteMode
         payloadSize = $PayloadSize
         direction = $Direction
@@ -1781,6 +1803,7 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $resolvedArtifactDir = ''
 $resolvedExe = ''
 $guiSmokeExitCode = -1
+$guiSmokeExitCodeAvailable = $false
 Push-Location $repoRoot
 try {
     if ([string]::IsNullOrWhiteSpace($WalletPassword)) {
@@ -1903,10 +1926,18 @@ try {
         -ArtifactDir $resolvedArtifactDir `
         -ExePath $resolvedExe `
         -TimeoutSeconds $TimeoutSeconds
-    $guiSmokeExitCode = [int]$guiSmokeResult.ExitCode
+    $guiSmokeExitCodeAvailable = $null -ne $guiSmokeResult -and
+        $guiSmokeResult.PSObject.Properties.Name -contains 'ExitCodeAvailable' -and
+        [bool]$guiSmokeResult.ExitCodeAvailable
+    $guiSmokeExitCode = if ($guiSmokeExitCodeAvailable -and $null -ne $guiSmokeResult.ExitCode) {
+        [int]$guiSmokeResult.ExitCode
+    }
+    else {
+        -1
+    }
     $summaryPath = Join-Path $resolvedArtifactDir 'filetransfer-tuna-gui-summary.json'
-    $summaryMissingAfterGuiChild = -not (Test-Path -LiteralPath $summaryPath -PathType Leaf)
-    if ($summaryMissingAfterGuiChild) {
+    $summaryMissingFromChild = -not (Test-Path -LiteralPath $summaryPath -PathType Leaf)
+    if ($summaryMissingFromChild) {
         if ($RouteMode -eq 'v4-restart-v6-fallback') {
             Write-TunaGuiControlledRestartFailureSummary -ArtifactDir $resolvedArtifactDir -RouteMode $RouteMode
         }
@@ -1920,11 +1951,29 @@ try {
                 -SetupFailureReason $summaryFailureReason
         }
     }
+    $summary = $null
+    $summaryCurrentValid = $false
+    if (Test-Path -LiteralPath $summaryPath -PathType Leaf) {
+        try {
+            $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+            $summaryCurrentValid = $null -ne $summary -and
+                $summary.PSObject.Properties.Name -contains 'event' -and
+                [string]::Equals(
+                    [string]$summary.event,
+                    'filetransfer_tuna_gui_handoff_summary',
+                    [System.StringComparison]::Ordinal)
+        }
+        catch {
+            $summary = $null
+            $summaryCurrentValid = $false
+        }
+    }
     Write-TunaGuiDirectEvidenceManifest `
         -RepoRoot $repoRoot `
         -ArtifactDir $resolvedArtifactDir `
         -ExePath $resolvedExe `
-        -GuiExitCode $guiSmokeExitCode
+        -GuiExitCode $guiSmokeExitCode `
+        -GuiExitCodeAvailable $guiSmokeExitCodeAvailable
 
     if ([bool]$guiSmokeResult.TimedOut) {
         Write-Error "GUI smoke evidence finalization timed out with exit code 124. Artifacts: $resolvedArtifactDir" -ErrorAction Continue
@@ -1942,7 +1991,7 @@ try {
         throw "GUI smoke failed with exit code $guiSmokeExitCode. Artifacts: $resolvedArtifactDir"
     }
 
-    if ($summaryMissingAfterGuiChild) {
+    if (-not $summaryCurrentValid) {
         if ($RouteMode -eq 'v4-restart-v6-fallback') {
             Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir
         }
@@ -1953,7 +2002,6 @@ try {
         throw "GUI smoke did not write file-transfer Tuna summary. Artifacts: $resolvedArtifactDir"
     }
 
-    $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
     if ($RouteMode -eq 'v4-restart-v6-fallback') {
         $slices = Select-TunaGuiControlledRestartLogSlices -ArtifactDir $resolvedArtifactDir
         if (-not [string]::IsNullOrWhiteSpace([string]$slices.SetupPath)) {
@@ -1996,7 +2044,8 @@ finally {
                 -RepoRoot $repoRoot `
                 -ArtifactDir $resolvedArtifactDir `
                 -ExePath $resolvedExe `
-                -GuiExitCode $guiSmokeExitCode
+                -GuiExitCode $guiSmokeExitCode `
+                -GuiExitCodeAvailable $guiSmokeExitCodeAvailable
         }
         catch {
             Write-Warning "Failed to write direct Tuna GUI evidence manifest: $($_.Exception.Message)"
