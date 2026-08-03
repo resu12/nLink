@@ -16389,6 +16389,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_precommit_probe_start_handoff_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffMissingRecoveredCount),
         ("runtime_unlock_precommit_probe_start_handoff_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffMissingUnresolvedCount),
         ("runtime_unlock_precommit_probe_start_handoff_verdict={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffVerdict),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingRawCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingDistinctCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingRecoveredCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_verdict={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffVerdict),
         ("runtime_unlock_precommit_probe_delivery_result_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeDeliveryResultCount),
         ("runtime_unlock_tuna_probe_sent_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSentCount),
         ("runtime_unlock_tuna_probe_received_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeReceivedCount),
@@ -40700,6 +40705,271 @@ function Get-FileTransferRuntimeUnlockPreCommitProbeStartHandoffCorrelation {
     }
 }
 
+function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
+    param([AllowEmptyCollection()][object[]]$Events = @())
+
+    [object[]]$orderedEvents = @($Events | Where-Object { $null -ne $_ } | Sort-Object Sequence, LineNumber)
+
+    function Get-ResponderProbeField {
+        param($Event, [string[]]$Names)
+        foreach ($name in $Names) {
+            $value = Get-FileTransferEventField -Event $Event -Name $name -Default ''
+            if (-not [string]::IsNullOrWhiteSpace($value) -and $value -notin @('(none)', 'none')) {
+                return $value
+            }
+        }
+        return ''
+    }
+
+    function Test-ResponderProbeFieldEqual {
+        param($Left, $Right, [string[]]$Names, [switch]$OptionalRight)
+        $leftValue = Get-ResponderProbeField -Event $Left -Names $Names
+        $rightValue = Get-ResponderProbeField -Event $Right -Names $Names
+        if ($OptionalRight -and
+            ([string]::IsNullOrWhiteSpace($leftValue) -or [string]::IsNullOrWhiteSpace($rightValue))) {
+            return $true
+        }
+        return -not [string]::IsNullOrWhiteSpace($leftValue) -and
+            -not [string]::IsNullOrWhiteSpace($rightValue) -and
+            [string]::Equals($leftValue, $rightValue, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+
+    function Test-ResponderLocalTupleMatch {
+        param($Boundary, $Candidate)
+        foreach ($names in @(
+                @('log_writer_id'),
+                @('session_id'),
+                @('transaction_generation'),
+                @('offer_generation'))) {
+            if (-not (Test-ResponderProbeFieldEqual -Left $Boundary -Right $Candidate -Names $names)) {
+                return $false
+            }
+        }
+        foreach ($names in @(
+                @('transfer_id'),
+                @('tuna_path_lease_generation', 'path_lease_generation'),
+                @('tuna_path_lease_listener_run_id', 'path_lease_listener_run_id'))) {
+            if (-not (Test-ResponderProbeFieldEqual -Left $Boundary -Right $Candidate -Names $names -OptionalRight)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    function Test-ResponderProbeIdentityMatch {
+        param($PathProbe, $Candidate)
+        foreach ($names in @(
+                @('log_writer_id'),
+                @('session_id'),
+                @('probe_id', 'path_probe_id'),
+                @('tuna_path_lease_generation', 'path_lease_generation'))) {
+            if (-not (Test-ResponderProbeFieldEqual -Left $PathProbe -Right $Candidate -Names $names)) {
+                return $false
+            }
+        }
+        foreach ($names in @(@('transfer_id'), @('direction'))) {
+            if (-not (Test-ResponderProbeFieldEqual -Left $PathProbe -Right $Candidate -Names $names -OptionalRight)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    [object[]]$pendingBoundaries = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_runtime_unlock_handoff_pending_route_commit' -and
+        (Get-FileTransferEventField -Event $_ -Name 'state' -Default '') -ieq 'routecommitpending' -and
+        (Get-FileTransferEventField -Event $_ -Name 'path_probe_state' -Default '') -ieq 'acked' -and
+        (Get-FileTransferEventField -Event $_ -Name 'route_commit_pending' -Default '0') -eq '1' -and
+        (Get-FileTransferEventField -Event $_ -Name 'route_committed' -Default '0') -eq '0'
+    })
+    [object[]]$transactionAnswers = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_transaction_answer_received' -and
+        (Get-FileTransferEventField -Event $_ -Name 'answer_received' -Default '0') -eq '1' -and
+        (Get-FileTransferEventField -Event $_ -Name 'tuna_path_lease_current' -Default '0') -eq '1'
+    })
+    [object[]]$pathProbeAcks = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_transaction_path_probe_acked' -and
+        (Get-FileTransferEventField -Event $_ -Name 'path_probe_state' -Default '') -ieq 'acked' -and
+        (Get-FileTransferEventField -Event $_ -Name 'path_probe_transport' -Default '') -ieq 'tuna' -and
+        [int64](Get-FileTransferEventField -Event $_ -Name 'path_probe_acked_utc_ms' -Default '0') -gt 0
+    })
+    [object[]]$coreProbeAcks = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_precommit_probe_acked' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -ieq 'inbound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'probe_state' -Default '') -ieq 'acked' -and
+        (Get-FileTransferEventField -Event $_ -Name 'received_transport' -Default '') -ieq 'tuna' -and
+        (Get-FileTransferEventField -Event $_ -Name 'launch_generation' -Default '0') -eq '0'
+    })
+    [object[]]$pendingAnswerAcks = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_answer_ack_pending'
+    })
+    [object[]]$acceptedAnswerAcks = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_answer_ack_received'
+    })
+    [object[]]$answerAckBarriers = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_answer_ack_probe_barrier_received'
+    })
+    [object[]]$launches = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_precommit_probe_launch_requested' -and
+        [int64](Get-FileTransferEventField -Event $_ -Name 'launch_generation' -Default '0') -gt 0 -and
+        (Get-FileTransferEventField -Event $_ -Name 'tuple_mutation' -Default '0') -eq '0' -and
+        ((Get-FileTransferEventField -Event $_ -Name 'launch_role' -Default '') -like 'Responder*' -or
+            (Get-FileTransferEventField -Event $_ -Name 'peer_probe_adoption' -Default '0') -eq '1')
+    })
+    [object[]]$boundLaunches = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_precommit_responder_peer_probe_handoff_bound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'status' -Default '') -in @('Accepted', 'Idempotent')
+    })
+    [object[]]$prepared = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_prepared' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -ieq 'inbound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'transition_kind' -Default '') -eq 'RegularV4ToTunaV4'
+    })
+    [object[]]$draining = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_draining' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -ieq 'inbound'
+    })
+    [object[]]$committed = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_committed' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -ieq 'inbound'
+    })
+    [object[]]$dispositions = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_disposition_applied' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -ieq 'inbound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default (
+            Get-FileTransferEventField -Event $_ -Name 'apply_status' -Default '')) -in @('Applied', 'applied', 'Idempotent', 'idempotent')
+    })
+
+    $rawCandidates = New-Object System.Collections.Generic.List[object]
+    $records = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    foreach ($boundary in $pendingBoundaries) {
+        [object[]]$localAnswers = @($transactionAnswers | Where-Object {
+            [int64]$_.Sequence -lt [int64]$boundary.Sequence -and
+            (Test-ResponderLocalTupleMatch -Boundary $boundary -Candidate $_)
+        } | Sort-Object Sequence, LineNumber -Descending)
+        [object[]]$localAcks = @($pathProbeAcks | Where-Object {
+            [int64]$_.Sequence -lt [int64]$boundary.Sequence -and
+            (Test-ResponderLocalTupleMatch -Boundary $boundary -Candidate $_)
+        } | Sort-Object Sequence, LineNumber -Descending)
+        if ($localAnswers.Count -eq 0 -or $localAcks.Count -eq 0) {
+            continue
+        }
+        $pathProbeAck = $localAcks[0]
+        [object[]]$matchingCoreAcks = @($coreProbeAcks | Where-Object {
+            [int64]$_.Sequence -le [int64]$boundary.Sequence -and
+            (Test-ResponderProbeIdentityMatch -PathProbe $pathProbeAck -Candidate $_)
+        })
+        if ($matchingCoreAcks.Count -eq 0) {
+            continue
+        }
+
+        $writer = Get-ResponderProbeField -Event $boundary -Names @('log_writer_id')
+        $sessionId = Get-ResponderProbeField -Event $boundary -Names @('session_id')
+        $offerGeneration = Get-ResponderProbeField -Event $boundary -Names @('offer_generation')
+        [object[]]$pending = @($pendingAnswerAcks | Where-Object {
+            [int64]$_.Sequence -lt [int64]$boundary.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-ResponderProbeField -Event $_ -Names @('generation', 'offer_generation')) -eq $offerGeneration
+        } | Sort-Object Sequence, LineNumber -Descending)
+        if ($pending.Count -eq 0) {
+            continue
+        }
+        $payer = Get-ResponderProbeField -Event $pending[0] -Names @('payer_decision_id')
+        [object[]]$accepted = @($acceptedAnswerAcks | Where-Object {
+            [int64]$_.Sequence -gt [int64]$pathProbeAck.Sequence -and
+            [int64]$_.Sequence -lt [int64]$boundary.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-ResponderProbeField -Event $_ -Names @('payer_decision_id')) -eq $payer
+        })
+        [object[]]$barriers = @($answerAckBarriers | Where-Object {
+            [int64]$_.Sequence -gt [int64]$pathProbeAck.Sequence -and
+            [int64]$_.Sequence -lt [int64]$boundary.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-ResponderProbeField -Event $_ -Names @('payer_decision_id')) -eq $payer
+        })
+        if ($accepted.Count -eq 0 -or $barriers.Count -eq 0) {
+            continue
+        }
+
+        $rawCandidates.Add($boundary) | Out-Null
+        $key = (@(
+            $writer,
+            $sessionId,
+            (Get-ResponderProbeField -Event $boundary -Names @('transaction_generation')),
+            $offerGeneration,
+            (Get-ResponderProbeField -Event $pathProbeAck -Names @('tuna_path_lease_generation', 'path_lease_generation')),
+            (Get-ResponderProbeField -Event $pathProbeAck -Names @('probe_id', 'path_probe_id'))
+        )) -join '|'
+        if ($seen.ContainsKey($key)) {
+            continue
+        }
+        $seen[$key] = $true
+
+        [object[]]$matchingLaunches = @($launches + $boundLaunches | Where-Object {
+            [int64]$_.Sequence -gt [int64]$boundary.Sequence -and
+            (Test-ResponderLocalTupleMatch -Boundary $boundary -Candidate $_) -and
+            (Test-ResponderProbeIdentityMatch -PathProbe $pathProbeAck -Candidate $_)
+        } | Sort-Object Sequence, LineNumber)
+        $recovered = $false
+        foreach ($launch in $matchingLaunches) {
+            $launchGeneration = Get-ResponderProbeField -Event $launch -Names @('launch_generation')
+            [object[]]$matchingPrepared = @($prepared | Where-Object {
+                [int64]$_.Sequence -gt [int64]$launch.Sequence -and
+                (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+                (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $sessionId -and
+                (Get-ResponderProbeField -Event $_ -Names @('transaction_generation')) -eq
+                    (Get-ResponderProbeField -Event $boundary -Names @('transaction_generation')) -and
+                (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -eq $offerGeneration -and
+                (Get-ResponderProbeField -Event $_ -Names @('launch_generation')) -eq $launchGeneration
+            } | Sort-Object Sequence, LineNumber)
+            foreach ($prepare in $matchingPrepared) {
+                $authority = Get-ResponderProbeField -Event $prepare -Names @('authority_id')
+                $transitionGeneration = Get-ResponderProbeField -Event $prepare -Names @('transition_generation')
+                $hasDrain = @($draining | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$prepare.Sequence -and
+                    (Get-ResponderProbeField -Event $_ -Names @('authority_id')) -eq $authority -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -eq $transitionGeneration
+                }).Count -gt 0
+                $matchingCommit = @($committed | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$prepare.Sequence -and
+                    (Get-ResponderProbeField -Event $_ -Names @('authority_id')) -eq $authority -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -eq $transitionGeneration
+                } | Select-Object -First 1)
+                $hasDisposition = $matchingCommit.Count -gt 0 -and @($dispositions | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$matchingCommit[0].Sequence -and
+                    (Get-ResponderProbeField -Event $_ -Names @('authority_id')) -eq $authority -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -eq $transitionGeneration
+                }).Count -gt 0
+                if ($hasDrain -and $matchingCommit.Count -gt 0 -and $hasDisposition) {
+                    $recovered = $true
+                    break
+                }
+            }
+            if ($recovered) { break }
+        }
+        $records.Add([pscustomobject]@{ Event = $boundary; Recovered = $recovered }) | Out-Null
+    }
+
+    [object[]]$distinct = @($records.ToArray() | ForEach-Object { $_.Event })
+    [object[]]$recoveredEvents = @($records.ToArray() | Where-Object { $_.Recovered } | ForEach-Object { $_.Event })
+    [object[]]$unresolved = @($records.ToArray() | Where-Object { -not $_.Recovered } | ForEach-Object { $_.Event })
+    return [pscustomobject]@{
+        RawCount = $rawCandidates.Count
+        DistinctCount = $distinct.Count
+        RecoveredCount = $recoveredEvents.Count
+        UnresolvedCount = $unresolved.Count
+        Verdict = if ($unresolved.Count -gt 0) { 'fail' } elseif ($distinct.Count -gt 0) { 'pass' } else { 'none' }
+        RawCandidateEvents = @($rawCandidates.ToArray())
+        DistinctCandidateEvents = $distinct
+        RecoveredCandidateEvents = $recoveredEvents
+        UnresolvedCandidateEvents = $unresolved
+    }
+}
+
 function Get-FileTransferRuntimeUnlockRetryDispatchAuthorityTupleMismatchCorrelation {
     param(
         [AllowEmptyCollection()][object[]]$Events = @(),
@@ -40992,6 +41262,8 @@ function Get-FileTransferRecoveryFailureClassification {
             -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents
     $runtimeUnlockPreCommitProbeStartHandoffProof =
         Get-FileTransferRuntimeUnlockPreCommitProbeStartHandoffCorrelation -Events $events
+    $runtimeUnlockResponderPeerProbeHandoffProof =
+        Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation -Events $events
     $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof =
         Get-FileTransferRuntimeUnlockRegularV4RecoveryLeaseCorrelation `
             -Events $legacyRuntimeUnlockRegularV4RecoveryLeaseEvents `
@@ -44448,6 +44720,12 @@ function Get-FileTransferRecoveryFailureClassification {
         -UseDefaultReason
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing' `
+        -Events @($runtimeUnlockResponderPeerProbeHandoffProof.UnresolvedCandidateEvents) `
+        -DefaultReason 'late_answer_ack_did_not_bind_acked_peer_probe_to_responder_route_transition' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_retry_dispatch_missing_after_authority_granted' `
         -Events $runtimeUnlockRetryDispatchUnsettledMissingAfterAuthorityGrantedEvents
 
@@ -44834,6 +45112,9 @@ function Get-FileTransferRecoveryFailureClassification {
     elseif ($fileTransferRouteTransitionDrainingTransportGraceProof.UnresolvedCount -gt 0) {
         $class =
             'filetransfer_route_transition_draining_transport_grace_terminalization'
+    }
+    elseif ($runtimeUnlockResponderPeerProbeHandoffProof.UnresolvedCount -gt 0) {
+        $class = 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing'
     }
     elseif ($fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingDistinctCount -gt 0) {
         $class =
@@ -45295,6 +45576,7 @@ function Get-FileTransferRecoveryFailureClassification {
                 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired',
                 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired',
                 'runtime_unlock_precommit_probe_start_handoff_missing',
+                'runtime_unlock_responder_acked_probe_route_transition_handoff_missing',
                 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing',
                 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed',
                 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound',
@@ -45577,6 +45859,11 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockPreCommitProbeStartHandoffMissingRecoveredCount = $runtimeUnlockPreCommitProbeStartHandoffProof.RecoveredCount
         RuntimeUnlockPreCommitProbeStartHandoffMissingUnresolvedCount = $runtimeUnlockPreCommitProbeStartHandoffProof.UnresolvedCount
         RuntimeUnlockPreCommitProbeStartHandoffVerdict = $runtimeUnlockPreCommitProbeStartHandoffProof.Verdict
+        RuntimeUnlockResponderPeerProbeHandoffMissingRawCount = $runtimeUnlockResponderPeerProbeHandoffProof.RawCount
+        RuntimeUnlockResponderPeerProbeHandoffMissingDistinctCount = $runtimeUnlockResponderPeerProbeHandoffProof.DistinctCount
+        RuntimeUnlockResponderPeerProbeHandoffMissingRecoveredCount = $runtimeUnlockResponderPeerProbeHandoffProof.RecoveredCount
+        RuntimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount = $runtimeUnlockResponderPeerProbeHandoffProof.UnresolvedCount
+        RuntimeUnlockResponderPeerProbeHandoffVerdict = $runtimeUnlockResponderPeerProbeHandoffProof.Verdict
         RuntimeUnlockTunaProbeSentCount = $runtimeUnlockTunaProbeSentEvents.Count
         RuntimeUnlockTunaProbeReceivedCount = $runtimeUnlockTunaProbeReceivedEvents.Count
         RuntimeUnlockTunaProbeAckSentCount = $runtimeUnlockTunaProbeAckSentEvents.Count
@@ -46434,6 +46721,11 @@ function New-FileTransferInvariantLedgerObject {
         runtime_unlock_precommit_probe_start_handoff_missing_recovered_count = [string]$recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffMissingRecoveredCount
         runtime_unlock_precommit_probe_start_handoff_missing_unresolved_count = [string]$recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffMissingUnresolvedCount
         runtime_unlock_precommit_probe_start_handoff_verdict = $recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffVerdict
+        runtime_unlock_responder_acked_probe_route_transition_handoff_missing_raw_count = [string]$recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingRawCount
+        runtime_unlock_responder_acked_probe_route_transition_handoff_missing_distinct_count = [string]$recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingDistinctCount
+        runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count = [string]$recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingRecoveredCount
+        runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count = [string]$recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount
+        runtime_unlock_responder_acked_probe_route_transition_handoff_verdict = $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffVerdict
         runtime_unlock_retry_dispatch_chain_closure_proof_verdict = $recoveryClassification.RuntimeUnlockRetryDispatchChainClosureProofVerdict
         runtime_unlock_retry_dispatch_settlement_reported_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchSettlementReportedCount
         runtime_unlock_retry_dispatch_settlement_accepted_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchSettlementAcceptedCount
@@ -46582,6 +46874,7 @@ function Write-FileTransferDiagnosticsArtifacts {
             'runtime_unlock_retry_dispatch_contract_unsettled',
             'runtime_unlock_retry_dispatch_held_after_authority_granted',
             'runtime_unlock_precommit_probe_start_handoff_missing',
+            'runtime_unlock_responder_acked_probe_route_transition_handoff_missing',
             'runtime_unlock_tuna_probe_recovery_authority_lost',
             'runtime_unlock_regular_v4_recovery_lease_not_issued',
             'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted',
@@ -46722,6 +47015,10 @@ function Write-FileTransferDiagnosticsArtifacts {
                 'recovery: initial runtime-unlock offer retirement did not enter the coordinator retry lifecycle'
                 break
             }
+            'runtime_unlock_responder_acked_probe_route_transition_handoff_missing' {
+                'recovery: accepted responder answer ACK did not bind the existing peer Tuna probe to the inbound route transition'
+                break
+            }
             'runtime_unlock_initial_activation_answer_peer_delivery_missing' {
                 'recovery: validated runtime-unlock answer was not delivered to the initiating peer'
                 break
@@ -46808,7 +47105,7 @@ function Write-FileTransferDiagnosticsArtifacts {
     elseif ($recoveryClassification.Class -eq 'runtime_unlock_initial_activation_answer_peer_delivery_missing') {
         'route_runtime'
     }
-    elseif ($recoveryClassification.Class -in @('filetransfer_receive_recovery_operation_incomplete', 'filetransfer_receive_recovery_completed_unproven_successor_missing', 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved', 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing', 'filetransfer_receive_recovery_completed_proven_successor_missing', 'runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'filetransfer_bridge_recovery_execution_payload_hold_missing', 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing', 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing', 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing', 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved', 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing', 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired', 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'fallback_tail_yield_authority_invalid', 'filetransfer_route_transition_draining_transport_grace_terminalization', 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing', 'filetransfer_route_transition_incomplete', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
+    elseif ($recoveryClassification.Class -in @('filetransfer_receive_recovery_operation_incomplete', 'filetransfer_receive_recovery_completed_unproven_successor_missing', 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved', 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing', 'filetransfer_receive_recovery_completed_proven_successor_missing', 'runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'filetransfer_bridge_recovery_execution_payload_hold_missing', 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing', 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing', 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing', 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing', 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved', 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing', 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired', 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'fallback_tail_yield_authority_invalid', 'filetransfer_route_transition_draining_transport_grace_terminalization', 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing', 'filetransfer_route_transition_incomplete', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
         'route_runtime'
     }
     elseif ($invariantMayOwnAcceptanceFailure) {
@@ -46842,6 +47139,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_precommit_probe_start_handoff_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffMissingRecoveredCount),
         ("runtime_unlock_precommit_probe_start_handoff_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffMissingUnresolvedCount),
         ("runtime_unlock_precommit_probe_start_handoff_verdict={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeStartHandoffVerdict),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingRawCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingDistinctCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingRecoveredCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_verdict={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffVerdict),
         ("runtime_unlock_regular_v4_recovery_lease_closure_retained_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureRetainedCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_adopted_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureAdoptedCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureRejectedCount),

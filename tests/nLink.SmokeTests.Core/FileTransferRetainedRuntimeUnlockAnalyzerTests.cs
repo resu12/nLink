@@ -6483,6 +6483,68 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.NotEqual("runtime_unlock_precommit_probe_start_handoff_missing", verdict["recovery_failure_class"]);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_ResponderAckedPeerProbeRequiresRouteTransitionHandoff(
+        bool compact,
+        bool includeHandoff)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string sessionId = "sess_responder_probe";
+        const string transferId = "transfer_responder_probe";
+        const string writerId = "writer_responder_probe";
+        const string probeId = "runtime-unlock-precommit:1:1:probe";
+        var lines = new List<string>
+        {
+            LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; log_writer_id={writerId}", secondsOffset: 0),
+            LogLine($"event=runtime_unlock_transaction_answer_received; session_id={sessionId}; transaction_generation=1; offer_generation=6; answer_received=1; tuna_path_lease_generation=1; tuna_path_lease_current=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; log_writer_id={writerId}", secondsOffset: 1),
+            LogLine($"event=tuna_acceleration_answer_ack_pending; session_id={sessionId}; payer_decision_id=4; generation=6; log_writer_id={writerId}", secondsOffset: 2),
+            LogLine($"event=runtime_unlock_transaction_path_probe_acked; session_id={sessionId}; transaction_generation=1; offer_generation=6; answer_received=1; path_probe_id={probeId}; path_probe_state=acked; path_probe_transport=tuna; path_probe_acked_utc_ms=100; tuna_path_lease_generation=1; tuna_path_lease_current=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; log_writer_id={writerId}", secondsOffset: 3),
+            LogLine($"event=runtime_unlock_precommit_probe_acked; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=1; offer_generation=1; launch_generation=0; tuna_path_lease_generation=1; probe_id={probeId}; probe_state=Acked; received_transport=tuna; log_writer_id={writerId}", secondsOffset: 4),
+            LogLine($"event=tuna_acceleration_answer_ack_received; session_id={sessionId}; payer_decision_id=4; log_writer_id={writerId}", secondsOffset: 5),
+            LogLine($"event=runtime_unlock_answer_ack_probe_barrier_received; session_id={sessionId}; payer_decision_id=4; log_writer_id={writerId}", secondsOffset: 6),
+            LogLine($"event=filetransfer_runtime_unlock_handoff_pending_route_commit; session_id={sessionId}; transaction_generation=1; offer_generation=6; state=routecommitpending; path_probe_state=acked; route_commit_pending=1; route_committed=0; log_writer_id={writerId}; log_writer_sequence=2017", secondsOffset: 7)
+        };
+        if (includeHandoff)
+        {
+            const string authorityId = "fta2-responder-probe";
+            lines.Add(LogLine($"event=runtime_unlock_precommit_probe_launch_requested; session_id={sessionId}; transfer_id={transferId}; transaction_generation=1; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; path_probe_id={probeId}; probe_state=Acked; launch_role=ResponderAdoptingAckedPeerProbe; peer_probe_adoption=1; tuple_mutation=0; log_writer_id={writerId}", secondsOffset: 8));
+            lines.Add(LogLine($"event=filetransfer_route_transition_prepared; authority_id={authorityId}; transition_generation=1; transition_kind=RegularV4ToTunaV4; direction=inbound; session_id={sessionId}; transfer_id={transferId}; transaction_generation=1; offer_generation=6; launch_generation=1; decision_status=Prepared; log_writer_id={writerId}", secondsOffset: 9));
+            lines.Add(LogLine($"event=filetransfer_route_transition_draining; authority_id={authorityId}; transition_generation=1; direction=inbound; log_writer_id={writerId}", secondsOffset: 10));
+            lines.Add(LogLine($"event=filetransfer_route_transition_committed; authority_id={authorityId}; transition_generation=1; direction=inbound; log_writer_id={writerId}", secondsOffset: 11));
+            lines.Add(LogLine($"event=filetransfer_route_transition_disposition_applied; authority_id={authorityId}; transition_generation=1; direction=inbound; decision_status=Applied; log_writer_id={writerId}", secondsOffset: 12));
+        }
+        lines.Add(LogLine($"event=file_transfer_inbound_terminal; session_id={sessionId}; transfer_id={transferId}; state=Completed; sha256_match=1", secondsOffset: 20));
+        lines.Add(LogLine($"event=file_transfer_outbound_terminal; session_id={sessionId}; transfer_id={transferId}; state=Completed; sha256_match=1", secondsOffset: 21));
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string> { ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1" }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_distinct_count"]);
+        Assert.Equal(includeHandoff ? "1" : "0", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count"]);
+        Assert.Equal(includeHandoff ? "0" : "1", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_precommit_probe_start_handoff_missing_unresolved_count"]);
+        if (!includeHandoff)
+        {
+            Assert.Equal("runtime_unlock_responder_acked_probe_route_transition_handoff_missing", verdict["first_proof_chain_failure_class"]);
+            Assert.Equal("2017", verdict["first_proof_chain_failure_writer_sequence"]);
+        }
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RuntimeUnlockRetrySchema2MatchingHoldBeforeGrant_Passes()

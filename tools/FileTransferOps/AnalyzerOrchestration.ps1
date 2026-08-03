@@ -1259,6 +1259,24 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $runtimeUnlockPreCommitProbeStartHandoffProof =
         Get-FileTransferRuntimeUnlockPreCommitProbeStartHandoffCorrelation `
             -Events $runtimeUnlockPreCommitProbeStartHandoffEvents
+    [object[]]$runtimeUnlockResponderPeerProbeHandoffEvents = @(
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_transaction_answer_received') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_transaction_path_probe_acked') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_acked') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_answer_ack_pending') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_answer_ack_received') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_answer_ack_probe_barrier_received') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_unlock_handoff_pending_route_commit') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_launch_requested') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_responder_peer_probe_handoff_bound') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_prepared') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_draining') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_committed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_disposition_applied')
+    )
+    $runtimeUnlockResponderPeerProbeHandoffProof =
+        Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation `
+            -Events $runtimeUnlockResponderPeerProbeHandoffEvents
     $runtimeUnlockRetryDispatchObservedCount = $runtimeUnlockRetryDispatchObservedEvents.Count
     [object[]]$runtimeUnlockRetryDispatchUnobservedGrantEvents = @(
         $runtimeUnlockRetryDispatchPostGrantHoldProof.UnresolvedGrantEvents
@@ -2806,6 +2824,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Reason = 'runtime_unlock_probe_start_timeout'
         }) | Out-Null
     }
+    foreach ($candidateEvent in @($runtimeUnlockResponderPeerProbeHandoffProof.UnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing'
+            Event = $candidateEvent
+            Reason = 'late_answer_ack_did_not_bind_acked_peer_probe_to_responder_route_transition'
+        }) | Out-Null
+    }
     $firstCompactProofChainFailure = @(
         $compactProofChainCandidates.ToArray() |
             Sort-Object @{ Expression = { [int64]$_.Event.Sequence } }, @{ Expression = { [int]$_.Event.LineNumber } }, Class |
@@ -2886,6 +2911,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $bridgeRecoveryExecutionStartupPayloadIsolationProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RecoveryClosureOfferTimeoutHandoffProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockInitialOfferRetryLifecycleHandoffProof.UnresolvedCount -gt 0 -or
+        $runtimeUnlockResponderPeerProbeHandoffProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockInitialActivationReceiveRecoveryHoldReleaseDeliveryProof.UnresolvedCount -gt 0 -or
@@ -2953,6 +2979,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing',
                 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing',
                 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing',
+                'runtime_unlock_responder_acked_probe_route_transition_handoff_missing',
                 'runtime_unlock_initial_activation_answer_peer_delivery_missing',
                 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved',
                 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing',
@@ -3051,6 +3078,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing',
             'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing',
             'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing',
+            'runtime_unlock_responder_acked_probe_route_transition_handoff_missing',
             'runtime_unlock_initial_activation_answer_peer_delivery_missing',
             'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved',
             'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing',
@@ -3185,6 +3213,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_precommit_probe_start_handoff_missing_recovered_count={0}" -f $runtimeUnlockPreCommitProbeStartHandoffProof.RecoveredCount),
         ("runtime_unlock_precommit_probe_start_handoff_missing_unresolved_count={0}" -f $runtimeUnlockPreCommitProbeStartHandoffProof.UnresolvedCount),
         ("runtime_unlock_precommit_probe_start_handoff_verdict={0}" -f $runtimeUnlockPreCommitProbeStartHandoffProof.Verdict),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_raw_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.RawCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_distinct_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.DistinctCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.RecoveredCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.UnresolvedCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_verdict={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.Verdict),
         ("regular_v4_frontier_repair_missing_range_not_preserved_raw_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.RawCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_distinct_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.DistinctCount),
         ("regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={0}" -f $regularV4FrontierRepairMissingRangePreservationProof.RecoveredCount),
@@ -4193,6 +4226,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_precommit_probe_start_handoff_missing_recovered_count={0}" -f $runtimeUnlockPreCommitProbeStartHandoffProof.RecoveredCount),
         ("runtime_unlock_precommit_probe_start_handoff_missing_unresolved_count={0}" -f $runtimeUnlockPreCommitProbeStartHandoffProof.UnresolvedCount),
         ("runtime_unlock_precommit_probe_start_handoff_verdict={0}" -f $runtimeUnlockPreCommitProbeStartHandoffProof.Verdict),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_raw_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.RawCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_distinct_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.DistinctCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.RecoveredCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.UnresolvedCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_verdict={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.Verdict),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_raw_count={0}" -f $regularV4PeerSilenceReplayMissingDispatchRangeProof.RawCount),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_distinct_count={0}" -f $regularV4PeerSilenceReplayMissingDispatchRangeProof.DistinctCount),
         ("regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count={0}" -f $regularV4PeerSilenceReplayMissingDispatchRangeProof.RecoveredCount),
@@ -4516,6 +4554,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         runtime_unlock_precommit_probe_start_handoff_missing_distinct_count = $runtimeUnlockPreCommitProbeStartHandoffProof.DistinctCount
         runtime_unlock_precommit_probe_start_handoff_missing_recovered_count = $runtimeUnlockPreCommitProbeStartHandoffProof.RecoveredCount
         runtime_unlock_precommit_probe_start_handoff_missing_unresolved_count = $runtimeUnlockPreCommitProbeStartHandoffProof.UnresolvedCount
+        runtime_unlock_responder_acked_probe_route_transition_handoff_missing_raw_count = $runtimeUnlockResponderPeerProbeHandoffProof.RawCount
+        runtime_unlock_responder_acked_probe_route_transition_handoff_missing_distinct_count = $runtimeUnlockResponderPeerProbeHandoffProof.DistinctCount
+        runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count = $runtimeUnlockResponderPeerProbeHandoffProof.RecoveredCount
+        runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count = $runtimeUnlockResponderPeerProbeHandoffProof.UnresolvedCount
+        runtime_unlock_responder_acked_probe_route_transition_handoff_verdict = $runtimeUnlockResponderPeerProbeHandoffProof.Verdict
         runtime_unlock_precommit_probe_start_handoff_verdict = $runtimeUnlockPreCommitProbeStartHandoffProof.Verdict
         regular_v4_frontier_repair_missing_range_not_preserved_raw_count = $regularV4FrontierRepairMissingRangePreservationProof.RawCount
         regular_v4_frontier_repair_missing_range_not_preserved_distinct_count = $regularV4FrontierRepairMissingRangePreservationProof.DistinctCount

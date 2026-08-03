@@ -2919,6 +2919,53 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeFailureClassification_ResponderAckedProbeUsesIndexedFastPath()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFileTransferFailureClassificationResult", "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-responder-probe-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                @(
+                    'event=runtime_unlock_transaction_answer_received; session_id=sess; transaction_generation=1; offer_generation=6; answer_received=1; tuna_path_lease_generation=1; tuna_path_lease_current=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; log_writer_id=writer',
+                    'event=tuna_acceleration_answer_ack_pending; session_id=sess; payer_decision_id=4; generation=6; log_writer_id=writer',
+                    'event=runtime_unlock_transaction_path_probe_acked; session_id=sess; transaction_generation=1; offer_generation=6; path_probe_id=probe; path_probe_state=acked; path_probe_transport=tuna; tuna_path_lease_generation=1; log_writer_id=writer',
+                    'event=runtime_unlock_precommit_probe_acked; session_id=sess; transfer_id=transfer; direction=inbound; transaction_generation=1; offer_generation=1; launch_generation=0; probe_id=probe; probe_state=acked; received_transport=tuna; tuna_path_lease_generation=1; log_writer_id=writer',
+                    'event=tuna_acceleration_answer_ack_received; session_id=sess; payer_decision_id=4; log_writer_id=writer',
+                    'event=runtime_unlock_answer_ack_probe_barrier_received; session_id=sess; payer_decision_id=4; log_writer_id=writer',
+                    'event=filetransfer_runtime_unlock_handoff_pending_route_commit; session_id=sess; transaction_generation=1; offer_generation=6; state=routecommitpending; path_probe_state=acked; route_commit_pending=1; route_committed=0; log_writer_id=writer'
+                ) | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($result.Phase -ne 'route_runtime' -or
+                    $result.Reason -ne 'late_answer_ack_did_not_bind_acked_peer_probe_to_responder_route_transition' -or
+                    -not $result.RuntimeUnlockResponderPeerProbeHandoffMissing -or
+                    $result.ClassificationSource -ne 'immutable_evidence_responder_peer_probe_index' -or
+                    [long]$result.EvidenceLineVisitCount -ne 7) {
+                    throw "responder peer-probe fast path mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+                Write-Output 'gui-responder-peer-probe-fast-path-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(result.ExitCode == 0, $"Responder peer-probe GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-responder-peer-probe-fast-path-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GuiSmokeFailureClassification_InvalidFallbackBootstrapFrontierUsesIndexedFastPath()
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
@@ -2931,7 +2978,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             "Get-TunaGuiRetiredPendingAnswerHandoffFailure");
         var fastPathMatch = System.Text.RegularExpressions.Regex.Match(
             nestedFunctionText,
-            @"(?s)function\s+Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure\s*\{(?<body>.*?)\r?\n\}\s*\r?\n\s*\$retiredPendingAnswerFastPath");
+            @"(?s)function\s+Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure\s*\{(?<body>.*?)\r?\n\}\s*\r?\n\s*\$responderPeerProbeFastPath");
         Assert.True(
             fastPathMatch.Success,
             "Could not extract the fallback-V6 bootstrap GUI fast path.");
