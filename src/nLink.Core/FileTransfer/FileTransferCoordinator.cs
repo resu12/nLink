@@ -696,6 +696,8 @@ internal sealed record FileTransferFallbackTailYieldSubstate(
     FallbackTailYieldTransportEpochReauthorization? PendingReauthorization = null,
     FileTransferFallbackTailPeerProofReceipt?
         PendingReauthorizationPeerProof = null,
+    FileTransferFallbackTailPeerProofReceipt?
+        PendingPeerProofBeforeLocalYield = null,
     RuntimeUnlockRetryDispatchAuthorityRequest?
         PendingRetryRecheckRequest = null,
     FileTransferFallbackTailPairedReleaseReservation? CurrentReservation = null,
@@ -9880,6 +9882,12 @@ internal static class FileTransferCoordinator
                         ? fallbackTail
                             .PendingReauthorizationPeerProof
                         : null,
+                PendingPeerProofBeforeLocalYield =
+                    fallbackTail.PendingPeerProofBeforeLocalYield is
+                        { } pendingInitial &&
+                    pendingInitial.ObservationScope.RoutePublication == token
+                        ? pendingInitial
+                        : null,
                 RetainedPredecessor =
                     pendingReauthorization is { } boundPending
                     ? boundPending.PredecessorDecision
@@ -10350,10 +10358,15 @@ internal static class FileTransferCoordinator
         var substate = state.PersistentState.FallbackTailYield;
         if (substate.CurrentOperation is not { } operation)
         {
-            return ApplyPendingFallbackTailReauthorizationPeerProofReceipt(
-                state,
-                substate,
-                receipt);
+            return substate.PendingReauthorization is not null
+                ? ApplyPendingFallbackTailReauthorizationPeerProofReceipt(
+                    state,
+                    substate,
+                    receipt)
+                : ApplyPendingFallbackTailInitialPeerProofReceipt(
+                    state,
+                    substate,
+                    receipt);
         }
 
         if (receipt.IsDefault)
@@ -10416,6 +10429,134 @@ internal static class FileTransferCoordinator
             substate,
             operation,
             "fallback_tail_peer_proof_receipt_applied");
+    }
+
+    private static FileTransferFallbackTailYieldTransitionDecision
+        ApplyPendingFallbackTailInitialPeerProofReceipt(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackTailYieldSubstate substate,
+            FileTransferFallbackTailPeerProofReceipt receipt)
+    {
+        if (receipt.IsDefault ||
+            !receipt.ObservationScope.HasCompleteExecutionScope)
+        {
+            return FallbackTailYieldTransitionRejected(
+                state,
+                "fallback_tail_peer_proof_receipt_invalid");
+        }
+
+        if (!IsFallbackTailYieldScopeCurrent(
+                state,
+                receipt.ObservationScope,
+                out var scopeRejectionReason))
+        {
+            return FallbackTailYieldTransitionRejected(
+                state,
+                scopeRejectionReason);
+        }
+
+        if (!IsInitialFallbackTailPeerProofExactForScope(
+                receipt.ObservationScope,
+                receipt.Proof,
+                out var proofRejectionReason))
+        {
+            return FallbackTailYieldTransitionRejected(
+                state,
+                proofRejectionReason);
+        }
+
+        if (substate.PendingPeerProofBeforeLocalYield is { } existing)
+        {
+            return IsSameFallbackTailPeerProofReceiptIdentity(
+                    existing,
+                    receipt)
+                ? FallbackTailYieldTransition(
+                    state,
+                    FileTransferFallbackTailYieldTransitionStatus.Idempotent,
+                    "fallback_tail_initial_peer_proof_receipt_idempotent")
+                : FallbackTailYieldTransitionRejected(
+                    state,
+                    "fallback_tail_initial_peer_proof_receipt_conflict");
+        }
+
+        return FallbackTailYieldTransition(
+            ApplyFallbackTailYieldSubstate(
+                state,
+                substate with
+                {
+                    PendingPeerProofBeforeLocalYield = receipt,
+                }),
+            FileTransferFallbackTailYieldTransitionStatus.Accepted,
+            "fallback_tail_initial_peer_proof_receipt_retained");
+    }
+
+    private static bool IsSameFallbackTailPeerProofReceiptIdentity(
+        FileTransferFallbackTailPeerProofReceipt left,
+        FileTransferFallbackTailPeerProofReceipt right)
+        => left.Proof == right.Proof &&
+           left.ObservationScope == right.ObservationScope &&
+           string.Equals(
+               left.ObservationIdentity,
+               right.ObservationIdentity,
+               StringComparison.Ordinal);
+
+    private static bool IsInitialFallbackTailPeerProofExactForScope(
+        FileTransferFallbackTailYieldScope scope,
+        FileTransferFallbackTailPeerProof proof,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (scope.Route != FileTransferRoute.PostTunaFallbackV6 ||
+            scope.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+            proof.IsDefault ||
+            proof.PredecessorAuthorityId is not null ||
+            !FileTransferAuthorityIdParser.TryNormalizeFallbackTailYield(
+                proof.AuthorityId.ToString(),
+                out _))
+        {
+            rejectionReason =
+                "fallback_tail_initial_peer_proof_authority_invalid";
+            return false;
+        }
+
+        var expectedOwnerKey = BuildFallbackTailYieldOwnerKey(
+            scope.SessionId,
+            scope.TransferId,
+            scope.RouteToken,
+            scope.ProtocolVersion,
+            proof.LiveRouteEpoch,
+            proof.LegGeneration,
+            proof.BridgeRecoveryGeneration,
+            proof.TransportEpoch,
+            proof.CheckpointRequestIdSnapshot);
+        var expectedPairKey = BuildFallbackTailYieldPairKey(
+            scope.SessionId,
+            scope.TransferId,
+            scope.RouteToken,
+            scope.ProtocolVersion,
+            proof.LiveRouteEpoch,
+            proof.TransportEpoch,
+            proof.CheckpointRequestIdSnapshot);
+        if (!string.Equals(proof.SessionId, scope.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(proof.TransferId, scope.TransferId, StringComparison.Ordinal) ||
+            !AreFallbackTailProofDirectionsOpposite(scope.Direction, proof.Direction) ||
+            proof.LiveRouteEpoch != scope.LiveRouteEpoch ||
+            proof.LegGeneration != scope.LegGeneration ||
+            proof.BridgeRecoveryGeneration != scope.BridgeRecoveryGeneration ||
+            proof.TransportEpoch != scope.TransportEpoch ||
+            !string.Equals(proof.OwnerKey, expectedOwnerKey, StringComparison.Ordinal) ||
+            !string.Equals(proof.PairKey, expectedPairKey, StringComparison.Ordinal) ||
+            !string.Equals(proof.PairKey, scope.PairKey, StringComparison.Ordinal) ||
+            !string.Equals(
+                proof.CheckpointRequestIdSnapshot,
+                scope.CheckpointRequestIdSnapshot,
+                StringComparison.Ordinal))
+        {
+            rejectionReason = "fallback_tail_peer_proof_scope_mismatch";
+            return false;
+        }
+
+        return true;
     }
 
     private static FileTransferFallbackTailYieldTransitionDecision
@@ -11714,6 +11855,7 @@ internal static class FileTransferCoordinator
                 RetainedPredecessor = null,
                 PendingReauthorization = null,
                 PendingReauthorizationPeerProof = null,
+                PendingPeerProofBeforeLocalYield = null,
                 PendingRetryRecheckRequest = null,
                 CurrentReservation = null,
                 LastTerminalOperation = lastTerminal,
@@ -11778,7 +11920,17 @@ internal static class FileTransferCoordinator
                  StringComparison.Ordinal) ||
              pending.TargetDataSessionGeneration !=
                  state.CurrentDataSessionGeneration);
-        return operationDataSessionChanged || pendingDataSessionChanged
+        var pendingInitialDataSessionChanged =
+            fallbackTail.PendingPeerProofBeforeLocalYield is { } pendingInitial &&
+            (!string.Equals(
+                 pendingInitial.ObservationScope.DataSessionIdentity,
+                 state.CurrentDataSessionIdentity,
+                 StringComparison.Ordinal) ||
+             pendingInitial.ObservationScope.DataSessionGeneration !=
+                 state.CurrentDataSessionGeneration);
+        return operationDataSessionChanged ||
+               pendingDataSessionChanged ||
+               pendingInitialDataSessionChanged
             ? InvalidateFallbackTailYieldSubstate(
                 state,
                 "data_session_replaced")
@@ -11871,6 +12023,7 @@ internal static class FileTransferCoordinator
             {
                 PendingReauthorization = rebound,
                 PendingReauthorizationPeerProof = null,
+                PendingPeerProofBeforeLocalYield = null,
                 RetainedPredecessor = rebound.PredecessorDecision,
                 LastReauthorizationGeneration =
                     reauthorizationGeneration,
@@ -11941,29 +12094,47 @@ internal static class FileTransferCoordinator
                 issuedReauthorization
                 ? substate.PendingReauthorizationPeerProof
                 : null;
+        var pendingInitialPeerProof =
+            sourceReauthorization is null
+                ? substate.PendingPeerProofBeforeLocalYield
+                : null;
+        var candidateOperation =
+            new FileTransferFallbackTailYieldOperation(
+                decision,
+                scope,
+                FileTransferFallbackTailYieldPairingState.YieldIssued,
+                SourceReauthorization:
+                    sourceReauthorization is { } exactReauthorization
+                        ? new FileTransferFallbackTailYieldReauthorizationReceipt(
+                            exactReauthorization)
+                        : null);
+        if (pendingInitialPeerProof is { } initialPeer &&
+            IsFallbackTailPeerProofExactForOperation(
+                substate,
+                candidateOperation,
+                initialPeer.Proof,
+                out _))
+        {
+            pendingPeerProof = initialPeer;
+        }
         return ApplyFallbackTailYieldSubstate(
             state,
             substate with
             {
                 CurrentOperation =
-                    new FileTransferFallbackTailYieldOperation(
-                        decision,
-                        scope,
-                        pendingPeerProof is null
+                    candidateOperation with
+                    {
+                        PairingState = pendingPeerProof is null
                             ? FileTransferFallbackTailYieldPairingState
                                 .YieldIssued
                             : FileTransferFallbackTailYieldPairingState
                                 .PeerProofObserved,
-                        PeerProof: pendingPeerProof,
-                        SourceReauthorization:
-                            sourceReauthorization is
-                                { } exactReauthorization
-                                ? new FileTransferFallbackTailYieldReauthorizationReceipt(
-                                    exactReauthorization)
-                                : null),
+                        PeerProof = pendingPeerProof,
+                    },
                 RetainedPredecessor = retainedPredecessor,
                 PendingReauthorization = null,
                 PendingReauthorizationPeerProof = null,
+                PendingPeerProofBeforeLocalYield = null,
                 CurrentReservation = null,
                 LastTerminalOperation = lastTerminal,
                 LastYieldGeneration = Math.Max(
@@ -12927,6 +13098,7 @@ internal static class FileTransferCoordinator
             {
                 PendingReauthorization = rebound,
                 PendingReauthorizationPeerProof = null,
+                PendingPeerProofBeforeLocalYield = null,
                 RetainedPredecessor = rebound.PredecessorDecision,
                 LastReauthorizationGeneration = nextGeneration,
             });
@@ -20978,6 +21150,7 @@ internal static class FileTransferCoordinator
             {
                     PendingReauthorization = pendingReauthorization,
                     PendingReauthorizationPeerProof = null,
+                    PendingPeerProofBeforeLocalYield = null,
                     RetainedPredecessor =
                         pendingReauthorization.PredecessorDecision,
                     LastReauthorizationGeneration = Math.Max(
@@ -23078,6 +23251,7 @@ internal static class FileTransferCoordinator
                                 NormalizeReason(bridgeRecovery.Reason),
                         },
                         PendingReauthorizationPeerProof = null,
+                        PendingPeerProofBeforeLocalYield = null,
                         LastReauthorizationGeneration =
                             reauthorizationGeneration,
                     });

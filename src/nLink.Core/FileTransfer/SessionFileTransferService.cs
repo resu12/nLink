@@ -8319,6 +8319,47 @@ public sealed partial class SessionFileTransferService :
     {
         var operation = next.CurrentOperation;
         var previousOperation = previous.CurrentOperation;
+        var previousPendingInitial =
+            previous.PendingPeerProofBeforeLocalYield;
+        var currentPendingInitial =
+            next.PendingPeerProofBeforeLocalYield;
+        if (previousPendingInitial is null &&
+            currentPendingInitial is { } retainedInitial)
+        {
+            LogFallbackTailPendingPeerProofEvent(
+                "filetransfer_fallback_tail_peer_proof_pending_decided",
+                retainedInitial,
+                null,
+                "Accepted",
+                reason);
+        }
+        else if (previousPendingInitial is { } priorInitial &&
+                 currentPendingInitial is null)
+        {
+            if (operation is { PeerProof: { } boundPeer } boundOperation &&
+                boundPeer.Proof == priorInitial.Proof &&
+                string.Equals(
+                    boundPeer.ObservationIdentity,
+                    priorInitial.ObservationIdentity,
+                    StringComparison.Ordinal))
+            {
+                LogFallbackTailYieldOperationEvent(
+                    "filetransfer_fallback_tail_peer_proof_pending_bound",
+                    boundOperation,
+                    "Accepted",
+                    reason,
+                    peerProof: boundPeer);
+            }
+            else
+            {
+                LogFallbackTailPendingPeerProofEvent(
+                    "filetransfer_fallback_tail_peer_proof_pending_invalidated",
+                    priorInitial,
+                    operation,
+                    "Invalidated",
+                    reason);
+            }
+        }
         if (operation is { } current &&
             (previousOperation is not { } prior ||
              prior.Decision != current.Decision))
@@ -8445,6 +8486,21 @@ public sealed partial class SessionFileTransferService :
                 successor,
                 reason);
         }
+    }
+
+    private static void LogFallbackTailPendingPeerProofEvent(
+        string eventName,
+        FileTransferFallbackTailPeerProofReceipt receipt,
+        FileTransferFallbackTailYieldOperation? operation,
+        string status,
+        string reason)
+    {
+        var scope = receipt.ObservationScope;
+        var proof = receipt.Proof;
+        var decision = operation?.Decision;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event={eventName}; session_id={FormatProtocolLogValue(scope.SessionId)}; transfer_id={FormatProtocolLogValue(scope.TransferId)}; direction={scope.Direction.ToString().ToLowerInvariant()}; route={FormatProtocolLogValue(scope.RouteToken)}; protocol_version={scope.ProtocolVersion}; live_route_epoch={scope.LiveRouteEpoch}; route_publication_generation={scope.RoutePublication?.PublicationGeneration ?? 0}; route_commit_generation={scope.RoutePublication?.RouteCommitGeneration ?? 0}; runtime_generation={scope.RuntimeOwner.RuntimeGeneration}; terminal_generation={scope.TerminalGeneration}; leg_generation={scope.LegGeneration}; transport_epoch={scope.TransportEpoch}; bridge_recovery_generation={scope.BridgeRecoveryGeneration}; checkpoint_generation={scope.CheckpointGeneration}; checkpoint_request_id={FormatProtocolLogValue(scope.CheckpointRequestIdSnapshot)}; data_session_identity={FormatProtocolLogValue(scope.DataSessionIdentity ?? "(none)")}; data_session_generation={scope.DataSessionGeneration}; authority_id={FormatProtocolLogValue(decision?.AuthorityId.ToString() ?? "(none)")}; yield_generation={decision?.YieldGeneration ?? 0}; owner_key={FormatProtocolLogValue(scope.OwnerKey)}; pair_key={FormatProtocolLogValue(scope.PairKey)}; peer_authority_id={FormatProtocolLogValue(proof.AuthorityId.ToString())}; peer_predecessor_authority_id={FormatProtocolLogValue(proof.PredecessorAuthorityId?.ToString() ?? "(none)")}; peer_yield_generation={proof.YieldGeneration}; peer_direction={proof.Direction.ToString().ToLowerInvariant()}; peer_owner_key={FormatProtocolLogValue(proof.OwnerKey)}; peer_pair_key={FormatProtocolLogValue(proof.PairKey)}; peer_observation_identity={FormatProtocolLogValue(receipt.ObservationIdentity)}; peer_frame_fingerprint={FormatProtocolLogValue(proof.FrameFingerprint)}; observed_utc_ms={receipt.ObservedUtcMs}; decision_status={FormatProtocolLogValue(status)}; reason={FormatProtocolLogValue(reason)}; decision_reason={FormatProtocolLogValue(reason)}");
     }
 
     private static void LogFallbackTailYieldOperationEvent(

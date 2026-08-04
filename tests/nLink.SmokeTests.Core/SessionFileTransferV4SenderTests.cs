@@ -20000,7 +20000,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             StringComparison.Ordinal);
         Assert.Contains("decision_status=Rejected;", log, StringComparison.Ordinal);
         Assert.Contains(
-            "reason=fallback_tail_yield_operation_missing",
+            "reason=fallback_tail_peer_proof_scope_mismatch",
             log,
             StringComparison.Ordinal);
         Assert.DoesNotContain(

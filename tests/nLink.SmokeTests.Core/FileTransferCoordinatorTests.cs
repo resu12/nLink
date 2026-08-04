@@ -15496,6 +15496,109 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void FallbackTailYield_InitialPeerProofBeforeLocalYieldIsRetainedAndPairsExactlyOnce()
+    {
+        var fallback = FileTransferRouteResolver.Resolve(
+            FileTransferRoute.PostTunaFallbackV6);
+        var source = ActiveFallbackStateWithoutCheckpoint() with
+        {
+            CurrentDataSessionIdentity = "peer-first-data-session",
+            CurrentDataSessionGeneration = 31,
+        };
+        var preview = MarkFallbackTailQuiescent(
+            source,
+            fallback,
+            source.CurrentLeg!.TransportEpochId,
+            committedChunk: 5,
+            highestObservedChunk: 5);
+        var previewDecision = Assert.IsType<FallbackTailYieldDecision>(
+            preview.FallbackTailYieldDecision);
+        var peerProof = CreateCoordinatorFallbackTailPeerProof(
+            preview.State,
+            previewDecision);
+        var receipt = FileTransferCoordinator.CreateFallbackTailPeerProofReceipt(
+            source,
+            peerProof,
+            "peer-proof-before-local-yield",
+            3_000);
+
+        var retained = FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(
+            source,
+            receipt);
+        Assert.Equal(
+            FileTransferFallbackTailYieldTransitionStatus.Accepted,
+            retained.Status);
+        var retainedSubstate =
+            FileTransferCoordinator.GetFallbackTailYieldSubstate(
+                retained.State);
+        Assert.Null(retainedSubstate.CurrentOperation);
+        Assert.Equal(
+            receipt,
+            retainedSubstate.PendingPeerProofBeforeLocalYield);
+        Assert.Null(retained.PairedRelease);
+
+        var duplicate = FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(
+            retained.State,
+            receipt with { ObservedUtcMs = 3_100 });
+        Assert.Equal(
+            FileTransferFallbackTailYieldTransitionStatus.Idempotent,
+            duplicate.Status);
+        Assert.Equal(
+            3_000,
+            FileTransferCoordinator.GetFallbackTailYieldSubstate(
+                    duplicate.State)
+                .PendingPeerProofBeforeLocalYield!.Value.ObservedUtcMs);
+        var conflict = FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(
+            duplicate.State,
+            receipt with
+            {
+                Proof = receipt.Proof with
+                {
+                    FrameFingerprint = "conflicting-peer-frame",
+                },
+            });
+        Assert.Equal(
+            FileTransferFallbackTailYieldTransitionStatus.Rejected,
+            conflict.Status);
+
+        var yielded = MarkFallbackTailQuiescent(
+            duplicate.State,
+            fallback,
+            duplicate.State.CurrentLeg!.TransportEpochId,
+            committedChunk: 5,
+            highestObservedChunk: 5);
+        var operation = Assert.IsType<FileTransferFallbackTailYieldOperation>(
+            FileTransferCoordinator.GetFallbackTailYieldSubstate(
+                    yielded.State)
+                .CurrentOperation);
+        Assert.Equal(
+            FileTransferFallbackTailYieldPairingState.PeerProofObserved,
+            operation.PairingState);
+        Assert.Equal(receipt, operation.PeerProof);
+        Assert.Null(
+            FileTransferCoordinator.GetFallbackTailYieldSubstate(
+                    yielded.State)
+                .PendingPeerProofBeforeLocalYield);
+
+        var local = FileTransferCoordinator.CreateFallbackTailLocalProofReceipt(
+            yielded.State,
+            operation.Decision,
+            "local-proof-after-peer",
+            "local-frame-after-peer",
+            3_200);
+        var paired = FileTransferCoordinator.ApplyFallbackTailLocalProofReceipt(
+            yielded.State,
+            local);
+        Assert.True(paired.Accepted, paired.Reason);
+        Assert.NotNull(paired.PairedRelease);
+        Assert.Equal(
+            FileTransferFallbackTailYieldPairingState.Paired,
+            FileTransferCoordinator.GetFallbackTailYieldSubstate(
+                    paired.State)
+                .CurrentOperation!.Value.PairingState);
+    }
+
+    [Fact]
     public void FallbackTailYield_FailedOperationIsSupersededBySameScopeQuiescence()
     {
         var fallback = FileTransferRouteResolver.Resolve(
@@ -15589,6 +15692,82 @@ public sealed class FileTransferCoordinatorTests
             FileTransferCoordinator.GetFallbackTailYieldSubstate(
                     duplicate.State)
                 .CurrentOperation!.Value.Decision);
+    }
+
+    [Fact]
+    public void FallbackTailYield_InitialPeerProofCarriesThroughFailedToQuiescentWithoutFailedRelease()
+    {
+        var fallback = FileTransferRouteResolver.Resolve(
+            FileTransferRoute.PostTunaFallbackV6);
+        var source = ActiveFallbackStateWithoutCheckpoint() with
+        {
+            CurrentDataSessionIdentity = "peer-first-failed-data-session",
+            CurrentDataSessionGeneration = 19,
+        };
+        var preview = MarkFallbackTailFailed(
+            source,
+            fallback,
+            source.CurrentLeg!.TransportEpochId);
+        var previewDecision = Assert.IsType<FallbackTailYieldDecision>(
+            preview.FallbackTailYieldDecision);
+        var receipt = FileTransferCoordinator.CreateFallbackTailPeerProofReceipt(
+            source,
+            CreateCoordinatorFallbackTailPeerProof(
+                preview.State,
+                previewDecision),
+            "peer-proof-before-failed-yield",
+            4_000);
+        var retained = FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(
+            source,
+            receipt);
+        Assert.True(retained.Accepted, retained.Reason);
+
+        var failed = MarkFallbackTailFailed(
+            retained.State,
+            fallback,
+            retained.State.CurrentLeg!.TransportEpochId);
+        var failedOperation = Assert.IsType<FileTransferFallbackTailYieldOperation>(
+            FileTransferCoordinator.GetFallbackTailYieldSubstate(failed.State)
+                .CurrentOperation);
+        Assert.Equal(
+            FallbackTailYieldKind.Failed,
+            failedOperation.Decision.YieldKind);
+        Assert.Equal(receipt, failedOperation.PeerProof);
+        Assert.NotEqual(
+            FileTransferFallbackTailYieldPairingState.Paired,
+            failedOperation.PairingState);
+
+        var successor = FileTransferCoordinator.AuthorizeAction(
+            failed.State,
+            FallbackActionRequest(
+                FileTransferCoordinatorActionKind.FallbackTailQuiescent,
+                failed.State.CurrentRuntimeOwner!.Value,
+                failed.State.CurrentLeg!,
+                fallbackTailYieldKind: FallbackTailYieldKind.Quiescent));
+        Assert.True(successor.Accepted, successor.RejectionReason);
+        var successorOperation = Assert.IsType<FileTransferFallbackTailYieldOperation>(
+            FileTransferCoordinator.GetFallbackTailYieldSubstate(successor.State)
+                .CurrentOperation);
+        Assert.Equal(
+            FallbackTailYieldKind.Quiescent,
+            successorOperation.Decision.YieldKind);
+        Assert.Equal(receipt, successorOperation.PeerProof);
+        Assert.True(successorOperation.FailedYieldSupersession!.Value.CarriedPeerProof);
+        Assert.Equal(
+            FileTransferFallbackTailYieldPairingState.PeerProofObserved,
+            successorOperation.PairingState);
+
+        var local = FileTransferCoordinator.CreateFallbackTailLocalProofReceipt(
+            successor.State,
+            successorOperation.Decision,
+            "local-proof-after-failed-successor",
+            "local-frame-after-failed-successor",
+            4_100);
+        var paired = FileTransferCoordinator.ApplyFallbackTailLocalProofReceipt(
+            successor.State,
+            local);
+        Assert.True(paired.Accepted, paired.Reason);
+        Assert.NotNull(paired.PairedRelease);
     }
 
     [Fact]
