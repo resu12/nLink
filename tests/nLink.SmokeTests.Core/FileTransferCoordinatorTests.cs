@@ -15496,6 +15496,102 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void FallbackTailYield_FailedOperationIsSupersededBySameScopeQuiescence()
+    {
+        var fallback = FileTransferRouteResolver.Resolve(
+            FileTransferRoute.PostTunaFallbackV6);
+        var source = ActiveFallbackStateWithoutCheckpoint() with
+        {
+            CurrentDataSessionIdentity = "fallback-data-session",
+            CurrentDataSessionGeneration = 17,
+        };
+        var failed = MarkFallbackTailFailed(
+            source,
+            fallback,
+            source.CurrentLeg!.TransportEpochId);
+        var failedDecision = Assert.IsType<FallbackTailYieldDecision>(
+            failed.FallbackTailYieldDecision);
+        var failedOperation = Assert.IsType<
+            FileTransferFallbackTailYieldOperation>(
+            FileTransferCoordinator.GetFallbackTailYieldSubstate(
+                    failed.State)
+                .CurrentOperation);
+
+        var peerReceipt =
+            FileTransferCoordinator.CreateFallbackTailPeerProofReceipt(
+                failed.State,
+                CreateCoordinatorFallbackTailPeerProof(
+                    failed.State,
+                    failedDecision),
+                "peer-proof-before-quiescence",
+                3_000);
+        var peerFirst =
+            FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(
+                failed.State,
+                peerReceipt);
+        Assert.True(peerFirst.Accepted, peerFirst.Reason);
+
+        var authorized = FileTransferCoordinator.AuthorizeAction(
+            peerFirst.State,
+            FallbackActionRequest(
+                FileTransferCoordinatorActionKind.FallbackTailQuiescent,
+                peerFirst.State.CurrentRuntimeOwner!.Value,
+                peerFirst.State.CurrentLeg!,
+                fallbackTailYieldKind:
+                    FallbackTailYieldKind.Quiescent));
+
+        Assert.True(authorized.Accepted, authorized.RejectionReason);
+        var successor = Assert.IsType<FallbackTailYieldDecision>(
+            authorized.FallbackTailYieldDecision);
+        Assert.Equal(
+            failedDecision.YieldGeneration + 1,
+            successor.YieldGeneration);
+        Assert.Null(successor.PredecessorAuthorityId);
+        var aggregate = FileTransferCoordinator.GetFallbackTailYieldSubstate(
+            authorized.State);
+        var successorOperation = Assert.IsType<
+            FileTransferFallbackTailYieldOperation>(
+            aggregate.CurrentOperation);
+        Assert.Equal(successor, successorOperation.Decision);
+        Assert.Equal(peerReceipt, successorOperation.PeerProof);
+        Assert.Equal(
+            FileTransferFallbackTailYieldPairingState.PeerProofObserved,
+            successorOperation.PairingState);
+        var binding = Assert.IsType<
+            FileTransferFallbackTailFailedYieldSupersessionBinding>(
+            successorOperation.FailedYieldSupersession);
+        Assert.Equal(failedDecision, binding.FailedDecision);
+        Assert.Equal(successor, binding.SuccessorDecision);
+        Assert.True(binding.CarriedPeerProof);
+        Assert.Null(aggregate.RetainedPredecessor);
+        Assert.Equal(
+            failedDecision,
+            aggregate.LastTerminalOperation!.Value.Decision);
+        Assert.Equal(
+            FileTransferFallbackTailYieldPairingState.Invalidated,
+            aggregate.LastTerminalOperation.Value.PairingState);
+        Assert.NotEqual(
+            failedOperation.Decision.AuthorityId,
+            successor.AuthorityId);
+
+        var duplicate = FileTransferCoordinator.AuthorizeAction(
+            authorized.State,
+            FallbackActionRequest(
+                FileTransferCoordinatorActionKind.FallbackTailQuiescent,
+                authorized.State.CurrentRuntimeOwner!.Value,
+                authorized.State.CurrentLeg!,
+                fallbackTailYieldKind:
+                    FallbackTailYieldKind.Quiescent));
+        Assert.True(duplicate.Accepted);
+        Assert.Equal(successor, duplicate.FallbackTailYieldDecision);
+        Assert.Equal(
+            successor,
+            FileTransferCoordinator.GetFallbackTailYieldSubstate(
+                    duplicate.State)
+                .CurrentOperation!.Value.Decision);
+    }
+
+    [Fact]
     public void Apply_TerminalStateRejectsFallbackLegMutations()
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);

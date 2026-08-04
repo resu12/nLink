@@ -654,6 +654,24 @@ internal sealed record FileTransferFallbackTailYieldReauthorizationReceipt(
     public bool IsDefault => Reauthorization.IsDefault;
 }
 
+internal readonly record struct
+    FileTransferFallbackTailFailedYieldSupersessionBinding(
+        FallbackTailYieldDecision FailedDecision,
+        FallbackTailYieldDecision SuccessorDecision,
+        FileTransferFallbackTailYieldScope Scope,
+        bool CarriedPeerProof,
+        string Reason)
+{
+    public bool IsDefault =>
+        FailedDecision.IsDefault ||
+        SuccessorDecision.IsDefault ||
+        Scope.IsDefault ||
+        FailedDecision.YieldKind != FallbackTailYieldKind.Failed ||
+        SuccessorDecision.YieldKind != FallbackTailYieldKind.Quiescent ||
+        FailedDecision.AuthorityId == SuccessorDecision.AuthorityId ||
+        SuccessorDecision.PredecessorAuthorityId is not null;
+}
+
 internal readonly record struct FileTransferFallbackTailYieldOperation(
     FallbackTailYieldDecision Decision,
     FileTransferFallbackTailYieldScope Scope,
@@ -665,6 +683,8 @@ internal readonly record struct FileTransferFallbackTailYieldOperation(
         PairedReleaseCarryForward = null,
     FileTransferFallbackTailYieldReauthorizationReceipt?
         SourceReauthorization = null,
+    FileTransferFallbackTailFailedYieldSupersessionBinding?
+        FailedYieldSupersession = null,
     string? InvalidationReason = null)
 {
     public bool IsDefault => Decision.IsDefault || Scope.IsDefault;
@@ -7466,7 +7486,15 @@ internal static class FileTransferCoordinator
                 IsFallbackTailYieldScopeCurrent(
                     state,
                     currentOperation.Scope,
-                    out _))
+                    out _) &&
+                !(requestedYieldKind == FallbackTailYieldKind.Quiescent &&
+                  requestedPredecessor is null &&
+                  request.FallbackTailYieldTransportEpochReauthorization is
+                      null &&
+                  IsFailedFallbackTailYieldEligibleForQuiescentSupersession(
+                      state,
+                      currentOperation,
+                      out _)))
             {
                 return ActionDecision(
                     state,
@@ -11864,6 +11892,22 @@ internal static class FileTransferCoordinator
             return state;
         }
 
+        if (decision.YieldKind == FallbackTailYieldKind.Quiescent &&
+            decision.PredecessorAuthorityId is null &&
+            sourceReauthorization is null &&
+            substate.CurrentOperation is { } failedOperation &&
+            IsFailedFallbackTailYieldEligibleForQuiescentSupersession(
+                state,
+                failedOperation,
+                out _))
+        {
+            return ApplyFailedFallbackTailYieldQuiescentSupersession(
+                state,
+                failedOperation,
+                decision,
+                reason);
+        }
+
         var retainedPredecessor = substate.RetainedPredecessor;
         var lastTerminal = substate.LastTerminalOperation;
         if (substate.CurrentOperation is { } current &&
@@ -11925,6 +11969,132 @@ internal static class FileTransferCoordinator
                 LastYieldGeneration = Math.Max(
                     substate.LastYieldGeneration,
                     decision.YieldGeneration),
+            });
+    }
+
+    private static bool
+        IsFailedFallbackTailYieldEligibleForQuiescentSupersession(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackTailYieldOperation operation,
+            out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        var substate = state.PersistentState.FallbackTailYield;
+        if (state.IsTerminal)
+        {
+            rejectionReason = "transfer_terminal";
+            return false;
+        }
+
+        if (substate.CurrentOperation != operation ||
+            !operation.Decision.Accepted ||
+            operation.Decision.YieldKind != FallbackTailYieldKind.Failed ||
+            operation.Decision.PredecessorAuthorityId is not null ||
+            operation.SourceReauthorization is not null ||
+            operation.FailedYieldSupersession is not null ||
+            operation.LocalProof is not null ||
+            operation.PairedRelease is not null ||
+            operation.PairingState is not
+                (FileTransferFallbackTailYieldPairingState.YieldIssued or
+                 FileTransferFallbackTailYieldPairingState.PeerProofObserved) ||
+            substate.CurrentReservation is not null ||
+            substate.PendingRetryRecheckRequest is not null ||
+            substate.PendingReauthorization is not null ||
+            substate.PendingReauthorizationPeerProof is not null)
+        {
+            rejectionReason =
+                "fallback_tail_failed_yield_not_supersedable";
+            return false;
+        }
+
+        return IsFallbackTailYieldScopeCurrent(
+            state,
+            operation.Scope,
+            out rejectionReason);
+    }
+
+    private static FileTransferCoordinatorState
+        ApplyFailedFallbackTailYieldQuiescentSupersession(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackTailYieldOperation failedOperation,
+            FallbackTailYieldDecision successorDecision,
+            string reason)
+    {
+        var substate = state.PersistentState.FallbackTailYield;
+        if (!IsFailedFallbackTailYieldEligibleForQuiescentSupersession(
+                state,
+                failedOperation,
+                out _) ||
+            successorDecision.IsDefault ||
+            successorDecision.YieldKind != FallbackTailYieldKind.Quiescent ||
+            successorDecision.PredecessorAuthorityId is not null)
+        {
+            return state;
+        }
+
+        var scope = CreateFallbackTailYieldScope(state, successorDecision);
+        if (!scope.HasCompleteExecutionScope ||
+            scope != failedOperation.Scope)
+        {
+            return state;
+        }
+
+        var carriedPeerProof = failedOperation.PeerProof;
+        var successorOperation =
+            new FileTransferFallbackTailYieldOperation(
+                successorDecision,
+                scope,
+                carriedPeerProof is null
+                    ? FileTransferFallbackTailYieldPairingState.YieldIssued
+                    : FileTransferFallbackTailYieldPairingState
+                        .PeerProofObserved,
+                PeerProof: carriedPeerProof);
+        if (carriedPeerProof is { } peer &&
+            !IsFallbackTailPeerProofExactForOperation(
+                substate,
+                successorOperation,
+                peer.Proof,
+                out _))
+        {
+            carriedPeerProof = null;
+            successorOperation = successorOperation with
+            {
+                PairingState =
+                    FileTransferFallbackTailYieldPairingState.YieldIssued,
+                PeerProof = null,
+            };
+        }
+
+        var normalizedReason = NormalizeReason(reason);
+        var binding =
+            new FileTransferFallbackTailFailedYieldSupersessionBinding(
+                failedOperation.Decision,
+                successorDecision,
+                scope,
+                carriedPeerProof is not null,
+                normalizedReason);
+        successorOperation = successorOperation with
+        {
+            FailedYieldSupersession = binding,
+        };
+        var terminalFailed = failedOperation with
+        {
+            PairingState =
+                FileTransferFallbackTailYieldPairingState.Invalidated,
+            InvalidationReason =
+                "failed_fallback_tail_yield_superseded_by_quiescence",
+        };
+        return ApplyFallbackTailYieldSubstate(
+            state,
+            substate with
+            {
+                CurrentOperation = successorOperation,
+                RetainedPredecessor = null,
+                CurrentReservation = null,
+                LastTerminalOperation = terminalFailed,
+                LastYieldGeneration = Math.Max(
+                    substate.LastYieldGeneration,
+                    successorDecision.YieldGeneration),
             });
     }
 
@@ -21997,6 +22167,10 @@ internal static class FileTransferCoordinator
             IsFallbackTailYieldScopeCurrent(
                 state,
                 currentOperation.Scope,
+                out _) &&
+            !IsFailedFallbackTailYieldEligibleForQuiescentSupersession(
+                state,
+                currentOperation,
                 out _))
         {
             return MutationRejected(
