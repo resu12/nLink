@@ -1375,6 +1375,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_fallback_checkpoint_delivery_held') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_fallback_checkpoint_delivery_resumed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_fallback_checkpoint_delivery_resume_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_regular_nkn_state_refresh_send_queued') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v4_feedback_first_success') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_receiver_state_received') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_fallback_checkpoint_peer_frame_received') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_outbound_sparse_worker_handoff_installed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_outbound_sparse_worker_handoff_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_fallback_checkpoint_lifecycle_advanced') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_fallback_checkpoint_invalidated') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_zero_credit_breaker') +
@@ -3364,6 +3371,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_held_delivery_retired_distinct_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.HeldDeliveryRetiredDistinctCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_held_delivery_retired_recovered_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.HeldDeliveryRetiredRecoveredCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_held_delivery_retired_unresolved_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.HeldDeliveryRetiredUnresolvedCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_child_binding_missing_raw_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.ChildBindingMissingRawCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_child_binding_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.ChildBindingMissingDistinctCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_child_binding_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.ChildBindingMissingRecoveredCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_child_binding_missing_unresolved_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.ChildBindingMissingUnresolvedCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_raw_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffRawCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_distinct_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffDistinctCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_recovered_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffRecoveredCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_unresolved_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffUnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RecoveredCount),
@@ -3712,6 +3727,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_held_delivery_retired_distinct_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.HeldDeliveryRetiredDistinctCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_held_delivery_retired_recovered_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.HeldDeliveryRetiredRecoveredCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_held_delivery_retired_unresolved_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.HeldDeliveryRetiredUnresolvedCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_child_binding_missing_raw_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.ChildBindingMissingRawCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_child_binding_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.ChildBindingMissingDistinctCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_child_binding_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.ChildBindingMissingRecoveredCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_child_binding_missing_unresolved_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.ChildBindingMissingUnresolvedCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_raw_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffRawCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_distinct_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffDistinctCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_recovered_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffRecoveredCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_unresolved_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffUnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RecoveredCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_unresolved_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.UnresolvedCount),
@@ -4056,6 +4079,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_held_delivery_retired_distinct_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.HeldDeliveryRetiredDistinctCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_held_delivery_retired_recovered_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.HeldDeliveryRetiredRecoveredCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_held_delivery_retired_unresolved_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.HeldDeliveryRetiredUnresolvedCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_child_binding_missing_raw_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.ChildBindingMissingRawCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_child_binding_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.ChildBindingMissingDistinctCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_child_binding_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.ChildBindingMissingRecoveredCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_child_binding_missing_unresolved_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.ChildBindingMissingUnresolvedCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_raw_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffRawCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_distinct_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffDistinctCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_recovered_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffRecoveredCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_unresolved_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffUnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RecoveredCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_unresolved_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.UnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_issuance_verdict={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.Verdict),
@@ -4384,6 +4415,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_held_delivery_retired_distinct_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.HeldDeliveryRetiredDistinctCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_held_delivery_retired_recovered_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.HeldDeliveryRetiredRecoveredCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_held_delivery_retired_unresolved_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.HeldDeliveryRetiredUnresolvedCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_child_binding_missing_raw_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.ChildBindingMissingRawCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_child_binding_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.ChildBindingMissingDistinctCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_child_binding_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.ChildBindingMissingRecoveredCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_child_binding_missing_unresolved_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.ChildBindingMissingUnresolvedCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_raw_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffRawCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_distinct_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffDistinctCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_recovered_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffRecoveredCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_unresolved_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffUnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RecoveredCount),
@@ -4742,6 +4781,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_held_delivery_retired_distinct_count = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.HeldDeliveryRetiredDistinctCount
         filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_held_delivery_retired_recovered_count = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.HeldDeliveryRetiredRecoveredCount
         filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_held_delivery_retired_unresolved_count = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.HeldDeliveryRetiredUnresolvedCount
+        filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_child_binding_missing_raw_count = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.ChildBindingMissingRawCount
+        filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_child_binding_missing_distinct_count = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.ChildBindingMissingDistinctCount
+        filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_child_binding_missing_recovered_count = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.ChildBindingMissingRecoveredCount
+        filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_child_binding_missing_unresolved_count = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.ChildBindingMissingUnresolvedCount
+        filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_raw_count = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffRawCount
+        filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_distinct_count = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffDistinctCount
+        filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_recovered_count = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffRecoveredCount
+        filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_unresolved_count = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffUnresolvedCount
         runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount
         runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount
         runtime_unlock_regular_v4_recovery_lease_not_issued_recovered_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RecoveredCount

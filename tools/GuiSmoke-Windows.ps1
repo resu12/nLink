@@ -7027,6 +7027,154 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
             }
         )
+        foreach ($rejection in @($indexed | Where-Object {
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_outbound_sparse_worker_handoff_rejected')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -eq 'outbound' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'route') -eq 'post_tuna_fallback_v6' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'stage') -eq 'state_refresh_sent' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_reason') -eq 'install_generation_mismatch'
+                })) {
+            $writer = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'log_writer_id'
+            $session = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'session_id'
+            $transfer = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'transfer_id'
+            $capturedInstall = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'install_generation'
+            if ([string]::IsNullOrWhiteSpace($writer) -or
+                [string]::IsNullOrWhiteSpace($session) -or
+                [string]::IsNullOrWhiteSpace($transfer) -or
+                $capturedInstall -in @('', '0', '(none)')) {
+                continue
+            }
+            $sameScope = {
+                param($item)
+                (Get-TunaGuiLogLineFieldValue -Line $item.Line -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $item.Line -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $item.Line -Name 'transfer_id') -eq $transfer
+            }
+            $resume = @($indexed | Where-Object {
+                    $_.Index -lt $rejection.Index -and (& $sameScope $_) -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_receive_recovery_fallback_checkpoint_delivery_resume_decided')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'outcome') -in @('accepted', 'idempotent')
+                } | Select-Object -Last 1)
+            if ($resume.Count -ne 1) {
+                continue
+            }
+            $generation = Get-TunaGuiLogLineFieldValue -Line $resume[0].Line -Name 'recovery_operation_generation'
+            $authority = Get-TunaGuiLogLineFieldValue -Line $resume[0].Line -Name 'recovery_operation_authority_id'
+            $checkpointId = Get-TunaGuiLogLineFieldValue -Line $resume[0].Line -Name 'effective_checkpoint_request_id'
+            $bindingGeneration = Get-TunaGuiLogLineFieldValue -Line $resume[0].Line -Name 'checkpoint_binding_generation'
+            $deliveryGeneration = Get-TunaGuiLogLineFieldValue -Line $resume[0].Line -Name 'checkpoint_delivery_generation'
+            $frameFingerprint = Get-TunaGuiLogLineFieldValue -Line $resume[0].Line -Name 'frame_fingerprint'
+            $sameCheckpoint = {
+                param($item)
+                (& $sameScope $item) -and
+                (Get-TunaGuiLogLineFieldValue -Line $item.Line -Name 'recovery_operation_generation') -eq $generation -and
+                (Get-TunaGuiLogLineFieldValue -Line $item.Line -Name 'effective_checkpoint_request_id') -eq $checkpointId -and
+                (Get-TunaGuiLogLineFieldValue -Line $item.Line -Name 'checkpoint_binding_generation') -eq $bindingGeneration -and
+                (Get-TunaGuiLogLineFieldValue -Line $item.Line -Name 'frame_fingerprint') -eq $frameFingerprint
+            }
+            $held = @($indexed | Where-Object {
+                    $_.Index -lt $resume[0].Index -and (& $sameCheckpoint $_) -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'checkpoint_delivery_generation') -eq $deliveryGeneration -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'delivery_state') -eq 'held'
+                } | Select-Object -Last 1)
+            $completion = @($indexed | Where-Object {
+                    $_.Index -lt $resume[0].Index -and (& $sameScope $_) -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_receive_recovery_operation_execution_receipt_applied')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'receive_recovery_operation_generation') -eq $generation -and
+                    ($authority -in @('[redacted]', '(redacted)', '(none)', 'none') -or
+                        (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'receive_recovery_operation_authority_id') -eq $authority) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'execution_outcome') -eq 'Completed'
+                } | Select-Object -Last 1)
+            $queued = @($indexed | Where-Object {
+                    $_.Index -gt $resume[0].Index -and $_.Index -lt $rejection.Index -and
+                    (& $sameScope $_) -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_v6_regular_nkn_state_refresh_send_queued')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'request_id') -eq $checkpointId -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'source') -eq 'deferred_replay'
+                } | Select-Object -First 1)
+            $physicalSuccess = @($indexed | Where-Object {
+                    $_.Index -gt $resume[0].Index -and $_.Index -lt $rejection.Index -and
+                    (& $sameScope $_) -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_v4_feedback_first_success')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'frame_type') -eq 'filetransfer.frontier_request.v6'
+                } | Select-Object -First 1)
+            $successor = @($indexed | Where-Object {
+                    $_.Index -gt $resume[0].Index -and $_.Index -lt $rejection.Index -and
+                    (& $sameScope $_) -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_outbound_sparse_worker_handoff_installed')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'predecessor_install_generation') -eq $capturedInstall
+                } | Select-Object -First 1)
+            if ($held.Count -ne 1 -or $completion.Count -ne 1 -or
+                $queued.Count -ne 1 -or $physicalSuccess.Count -ne 1 -or
+                $successor.Count -ne 1) {
+                continue
+            }
+            $scopeFields = @(
+                'route', 'protocol_version', 'live_route_epoch', 'runtime_generation',
+                'terminal_generation', 'leg_generation', 'route_publication_generation',
+                'route_commit_generation', 'data_session_generation')
+            $sameRuntimeScope = $true
+            foreach ($field in $scopeFields) {
+                if ((Get-TunaGuiLogLineFieldValue -Line $successor[0].Line -Name $field) -ne
+                    (Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name $field)) {
+                    $sameRuntimeScope = $false
+                    break
+                }
+            }
+            if (-not $sameRuntimeScope) {
+                continue
+            }
+            $delivered = @($indexed | Where-Object {
+                    $_.Index -gt $resume[0].Index -and (& $sameCheckpoint $_) -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'checkpoint_delivery_generation') -eq $deliveryGeneration -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'delivery_state') -eq 'delivered'
+                } | Select-Object -First 1)
+            if ($delivered.Count -eq 0) {
+                return $true
+            }
+            $peerFrame = @($indexed | Where-Object {
+                    $_.Index -gt $delivered[0].Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_v6_receiver_state_received',
+                        'filetransfer_receive_recovery_fallback_checkpoint_peer_frame_received'))
+                } | Select-Object -First 1)
+            $proof = @($indexed | Where-Object {
+                    $_.Index -gt $delivered[0].Index -and (& $sameScope $_) -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_receive_recovery_operation_proof_decision_observed')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'receive_recovery_operation_generation') -eq $generation -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -in @('accepted', 'idempotent')
+                } | Select-Object -First 1)
+            $acceptedBinding = @($indexed | Where-Object {
+                    $_.Index -gt $delivered[0].Index -and (& $sameCheckpoint $_) -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_receive_recovery_fallback_checkpoint_lifecycle_advanced')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'checkpoint_binding_state') -in @('accepted', 'retired')
+                } | Select-Object -First 1)
+            $released = @($indexed | Where-Object {
+                    $_.Index -gt $delivered[0].Index -and (& $sameScope $_) -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'runtime_unlock_initial_activation_receive_recovery_hold_decided')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'receive_recovery_operation_generation') -eq $generation -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq 'Released'
+                } | Select-Object -First 1)
+            if ($peerFrame.Count -eq 0 -or $proof.Count -eq 0 -or
+                $acceptedBinding.Count -eq 0 -or $released.Count -eq 0) {
+                return $true
+            }
+        }
         foreach ($retirement in @($indexed | Where-Object {
                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                         'filetransfer_receive_recovery_fallback_checkpoint_lifecycle_advanced')) -and
@@ -11671,6 +11819,12 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $receiveRecoveryFallbackCheckpointScopeHandoffMissing =
         Test-TunaGuiReceiveRecoveryFallbackCheckpointScopeHandoffMissing `
             -Lines $regularV4EvidenceLineText
+    $receiveRecoveryFallbackCheckpointSparsePumpHandoffMissing =
+        $receiveRecoveryFallbackCheckpointScopeHandoffMissing -and
+        (Test-TunaGuiLogLinesContain -Lines $regularV4EvidenceLineText -Needles @(
+                'event=filetransfer_outbound_sparse_worker_handoff_rejected',
+                'stage=state_refresh_sent',
+                'decision_reason=install_generation_mismatch'))
     $routeTransitionDrainingTransportGraceTerminalization =
         Test-TunaGuiRouteTransitionDrainingTransportGraceFailure `
             -Lines $regularV4EvidenceLineText
@@ -11819,7 +11973,12 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     }
     elseif ($receiveRecoveryFallbackCheckpointScopeHandoffMissing) {
         $phase = 'receive_recovery'
-        $reason = 'post_tuna_fallback_checkpoint_descendant_treated_as_runtime_scope_replacement'
+        $reason = if ($receiveRecoveryFallbackCheckpointSparsePumpHandoffMissing) {
+            'coordinator_resumed_fallback_checkpoint_delivery_not_committed_after_same_scope_sparse_pump_handoff'
+        }
+        else {
+            'post_tuna_fallback_checkpoint_descendant_treated_as_runtime_scope_replacement'
+        }
     }
     elseif ($initialActivationAnswerPeerDeliveryMissing) {
         $phase = 'runtime_unlock_initial_activation'

@@ -14,6 +14,97 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransferOpsScriptsTestBase
 {
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task AnalyzeRetained_ReceiveRecoveryFallbackCheckpointSparsePumpHandoff(
+        bool compact,
+        bool recovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string operationScope =
+            "session_id=sess_checkpoint_pump; transfer_id=transfer_checkpoint_pump; " +
+            "direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; " +
+            "receive_recovery_operation_generation=3; " +
+            "receive_recovery_operation_authority_id=recovery-authority-3; " +
+            "log_writer_id=writer_checkpoint_pump";
+        const string checkpointScope =
+            "session_id=sess_checkpoint_pump; transfer_id=transfer_checkpoint_pump; " +
+            "direction=outbound; recovery_operation_generation=3; " +
+            "recovery_operation_authority_id=recovery-authority-3; " +
+            "effective_checkpoint_request_id=v6-state-refresh-1; " +
+            "checkpoint_binding_generation=1; checkpoint_delivery_generation=1; " +
+            "frame_fingerprint=frame-1; transport_epoch=1; " +
+            "log_writer_id=writer_checkpoint_pump";
+        const string pumpScope =
+            "session_id=sess_checkpoint_pump; transfer_id=transfer_checkpoint_pump; " +
+            "direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; " +
+            "live_route_epoch=2; runtime_generation=3; terminal_generation=0; " +
+            "leg_generation=3; route_publication_generation=3; route_commit_generation=0; " +
+            "data_session_generation=1; log_writer_id=writer_checkpoint_pump";
+        var messages = new List<string>
+        {
+            LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied; {checkpointScope}; delivery_state=held; decision_status=accepted"),
+            LogLine($"event=filetransfer_receive_recovery_operation_execution_receipt_applied; {operationScope}; execution_outcome=Completed"),
+            LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_delivery_resume_decided; {checkpointScope}; physical_epoch=1; outcome=accepted"),
+            LogLine("event=filetransfer_v6_regular_nkn_state_refresh_send_queued; " +
+                "session_id=sess_checkpoint_pump; transfer_id=transfer_checkpoint_pump; " +
+                "request_id=v6-state-refresh-1; source=deferred_replay; " +
+                "log_writer_id=writer_checkpoint_pump"),
+            LogLine($"event=filetransfer_outbound_sparse_worker_handoff_installed; {pumpScope}; install_generation=44; predecessor_install_generation=43"),
+            LogLine("event=filetransfer_v4_feedback_first_success; " +
+                "session_id=sess_checkpoint_pump; transfer_id=transfer_checkpoint_pump; " +
+                "frame_type=filetransfer.frontier_request.v6; log_writer_id=writer_checkpoint_pump"),
+            LogLine($"event=filetransfer_outbound_sparse_worker_handoff_rejected; {pumpScope}; " +
+                "install_generation=43; predecessor_install_generation=42; " +
+                "stage=state_refresh_sent; decision_reason=install_generation_mismatch")
+        };
+        if (recovered)
+        {
+            messages.Add(LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied; {checkpointScope}; delivery_state=delivered; decision_status=accepted"));
+            messages.Add(LogLine("event=filetransfer_v6_receiver_state_received; " +
+                "session_id=sess_checkpoint_pump; transfer_id=transfer_checkpoint_pump; " +
+                "log_writer_id=writer_peer"));
+            messages.Add(LogLine($"event=filetransfer_receive_recovery_operation_proof_decision_observed; {operationScope}; decision_status=accepted"));
+            messages.Add(LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_lifecycle_advanced; {checkpointScope}; checkpoint_binding_state=accepted"));
+            messages.Add(LogLine($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {operationScope}; decision_status=Released"));
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            messages,
+            [],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_raw_count"]);
+        Assert.Equal("1", verdict["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_raw_count"]);
+        Assert.Equal(recovered ? "1" : "0", verdict["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_recovered_count"]);
+        Assert.Equal(recovered ? "0" : "1", verdict["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_unresolved_count"]);
+        if (!recovered)
+        {
+            Assert.Equal(
+                "filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing",
+                verdict["first_proof_chain_failure_class"]);
+            Assert.Equal(
+                "coordinator_resumed_fallback_checkpoint_delivery_not_committed_after_same_scope_sparse_pump_handoff",
+                verdict["first_proof_chain_failure_reason"]);
+        }
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task AnalyzeRetained_ReceiveRecoveryFallbackCheckpointHeldDeliveryRetiredBeforeResume(
