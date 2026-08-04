@@ -3013,6 +3013,52 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeFailureClassification_PeerFirstFallbackTailProofUsesIndexedFastPath()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFileTransferFailureClassificationResult", "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-peer-first-tail-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                @(
+                    'event=filetransfer_fallback_tail_peer_proof_receipt_decided; session_id=sess; transfer_id=transfer; direction=inbound; peer_pair_key=pair; peer_observation_identity=peer-proof; peer_frame_fingerprint=frame; decision_status=Rejected; decision_reason=fallback_tail_yield_operation_missing; log_writer_id=writer-in',
+                    'event=filetransfer_fallback_tail_yield_issued; session_id=sess; transfer_id=transfer; direction=inbound; route=post_tuna_fallback_v6; authority_id=inbound-yield; yield_generation=1; pair_key=pair; yield_kind=Quiescent; log_writer_id=writer-in',
+                    'event=filetransfer_fallback_tail_local_proof_receipt_decided; session_id=sess; transfer_id=transfer; direction=inbound; authority_id=inbound-yield; yield_generation=1; local_proof_identity=inbound-local-proof; decision_status=Accepted; log_writer_id=writer-in',
+                    'event=filetransfer_fallback_tail_pairing_committed; session_id=sess; transfer_id=transfer; direction=outbound; authority_id=outbound-yield; peer_direction=inbound; peer_observation_identity=inbound-local-proof; log_writer_id=writer-out',
+                    'event=filetransfer_fallback_tail_paired_release_consumed; session_id=sess; transfer_id=transfer; direction=outbound; authority_id=outbound-yield; log_writer_id=writer-out',
+                    'event=filetransfer_runtime_unlock_admission_denied; session_id=sess; transfer_id=transfer; direction=inbound; route=post_tuna_fallback_v6; admission_reason=paired_fallback_tail_yield_missing; log_writer_id=writer-in'
+                ) | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($result.Phase -ne 'route_runtime' -or
+                    $result.Reason -ne 'reciprocal_fallback_tail_peer_proof_not_rebound_after_local_quiescent_yield' -or
+                    -not $result.FallbackTailPeerProofBeforeLocalYieldNotRetained -or
+                    $result.ClassificationSource -ne 'immutable_evidence_fallback_tail_peer_first_index' -or
+                    [long]$result.EvidenceLineVisitCount -ne 6) {
+                    throw "peer-first fallback-tail fast path mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+                Write-Output 'gui-peer-first-fallback-tail-fast-path-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(result.ExitCode == 0, $"Peer-first fallback-tail GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-peer-first-fallback-tail-fast-path-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GuiSmokeFailureClassification_InvalidFallbackBootstrapFrontierUsesIndexedFastPath()
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));

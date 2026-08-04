@@ -3707,6 +3707,9 @@ function Get-FileTransferFallbackTailCoordinatorAggregateCorrelation {
             'runtime_unlock_retry_dispatch_authority_granted')
     })
     [object[]]$effectiveGrantEvents = @()
+    [object[]]$installCommittedEvents = @($installEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_install_committed'
+    })
     if ($installEvents.Count -gt 0) {
         $installProof = Get-FileTransferRuntimeUnlockRetryDispatchInstallProof -Events $installEvents
         $effectiveGrantEvents = @($installProof.EffectiveGrantEvents)
@@ -3738,6 +3741,7 @@ function Get-FileTransferFallbackTailCoordinatorAggregateCorrelation {
             -Default '0')
         [object[]]$matchingReservations = @()
         [object[]]$matchingGrants = @()
+        [object[]]$matchingInstallCommits = @()
         if ($valid -and
             -not [string]::IsNullOrWhiteSpace($retryAuthorityId) -and
             $retryAuthorityId -notin @('(none)', 'none') -and
@@ -3784,7 +3788,33 @@ function Get-FileTransferFallbackTailCoordinatorAggregateCorrelation {
                 (Get-FileTransferEventField -Event $_ -Name 'release_outcome' -Default '') -eq
                     'Quiescent'
             } | Sort-Object Sequence, LineNumber -Descending | Select-Object -First 1)
-            $valid = $matchingReservations.Count -eq 1 -and $matchingGrants.Count -eq 1
+            $matchingInstallCommits = @($installCommittedEvents | Where-Object {
+                (Test-FallbackTailAggregateBefore -Earlier $_ -Later $consumption) -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq
+                    (Get-FileTransferEventField -Event $consumption -Name 'session_id' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq
+                    (Get-FileTransferEventField -Event $consumption -Name 'transfer_id' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq
+                    (Get-FileTransferEventField -Event $consumption -Name 'direction' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq
+                    $retryAuthorityId -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'install_generation' -Default 0) -eq
+                    $installGeneration -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'dispatch_attempt_generation' -Default 0) -eq
+                    $attemptGeneration -and
+                (Get-FileTransferEventField -Event $_ -Name 'release_kind' -Default '') -eq
+                    'FallbackPairedTailYield' -and
+                (Get-FileTransferEventField -Event $_ -Name 'release_authority_id' -Default '') -eq
+                    (Get-FileTransferEventField -Event $consumption -Name 'authority_id' -Default '') -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'release_generation' -Default 0) -eq
+                    (Get-FileTransferEventInt64Field -Event $consumption -Name 'yield_generation' -Default 0) -and
+                (Get-FileTransferEventField -Event $_ -Name 'release_outcome' -Default '') -eq
+                    'Quiescent' -and
+                (Get-FileTransferEventField -Event $_ -Name 'install_status' -Default '') -eq
+                    'Installed'
+            } | Sort-Object Sequence, LineNumber -Descending | Select-Object -First 1)
+            $valid = $matchingReservations.Count -eq 1 -and
+                ($matchingGrants.Count -eq 1 -or $matchingInstallCommits.Count -eq 1)
         }
         else {
             $valid = $false
@@ -14317,6 +14347,10 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("failed_yield_quiescent_successor_missing_distinct_count={0}" -f $RecoveryClassification.FailedYieldQuiescentSuccessorMissingDistinctCount)) | Out-Null
     $lines.Add(("failed_yield_quiescent_successor_missing_recovered_count={0}" -f $RecoveryClassification.FailedYieldQuiescentSuccessorMissingRecoveredCount)) | Out-Null
     $lines.Add(("failed_yield_quiescent_successor_missing_unresolved_count={0}" -f $RecoveryClassification.FailedYieldQuiescentSuccessorMissingUnresolvedCount)) | Out-Null
+    $lines.Add(("peer_proof_before_local_yield_not_retained_raw_count={0}" -f $RecoveryClassification.PeerProofBeforeLocalYieldNotRetainedRawCount)) | Out-Null
+    $lines.Add(("peer_proof_before_local_yield_not_retained_distinct_count={0}" -f $RecoveryClassification.PeerProofBeforeLocalYieldNotRetainedDistinctCount)) | Out-Null
+    $lines.Add(("peer_proof_before_local_yield_not_retained_recovered_count={0}" -f $RecoveryClassification.PeerProofBeforeLocalYieldNotRetainedRecoveredCount)) | Out-Null
+    $lines.Add(("peer_proof_before_local_yield_not_retained_unresolved_count={0}" -f $RecoveryClassification.PeerProofBeforeLocalYieldNotRetainedUnresolvedCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_raw_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialOfferRetryLifecycleHandoffMissingRawCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_distinct_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialOfferRetryLifecycleHandoffMissingDistinctCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_recovered_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount)) | Out-Null
@@ -16417,6 +16451,10 @@ function New-FileTransferStabilityGateSummaryLines {
         ("failed_yield_quiescent_successor_missing_distinct_count={0}" -f $recoveryClassification.FailedYieldQuiescentSuccessorMissingDistinctCount),
         ("failed_yield_quiescent_successor_missing_recovered_count={0}" -f $recoveryClassification.FailedYieldQuiescentSuccessorMissingRecoveredCount),
         ("failed_yield_quiescent_successor_missing_unresolved_count={0}" -f $recoveryClassification.FailedYieldQuiescentSuccessorMissingUnresolvedCount),
+        ("peer_proof_before_local_yield_not_retained_raw_count={0}" -f $recoveryClassification.PeerProofBeforeLocalYieldNotRetainedRawCount),
+        ("peer_proof_before_local_yield_not_retained_distinct_count={0}" -f $recoveryClassification.PeerProofBeforeLocalYieldNotRetainedDistinctCount),
+        ("peer_proof_before_local_yield_not_retained_recovered_count={0}" -f $recoveryClassification.PeerProofBeforeLocalYieldNotRetainedRecoveredCount),
+        ("peer_proof_before_local_yield_not_retained_unresolved_count={0}" -f $recoveryClassification.PeerProofBeforeLocalYieldNotRetainedUnresolvedCount),
         ("runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount),
         ("runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount),
         ("runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount),
@@ -32535,14 +32573,17 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
             [int64]$_.Sequence -gt [int64]$successorSend[0].Sequence -and
             (Test-ProofStatePublicationCommandMatch -Issued $successorIssued[0] -Retained $successorRetained[0] -Candidate $_)
         } | Select-Object -First 1)
+        $successorProofBoundary = if ($successorPublicationReceipt.Count -eq 1) {
+            [int64]$successorPublicationReceipt[0].Sequence
+        }
+        elseif ($successorRetained.Count -eq 1) {
+            [int64]$successorRetained[0].Sequence
+        }
+        else { [int64]::MaxValue }
         $successorProof = @($proofEvents | Where-Object {
-            $successorPublicationReceipt.Count -eq 1 -and
-            [int64]$_.Sequence -gt [int64]$successorPublicationReceipt[0].Sequence -and
-            (Get-ProofStateField -Event $_ -Names @('session_id')) -eq
-                (Get-ProofStateField -Event $successorIssued[0] -Names @('session_id')) -and
-            (Get-ProofStateField -Event $_ -Names @('transfer_id')) -eq
-                (Get-ProofStateField -Event $successorIssued[0] -Names @('transfer_id')) -and
-            (Get-ProofStateField -Event $_ -Names @('direction')) -eq 'outbound'
+            $successorRetained.Count -eq 1 -and
+            [int64]$_.Sequence -gt $successorProofBoundary -and
+            (Test-ProofStateOperationMatch -Issued $successorIssued[0] -Candidate $_)
         } | Select-Object -First 1)
         $successorAdopted = @($adoptedEvents | Where-Object {
             $successorProof.Count -eq 1 -and
@@ -32554,7 +32595,23 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
             [int64]$_.Sequence -gt [int64]$successorAdopted[0].Sequence -and
             (Test-ProofStateOperationMatch -Issued $successorProof[0] -Candidate $_)
         } | Select-Object -First 1)
-        if ($successorAdopted.Count -eq 1 -and $successorResumed.Count -eq 1) {
+        $successorPayloadAdmission = @($payloadAdmissionEvents | Where-Object {
+            $successorAdopted.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$successorAdopted[0].Sequence -and
+            (Test-ProofStatePayloadAdmissionMatch -Operation $successorIssued[0] -Candidate $_)
+        } | Select-Object -First 1)
+        $successorInvalidatedBeforeAdoption = @($operationInvalidatedEvents | Where-Object {
+            $successorRetained.Count -eq 1 -and
+            $successorAdopted.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$successorRetained[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$successorAdopted[0].Sequence -and
+            (Test-ProofStateOperationMatch -Issued $successorIssued[0] -Candidate $_)
+        } | Select-Object -First 1)
+        if ($successorAdopted.Count -eq 1 -and
+            $successorInvalidatedBeforeAdoption.Count -eq 0 -and
+            ($successorResumed.Count -eq 1 -or
+                $successorPayloadAdmission.Count -eq 1 -or
+                $successorPublicationReceipt.Count -eq 0)) {
             $unresolved.Remove($candidateEvent) | Out-Null
             $recovered.Add($candidateEvent) | Out-Null
         }
@@ -41998,6 +42055,18 @@ function Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation {
     [object[]]$preparedEvents = @($ordered | Where-Object {
             $_.EventName -eq 'filetransfer_route_transition_prepared'
         })
+    [object[]]$admissionDeniedEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_runtime_unlock_admission_denied' -and
+            (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'protocol_version' -Default 0) -eq 6 -and
+            (Get-FileTransferEventField -Event $_ -Name 'admission_reason' -Default '') -eq
+                'paired_fallback_tail_yield_missing'
+        })
+    [object[]]$pendingPeerProofEvents = @($ordered | Where-Object {
+            $_.EventName -in @(
+                'filetransfer_fallback_tail_peer_proof_pending_decided',
+                'filetransfer_fallback_tail_peer_proof_pending_bound')
+        })
     $rawEvents = New-Object System.Collections.Generic.List[object]
     $recordsByKey = @{}
     foreach ($rejection in $rejections) {
@@ -42091,7 +42160,198 @@ function Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation {
         }
     }
 
+    foreach ($denial in $admissionDeniedEvents) {
+        $writer = Get-FileTransferEventField -Event $denial -Name 'log_writer_id' -Default ''
+        $session = Get-FileTransferEventField -Event $denial -Name 'session_id' -Default ''
+        $transfer = Get-FileTransferEventField -Event $denial -Name 'transfer_id' -Default ''
+        $direction = Get-FileTransferEventField -Event $denial -Name 'direction' -Default ''
+        $sequence = [int64]$denial.Sequence
+        if ([string]::IsNullOrWhiteSpace($writer) -or
+            [string]::IsNullOrWhiteSpace($session) -or
+            [string]::IsNullOrWhiteSpace($transfer) -or
+            $direction -notin @('inbound', 'outbound')) {
+            continue
+        }
+
+        [object[]]$localYields = @($yieldEvents | Where-Object {
+                [int64]$_.Sequence -lt $sequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq $direction -and
+                (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+                (Get-FileTransferEventField -Event $_ -Name 'yield_kind' -Default '') -eq 'Quiescent'
+            } | Sort-Object Sequence, LineNumber -Descending | Select-Object -First 1)
+        if ($localYields.Count -ne 1) { continue }
+        $localYield = $localYields[0]
+        $authority = Get-FileTransferEventField -Event $localYield -Name 'authority_id' -Default ''
+        $generation = Get-FileTransferEventField -Event $localYield -Name 'yield_generation' -Default '0'
+        $pairKey = Get-FileTransferEventField -Event $localYield -Name 'pair_key' -Default ''
+        $localProofIdentity = ''
+        [object[]]$localProof = @($localProofEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$localYield.Sequence -and
+                [int64]$_.Sequence -lt $sequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq $authority -and
+                (Get-FileTransferEventField -Event $_ -Name 'yield_generation' -Default '0') -eq $generation -and
+                (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default 'Accepted') -in
+                    @('Accepted', 'Idempotent', 'Applied')
+            } | Select-Object -First 1)
+        if ($localProof.Count -ne 1) { continue }
+        $localProofIdentity = Get-FileTransferEventField -Event $localProof[0] -Name 'local_proof_identity' -Default (
+            Get-FileTransferEventField -Event $localProof[0] -Name 'proof_identity' -Default '')
+
+        [object[]]$missingProofs = @($peerProofEvents | Where-Object {
+                [int64]$_.Sequence -lt [int64]$localYield.Sequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+                (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq
+                    (Get-FileTransferEventField -Event $localYield -Name 'protocol_version' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'live_route_epoch' -Default '') -eq
+                    (Get-FileTransferEventField -Event $localYield -Name 'live_route_epoch' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'route_publication_generation' -Default '') -eq
+                    (Get-FileTransferEventField -Event $localYield -Name 'route_publication_generation' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'runtime_generation' -Default '') -eq
+                    (Get-FileTransferEventField -Event $localYield -Name 'runtime_generation' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'terminal_generation' -Default '') -eq
+                    (Get-FileTransferEventField -Event $localYield -Name 'terminal_generation' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'leg_generation' -Default '') -eq
+                    (Get-FileTransferEventField -Event $localYield -Name 'leg_generation' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'transport_epoch' -Default '') -eq
+                    (Get-FileTransferEventField -Event $localYield -Name 'transport_epoch' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'bridge_recovery_generation' -Default '') -eq
+                    (Get-FileTransferEventField -Event $localYield -Name 'bridge_recovery_generation' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'checkpoint_generation' -Default '') -eq
+                    (Get-FileTransferEventField -Event $localYield -Name 'checkpoint_generation' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'checkpoint_request_id' -Default '') -eq
+                    (Get-FileTransferEventField -Event $localYield -Name 'checkpoint_request_id' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'data_session_identity' -Default '') -eq
+                    (Get-FileTransferEventField -Event $localYield -Name 'data_session_identity' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'data_session_generation' -Default '') -eq
+                    (Get-FileTransferEventField -Event $localYield -Name 'data_session_generation' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -eq 'Rejected' -and
+                (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq
+                    'fallback_tail_yield_operation_missing' -and
+                (Get-FileTransferEventField -Event $_ -Name 'peer_predecessor_authority_id' -Default '(none)') -in
+                    @('(none)', 'none') -and
+                (Get-FileTransferEventField -Event $_ -Name 'peer_pair_key' -Default '') -eq $pairKey -and
+                (Get-FileTransferEventField -Event $_ -Name 'peer_observation_identity' -Default '') -notin
+                    @('', '(none)', 'none') -and
+                (Get-FileTransferEventField -Event $_ -Name 'peer_frame_fingerprint' -Default '') -notin
+                    @('', '(none)', 'none')
+            } | Sort-Object Sequence, LineNumber)
+        if ($missingProofs.Count -eq 0) { continue }
+        $missingProof = $missingProofs[0]
+
+        [object[]]$reciprocalPairing = @($pairingEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$localProof[0].Sequence -and
+                [int64]$_.Sequence -lt $sequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -ne $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                (Get-FileTransferEventField -Event $_ -Name 'pair_key' -Default '') -eq $pairKey -and
+                (Get-FileTransferEventField -Event $_ -Name 'peer_direction' -Default '') -eq $direction -and
+                (Get-FileTransferEventField -Event $_ -Name 'peer_observation_identity' -Default '') -eq
+                    $localProofIdentity
+            } | Select-Object -First 1)
+        if ($reciprocalPairing.Count -ne 1) { continue }
+        $reciprocalAuthority = Get-FileTransferEventField -Event $reciprocalPairing[0] -Name 'authority_id' -Default ''
+        $reciprocalGeneration = Get-FileTransferEventField -Event $reciprocalPairing[0] -Name 'yield_generation' -Default '0'
+        [object[]]$reciprocalConsumption = @($consumptionEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$reciprocalPairing[0].Sequence -and
+                [int64]$_.Sequence -lt $sequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq
+                    (Get-FileTransferEventField -Event $reciprocalPairing[0] -Name 'log_writer_id' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq $reciprocalAuthority -and
+                (Get-FileTransferEventField -Event $_ -Name 'yield_generation' -Default '0') -eq $reciprocalGeneration -and
+                (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in @('Accepted', 'Idempotent')
+            } | Select-Object -First 1)
+        if ($reciprocalConsumption.Count -ne 1) { continue }
+
+        $scopeParts = @(
+            'route_publication_generation', 'route_commit_generation',
+            'runtime_generation', 'terminal_generation', 'leg_generation',
+            'transport_epoch', 'bridge_recovery_generation',
+            'checkpoint_generation', 'checkpoint_request_id',
+            'data_session_identity', 'data_session_generation') | ForEach-Object {
+                Get-FileTransferEventField -Event $localYield -Name $_ -Default ''
+            }
+        $key = (@($session, $transfer, $direction, $authority, $generation,
+                $pairKey,
+                (Get-FileTransferEventField -Event $missingProof -Name 'peer_authority_id' -Default ''),
+                (Get-FileTransferEventField -Event $missingProof -Name 'peer_yield_generation' -Default '0'),
+                (Get-FileTransferEventField -Event $missingProof -Name 'peer_observation_identity' -Default ''),
+                (Get-FileTransferEventField -Event $missingProof -Name 'peer_frame_fingerprint' -Default ''),
+                (Get-FileTransferEventField -Event $reciprocalPairing[0] -Name 'log_writer_id' -Default ''),
+                $writer) + $scopeParts -join '|').ToLowerInvariant()
+        $rawEvents.Add($denial) | Out-Null
+        if (-not $recordsByKey.ContainsKey($key)) {
+            $recordsByKey[$key] = [pscustomobject]@{
+                Event = $denial
+                LocalYieldEvent = $localYield
+                MissingPeerProofEvent = $missingProof
+                Reason = 'reciprocal_fallback_tail_peer_proof_not_rebound_after_local_quiescent_yield'
+                Variant = 'peer_proof_before_local_yield_not_retained'
+                DistinctKey = $key
+                Recovered = $false
+            }
+        }
+    }
+
     foreach ($record in @($recordsByKey.Values)) {
+        if ($record.Variant -eq 'peer_proof_before_local_yield_not_retained') {
+            $yield = $record.LocalYieldEvent
+            $writer = Get-FileTransferEventField -Event $yield -Name 'log_writer_id' -Default ''
+            $session = Get-FileTransferEventField -Event $yield -Name 'session_id' -Default ''
+            $transfer = Get-FileTransferEventField -Event $yield -Name 'transfer_id' -Default ''
+            $direction = Get-FileTransferEventField -Event $yield -Name 'direction' -Default ''
+            $authority = Get-FileTransferEventField -Event $yield -Name 'authority_id' -Default ''
+            $generation = Get-FileTransferEventField -Event $yield -Name 'yield_generation' -Default '0'
+            $after = [int64]$record.Event.Sequence
+            $bound = @($pendingPeerProofEvents | Where-Object {
+                    [int64]$_.Sequence -gt $after -and
+                    $_.EventName -eq 'filetransfer_fallback_tail_peer_proof_pending_bound' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq $direction -and
+                    (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq $authority -and
+                    (Get-FileTransferEventField -Event $_ -Name 'yield_generation' -Default '0') -eq $generation -and
+                    (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in @('Accepted', 'Idempotent')
+                } | Select-Object -First 1)
+            $paired = @($pairingEvents | Where-Object {
+                    $bound.Count -eq 1 -and [int64]$_.Sequence -gt [int64]$bound[0].Sequence -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq $authority -and
+                    (Get-FileTransferEventField -Event $_ -Name 'yield_generation' -Default '0') -eq $generation
+                } | Select-Object -First 1)
+            $reserved = @($reservationEvents | Where-Object {
+                    $paired.Count -eq 1 -and [int64]$_.Sequence -gt [int64]$paired[0].Sequence -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq $authority
+                } | Select-Object -First 1)
+            $consumed = @($consumptionEvents | Where-Object {
+                    $reserved.Count -eq 1 -and [int64]$_.Sequence -gt [int64]$reserved[0].Sequence -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq $authority
+                } | Select-Object -First 1)
+            $prepared = @($preparedEvents | Where-Object {
+                    $consumed.Count -eq 1 -and [int64]$_.Sequence -gt [int64]$consumed[0].Sequence -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'source_route' -Default '') -eq 'post_tuna_fallback_v6' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'target_route' -Default '') -eq 'file_tuna_v4'
+                } | Select-Object -First 1)
+            if ($bound.Count -eq 1 -and $paired.Count -eq 1 -and
+                $reserved.Count -eq 1 -and $consumed.Count -eq 1 -and $prepared.Count -eq 1) {
+                $record.Recovered = $true
+            }
+            continue
+        }
+
         $failed = $record.FailedYieldEvent
         $failedAuthority = Get-FileTransferEventField -Event $failed -Name 'authority_id' -Default ''
         $writer = Get-FileTransferEventField -Event $failed -Name 'log_writer_id' -Default ''
@@ -42162,6 +42422,12 @@ function Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation {
     [object[]]$records = @($recordsByKey.Values | Sort-Object { [int64]$_.Event.Sequence })
     [object[]]$recovered = @($records | Where-Object { $_.Recovered })
     [object[]]$unresolved = @($records | Where-Object { -not $_.Recovered })
+    [object[]]$failedYieldRecords = @($records | Where-Object {
+            $_.Variant -eq 'failed_yield_quiescent_successor_missing'
+        })
+    [object[]]$peerFirstRecords = @($records | Where-Object {
+            $_.Variant -eq 'peer_proof_before_local_yield_not_retained'
+        })
     return [pscustomobject]@{
         RawCount = $rawEvents.Count
         DistinctCount = $records.Count
@@ -42172,6 +42438,18 @@ function Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation {
         RecoveredCandidateRecords = $recovered
         UnresolvedCandidateRecords = $unresolved
         RawEvents = @($rawEvents.ToArray())
+        FailedYieldRawCount = @($rawEvents.ToArray() | Where-Object {
+                $_.EventName -eq 'filetransfer_runtime_owner_stale_update_rejected'
+            }).Count
+        FailedYieldDistinctCount = $failedYieldRecords.Count
+        FailedYieldRecoveredCount = @($failedYieldRecords | Where-Object { $_.Recovered }).Count
+        FailedYieldUnresolvedCount = @($failedYieldRecords | Where-Object { -not $_.Recovered }).Count
+        PeerFirstRawCount = @($rawEvents.ToArray() | Where-Object {
+                $_.EventName -eq 'filetransfer_runtime_unlock_admission_denied'
+            }).Count
+        PeerFirstDistinctCount = $peerFirstRecords.Count
+        PeerFirstRecoveredCount = @($peerFirstRecords | Where-Object { $_.Recovered }).Count
+        PeerFirstUnresolvedCount = @($peerFirstRecords | Where-Object { -not $_.Recovered }).Count
     }
 }
 
@@ -46883,10 +47161,14 @@ function Get-FileTransferRecoveryFailureClassification {
         PairedFallbackTailYieldMissingRecoveredCount = $fallbackTailFailedYieldQuiescentSuccessorProof.RecoveredCount
         PairedFallbackTailYieldMissingUnresolvedCount = $fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCount
         PairedFallbackTailYieldMissingVerdict = $fallbackTailFailedYieldQuiescentSuccessorProof.Verdict
-        FailedYieldQuiescentSuccessorMissingRawCount = $fallbackTailFailedYieldQuiescentSuccessorProof.RawCount
-        FailedYieldQuiescentSuccessorMissingDistinctCount = $fallbackTailFailedYieldQuiescentSuccessorProof.DistinctCount
-        FailedYieldQuiescentSuccessorMissingRecoveredCount = $fallbackTailFailedYieldQuiescentSuccessorProof.RecoveredCount
-        FailedYieldQuiescentSuccessorMissingUnresolvedCount = $fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCount
+        FailedYieldQuiescentSuccessorMissingRawCount = $fallbackTailFailedYieldQuiescentSuccessorProof.FailedYieldRawCount
+        FailedYieldQuiescentSuccessorMissingDistinctCount = $fallbackTailFailedYieldQuiescentSuccessorProof.FailedYieldDistinctCount
+        FailedYieldQuiescentSuccessorMissingRecoveredCount = $fallbackTailFailedYieldQuiescentSuccessorProof.FailedYieldRecoveredCount
+        FailedYieldQuiescentSuccessorMissingUnresolvedCount = $fallbackTailFailedYieldQuiescentSuccessorProof.FailedYieldUnresolvedCount
+        PeerProofBeforeLocalYieldNotRetainedRawCount = $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstRawCount
+        PeerProofBeforeLocalYieldNotRetainedDistinctCount = $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstDistinctCount
+        PeerProofBeforeLocalYieldNotRetainedRecoveredCount = $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstRecoveredCount
+        PeerProofBeforeLocalYieldNotRetainedUnresolvedCount = $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstUnresolvedCount
         RuntimeUnlockRegularV4RecoveryLeaseNotIssuedRawCount = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount
         RuntimeUnlockRegularV4RecoveryLeaseNotIssuedDistinctCount = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount
         RuntimeUnlockRegularV4RecoveryLeaseNotIssuedRecoveredCount = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RecoveredCount
@@ -47796,6 +48078,10 @@ function New-FileTransferInvariantLedgerObject {
         failed_yield_quiescent_successor_missing_distinct_count = [string]$recoveryClassification.FailedYieldQuiescentSuccessorMissingDistinctCount
         failed_yield_quiescent_successor_missing_recovered_count = [string]$recoveryClassification.FailedYieldQuiescentSuccessorMissingRecoveredCount
         failed_yield_quiescent_successor_missing_unresolved_count = [string]$recoveryClassification.FailedYieldQuiescentSuccessorMissingUnresolvedCount
+        peer_proof_before_local_yield_not_retained_raw_count = [string]$recoveryClassification.PeerProofBeforeLocalYieldNotRetainedRawCount
+        peer_proof_before_local_yield_not_retained_distinct_count = [string]$recoveryClassification.PeerProofBeforeLocalYieldNotRetainedDistinctCount
+        peer_proof_before_local_yield_not_retained_recovered_count = [string]$recoveryClassification.PeerProofBeforeLocalYieldNotRetainedRecoveredCount
+        peer_proof_before_local_yield_not_retained_unresolved_count = [string]$recoveryClassification.PeerProofBeforeLocalYieldNotRetainedUnresolvedCount
         runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_raw_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount
         runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_distinct_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount
         runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_recovered_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount
@@ -48384,6 +48670,10 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("failed_yield_quiescent_successor_missing_distinct_count={0}" -f $recoveryClassification.FailedYieldQuiescentSuccessorMissingDistinctCount),
         ("failed_yield_quiescent_successor_missing_recovered_count={0}" -f $recoveryClassification.FailedYieldQuiescentSuccessorMissingRecoveredCount),
         ("failed_yield_quiescent_successor_missing_unresolved_count={0}" -f $recoveryClassification.FailedYieldQuiescentSuccessorMissingUnresolvedCount),
+        ("peer_proof_before_local_yield_not_retained_raw_count={0}" -f $recoveryClassification.PeerProofBeforeLocalYieldNotRetainedRawCount),
+        ("peer_proof_before_local_yield_not_retained_distinct_count={0}" -f $recoveryClassification.PeerProofBeforeLocalYieldNotRetainedDistinctCount),
+        ("peer_proof_before_local_yield_not_retained_recovered_count={0}" -f $recoveryClassification.PeerProofBeforeLocalYieldNotRetainedRecoveredCount),
+        ("peer_proof_before_local_yield_not_retained_unresolved_count={0}" -f $recoveryClassification.PeerProofBeforeLocalYieldNotRetainedUnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseNotIssuedRawCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseNotIssuedDistinctCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseNotIssuedRecoveredCount),

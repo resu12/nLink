@@ -4699,6 +4699,7 @@ function New-TunaGuiFileTransferFailureClassificationResult {
         InitialActivationRetiredPendingAnswerHandoffMissing = $false
         RuntimeUnlockResponderPeerProbeHandoffMissing = $false
         FallbackTailFailedYieldQuiescentSuccessorMissing = $false
+        FallbackTailPeerProofBeforeLocalYieldNotRetained = $false
         InitialActivationReceiveRecoveryHoldNotPreserved = $false
         InitialActivationReceiveRecoveryHoldReleasedOfferExpired = $false
         RouteTransitionDrainingTransportGraceTerminalization = $false
@@ -5684,6 +5685,169 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         }
     }
 
+    function Get-TunaGuiFallbackTailPeerProofBeforeLocalYieldFailure {
+        param(
+            [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+        )
+
+        $missingByScope = @{}
+        $localByScope = @{}
+        $reciprocalPairByPeerProof = @{}
+        $consumedAuthorities = [System.Collections.Generic.HashSet[string]]::new(
+            [System.StringComparer]::OrdinalIgnoreCase)
+        $candidates = @{}
+        $visits = 0L
+        foreach ($line in $Lines) {
+            $visits++
+            $eventName = Get-TunaGuiLogLineFieldValue -Line $line -Name 'event'
+            if ([string]::IsNullOrWhiteSpace($eventName)) { continue }
+            $writer = Get-TunaGuiLogLineFieldValue -Line $line -Name 'log_writer_id'
+            $sessionId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'session_id'
+            $transferId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'transfer_id'
+            $direction = Get-TunaGuiLogLineFieldValue -Line $line -Name 'direction'
+
+            if ($eventName -eq 'filetransfer_fallback_tail_peer_proof_receipt_decided' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -eq 'Rejected' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_reason') -eq
+                    'fallback_tail_yield_operation_missing') {
+                $pairKey = Get-TunaGuiLogLineFieldValue -Line $line -Name 'peer_pair_key'
+                $identity = Get-TunaGuiLogLineFieldValue -Line $line -Name 'peer_observation_identity'
+                $fingerprint = Get-TunaGuiLogLineFieldValue -Line $line -Name 'peer_frame_fingerprint'
+                if (-not [string]::IsNullOrWhiteSpace($writer) -and
+                    -not [string]::IsNullOrWhiteSpace($sessionId) -and
+                    -not [string]::IsNullOrWhiteSpace($transferId) -and
+                    -not [string]::IsNullOrWhiteSpace($pairKey) -and
+                    -not [string]::IsNullOrWhiteSpace($identity) -and
+                    -not [string]::IsNullOrWhiteSpace($fingerprint)) {
+                    $key = "$writer|$sessionId|$transferId|$pairKey".ToLowerInvariant()
+                    if (-not $missingByScope.ContainsKey($key)) {
+                        $missingByScope[$key] = "$identity|$fingerprint"
+                    }
+                }
+                continue
+            }
+
+            if ($eventName -eq 'filetransfer_fallback_tail_yield_issued' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'route') -eq 'post_tuna_fallback_v6' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'yield_kind') -eq 'Quiescent') {
+                $key = "$writer|$sessionId|$transferId|$direction".ToLowerInvariant()
+                $localByScope[$key] = [pscustomobject]@{
+                    Writer = $writer
+                    SessionId = $sessionId
+                    TransferId = $transferId
+                    Direction = $direction
+                    AuthorityId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id'
+                    YieldGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'yield_generation'
+                    PairKey = Get-TunaGuiLogLineFieldValue -Line $line -Name 'pair_key'
+                    LocalProofIdentity = ''
+                }
+                continue
+            }
+
+            if ($eventName -eq 'filetransfer_fallback_tail_local_proof_receipt_decided' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -in @('Accepted', 'Idempotent', 'Applied')) {
+                $key = "$writer|$sessionId|$transferId|$direction".ToLowerInvariant()
+                if ($localByScope.ContainsKey($key)) {
+                    $local = $localByScope[$key]
+                    if ($local.AuthorityId -eq (Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id') -and
+                        $local.YieldGeneration -eq (Get-TunaGuiLogLineFieldValue -Line $line -Name 'yield_generation')) {
+                        $local.LocalProofIdentity = Get-TunaGuiLogLineFieldValue -Line $line -Name 'local_proof_identity'
+                        if ([string]::IsNullOrWhiteSpace($local.LocalProofIdentity)) {
+                            $local.LocalProofIdentity = Get-TunaGuiLogLineFieldValue -Line $line -Name 'proof_identity'
+                        }
+                    }
+                }
+                continue
+            }
+
+            if ($eventName -eq 'filetransfer_fallback_tail_pairing_committed') {
+                $peerDirection = Get-TunaGuiLogLineFieldValue -Line $line -Name 'peer_direction'
+                $peerIdentity = Get-TunaGuiLogLineFieldValue -Line $line -Name 'peer_observation_identity'
+                if (-not [string]::IsNullOrWhiteSpace($peerDirection) -and
+                    -not [string]::IsNullOrWhiteSpace($peerIdentity)) {
+                    $pairKey = "$sessionId|$transferId|$peerDirection|$peerIdentity".ToLowerInvariant()
+                    $reciprocalPairByPeerProof[$pairKey] = [pscustomobject]@{
+                        Writer = $writer
+                        AuthorityId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id'
+                    }
+                }
+                foreach ($candidate in $candidates.Values | Where-Object {
+                        $_.Writer -eq $writer -and
+                        $_.AuthorityId -eq (Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id')
+                    }) {
+                    $candidate.Paired = $true
+                }
+                continue
+            }
+
+            if ($eventName -eq 'filetransfer_fallback_tail_paired_release_consumed') {
+                [void]$consumedAuthorities.Add(
+                    "$writer|$(Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id')")
+                foreach ($candidate in $candidates.Values | Where-Object {
+                        $_.Writer -eq $writer -and
+                        $_.AuthorityId -eq (Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id')
+                    }) {
+                    $candidate.Consumed = $true
+                }
+                continue
+            }
+
+            if ($eventName -eq 'filetransfer_runtime_unlock_admission_denied' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'admission_reason') -eq
+                    'paired_fallback_tail_yield_missing' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'route') -eq 'post_tuna_fallback_v6') {
+                $localKey = "$writer|$sessionId|$transferId|$direction".ToLowerInvariant()
+                if (-not $localByScope.ContainsKey($localKey)) { continue }
+                $local = $localByScope[$localKey]
+                $missingKey = "$writer|$sessionId|$transferId|$($local.PairKey)".ToLowerInvariant()
+                $pairKey = "$sessionId|$transferId|$direction|$($local.LocalProofIdentity)".ToLowerInvariant()
+                if ($missingByScope.ContainsKey($missingKey) -and
+                    $reciprocalPairByPeerProof.ContainsKey($pairKey)) {
+                    $reciprocal = $reciprocalPairByPeerProof[$pairKey]
+                    if ($consumedAuthorities.Contains("$($reciprocal.Writer)|$($reciprocal.AuthorityId)")) {
+                        $candidateKey = "$writer|$sessionId|$transferId|$direction|$($local.AuthorityId)|$($local.YieldGeneration)".ToLowerInvariant()
+                        $candidates[$candidateKey] = [pscustomobject]@{
+                            Writer = $writer
+                            SessionId = $sessionId
+                            TransferId = $transferId
+                            Direction = $direction
+                            AuthorityId = $local.AuthorityId
+                            YieldGeneration = $local.YieldGeneration
+                            Bound = $false
+                            Paired = $false
+                            Consumed = $false
+                            Prepared = $false
+                        }
+                    }
+                }
+                continue
+            }
+
+            foreach ($candidate in $candidates.Values | Where-Object {
+                    $_.Writer -eq $writer -and $_.SessionId -eq $sessionId -and
+                    $_.TransferId -eq $transferId -and $_.Direction -eq $direction
+                }) {
+                if ($eventName -eq 'filetransfer_fallback_tail_peer_proof_pending_bound' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id') -eq $candidate.AuthorityId -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'yield_generation') -eq $candidate.YieldGeneration) {
+                    $candidate.Bound = $true
+                }
+                elseif ($eventName -eq 'filetransfer_route_transition_prepared' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_route') -eq 'post_tuna_fallback_v6' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'target_route') -eq 'file_tuna_v4') {
+                    $candidate.Prepared = $true
+                }
+            }
+        }
+
+        return [pscustomobject]@{
+            Unresolved = @($candidates.Values | Where-Object {
+                    -not ($_.Bound -and $_.Paired -and $_.Consumed -and $_.Prepared)
+                }).Count -gt 0
+            LineVisits = $visits
+        }
+    }
+
     $responderPeerProbeFastPath =
         Get-TunaGuiRuntimeUnlockResponderPeerProbeHandoffFailure -Lines ([string[]]$evidenceLines)
     if ($responderPeerProbeFastPath.Unresolved) {
@@ -5702,6 +5866,22 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -EvidenceLookupCount 0L `
             -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
         $result.RuntimeUnlockResponderPeerProbeHandoffMissing = $true
+        return $result
+    }
+
+    $fallbackTailPeerFirstFastPath =
+        Get-TunaGuiFallbackTailPeerProofBeforeLocalYieldFailure -Lines ([string[]]$evidenceLines)
+    if ($fallbackTailPeerFirstFastPath.Unresolved) {
+        $result = New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'route_runtime' `
+            -Reason 'reciprocal_fallback_tail_peer_proof_not_rebound_after_local_quiescent_yield' `
+            -RouteMode $RouteMode `
+            -ClassificationSource "${classificationSource}_fallback_tail_peer_first_index" `
+            -EvidenceLineVisitCount ([long]$fallbackTailPeerFirstFastPath.LineVisits) `
+            -EvidenceParsedRecordCount 0L `
+            -EvidenceLookupCount 0L `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
+        $result.FallbackTailPeerProofBeforeLocalYieldNotRetained = $true
         return $result
     }
 

@@ -2111,6 +2111,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_handoff_recovered') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_handoff_tail_unblocked') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_owner_stale_update_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_unlock_admission_denied') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_peer_proof_pending_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_peer_proof_pending_bound') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_peer_proof_pending_invalidated') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_local_proof_receipt_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_local_proof_receipt_applied') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_local_proof_receipt_rejected') +
@@ -3403,10 +3407,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("paired_fallback_tail_yield_missing_recovered_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.RecoveredCount),
         ("paired_fallback_tail_yield_missing_unresolved_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCount),
         ("paired_fallback_tail_yield_missing_verdict={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.Verdict),
-        ("failed_yield_quiescent_successor_missing_raw_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.RawCount),
-        ("failed_yield_quiescent_successor_missing_distinct_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.DistinctCount),
-        ("failed_yield_quiescent_successor_missing_recovered_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.RecoveredCount),
-        ("failed_yield_quiescent_successor_missing_unresolved_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCount),
+        ("failed_yield_quiescent_successor_missing_raw_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.FailedYieldRawCount),
+        ("failed_yield_quiescent_successor_missing_distinct_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.FailedYieldDistinctCount),
+        ("failed_yield_quiescent_successor_missing_recovered_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.FailedYieldRecoveredCount),
+        ("failed_yield_quiescent_successor_missing_unresolved_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.FailedYieldUnresolvedCount),
+        ("peer_proof_before_local_yield_not_retained_raw_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstRawCount),
+        ("peer_proof_before_local_yield_not_retained_distinct_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstDistinctCount),
+        ("peer_proof_before_local_yield_not_retained_recovered_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstRecoveredCount),
+        ("peer_proof_before_local_yield_not_retained_unresolved_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstUnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RecoveredCount),
@@ -4822,10 +4830,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         paired_fallback_tail_yield_missing_recovered_count = $fallbackTailFailedYieldQuiescentSuccessorProof.RecoveredCount
         paired_fallback_tail_yield_missing_unresolved_count = $fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCount
         paired_fallback_tail_yield_missing_verdict = $fallbackTailFailedYieldQuiescentSuccessorProof.Verdict
-        failed_yield_quiescent_successor_missing_raw_count = $fallbackTailFailedYieldQuiescentSuccessorProof.RawCount
-        failed_yield_quiescent_successor_missing_distinct_count = $fallbackTailFailedYieldQuiescentSuccessorProof.DistinctCount
-        failed_yield_quiescent_successor_missing_recovered_count = $fallbackTailFailedYieldQuiescentSuccessorProof.RecoveredCount
-        failed_yield_quiescent_successor_missing_unresolved_count = $fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCount
+        failed_yield_quiescent_successor_missing_raw_count = $fallbackTailFailedYieldQuiescentSuccessorProof.FailedYieldRawCount
+        failed_yield_quiescent_successor_missing_distinct_count = $fallbackTailFailedYieldQuiescentSuccessorProof.FailedYieldDistinctCount
+        failed_yield_quiescent_successor_missing_recovered_count = $fallbackTailFailedYieldQuiescentSuccessorProof.FailedYieldRecoveredCount
+        failed_yield_quiescent_successor_missing_unresolved_count = $fallbackTailFailedYieldQuiescentSuccessorProof.FailedYieldUnresolvedCount
+        peer_proof_before_local_yield_not_retained_raw_count = $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstRawCount
+        peer_proof_before_local_yield_not_retained_distinct_count = $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstDistinctCount
+        peer_proof_before_local_yield_not_retained_recovered_count = $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstRecoveredCount
+        peer_proof_before_local_yield_not_retained_unresolved_count = $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstUnresolvedCount
         runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount
         runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount
         runtime_unlock_regular_v4_recovery_lease_not_issued_recovered_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RecoveredCount

@@ -2642,6 +2642,79 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_FallbackTailPeerProofBeforeLocalYieldNotRetained_ClassifiesAdmissionBoundary(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_peer_first_tail_yield";
+        const string localAuthority =
+            "fta2-fallback_tail_yield-111111111111111111111111";
+        const string reciprocalAuthority =
+            "fta2-fallback_tail_yield-222222222222222222222222";
+        const string retryAuthority =
+            "fta2-runtime_unlock_retry_dispatch-333333333333333333333333";
+        var pairKey =
+            $"sess_a|{transferId}|post_tuna_fallback_v6|6|2|1|(none)";
+        var ownerKey =
+            $"sess_a|{transferId}|post_tuna_fallback_v6|6|2|3|1|1|(none)";
+        var common =
+            $"session_id=sess_a; transfer_id={transferId}; route=post_tuna_fallback_v6; " +
+            "protocol_version=6; live_route_epoch=2; route_publication_generation=3; " +
+            "route_commit_generation=0; runtime_generation=3; terminal_generation=0; " +
+            "leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; " +
+            "checkpoint_generation=1; checkpoint_request_id=(none); " +
+            "data_session_identity=data-session-1; data_session_generation=1";
+        var localProofIdentity =
+            $"sess_a:{transferId}:inbound:{localAuthority}:1:local-frame";
+        var peerProofIdentity =
+            $"sess_a:{transferId}:outbound:{reciprocalAuthority}:1:peer-frame";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_fallback_tail_peer_proof_receipt_decided; direction=outbound; {common}; authority_id=(none); yield_generation=0; owner_key=(none); pair_key=(none); peer_authority_id={reciprocalAuthority}; peer_predecessor_authority_id=(none); peer_yield_generation=1; peer_owner_key={ownerKey}; peer_pair_key={pairKey}; peer_observation_identity={peerProofIdentity}; peer_frame_fingerprint=peer-frame; decision_status=Rejected; decision_reason=fallback_tail_yield_operation_missing; log_writer_id=writer_b; log_writer_sequence=1"),
+            LogLine($"event=filetransfer_fallback_tail_peer_proof_receipt_decided; direction=outbound; {common}; authority_id=(none); yield_generation=0; owner_key=(none); pair_key=(none); peer_authority_id={reciprocalAuthority}; peer_predecessor_authority_id=(none); peer_yield_generation=1; peer_owner_key={ownerKey}; peer_pair_key={pairKey}; peer_observation_identity={peerProofIdentity}; peer_frame_fingerprint=peer-frame; decision_status=Rejected; decision_reason=fallback_tail_yield_operation_missing; log_writer_id=writer_b; log_writer_sequence=2", secondsOffset: 1),
+            LogLine($"event=filetransfer_fallback_tail_yield_issued; direction=outbound; {common}; authority_id={reciprocalAuthority}; predecessor_authority_id=(none); yield_generation=1; yield_kind=Quiescent; owner_key={ownerKey}; pair_key={pairKey}; pairing_state=YieldIssued; decision_status=Accepted; log_writer_id=writer_a; log_writer_sequence=1", secondsOffset: 2),
+            LogLine($"event=filetransfer_fallback_tail_local_proof_receipt_decided; direction=outbound; {common}; authority_id={reciprocalAuthority}; predecessor_authority_id=(none); yield_generation=1; owner_key={ownerKey}; pair_key={pairKey}; local_proof_identity={peerProofIdentity}; local_frame_fingerprint=peer-frame; decision_status=Accepted; log_writer_id=writer_a; log_writer_sequence=2", secondsOffset: 3),
+            LogLine($"event=filetransfer_fallback_tail_yield_issued; direction=inbound; {common}; authority_id={localAuthority}; predecessor_authority_id=(none); yield_generation=1; yield_kind=Quiescent; owner_key={ownerKey}; pair_key={pairKey}; pairing_state=YieldIssued; decision_status=Accepted; log_writer_id=writer_b; log_writer_sequence=3", secondsOffset: 4),
+            LogLine($"event=filetransfer_fallback_tail_local_proof_receipt_decided; direction=inbound; {common}; authority_id={localAuthority}; predecessor_authority_id=(none); yield_generation=1; owner_key={ownerKey}; pair_key={pairKey}; local_proof_identity={localProofIdentity}; local_frame_fingerprint=local-frame; decision_status=Accepted; log_writer_id=writer_b; log_writer_sequence=4", secondsOffset: 5),
+            LogLine($"event=filetransfer_fallback_tail_peer_proof_receipt_decided; direction=outbound; {common}; authority_id={reciprocalAuthority}; predecessor_authority_id=(none); yield_generation=1; owner_key={ownerKey}; pair_key={pairKey}; peer_authority_id={localAuthority}; peer_predecessor_authority_id=(none); peer_yield_generation=1; peer_direction=inbound; peer_owner_key={ownerKey}; peer_pair_key={pairKey}; peer_observation_identity={localProofIdentity}; peer_frame_fingerprint=local-frame; decision_status=Accepted; log_writer_id=writer_a; log_writer_sequence=3", secondsOffset: 6),
+            LogLine($"event=filetransfer_fallback_tail_pairing_committed; direction=outbound; {common}; authority_id={reciprocalAuthority}; predecessor_authority_id=(none); yield_generation=1; yield_kind=Quiescent; owner_key={ownerKey}; pair_key={pairKey}; pairing_state=Paired; pairing_generation=1; local_proof_identity={peerProofIdentity}; local_frame_fingerprint=peer-frame; peer_authority_id={localAuthority}; peer_predecessor_authority_id=(none); peer_yield_generation=1; peer_direction=inbound; peer_owner_key={ownerKey}; peer_pair_key={pairKey}; peer_observation_identity={localProofIdentity}; peer_frame_fingerprint=local-frame; decision_status=Accepted; log_writer_id=writer_a; log_writer_sequence=4", secondsOffset: 7),
+            LogLine($"event=filetransfer_fallback_tail_paired_release_reserved; direction=outbound; {common}; authority_id={reciprocalAuthority}; predecessor_authority_id=(none); yield_generation=1; yield_kind=Quiescent; owner_key={ownerKey}; pair_key={pairKey}; pairing_state=ReleaseReserved; pairing_generation=1; release_kind=FallbackPairedTailYield; release_outcome=Quiescent; reservation_generation=1; retry_authority_id={retryAuthority}; retry_attempt_generation=1; dispatch_attempt_generation=1; decision_status=Accepted; log_writer_id=writer_a; log_writer_sequence=5", secondsOffset: 8),
+            LogLine($"event=runtime_unlock_retry_dispatch_install_committed; direction=outbound; session_id=sess_a; transfer_id={transferId}; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=3; route_commit_generation=0; authority_id={retryAuthority}; dispatch_attempt_generation=1; install_generation=1; release_kind=FallbackPairedTailYield; release_authority_id={reciprocalAuthority}; release_generation=1; release_outcome=Quiescent; install_status=Installed; log_writer_id=writer_a; log_writer_sequence=6", secondsOffset: 9),
+            LogLine($"event=filetransfer_fallback_tail_paired_release_consumed; direction=outbound; {common}; authority_id={reciprocalAuthority}; predecessor_authority_id=(none); yield_generation=1; yield_kind=Quiescent; owner_key={ownerKey}; pair_key={pairKey}; pairing_state=ReleaseConsumed; pairing_generation=1; release_kind=FallbackPairedTailYield; release_outcome=Quiescent; reservation_generation=1; retry_authority_id={retryAuthority}; retry_attempt_generation=1; dispatch_attempt_generation=1; install_generation=1; decision_status=Accepted; log_writer_id=writer_a; log_writer_sequence=7", secondsOffset: 10),
+            LogLine($"event=filetransfer_runtime_unlock_admission_denied; direction=inbound; {common}; source=precommit_probe_responder; reason=runtime_unlock_answer_ack_probe_ready; admission_generation=0; admission_reason=paired_fallback_tail_yield_missing; log_writer_id=writer_b; log_writer_sequence=5", secondsOffset: 11),
+            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id={transferId}; state=Failed; error_code=route_cycle_missing; log_writer_id=writer_a; log_writer_sequence=8", secondsOffset: 12),
+            LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=Failed; error_code=route_cycle_missing; log_writer_id=writer_b; log_writer_sequence=6", secondsOffset: 12),
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["paired_fallback_tail_yield_missing_raw_count"]);
+        Assert.Equal("1", verdict["paired_fallback_tail_yield_missing_distinct_count"]);
+        Assert.Equal("0", verdict["paired_fallback_tail_yield_missing_recovered_count"]);
+        Assert.Equal("1", verdict["paired_fallback_tail_yield_missing_unresolved_count"]);
+        Assert.Equal("0", verdict["failed_yield_quiescent_successor_missing_unresolved_count"]);
+        Assert.Equal("1", verdict["peer_proof_before_local_yield_not_retained_unresolved_count"]);
+    }
+
+    [Theory]
     [InlineData(2, 1, "canonical_7", "pass")]
     [InlineData(2, 1, "legacy_bridge_scoped_8", "fail")]
     [InlineData(2, 1, "owner_derived", "fail")]
