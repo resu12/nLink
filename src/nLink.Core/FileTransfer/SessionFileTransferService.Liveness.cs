@@ -1214,6 +1214,7 @@ public sealed partial class SessionFileTransferService
         FileTransferReceiveRecoveryDecision? executionDecision;
         FileTransferReceiveRecoveryOperation? completedOperation = null;
         RuntimeUnlockRetryDispatchDecision? retryDispatchDecision = null;
+        OutboundTransferContext? fallbackCheckpointToResume = null;
         lock (gate)
         {
             executionDecision = ObserveBridgeRecoveryExecutionReceiptLocked(request, receipt);
@@ -1222,6 +1223,23 @@ public sealed partial class SessionFileTransferService
                 executionDecision?.State.PersistentState
                     .FileTransferReceiveRecovery.LastTerminalOperation;
             retryDispatchDecision = executionDecision?.RetryDispatchDecision;
+            if (receipt.Outcome ==
+                    FileTransferBridgeRecoveryExecutionOutcome.Completed &&
+                executionDecision?.Status ==
+                    FileTransferReceiveRecoveryTransitionStatus.Accepted &&
+                request.Direction == FileTransferDirection.Outbound &&
+                outboundTransfer is { } outbound &&
+                string.Equals(
+                    outbound.SessionId,
+                    request.SessionId,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    outbound.TransferId,
+                    request.TransferId,
+                    StringComparison.Ordinal))
+            {
+                fallbackCheckpointToResume = outbound;
+            }
         }
 
         var receiptAccepted = executionDecision is
@@ -1252,6 +1270,14 @@ public sealed partial class SessionFileTransferService
             "FileTransferService",
             $"event=filetransfer_receive_recovery_operation_execution_receipt_decision_observed; session_id={FormatProtocolLogValue(request.SessionId)}; transfer_id={FormatProtocolLogValue(request.TransferId)}; direction={request.Direction.ToString().ToLowerInvariant()}; recovery_operation_generation={completedOperation?.Authority.OperationGeneration ?? request.ReceiveRecoveryOperationAuthority?.OperationGeneration ?? 0}; bridge_decision_generation={receipt.Command.Decision.BridgeDecisionGeneration}; recovery_liveness_lease_generation={receipt.Command.RecoveryLivenessLease?.LeaseGeneration ?? 0}; execution_outcome={receipt.Outcome}; execution_mode={FormatProtocolLogValue(receipt.ExecutionMode)}; closure_generation={completedOperation?.ClosureGeneration ?? 0}; closure_state={completedOperation?.ClosureState.ToString() ?? "none"}; decision_status={executionDecision?.Status.ToString() ?? "missing"}; decision_reason={FormatProtocolLogValue(executionDecision?.Reason ?? "current_transfer_missing")}");
         ProcessReceiveRecoveryRetryDispatchDecision(retryDispatchDecision);
+        if (fallbackCheckpointToResume is not null)
+        {
+            QueueDeferredOutboundPostTunaFallbackStateRefreshAfterResume(
+                fallbackCheckpointToResume,
+                "receive_recovery_completed",
+                FileTransferReceiveRecoveryFallbackCheckpointResumeTrigger
+                    .RecoveryCompleted);
+        }
     }
 
     private void InvalidateUndispatchedReceiveRecoveryOperation(

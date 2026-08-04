@@ -9717,12 +9717,23 @@ public sealed class FileTransferCoordinatorTests
                     FileTransferReceiveRecoveryFallbackCheckpointDeliveryState
                         .Held,
                     frameIdentity.Sha256,
-                    "submission_barrier_closed"));
+                    "submission_barrier_closed"),
+                observedUtcMs: 15);
         Assert.True(held.Accepted, held.Reason);
         Assert.Equal(
             command,
             FileTransferCoordinator.GetReceiveRecoverySubstate(held.State)
                 .PendingFallbackCheckpointDeliveryCommand);
+
+        var prematureRetirement = RetireFallbackCheckpoint(
+            held.State,
+            fallback,
+            frame.RepairRequestId,
+            frame.TransportEpoch);
+        Assert.Equal(
+            "filetransfer_receive_recovery_fallback_checkpoint_delivery_terminal_receipt_required",
+            prematureRetirement.MutationRejectedReason);
+        Assert.Equal(held.State, prematureRetirement.State);
 
         var completed = FileTransferCoordinator
             .ObserveReceiveRecoveryExecutionReceipt(
@@ -9730,8 +9741,86 @@ public sealed class FileTransferCoordinatorTests
                 receipt,
                 observedUtcMs: 20);
         Assert.True(completed.Accepted, completed.Reason);
+        var completionResume = FileTransferCoordinator
+            .ReserveReceiveRecoveryFallbackCheckpointDeliveryResume(
+                completed.State,
+                new FileTransferReceiveRecoveryFallbackCheckpointResumeEvidence(
+                    command,
+                    FileTransferReceiveRecoveryFallbackCheckpointResumeTrigger
+                        .RecoveryCompleted,
+                    21));
+        Assert.True(completionResume.Accepted, completionResume.Reason);
+        Assert.Equal(
+            command,
+            Assert.IsType<FileTransferReceiveRecoveryFallbackCheckpointResumeReservation>(
+                completionResume.FallbackCheckpointResumeReservation).Command);
+        var duplicateCompletionResume = FileTransferCoordinator
+            .ReserveReceiveRecoveryFallbackCheckpointDeliveryResume(
+                completionResume.State,
+                new FileTransferReceiveRecoveryFallbackCheckpointResumeEvidence(
+                    command,
+                    FileTransferReceiveRecoveryFallbackCheckpointResumeTrigger
+                        .RecoveryCompleted,
+                    21));
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Idempotent,
+            duplicateCompletionResume.Status);
+        var losingAvailabilityResume = FileTransferCoordinator
+            .ReserveReceiveRecoveryFallbackCheckpointDeliveryResume(
+                completionResume.State,
+                new FileTransferReceiveRecoveryFallbackCheckpointResumeEvidence(
+                    command,
+                    FileTransferReceiveRecoveryFallbackCheckpointResumeTrigger
+                        .DataSessionAvailable,
+                    22));
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Idempotent,
+            losingAvailabilityResume.Status);
+        Assert.Equal(
+            completionResume.FallbackCheckpointResumeReservation,
+            losingAvailabilityResume.FallbackCheckpointResumeReservation);
+
+        var reHeld = FileTransferCoordinator
+            .ApplyReceiveRecoveryFallbackCheckpointDeliveryReceipt(
+                completionResume.State,
+                new FileTransferReceiveRecoveryFallbackCheckpointDeliveryReceipt(
+                    command,
+                    FileTransferReceiveRecoveryFallbackCheckpointDeliveryState
+                        .Held,
+                    frameIdentity.Sha256,
+                    "submission_barrier_closed"),
+                observedUtcMs: 23);
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Idempotent,
+            reHeld.Status);
+        Assert.Null(
+            FileTransferCoordinator.GetReceiveRecoverySubstate(reHeld.State)
+                .PendingFallbackCheckpointResumeReservation);
+        var availabilityResume = FileTransferCoordinator
+            .ReserveReceiveRecoveryFallbackCheckpointDeliveryResume(
+                reHeld.State,
+                new FileTransferReceiveRecoveryFallbackCheckpointResumeEvidence(
+                    command,
+                    FileTransferReceiveRecoveryFallbackCheckpointResumeTrigger
+                        .DataSessionAvailable,
+                    24));
+        Assert.True(availabilityResume.Accepted, availabilityResume.Reason);
+        var delivered = FileTransferCoordinator
+            .ApplyReceiveRecoveryFallbackCheckpointDeliveryReceipt(
+                availabilityResume.State,
+                new FileTransferReceiveRecoveryFallbackCheckpointDeliveryReceipt(
+                    command,
+                    FileTransferReceiveRecoveryFallbackCheckpointDeliveryState
+                        .Delivered,
+                    frameIdentity.Sha256,
+                    "checkpoint_delivered"),
+                observedUtcMs: 25);
+        Assert.True(delivered.Accepted, delivered.Reason);
+        Assert.Null(
+            FileTransferCoordinator.GetReceiveRecoverySubstate(delivered.State)
+                .PendingFallbackCheckpointDeliveryCommand);
         var proof = FileTransferCoordinator.ObserveReceiveRecoveryProof(
-            completed.State,
+            delivered.State,
             new FileTransferReceiveRecoveryProof(
                 authority,
                 "post-fallback-checkpoint-proof",

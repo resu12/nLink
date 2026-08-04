@@ -4011,7 +4011,11 @@ public sealed partial class SessionFileTransferService :
                 SignalOutboundSparseSenderPump(outboundToResume);
             }
 
-            QueueDeferredOutboundPostTunaFallbackStateRefreshAfterResume(outboundToResume, effectiveReason);
+            QueueDeferredOutboundPostTunaFallbackStateRefreshAfterResume(
+                outboundToResume,
+                effectiveReason,
+                FileTransferReceiveRecoveryFallbackCheckpointResumeTrigger
+                    .DataSessionAvailable);
         }
         else if (outboundEpochStartedWhileUnavailable && outboundToResume is not null)
         {
