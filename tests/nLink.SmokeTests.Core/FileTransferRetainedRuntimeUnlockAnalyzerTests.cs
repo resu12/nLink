@@ -16,6 +16,66 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task AnalyzeRetained_ReceiveRecoveryFallbackCheckpointHeldDeliveryRetiredBeforeResume(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string operationScope =
+            "session_id=sess_checkpoint_hold; transfer_id=transfer_checkpoint_hold; " +
+            "direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; " +
+            "receive_recovery_operation_generation=3; " +
+            "receive_recovery_operation_authority_id=recovery-authority-3; " +
+            "log_writer_id=writer_checkpoint_hold";
+        const string checkpointScope =
+            "session_id=sess_checkpoint_hold; transfer_id=transfer_checkpoint_hold; " +
+            "direction=outbound; recovery_operation_generation=3; " +
+            "recovery_operation_authority_id=recovery-authority-3; " +
+            "effective_checkpoint_request_id=v6-state-refresh-1; " +
+            "checkpoint_binding_generation=1; frame_fingerprint=frame-1; " +
+            "transport_epoch=1; log_writer_id=writer_checkpoint_hold";
+        var result = await RunAnalyzeFixtureAsync(
+            [
+                LogLine($"event=filetransfer_receive_recovery_operation_issued; {operationScope}"),
+                LogLine($"event=filetransfer_receive_recovery_operation_execution_start_decided; {operationScope}; execution_state=Running"),
+                LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_bound; {checkpointScope}; checkpoint_binding_state=pending"),
+                LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied; {checkpointScope}; checkpoint_delivery_generation=1; delivery_state=held; decision_status=accepted"),
+                LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_lifecycle_advanced; {checkpointScope}; checkpoint_binding_state=retired; decision_reason=tail_reconciliation_forced"),
+                LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_invalidated; {checkpointScope}; checkpoint_binding_state=invalidated; decision_reason=runtime_scope_replaced"),
+                LogLine($"event=filetransfer_receive_recovery_operation_invalidated; {operationScope}; decision_reason=runtime_scope_replaced")
+            ],
+            [],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_raw_count"]);
+        Assert.Equal("1", verdict["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_distinct_count"]);
+        Assert.Equal("0", verdict["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_recovered_count"]);
+        Assert.Equal("1", verdict["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_unresolved_count"]);
+        Assert.Equal("1", verdict["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_held_delivery_retired_raw_count"]);
+        Assert.Equal("1", verdict["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_held_delivery_retired_unresolved_count"]);
+        Assert.Equal(
+            "filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing",
+            verdict["first_proof_chain_failure_class"]);
+        Assert.Equal(
+            "held_receive_recovery_fallback_checkpoint_retired_before_exact_resume_boundary",
+            verdict["first_proof_chain_failure_reason"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task AnalyzeRetained_InitialActivationAnswerRequiresPeerDelivery(bool compact)
     {
         if (!OperatingSystem.IsWindows())

@@ -7027,6 +7027,99 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
             }
         )
+        foreach ($retirement in @($indexed | Where-Object {
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_receive_recovery_fallback_checkpoint_lifecycle_advanced')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -eq 'outbound' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'checkpoint_binding_state') -eq 'retired' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_reason') -eq 'tail_reconciliation_forced'
+                })) {
+            $writer = Get-TunaGuiLogLineFieldValue -Line $retirement.Line -Name 'log_writer_id'
+            $session = Get-TunaGuiLogLineFieldValue -Line $retirement.Line -Name 'session_id'
+            $transfer = Get-TunaGuiLogLineFieldValue -Line $retirement.Line -Name 'transfer_id'
+            $generation = Get-TunaGuiLogLineFieldValue -Line $retirement.Line -Name 'recovery_operation_generation'
+            $checkpointId = Get-TunaGuiLogLineFieldValue -Line $retirement.Line -Name 'effective_checkpoint_request_id'
+            $bindingGeneration = Get-TunaGuiLogLineFieldValue -Line $retirement.Line -Name 'checkpoint_binding_generation'
+            $frameFingerprint = Get-TunaGuiLogLineFieldValue -Line $retirement.Line -Name 'frame_fingerprint'
+            $transportEpoch = Get-TunaGuiLogLineFieldValue -Line $retirement.Line -Name 'transport_epoch'
+            if ([string]::IsNullOrWhiteSpace($writer) -or
+                [string]::IsNullOrWhiteSpace($session) -or
+                [string]::IsNullOrWhiteSpace($transfer) -or
+                $generation -in @('', '0', '(none)') -or
+                [string]::IsNullOrWhiteSpace($checkpointId) -or
+                $bindingGeneration -in @('', '0', '(none)') -or
+                [string]::IsNullOrWhiteSpace($frameFingerprint) -or
+                $transportEpoch -in @('', '0', '(none)')) {
+                continue
+            }
+            $sameScope = {
+                param($item)
+                (Get-TunaGuiLogLineFieldValue -Line $item.Line -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $item.Line -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $item.Line -Name 'transfer_id') -eq $transfer
+            }
+            $sameCheckpoint = {
+                param($item)
+                (& $sameScope $item) -and
+                (Get-TunaGuiLogLineFieldValue -Line $item.Line -Name 'recovery_operation_generation') -eq $generation -and
+                (Get-TunaGuiLogLineFieldValue -Line $item.Line -Name 'effective_checkpoint_request_id') -eq $checkpointId -and
+                (Get-TunaGuiLogLineFieldValue -Line $item.Line -Name 'checkpoint_binding_generation') -eq $bindingGeneration -and
+                (Get-TunaGuiLogLineFieldValue -Line $item.Line -Name 'frame_fingerprint') -eq $frameFingerprint
+            }
+            $binding = @($indexed | Where-Object {
+                    $_.Index -lt $retirement.Index -and (& $sameCheckpoint $_) -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_receive_recovery_fallback_checkpoint_bound')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'checkpoint_binding_state') -eq 'pending' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transport_epoch') -eq $transportEpoch
+                } | Select-Object -Last 1)
+            $held = @($indexed | Where-Object {
+                    $_.Index -lt $retirement.Index -and (& $sameCheckpoint $_) -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'delivery_state') -eq 'held' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -in @('accepted', 'idempotent')
+                } | Select-Object -Last 1)
+            if ($binding.Count -ne 1 -or $held.Count -ne 1) {
+                continue
+            }
+            $deliveryGeneration = Get-TunaGuiLogLineFieldValue -Line $held[0].Line -Name 'checkpoint_delivery_generation'
+            $started = @($indexed | Where-Object {
+                    $_.Index -lt $binding[0].Index -and (& $sameScope $_) -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_receive_recovery_operation_issued',
+                        'filetransfer_receive_recovery_operation_execution_start_decided')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'receive_recovery_operation_generation') -eq $generation -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'route') -eq 'post_tuna_fallback_v6'
+                })
+            $resume = @($indexed | Where-Object {
+                    $_.Index -gt $held[0].Index -and $_.Index -lt $retirement.Index -and
+                    (& $sameCheckpoint $_) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'checkpoint_delivery_generation') -eq $deliveryGeneration -and
+                    ((Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_receive_recovery_fallback_checkpoint_delivery_resumed')) -or
+                        ((Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                            'filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied')) -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'delivery_state') -eq 'delivered'))
+                })
+            $bindingInvalidated = @($indexed | Where-Object {
+                    $_.Index -gt $retirement.Index -and (& $sameCheckpoint $_) -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_receive_recovery_fallback_checkpoint_invalidated')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_reason') -eq 'runtime_scope_replaced'
+                } | Select-Object -First 1)
+            $operationInvalidated = @($indexed | Where-Object {
+                    $_.Index -gt $retirement.Index -and (& $sameScope $_) -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_receive_recovery_operation_invalidated')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'receive_recovery_operation_generation') -eq $generation -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_reason') -eq 'runtime_scope_replaced'
+                } | Select-Object -First 1)
+            if ($started.Count -gt 0 -and $resume.Count -eq 0 -and
+                $bindingInvalidated.Count -eq 1 -and $operationInvalidated.Count -eq 1) {
+                return $true
+            }
+        }
         foreach ($candidate in @($indexed | Where-Object {
                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                         'filetransfer_receive_recovery_operation_invalidated')) -and
