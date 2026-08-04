@@ -167,6 +167,56 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_RuntimeUnlockAnswerAckSubmissionBarrierPrecedesProbeHandoff(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string initiatorScope =
+            "session_id=sess_answer_ack_barrier; transfer_id=transfer_answer_ack_barrier; " +
+            "payer_decision_id=41; generation=7; log_writer_id=writer_initiator";
+        var result = await RunAnalyzeFixtureAsync(
+            [
+                LogLine($"event=runtime_unlock_transaction_answer_received; {initiatorScope}; transaction_generation=1; offer_generation=7"),
+                LogLine($"event=runtime_unlock_acceleration_reply_target_decided; {initiatorScope}; purpose=answer_ack; boundary=answer_ack_send; status=accepted; target_mode=validated_inbound_source"),
+                LogLine($"event=tuna_acceleration_answer_ack_rejected; {initiatorScope}; msg_id=answer-ack-1"),
+                LogLine($"event=runtime_unlock_answer_ack_probe_barrier_released; {initiatorScope}; reason=answer_ack_sent_before_tuna_probe"),
+                LogLine($"event=runtime_unlock_precommit_probe_launch_requested; {initiatorScope}; responder_waiting_for_peer_probe=0; launch_generation=1; probe_id=probe-1"),
+                LogLine($"event=runtime_unlock_precommit_probe_sent; {initiatorScope}; launch_generation=1; probe_id=probe-1"),
+                LogLine("event=runtime_unlock_precommit_probe_acked; session_id=sess_answer_ack_barrier; transfer_id=transfer_answer_ack_barrier; " +
+                    "direction=inbound; launch_generation=0; probe_id=probe-1; log_writer_id=writer_responder")
+            ],
+            [],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count"]);
+        Assert.Equal(
+            "runtime_unlock_initial_activation_answer_peer_delivery_missing",
+            verdict["first_proof_chain_failure_class"]);
+        Assert.Equal(
+            "runtime_unlock_answer_ack_submission_failed_during_bridge_recovery_before_probe_handoff",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("tuna_acceleration_answer_ack_rejected", verdict["first_proof_chain_failure_event"]);
+    }
+
+    [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]
     [InlineData(false, true)]
@@ -6541,6 +6591,56 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("0", verdict["runtime_unlock_precommit_probe_start_handoff_missing_raw_count"]);
         Assert.Equal("none", verdict["runtime_unlock_precommit_probe_start_handoff_verdict"]);
         Assert.NotEqual("runtime_unlock_precommit_probe_start_handoff_missing", verdict["recovery_failure_class"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_ReceiveRecoveryProofStateActivationPauseNaturalProofRecovers(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string scope =
+            "session_id=sess_pause_natural_proof; transfer_id=transfer_pause_natural_proof; " +
+            "direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; " +
+            "route_publication_generation=1; runtime_generation=1; terminal_generation=0; " +
+            "leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; " +
+            "checkpoint_generation=1; data_session_generation=1; log_writer_id=writer_inbound";
+        const string operation =
+            "receive_recovery_operation_generation=2; " +
+            "receive_recovery_operation_authority_id=pause-natural-proof-inbound; " +
+            "bridge_decision_generation=2";
+        var result = await RunAnalyzeFixtureAsync(
+            [
+                LogLine($"event=filetransfer_receive_recovery_operation_issued; {operation}; {scope}"),
+                LogLine($"event=filetransfer_receive_recovery_operation_execution_receipt_applied; {operation}; {scope}; execution_outcome=Completed; closure_state=Retained; closure_generation=2; proof_identity=(none)"),
+                LogLine($"event=filetransfer_receive_recovery_operation_closure_retained; {operation}; {scope}; execution_outcome=Completed; closure_state=Retained; closure_generation=2; proof_identity=(none)"),
+                LogLine($"event=filetransfer_tuna_activation_transport_pause_control_suppressed; {scope}; paused=1; reason=tuna_activation_negotiating"),
+                LogLine($"event=filetransfer_receive_recovery_proof_state_publication_decided; {operation}; {scope}; closure_generation=2; publication_generation=1; decision_status=Accepted"),
+                LogLine($"event=filetransfer_receive_recovery_proof_state_publication_receipt_applied; {operation}; {scope}; closure_generation=2; publication_generation=1; publication_outcome=Held; publication_reason=filetransfer_receive_recovery_proof_state_held_for_tuna_activation_pause; decision_status=Accepted"),
+                LogLine($"event=filetransfer_receive_recovery_operation_proof_observed; {operation}; {scope}; closure_generation=2; closure_state=Adopted; proof_identity=file_transfer_data_frame:bulk:2"),
+                LogLine($"event=filetransfer_receive_recovery_operation_closure_adopted; {operation}; {scope}; closure_generation=2; closure_state=Adopted; proof_identity=file_transfer_data_frame:bulk:2")
+            ],
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_raw_count"]);
+        Assert.Equal("1", verdict["filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_distinct_count"]);
+        Assert.Equal("1", verdict["filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_recovered_count"]);
+        Assert.Equal("0", verdict["filetransfer_receive_recovery_completed_retained_proof_state_publication_missing_unresolved_count"]);
     }
 
     [Theory]

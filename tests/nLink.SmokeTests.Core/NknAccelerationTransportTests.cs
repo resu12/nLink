@@ -17943,6 +17943,114 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task TransportAccelerationAnswerAck_RuntimeUnlockWaitsForReplaySubmissionBeforeHandoff()
+    {
+        FakeNknClient.ResetNetwork();
+        var previousHelpeePriorityDelay = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
+        NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = TimeSpan.Zero;
+        var rejectAnswerAck = 1;
+        var answerAckAttempts = 0;
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.tuna.file.activation.ack-replay-gate.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            var helperClient = new FakeNknClient("helper.tuna.file.activation.ack-replay-gate.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            var hostLane = new RetryableTunaAccelerationSession(canListen: false, failedDialAttemptsBeforeSuccess: 0);
+            var helperLane = new RetryableTunaAccelerationSession(canListen: false, failedDialAttemptsBeforeSuccess: 0);
+            hostClient.BeforeSendAsync = (_, payload, _) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out var envelope) &&
+                    envelope.Type == MsgType.TransportAccelerationAnswerAck)
+                {
+                    Interlocked.Increment(ref answerAckAttempts);
+                    if (Volatile.Read(ref rejectAnswerAck) != 0)
+                    {
+                        throw new InvalidOperationException("bridge_submission_epoch_not_ready");
+                    }
+                }
+
+                return Task.CompletedTask;
+            };
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-tuna-file-activation-ack-replay-gate-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                hostLane);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-tuna-file-activation-ack-replay-gate-id", helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                helperLane);
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            _ = await host.OpenFileTransferDataSessionAsync(
+                sessionId,
+                "transfer_tuna_activation_ack_replay_gate_host",
+                cts.Token);
+            _ = await helper.OpenFileTransferDataSessionAsync(
+                sessionId,
+                "transfer_tuna_activation_ack_replay_gate_helper",
+                cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, "transfer_tuna_activation_ack_replay_gate_host");
+            TrackAuthorizedRegularV4RouteForTests(helper, "transfer_tuna_activation_ack_replay_gate_helper");
+            var logStart = GetOperationalLogLength();
+
+            hostLane.SetCanListen(true);
+            await ((ITransportAccelerationControl)host).RequestAccelerationNegotiationAsync("runtime_unlock", cts.Token);
+
+            await WaitUntilAsync(
+                () => Volatile.Read(ref answerAckAttempts) > 0 &&
+                      ReadOperationalLogTail(logStart).Contains(
+                          "event=runtime_unlock_answer_ack_probe_barrier_held;",
+                          StringComparison.Ordinal),
+                TimeSpan.FromSeconds(6));
+            Assert.DoesNotContain(
+                "event=filetransfer_runtime_unlock_handoff_pending_route_commit;",
+                ReadOperationalLogTail(logStart),
+                StringComparison.Ordinal);
+
+            Volatile.Write(ref rejectAnswerAck, 0);
+
+            await WaitUntilAsync(
+                () =>
+                {
+                    var tail = ReadOperationalLogTail(logStart);
+                    return tail.Contains(
+                               "event=tuna_acceleration_answer_ack_replay_sent;",
+                               StringComparison.Ordinal) &&
+                           tail.Contains(
+                               "event=filetransfer_runtime_unlock_handoff_pending_route_commit;",
+                               StringComparison.Ordinal);
+                },
+                TimeSpan.FromSeconds(8));
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "decision_reason=answer_ack_submission_pending_bridge_recovery",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "reason=runtime_unlock_answer_ack_probe_ready",
+                logTail,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            Volatile.Write(ref rejectAnswerAck, 0);
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = previousHelpeePriorityDelay;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public void RuntimeUnlockResponderPeerProbe_ExactStartedAndAckedEvidenceSelectsAdoptionRoles()
     {
         var transportType = typeof(NknSignalingTransport);

@@ -22503,6 +22503,21 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
             'tuna_acceleration_answer_ack_received_raw',
             'tuna_acceleration_answer_ack_received')
     })
+    [object[]]$answerAckSubmissionRejections = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_answer_ack_rejected'
+    })
+    [object[]]$transactionAnswers = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_transaction_answer_received'
+    })
+    [object[]]$probeBarriers = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_answer_ack_probe_barrier_released'
+    })
+    [object[]]$probeSends = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_precommit_probe_sent'
+    })
+    [object[]]$probeAcks = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_precommit_probe_acked'
+    })
     [object[]]$preCommitEvents = @($orderedEvents | Where-Object {
         $_.EventName -in @(
             'runtime_unlock_precommit_probe_launch_requested',
@@ -22518,7 +22533,8 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
         $_.EventName -eq 'runtime_unlock_acceleration_reply_target_decided' -and
         (Get-FileTransferEventField -Event $_ -Name 'purpose' -Default '') -in @(
             'answer',
-            'answer_replay') -and
+            'answer_replay',
+            'answer_ack') -and
         (Get-FileTransferEventField -Event $_ -Name 'status' -Default '') -eq
             'accepted'
     })
@@ -22540,6 +22556,8 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
     $recovered = New-Object System.Collections.Generic.List[object]
     $unresolved = New-Object System.Collections.Generic.List[object]
     $peerRecoveryReplayWindowUnresolved =
+        New-Object System.Collections.Generic.List[object]
+    $answerAckSubmissionBarrierUnresolved =
         New-Object System.Collections.Generic.List[object]
     $seen = @{}
     foreach ($timeout in $timeouts) {
@@ -22633,6 +22651,117 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
         }
     }
 
+    foreach ($rejection in $answerAckSubmissionRejections) {
+        $sessionId = Get-AnswerDeliveryIdentityValue $rejection @('session_id')
+        $payerDecisionId = Get-AnswerDeliveryIdentityValue $rejection @('payer_decision_id')
+        $generation = Get-AnswerDeliveryIdentityValue $rejection @('generation')
+        $writer = Get-AnswerDeliveryIdentityValue $rejection @('log_writer_id')
+        if ([string]::IsNullOrWhiteSpace($sessionId) -or
+            [string]::IsNullOrWhiteSpace($payerDecisionId) -or
+            [string]::IsNullOrWhiteSpace($generation) -or
+            [string]::IsNullOrWhiteSpace($writer)) {
+            continue
+        }
+
+        $transactionAnswer = @($transactionAnswers | Where-Object {
+            [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -Last 1)
+        $replyTarget = @($replyTargetEvents | Where-Object {
+            [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('purpose')) -eq 'answer_ack' -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -eq $payerDecisionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('generation')) -eq $generation -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -Last 1)
+        $barrier = @($probeBarriers | Where-Object {
+            [int64]$_.Sequence -gt [int64]$rejection.Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -eq $payerDecisionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -First 1)
+        $launch = @($preCommitEvents | Where-Object {
+            $_.EventName -eq 'runtime_unlock_precommit_probe_launch_requested' -and
+            $barrier.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$barrier[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer -and
+            (Get-AnswerDeliveryIdentityValue $_ @('responder_waiting_for_peer_probe')) -ne '1'
+        } | Select-Object -First 1)
+        $probeSend = @($probeSends | Where-Object {
+            $launch.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$launch[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -First 1)
+        $peerProbeAck = @($probeAcks | Where-Object {
+            $probeSend.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$probeSend[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -ne $writer -and
+            (Get-AnswerDeliveryIdentityValue $_ @('launch_generation')) -eq '0'
+        } | Select-Object -First 1)
+        if ($transactionAnswer.Count -ne 1 -or
+            $replyTarget.Count -ne 1 -or
+            $barrier.Count -ne 1 -or
+            $launch.Count -ne 1 -or
+            $probeSend.Count -ne 1 -or
+            $peerProbeAck.Count -ne 1) {
+            continue
+        }
+
+        $raw.Add($rejection) | Out-Null
+        $key = [string]::Join('|', @(
+            'answer_ack_submission_barrier',
+            $writer,
+            $sessionId,
+            $payerDecisionId,
+            $generation,
+            (Get-AnswerDeliveryIdentityValue $rejection @('msg_id')))).ToLowerInvariant()
+        if ($seen.ContainsKey($key)) {
+            continue
+        }
+        $seen[$key] = $true
+        $distinct.Add($rejection) | Out-Null
+
+        $laterSubmission = @($answerAcks | Where-Object {
+            $_.EventName -eq 'tuna_acceleration_answer_ack_sent' -and
+            [int64]$_.Sequence -gt [int64]$rejection.Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -eq $payerDecisionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('generation')) -eq $generation -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -First 1)
+        $peerAck = @($answerAcks | Where-Object {
+            $laterSubmission.Count -eq 1 -and
+            $_.EventName -in @(
+                'tuna_acceleration_answer_ack_received_raw',
+                'tuna_acceleration_answer_ack_received') -and
+            [int64]$_.Sequence -gt [int64]$laterSubmission[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -ne $writer
+        } | Select-Object -First 1)
+        $inboundPrepared = @($preCommitEvents | Where-Object {
+            $peerAck.Count -eq 1 -and
+            $_.EventName -eq 'filetransfer_route_transition_prepared' -and
+            [int64]$_.Sequence -gt [int64]$peerAck[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('direction')) -eq 'inbound' -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -ne $writer
+        } | Select-Object -First 1)
+        if ($laterSubmission.Count -eq 1 -and
+            $peerAck.Count -eq 1 -and
+            $inboundPrepared.Count -eq 1) {
+            $recovered.Add($rejection) | Out-Null
+        }
+        else {
+            $unresolved.Add($rejection) | Out-Null
+            $answerAckSubmissionBarrierUnresolved.Add($rejection) | Out-Null
+        }
+    }
+
     return [pscustomobject]@{
         RawCount = $raw.Count
         DistinctCount = $distinct.Count
@@ -22645,6 +22774,8 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
         UnresolvedCandidateEvents = @($unresolved.ToArray())
         PeerRecoveryReplayWindowUnresolvedCandidateEvents =
             @($peerRecoveryReplayWindowUnresolved.ToArray())
+        AnswerAckSubmissionBarrierUnresolvedCandidateEvents =
+            @($answerAckSubmissionBarrierUnresolved.ToArray())
     }
 }
 
@@ -31921,6 +32052,22 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
     $recovered = New-Object System.Collections.Generic.List[object]
     $unresolved = New-Object System.Collections.Generic.List[object]
     foreach ($record in @($distinct.Values)) {
+        if ($record.BoundaryKind -eq 'activation_pause_submission_hold') {
+            $naturalProof = @($proofEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$record.Event.Sequence -and
+                (Test-ProofStateOperationMatch -Issued $record.Issued -Candidate $_)
+            } | Select-Object -First 1)
+            $naturalAdoption = @($adoptedEvents | Where-Object {
+                $naturalProof.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$naturalProof[0].Sequence -and
+                (Test-ProofStateOperationMatch -Issued $record.Issued -Candidate $_)
+            } | Select-Object -First 1)
+            if ($naturalProof.Count -eq 1 -and $naturalAdoption.Count -eq 1) {
+                $recovered.Add($record.Event) | Out-Null
+                continue
+            }
+        }
+
         if ($record.BoundaryKind -eq 'post_delivery_peer_reachability') {
             $initialGeneration = Get-ProofStatePublicationGeneration `
                 -Event $record.InitialPublicationReceipt
@@ -45107,6 +45254,13 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     foreach ($candidateEvent in @($runtimeUnlockInitialActivationAnswerPeerDeliveryProof.UnresolvedCandidateEvents)) {
         $candidateReason = if (@(
+                $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.AnswerAckSubmissionBarrierUnresolvedCandidateEvents |
+                    Where-Object {
+                        [int64]$_.Sequence -eq [int64]$candidateEvent.Sequence
+                    }).Count -gt 0) {
+            'runtime_unlock_answer_ack_submission_failed_during_bridge_recovery_before_probe_handoff'
+        }
+        elseif (@(
                 $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.PeerRecoveryReplayWindowUnresolvedCandidateEvents |
                     Where-Object {
                         [int64]$_.Sequence -eq [int64]$candidateEvent.Sequence

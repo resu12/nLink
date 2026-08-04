@@ -417,7 +417,8 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockOfferAuthorityMode? AuthorityMode,
         long DeadlineUtcMs,
         long WorkerGeneration,
-        string Purpose);
+        string Purpose,
+        TaskCompletionSource<bool> FirstSubmissionAccepted);
 
     private sealed record RuntimeUnlockInitialActivationReceiveRecoveryHoldShadow(
         RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest Request,
@@ -24011,7 +24012,9 @@ public sealed partial class NknSignalingTransport
                 pendingAccelerationAnswerAckAuthorityMode,
                 deadlineUtcMs,
                 ++pendingAccelerationReplyWorkerGeneration,
-                "answer");
+                "answer",
+                new TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously));
             pendingAccelerationAnswerReplyShadow = shadow;
             workerCreated = true;
             return shadow;
@@ -24077,7 +24080,9 @@ public sealed partial class NknSignalingTransport
                     : null,
                 deadlineUtcMs,
                 ++pendingAccelerationReplyWorkerGeneration,
-                "answer_ack");
+                "answer_ack",
+                new TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously));
             pendingAccelerationAnswerAckReplyShadow = shadow;
             workerCreated = true;
             return shadow;
@@ -25157,7 +25162,7 @@ public sealed partial class NknSignalingTransport
         return AccelerationAnswerReplayAttempts;
     }
 
-    private async Task SendAccelerationAnswerAckAsync(
+    private async Task<bool> SendAccelerationAnswerAckAsync(
         TransportAccelerationAnswerPayload answer,
         AccelerationReplyTargetEvidence replyTarget,
         NknAccelerationLaneKind lanes,
@@ -25172,7 +25177,7 @@ public sealed partial class NknSignalingTransport
                 "answer_ack_send") ||
             !TryGetCurrentEnvelopeCode(out var envelopeCode))
         {
-            return;
+            return false;
         }
 
         var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -25213,13 +25218,43 @@ public sealed partial class NknSignalingTransport
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=tuna_acceleration_answer_ack_{(queued.Succeeded ? "sent" : "rejected")}; session_id={SanitizeLogToken(answer.SessionId)}; lanes={FormatAccelerationLanesForLog(lanes)}; payer_decision_id={answer.PayerDecisionId}; generation={replyShadow.PendingGeneration}; target_mode=validated_inbound_source; target_peer_fingerprint={replyTarget.PeerFingerprint}; inbound_msg_id={SanitizeLogToken(replyTarget.InboundMessageId)}; msg_id={SanitizeLogToken(envelope.MessageId)}; reply_deadline_utc_ms={replyShadow.DeadlineUtcMs}; remaining_lifetime_ms={Math.Max(0, replyShadow.DeadlineUtcMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())}; delivery_evidence=local_submission_only");
+        if (queued.Succeeded)
+        {
+            replyShadow.FirstSubmissionAccepted.TrySetResult(true);
+        }
         if (replayWorkerCreated && (runtimeUnlock || queued.Succeeded))
         {
             ScheduleAccelerationAnswerAckReplay(replyShadow);
         }
+
+        if (!runtimeUnlock || queued.Succeeded)
+        {
+            return queued.Succeeded;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_answer_ack_probe_barrier_held; session_id={SanitizeLogToken(answer.SessionId)}; payer_decision_id={answer.PayerDecisionId}; generation={replyShadow.PendingGeneration}; msg_id={SanitizeLogToken(envelope.MessageId)}; reply_deadline_utc_ms={replyShadow.DeadlineUtcMs}; decision_reason=answer_ack_submission_pending_bridge_recovery");
+        var remainingMs = replyShadow.DeadlineUtcMs -
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        if (remainingMs <= 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            return await replyShadow.FirstSubmissionAccepted.Task
+                .WaitAsync(TimeSpan.FromMilliseconds(remainingMs), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            return false;
+        }
     }
 
-    private Task SendAccelerationAnswerAckAsync(
+    private Task<bool> SendAccelerationAnswerAckAsync(
         TransportAccelerationAnswerPayload answer,
         NknAccelerationLaneKind lanes,
         CancellationToken ct)
@@ -25319,6 +25354,10 @@ public sealed partial class NknSignalingTransport
                         LocalOperationalLog.Info(
                             "NKN.Tuna",
                             $"event=tuna_acceleration_answer_ack_replay_{(queued.Succeeded ? "sent" : "rejected")}; attempt={attempt}; session_id={SanitizeLogToken(currentShadow.SessionId)}; payer_decision_id={currentShadow.PayerDecisionId}; generation={currentShadow.PendingGeneration}; target_mode=validated_inbound_source; target_peer_fingerprint={currentShadow.ReplyTarget.PeerFingerprint}; inbound_msg_id={SanitizeLogToken(currentShadow.ReplyTarget.InboundMessageId)}; msg_id={SanitizeLogToken(currentShadow.Envelope.MessageId)}; reply_deadline_utc_ms={currentShadow.DeadlineUtcMs}; remaining_lifetime_ms={Math.Max(0, currentShadow.DeadlineUtcMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())}; delivery_evidence=local_submission_only");
+                        if (queued.Succeeded)
+                        {
+                            currentShadow.FirstSubmissionAccepted.TrySetResult(true);
+                        }
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
@@ -27918,13 +27957,20 @@ public sealed partial class NknSignalingTransport
             _ = Task.Run(
                 async () =>
                 {
-                    await SendAccelerationAnswerAckAsync(
+                    var answerAckSubmitted = await SendAccelerationAnswerAckAsync(
                             answer,
                             answerReplyTarget,
                             validation.AcceptedLanes,
                             CancellationToken.None,
                             runtimeUnlock: true)
                         .ConfigureAwait(false);
+                    if (!answerAckSubmitted)
+                    {
+                        LocalOperationalLog.Warn(
+                            "NKN.Tuna",
+                            $"event=runtime_unlock_answer_ack_probe_barrier_rejected; session_id={SanitizeLogToken(answer.SessionId)}; payer_decision_id={answer.PayerDecisionId}; decision_reason=answer_ack_wire_deadline_expired_before_submission");
+                        return;
+                    }
                     await Task.Delay(RuntimeUnlockAnswerAckProbeSettleDelay, CancellationToken.None).ConfigureAwait(false);
                     Interlocked.Exchange(ref accelerationNegotiationRetryAttempts, 0);
                     LocalOperationalLog.Info(
