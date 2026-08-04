@@ -14308,6 +14308,15 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_distinct_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffDistinctCount)) | Out-Null
     $lines.Add(("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_recovered_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffRecoveredCount)) | Out-Null
     $lines.Add(("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_unresolved_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffUnresolvedCount)) | Out-Null
+    $lines.Add(("paired_fallback_tail_yield_missing_raw_count={0}" -f $RecoveryClassification.PairedFallbackTailYieldMissingRawCount)) | Out-Null
+    $lines.Add(("paired_fallback_tail_yield_missing_distinct_count={0}" -f $RecoveryClassification.PairedFallbackTailYieldMissingDistinctCount)) | Out-Null
+    $lines.Add(("paired_fallback_tail_yield_missing_recovered_count={0}" -f $RecoveryClassification.PairedFallbackTailYieldMissingRecoveredCount)) | Out-Null
+    $lines.Add(("paired_fallback_tail_yield_missing_unresolved_count={0}" -f $RecoveryClassification.PairedFallbackTailYieldMissingUnresolvedCount)) | Out-Null
+    $lines.Add(("paired_fallback_tail_yield_missing_verdict={0}" -f $RecoveryClassification.PairedFallbackTailYieldMissingVerdict)) | Out-Null
+    $lines.Add(("failed_yield_quiescent_successor_missing_raw_count={0}" -f $RecoveryClassification.FailedYieldQuiescentSuccessorMissingRawCount)) | Out-Null
+    $lines.Add(("failed_yield_quiescent_successor_missing_distinct_count={0}" -f $RecoveryClassification.FailedYieldQuiescentSuccessorMissingDistinctCount)) | Out-Null
+    $lines.Add(("failed_yield_quiescent_successor_missing_recovered_count={0}" -f $RecoveryClassification.FailedYieldQuiescentSuccessorMissingRecoveredCount)) | Out-Null
+    $lines.Add(("failed_yield_quiescent_successor_missing_unresolved_count={0}" -f $RecoveryClassification.FailedYieldQuiescentSuccessorMissingUnresolvedCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_raw_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialOfferRetryLifecycleHandoffMissingRawCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_distinct_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialOfferRetryLifecycleHandoffMissingDistinctCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_recovered_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount)) | Out-Null
@@ -16399,6 +16408,15 @@ function New-FileTransferStabilityGateSummaryLines {
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_distinct_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffDistinctCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_recovered_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffRecoveredCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_unresolved_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffUnresolvedCount),
+        ("paired_fallback_tail_yield_missing_raw_count={0}" -f $recoveryClassification.PairedFallbackTailYieldMissingRawCount),
+        ("paired_fallback_tail_yield_missing_distinct_count={0}" -f $recoveryClassification.PairedFallbackTailYieldMissingDistinctCount),
+        ("paired_fallback_tail_yield_missing_recovered_count={0}" -f $recoveryClassification.PairedFallbackTailYieldMissingRecoveredCount),
+        ("paired_fallback_tail_yield_missing_unresolved_count={0}" -f $recoveryClassification.PairedFallbackTailYieldMissingUnresolvedCount),
+        ("paired_fallback_tail_yield_missing_verdict={0}" -f $recoveryClassification.PairedFallbackTailYieldMissingVerdict),
+        ("failed_yield_quiescent_successor_missing_raw_count={0}" -f $recoveryClassification.FailedYieldQuiescentSuccessorMissingRawCount),
+        ("failed_yield_quiescent_successor_missing_distinct_count={0}" -f $recoveryClassification.FailedYieldQuiescentSuccessorMissingDistinctCount),
+        ("failed_yield_quiescent_successor_missing_recovered_count={0}" -f $recoveryClassification.FailedYieldQuiescentSuccessorMissingRecoveredCount),
+        ("failed_yield_quiescent_successor_missing_unresolved_count={0}" -f $recoveryClassification.FailedYieldQuiescentSuccessorMissingUnresolvedCount),
         ("runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount),
         ("runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount),
         ("runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount),
@@ -41931,6 +41949,232 @@ function Get-FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffCorrelatio
     }
 }
 
+function Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation {
+    param([object[]]$Events = @())
+
+    [object[]]$ordered = @($Events | Where-Object { $null -ne $_ } |
+            Sort-Object Sequence, LineNumber)
+    [object[]]$rejections = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_runtime_owner_stale_update_rejected' -and
+            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+            (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+            (Get-FileTransferEventField -Event $_ -Name 'attempted_action' -Default '') -eq 'fallback_tail_quiescent' -and
+            (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'fallback_tail_yield_operation_conflict'
+        })
+    [object[]]$yieldEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_fallback_tail_yield_issued'
+        })
+    [object[]]$timeoutEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_fallback_tail_quiescence_timeout'
+        })
+    [object[]]$frontierRecoveryEvents = @($ordered | Where-Object {
+            $_.EventName -in @(
+                'filetransfer_fallback_tail_frontier_repair_cleared',
+                'filetransfer_v6_handoff_recovered',
+                'filetransfer_v6_handoff_tail_unblocked')
+        })
+    [object[]]$supersessionEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_fallback_tail_failed_yield_superseded'
+        })
+    [object[]]$localProofEvents = @($ordered | Where-Object {
+            $_.EventName -in @(
+                'filetransfer_fallback_tail_local_proof_receipt_decided',
+                'filetransfer_fallback_tail_yield_proof_sent')
+        })
+    [object[]]$peerProofEvents = @($ordered | Where-Object {
+            $_.EventName -in @(
+                'filetransfer_fallback_tail_peer_proof_receipt_decided',
+                'filetransfer_fallback_tail_yield_proof_received')
+        })
+    [object[]]$pairingEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_fallback_tail_pairing_committed'
+        })
+    [object[]]$reservationEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_fallback_tail_paired_release_reserved'
+        })
+    [object[]]$consumptionEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_fallback_tail_paired_release_consumed'
+        })
+    [object[]]$preparedEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_route_transition_prepared'
+        })
+    $rawEvents = New-Object System.Collections.Generic.List[object]
+    $recordsByKey = @{}
+    foreach ($rejection in $rejections) {
+        $writer = Get-FileTransferEventField -Event $rejection -Name 'log_writer_id' -Default ''
+        $session = Get-FileTransferEventField -Event $rejection -Name 'session_id' -Default ''
+        $transfer = Get-FileTransferEventField -Event $rejection -Name 'transfer_id' -Default ''
+        $sequence = [int64]$rejection.Sequence
+        if ([string]::IsNullOrWhiteSpace($writer) -or
+            [string]::IsNullOrWhiteSpace($session) -or
+            [string]::IsNullOrWhiteSpace($transfer)) {
+            continue
+        }
+
+        [object[]]$sameWriterYields = @($yieldEvents | Where-Object {
+                [int64]$_.Sequence -lt $sequence -and
+                $_.EventName -eq 'filetransfer_fallback_tail_yield_issued' -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+                (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6'
+            })
+        [object[]]$failedYields = @($sameWriterYields | Where-Object {
+                $kind = Get-FileTransferEventField -Event $_ -Name 'yield_kind' -Default ''
+                if ($kind -eq 'Failed') { return $true }
+                if (-not [string]::IsNullOrWhiteSpace($kind)) { return $false }
+                $yieldSequence = [int64]$_.Sequence
+                @($timeoutEvents | Where-Object {
+                        [int64]$_.Sequence -gt $yieldSequence -and
+                        [int64]$_.Sequence -lt $sequence -and
+                        $_.EventName -eq 'filetransfer_fallback_tail_quiescence_timeout' -and
+                        (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                        (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                        (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound'
+                    }).Count -gt 0
+            })
+        if ($failedYields.Count -ne 1) {
+            continue
+        }
+
+        $failed = $failedYields[0]
+        $failedSequence = [int64]$failed.Sequence
+        [object[]]$frontierRecovered = @($frontierRecoveryEvents | Where-Object {
+                [int64]$_.Sequence -gt $failedSequence -and
+                [int64]$_.Sequence -lt $sequence -and
+                $_.EventName -in @(
+                    'filetransfer_fallback_tail_frontier_repair_cleared',
+                    'filetransfer_v6_handoff_recovered',
+                    'filetransfer_v6_handoff_tail_unblocked') -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound'
+            })
+        if ($frontierRecovered.Count -eq 0) {
+            continue
+        }
+
+        $authority = Get-FileTransferEventField -Event $failed -Name 'authority_id' -Default ''
+        $generation = Get-FileTransferEventField -Event $failed -Name 'yield_generation' -Default '0'
+        $ownerKey = Get-FileTransferEventField -Event $failed -Name 'owner_key' -Default ''
+        $pairKey = Get-FileTransferEventField -Event $failed -Name 'pair_key' -Default ''
+        $scopeParts = @(
+            'route_publication_generation', 'route_commit_generation',
+            'runtime_generation', 'terminal_generation', 'leg_generation',
+            'transport_epoch', 'bridge_recovery_generation',
+            'checkpoint_generation', 'checkpoint_request_id',
+            'data_session_identity', 'data_session_generation') | ForEach-Object {
+                Get-FileTransferEventField -Event $failed -Name $_ -Default ''
+            }
+        if ([string]::IsNullOrWhiteSpace($authority) -or
+            [int64]$generation -le 0 -or
+            [string]::IsNullOrWhiteSpace($ownerKey) -or
+            [string]::IsNullOrWhiteSpace($pairKey)) {
+            continue
+        }
+
+        $key = (@($session, $transfer, 'outbound', $authority, $generation,
+                $ownerKey, $pairKey) + $scopeParts -join '|').ToLowerInvariant()
+        $rawEvents.Add($rejection) | Out-Null
+        if (-not $recordsByKey.ContainsKey($key)) {
+            $recordsByKey[$key] = [pscustomobject]@{
+                Event = $rejection
+                FailedYieldEvent = $failed
+                Reason = 'same_scope_failed_fallback_tail_yield_blocked_quiescent_successor'
+                Variant = 'failed_yield_quiescent_successor_missing'
+                DistinctKey = $key
+                Recovered = $false
+            }
+        }
+    }
+
+    foreach ($record in @($recordsByKey.Values)) {
+        $failed = $record.FailedYieldEvent
+        $failedAuthority = Get-FileTransferEventField -Event $failed -Name 'authority_id' -Default ''
+        $writer = Get-FileTransferEventField -Event $failed -Name 'log_writer_id' -Default ''
+        $session = Get-FileTransferEventField -Event $failed -Name 'session_id' -Default ''
+        $transfer = Get-FileTransferEventField -Event $failed -Name 'transfer_id' -Default ''
+        $after = [int64]$record.Event.Sequence
+        [object[]]$supersessions = @($supersessionEvents | Where-Object {
+                [int64]$_.Sequence -gt $after -and
+                $_.EventName -eq 'filetransfer_fallback_tail_failed_yield_superseded' -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+                (Get-FileTransferEventField -Event $_ -Name 'failed_predecessor_authority_id' -Default '') -eq $failedAuthority -and
+                (Get-FileTransferEventField -Event $_ -Name 'yield_kind' -Default '') -eq 'Quiescent'
+            } | Select-Object -First 1)
+        if ($supersessions.Count -ne 1) { continue }
+        $successor = $supersessions[0]
+        $successorAuthority = Get-FileTransferEventField -Event $successor -Name 'authority_id' -Default ''
+        $successorGeneration = Get-FileTransferEventField -Event $successor -Name 'yield_generation' -Default '0'
+        if ([string]::IsNullOrWhiteSpace($successorAuthority) -or
+            [int64]$successorGeneration -le 0) { continue }
+
+        $sameSuccessor = {
+            param($event)
+            [int64]$event.Sequence -gt [int64]$successor.Sequence -and
+            (Get-FileTransferEventField -Event $event -Name 'log_writer_id' -Default '') -eq $writer -and
+            (Get-FileTransferEventField -Event $event -Name 'session_id' -Default '') -eq $session -and
+            (Get-FileTransferEventField -Event $event -Name 'transfer_id' -Default '') -eq $transfer -and
+            (Get-FileTransferEventField -Event $event -Name 'authority_id' -Default '') -eq $successorAuthority -and
+            (Get-FileTransferEventField -Event $event -Name 'yield_generation' -Default '0') -eq $successorGeneration
+        }
+        $localProof = @($localProofEvents | Where-Object {
+                (& $sameSuccessor $_) -and
+                (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default 'Accepted') -in @('Accepted', 'Idempotent', 'Applied')
+            })
+        $peerProof = @($peerProofEvents | Where-Object {
+                (& $sameSuccessor $_) -and
+                (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default 'Accepted') -in @('Accepted', 'Idempotent', 'Applied')
+            })
+        $pairing = @($pairingEvents | Where-Object {
+                (& $sameSuccessor $_)
+            })
+        $reserved = @($reservationEvents | Where-Object {
+                (& $sameSuccessor $_)
+            })
+        $consumed = @($consumptionEvents | Where-Object {
+                (& $sameSuccessor $_)
+            })
+        $prepared = @($preparedEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$successor.Sequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+                (Get-FileTransferEventField -Event $_ -Name 'source_route' -Default '') -eq 'post_tuna_fallback_v6' -and
+                (Get-FileTransferEventField -Event $_ -Name 'target_route' -Default '') -eq 'file_tuna_v4' -and
+                (Get-FileTransferEventField -Event $_ -Name 'fallback_yield_authority_id' -Default '') -eq $successorAuthority
+            })
+        if ($localProof.Count -gt 0 -and $peerProof.Count -gt 0 -and
+            $pairing.Count -gt 0 -and
+            $reserved.Count -gt 0 -and $consumed.Count -gt 0 -and
+            $prepared.Count -gt 0) {
+            $record.Recovered = $true
+        }
+    }
+
+    [object[]]$records = @($recordsByKey.Values | Sort-Object { [int64]$_.Event.Sequence })
+    [object[]]$recovered = @($records | Where-Object { $_.Recovered })
+    [object[]]$unresolved = @($records | Where-Object { -not $_.Recovered })
+    return [pscustomobject]@{
+        RawCount = $rawEvents.Count
+        DistinctCount = $records.Count
+        RecoveredCount = $recovered.Count
+        UnresolvedCount = $unresolved.Count
+        Verdict = if ($unresolved.Count -gt 0) { 'fail' } else { 'pass' }
+        CandidateRecords = $records
+        RecoveredCandidateRecords = $recovered
+        UnresolvedCandidateRecords = $unresolved
+        RawEvents = @($rawEvents.ToArray())
+    }
+}
+
 function Get-FileTransferRecoveryFailureClassification {
     param(
         [Parameter(Mandatory = $true)]$Summary,
@@ -42054,6 +42298,9 @@ function Get-FileTransferRecoveryFailureClassification {
             -Events $events
     $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof =
         Get-FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffCorrelation `
+            -Events $events
+    $fallbackTailFailedYieldQuiescentSuccessorProof =
+        Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation `
             -Events $events
     $fileTransferReceiveRecoveryOperationPhase2EventNames = @(
         'runtime_unlock_retry_dispatch_decision_staged',
@@ -45680,6 +45927,14 @@ function Get-FileTransferRecoveryFailureClassification {
             -DefaultReason ([string]$candidateRecord.Reason) `
             -UseDefaultReason
     }
+    foreach ($candidateRecord in @($fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCandidateRecords)) {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class 'paired_fallback_tail_yield_missing' `
+            -Events @($candidateRecord.Event) `
+            -DefaultReason ([string]$candidateRecord.Reason) `
+            -UseDefaultReason
+    }
     foreach ($candidateRecord in @($fileTransferRouteTransitionProof.UnresolvedCandidateRecords)) {
         $candidateClass = if (-not [string]::IsNullOrWhiteSpace([string]$candidateRecord.Class)) {
             [string]$candidateRecord.Class
@@ -45802,7 +46057,12 @@ function Get-FileTransferRecoveryFailureClassification {
     # contains an actual fallback route or fallback-owner tuple. This prevents a
     # route-less downstream diagnostic from manufacturing fallback authority.
     if ($hasFallbackRouteOrOwnerEvidence) {
-        $fallbackFailureClass = if ($fallbackTailProof.TransportEpochReauthorizationUnresolvedCount -gt 0) {
+        $fallbackFailureClass = if ($fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCount -gt 0) {
+            # The exact Failed -> Quiescent conflict owns this boundary.  The
+            # preceding timeout and generic quiescence symptoms are diagnostic.
+            ''
+        }
+        elseif ($fallbackTailProof.TransportEpochReauthorizationUnresolvedCount -gt 0) {
             # The cross-epoch suppression is the precise authority edge. One-sided
             # yield/quiescence symptoms in the retired scope are downstream.
             ''
@@ -45980,6 +46240,9 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.UnresolvedCount -gt 0) {
         $class = 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing'
+    }
+    elseif ($fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCount -gt 0) {
+        $class = 'paired_fallback_tail_yield_missing'
     }
     elseif ($fileTransferRouteTransitionDrainingTransportGraceProof.UnresolvedCount -gt 0) {
         $class =
@@ -46615,6 +46878,15 @@ function Get-FileTransferRecoveryFailureClassification {
         FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffDistinctCount = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffDistinctCount
         FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffRecoveredCount = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffRecoveredCount
         FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffUnresolvedCount = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffUnresolvedCount
+        PairedFallbackTailYieldMissingRawCount = $fallbackTailFailedYieldQuiescentSuccessorProof.RawCount
+        PairedFallbackTailYieldMissingDistinctCount = $fallbackTailFailedYieldQuiescentSuccessorProof.DistinctCount
+        PairedFallbackTailYieldMissingRecoveredCount = $fallbackTailFailedYieldQuiescentSuccessorProof.RecoveredCount
+        PairedFallbackTailYieldMissingUnresolvedCount = $fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCount
+        PairedFallbackTailYieldMissingVerdict = $fallbackTailFailedYieldQuiescentSuccessorProof.Verdict
+        FailedYieldQuiescentSuccessorMissingRawCount = $fallbackTailFailedYieldQuiescentSuccessorProof.RawCount
+        FailedYieldQuiescentSuccessorMissingDistinctCount = $fallbackTailFailedYieldQuiescentSuccessorProof.DistinctCount
+        FailedYieldQuiescentSuccessorMissingRecoveredCount = $fallbackTailFailedYieldQuiescentSuccessorProof.RecoveredCount
+        FailedYieldQuiescentSuccessorMissingUnresolvedCount = $fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCount
         RuntimeUnlockRegularV4RecoveryLeaseNotIssuedRawCount = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount
         RuntimeUnlockRegularV4RecoveryLeaseNotIssuedDistinctCount = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount
         RuntimeUnlockRegularV4RecoveryLeaseNotIssuedRecoveredCount = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RecoveredCount
@@ -47515,6 +47787,15 @@ function New-FileTransferInvariantLedgerObject {
         filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_distinct_count = [string]$recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffDistinctCount
         filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_recovered_count = [string]$recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffRecoveredCount
         filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_unresolved_count = [string]$recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffUnresolvedCount
+        paired_fallback_tail_yield_missing_raw_count = [string]$recoveryClassification.PairedFallbackTailYieldMissingRawCount
+        paired_fallback_tail_yield_missing_distinct_count = [string]$recoveryClassification.PairedFallbackTailYieldMissingDistinctCount
+        paired_fallback_tail_yield_missing_recovered_count = [string]$recoveryClassification.PairedFallbackTailYieldMissingRecoveredCount
+        paired_fallback_tail_yield_missing_unresolved_count = [string]$recoveryClassification.PairedFallbackTailYieldMissingUnresolvedCount
+        paired_fallback_tail_yield_missing_verdict = $recoveryClassification.PairedFallbackTailYieldMissingVerdict
+        failed_yield_quiescent_successor_missing_raw_count = [string]$recoveryClassification.FailedYieldQuiescentSuccessorMissingRawCount
+        failed_yield_quiescent_successor_missing_distinct_count = [string]$recoveryClassification.FailedYieldQuiescentSuccessorMissingDistinctCount
+        failed_yield_quiescent_successor_missing_recovered_count = [string]$recoveryClassification.FailedYieldQuiescentSuccessorMissingRecoveredCount
+        failed_yield_quiescent_successor_missing_unresolved_count = [string]$recoveryClassification.FailedYieldQuiescentSuccessorMissingUnresolvedCount
         runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_raw_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount
         runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_distinct_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount
         runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_recovered_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount
@@ -48094,6 +48375,15 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_distinct_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffDistinctCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_recovered_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffRecoveredCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_unresolved_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffUnresolvedCount),
+        ("paired_fallback_tail_yield_missing_raw_count={0}" -f $recoveryClassification.PairedFallbackTailYieldMissingRawCount),
+        ("paired_fallback_tail_yield_missing_distinct_count={0}" -f $recoveryClassification.PairedFallbackTailYieldMissingDistinctCount),
+        ("paired_fallback_tail_yield_missing_recovered_count={0}" -f $recoveryClassification.PairedFallbackTailYieldMissingRecoveredCount),
+        ("paired_fallback_tail_yield_missing_unresolved_count={0}" -f $recoveryClassification.PairedFallbackTailYieldMissingUnresolvedCount),
+        ("paired_fallback_tail_yield_missing_verdict={0}" -f $recoveryClassification.PairedFallbackTailYieldMissingVerdict),
+        ("failed_yield_quiescent_successor_missing_raw_count={0}" -f $recoveryClassification.FailedYieldQuiescentSuccessorMissingRawCount),
+        ("failed_yield_quiescent_successor_missing_distinct_count={0}" -f $recoveryClassification.FailedYieldQuiescentSuccessorMissingDistinctCount),
+        ("failed_yield_quiescent_successor_missing_recovered_count={0}" -f $recoveryClassification.FailedYieldQuiescentSuccessorMissingRecoveredCount),
+        ("failed_yield_quiescent_successor_missing_unresolved_count={0}" -f $recoveryClassification.FailedYieldQuiescentSuccessorMissingUnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseNotIssuedRawCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseNotIssuedDistinctCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseNotIssuedRecoveredCount),

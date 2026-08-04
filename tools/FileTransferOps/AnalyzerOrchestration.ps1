@@ -2089,6 +2089,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             -Events $runtimeUnlockUncommittedTunaFallbackHandoffSuppressionEvents
     [object[]]$fallbackTailPairingEvents = @(
         @($routeEvents) +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_prepared') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_recovered') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_hint_authorized_publication_accepted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_started') +
@@ -2104,6 +2105,12 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_transport_epoch_reauthorization_successor_issued') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_transport_epoch_reauthorization_invalidated') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_yield_issued') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_failed_yield_superseded') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_quiescence_timeout') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_frontier_repair_cleared') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_handoff_recovered') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_handoff_tail_unblocked') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_owner_stale_update_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_local_proof_receipt_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_local_proof_receipt_applied') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_local_proof_receipt_rejected') +
@@ -2128,6 +2135,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_inbound_terminal') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_outbound_terminal')
     )
+    $fallbackTailFailedYieldQuiescentSuccessorProof =
+        Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation `
+            -Events $fallbackTailPairingEvents
     $fallbackTailPairedYieldValidation =
         Get-FileTransferFallbackTailPairedYieldValidation -Events $fallbackTailPairingEvents
     $fallbackSchema2YieldCount = @($fallbackTailPairedYieldValidation.Schema2YieldEvents).Count
@@ -2880,6 +2890,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Reason = $candidateRecord.Reason
         }) | Out-Null
     }
+    foreach ($candidateRecord in @($fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCandidateRecords)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'paired_fallback_tail_yield_missing'
+            Event = $candidateRecord.Event
+            Reason = $candidateRecord.Reason
+        }) | Out-Null
+    }
     $firstCompactProofChainFailure = @(
         $compactProofChainCandidates.ToArray() |
             Sort-Object @{ Expression = { [int64]$_.Event.Sequence } }, @{ Expression = { [int]$_.Event.LineNumber } }, Class |
@@ -2950,6 +2967,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $fileTransferReceiveRecoveryCompletedUnprovenSuccessorProof.UnresolvedCount -gt 0 -or
         $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.UnresolvedCount -gt 0 -or
         $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.UnresolvedCount -gt 0 -or
+        $fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedUnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureLivenessUnresolvedCount -gt 0 -or
@@ -3380,6 +3398,15 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_distinct_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffDistinctCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_recovered_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffRecoveredCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_unresolved_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffUnresolvedCount),
+        ("paired_fallback_tail_yield_missing_raw_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.RawCount),
+        ("paired_fallback_tail_yield_missing_distinct_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.DistinctCount),
+        ("paired_fallback_tail_yield_missing_recovered_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.RecoveredCount),
+        ("paired_fallback_tail_yield_missing_unresolved_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCount),
+        ("paired_fallback_tail_yield_missing_verdict={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.Verdict),
+        ("failed_yield_quiescent_successor_missing_raw_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.RawCount),
+        ("failed_yield_quiescent_successor_missing_distinct_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.DistinctCount),
+        ("failed_yield_quiescent_successor_missing_recovered_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.RecoveredCount),
+        ("failed_yield_quiescent_successor_missing_unresolved_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RecoveredCount),
@@ -4790,6 +4817,15 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_distinct_count = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffDistinctCount
         filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_recovered_count = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffRecoveredCount
         filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_unresolved_count = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffUnresolvedCount
+        paired_fallback_tail_yield_missing_raw_count = $fallbackTailFailedYieldQuiescentSuccessorProof.RawCount
+        paired_fallback_tail_yield_missing_distinct_count = $fallbackTailFailedYieldQuiescentSuccessorProof.DistinctCount
+        paired_fallback_tail_yield_missing_recovered_count = $fallbackTailFailedYieldQuiescentSuccessorProof.RecoveredCount
+        paired_fallback_tail_yield_missing_unresolved_count = $fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCount
+        paired_fallback_tail_yield_missing_verdict = $fallbackTailFailedYieldQuiescentSuccessorProof.Verdict
+        failed_yield_quiescent_successor_missing_raw_count = $fallbackTailFailedYieldQuiescentSuccessorProof.RawCount
+        failed_yield_quiescent_successor_missing_distinct_count = $fallbackTailFailedYieldQuiescentSuccessorProof.DistinctCount
+        failed_yield_quiescent_successor_missing_recovered_count = $fallbackTailFailedYieldQuiescentSuccessorProof.RecoveredCount
+        failed_yield_quiescent_successor_missing_unresolved_count = $fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCount
         runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount
         runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount
         runtime_unlock_regular_v4_recovery_lease_not_issued_recovered_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RecoveredCount

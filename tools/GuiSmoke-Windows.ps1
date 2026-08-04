@@ -4698,6 +4698,7 @@ function New-TunaGuiFileTransferFailureClassificationResult {
         InitialActivationAnswerPeerDeliveryMissing = $false
         InitialActivationRetiredPendingAnswerHandoffMissing = $false
         RuntimeUnlockResponderPeerProbeHandoffMissing = $false
+        FallbackTailFailedYieldQuiescentSuccessorMissing = $false
         InitialActivationReceiveRecoveryHoldNotPreserved = $false
         InitialActivationReceiveRecoveryHoldReleasedOfferExpired = $false
         RouteTransitionDrainingTransportGraceTerminalization = $false
@@ -5548,6 +5549,141 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         }
     }
 
+    function Get-TunaGuiFallbackTailFailedYieldQuiescentSuccessorFailure {
+        param(
+            [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+        )
+
+        $states = @{}
+        $visits = 0L
+        foreach ($line in $Lines) {
+            $visits++
+            $eventName = Get-TunaGuiLogLineFieldValue -Line $line -Name 'event'
+            if ([string]::IsNullOrWhiteSpace($eventName)) { continue }
+
+            $writer = Get-TunaGuiLogLineFieldValue -Line $line -Name 'log_writer_id'
+            $sessionId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'session_id'
+            $transferId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'transfer_id'
+            $direction = Get-TunaGuiLogLineFieldValue -Line $line -Name 'direction'
+
+            if ($eventName -eq 'filetransfer_fallback_tail_yield_issued' -and
+                $direction -ieq 'outbound' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'route') -eq 'post_tuna_fallback_v6') {
+                $yieldKind = Get-TunaGuiLogLineFieldValue -Line $line -Name 'yield_kind'
+                $legacyFailed = [string]::IsNullOrWhiteSpace($yieldKind) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'reason') -eq 'missing_frontier_state'
+                if ($yieldKind -ieq 'Failed' -or $legacyFailed) {
+                    $authorityId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id'
+                    $yieldGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'yield_generation'
+                    $scope = @(
+                        'owner_key', 'pair_key', 'route_publication_generation',
+                        'route_commit_generation', 'runtime_generation',
+                        'terminal_generation', 'leg_generation', 'transport_epoch',
+                        'bridge_recovery_generation', 'checkpoint_generation',
+                        'checkpoint_request_id', 'data_session_identity',
+                        'data_session_generation') | ForEach-Object {
+                            Get-TunaGuiLogLineFieldValue -Line $line -Name $_
+                        }
+                    if (-not [string]::IsNullOrWhiteSpace($writer) -and
+                        -not [string]::IsNullOrWhiteSpace($sessionId) -and
+                        -not [string]::IsNullOrWhiteSpace($transferId) -and
+                        -not [string]::IsNullOrWhiteSpace($authorityId) -and
+                        [int64]$yieldGeneration -gt 0) {
+                        $key = (@($writer, $sessionId, $transferId, $authorityId, $yieldGeneration) + $scope -join '|').ToLowerInvariant()
+                        if (-not $states.ContainsKey($key)) {
+                            $states[$key] = [pscustomobject]@{
+                                Writer = $writer; SessionId = $sessionId; TransferId = $transferId
+                                FailedAuthorityId = $authorityId; FailedGeneration = $yieldGeneration
+                                Timeout = $yieldKind -ieq 'Failed'; FrontierRecovered = $false
+                                Candidate = $false; SuccessorAuthorityId = ''; SuccessorGeneration = '0'
+                                LocalProof = $false; PeerProof = $false; Pairing = $false
+                                Reservation = $false; Consumption = $false; Prepared = $false
+                            }
+                        }
+                    }
+                }
+                continue
+            }
+
+            $matching = @($states.Values | Where-Object {
+                    $_.Writer -eq $writer -and $_.SessionId -eq $sessionId -and
+                    $_.TransferId -eq $transferId
+                })
+            if ($matching.Count -eq 0) { continue }
+
+            if ($eventName -eq 'filetransfer_fallback_tail_quiescence_timeout' -and
+                $direction -ieq 'outbound') {
+                foreach ($state in $matching) { $state.Timeout = $true }
+                continue
+            }
+            if ($eventName -in @(
+                    'filetransfer_fallback_tail_frontier_repair_cleared',
+                    'filetransfer_v6_handoff_recovered',
+                    'filetransfer_v6_handoff_tail_unblocked') -and
+                $direction -ieq 'outbound') {
+                foreach ($state in $matching | Where-Object { $_.Timeout }) {
+                    $state.FrontierRecovered = $true
+                }
+                continue
+            }
+            if ($eventName -eq 'filetransfer_runtime_owner_stale_update_rejected' -and
+                $direction -ieq 'outbound' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'attempted_action') -eq 'fallback_tail_quiescent' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'reason') -eq 'fallback_tail_yield_operation_conflict') {
+                $eligible = @($matching | Where-Object { $_.Timeout -and $_.FrontierRecovered })
+                if ($eligible.Count -eq 1) { $eligible[0].Candidate = $true }
+                continue
+            }
+            if ($eventName -eq 'filetransfer_fallback_tail_failed_yield_superseded') {
+                $failedAuthority = Get-TunaGuiLogLineFieldValue -Line $line -Name 'failed_predecessor_authority_id'
+                $eligible = @($matching | Where-Object {
+                        $_.Candidate -and $_.FailedAuthorityId -eq $failedAuthority
+                    })
+                if ($eligible.Count -eq 1) {
+                    $eligible[0].SuccessorAuthorityId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id'
+                    $eligible[0].SuccessorGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'yield_generation'
+                }
+                continue
+            }
+
+            $authorityId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id'
+            $yieldGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'yield_generation'
+            $successors = @($matching | Where-Object {
+                    -not [string]::IsNullOrWhiteSpace($_.SuccessorAuthorityId) -and
+                    $_.SuccessorAuthorityId -eq $authorityId -and
+                    $_.SuccessorGeneration -eq $yieldGeneration
+                })
+            foreach ($state in $successors) {
+                switch ($eventName) {
+                    'filetransfer_fallback_tail_local_proof_receipt_decided' { $state.LocalProof = $true }
+                    'filetransfer_fallback_tail_yield_proof_sent' { $state.LocalProof = $true }
+                    'filetransfer_fallback_tail_peer_proof_receipt_decided' { $state.PeerProof = $true }
+                    'filetransfer_fallback_tail_yield_proof_received' { $state.PeerProof = $true }
+                    'filetransfer_fallback_tail_pairing_committed' { $state.Pairing = $true }
+                    'filetransfer_fallback_tail_paired_release_reserved' { $state.Reservation = $true }
+                    'filetransfer_fallback_tail_paired_release_consumed' { $state.Consumption = $true }
+                }
+            }
+            if ($eventName -eq 'filetransfer_route_transition_prepared' -and
+                $direction -ieq 'outbound' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_route') -eq 'post_tuna_fallback_v6' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'target_route') -eq 'file_tuna_v4') {
+                $preparedAuthority = Get-TunaGuiLogLineFieldValue -Line $line -Name 'fallback_yield_authority_id'
+                foreach ($state in $matching | Where-Object { $_.SuccessorAuthorityId -eq $preparedAuthority }) {
+                    $state.Prepared = $true
+                }
+            }
+        }
+
+        return [pscustomobject]@{
+            Unresolved = @($states.Values | Where-Object {
+                    $_.Candidate -and -not ($_.LocalProof -and $_.PeerProof -and $_.Pairing -and
+                        $_.Reservation -and $_.Consumption -and $_.Prepared)
+                }).Count -gt 0
+            LineVisits = $visits
+        }
+    }
+
     $responderPeerProbeFastPath =
         Get-TunaGuiRuntimeUnlockResponderPeerProbeHandoffFailure -Lines ([string[]]$evidenceLines)
     if ($responderPeerProbeFastPath.Unresolved) {
@@ -5566,6 +5702,27 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -EvidenceLookupCount 0L `
             -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
         $result.RuntimeUnlockResponderPeerProbeHandoffMissing = $true
+        return $result
+    }
+
+    $fallbackTailFailedYieldFastPath =
+        Get-TunaGuiFallbackTailFailedYieldQuiescentSuccessorFailure -Lines ([string[]]$evidenceLines)
+    if ($fallbackTailFailedYieldFastPath.Unresolved) {
+        if ($null -ne $TestMetrics) {
+            $TestMetrics.evidenceLineVisitCount = [long]$fallbackTailFailedYieldFastPath.LineVisits
+            $TestMetrics.evidenceLookupCount = 0L
+            $TestMetrics.classificationSource = "${classificationSource}_fallback_tail_failed_yield_index"
+        }
+        $result = New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'route_runtime' `
+            -Reason 'same_scope_failed_fallback_tail_yield_blocked_quiescent_successor' `
+            -RouteMode $RouteMode `
+            -ClassificationSource "${classificationSource}_fallback_tail_failed_yield_index" `
+            -EvidenceLineVisitCount ([long]$fallbackTailFailedYieldFastPath.LineVisits) `
+            -EvidenceParsedRecordCount 0L `
+            -EvidenceLookupCount 0L `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
+        $result.FallbackTailFailedYieldQuiescentSuccessorMissing = $true
         return $result
     }
 

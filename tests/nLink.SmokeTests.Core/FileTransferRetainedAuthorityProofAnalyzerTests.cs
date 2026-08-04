@@ -3530,7 +3530,7 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
             "Get-TunaGuiRetiredPendingAnswerHandoffFailure");
         var fastPathMatch = System.Text.RegularExpressions.Regex.Match(
             nestedFunctionText,
-            @"(?s)function\s+Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure\s*\{(?<body>.*?)\r?\n\}\s*\r?\n\s*\$responderPeerProbeFastPath");
+            @"(?s)function\s+Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure\s*\{(?<body>.*?)\r?\n\}\s*\r?\n\s*function\s+Get-TunaGuiFallbackTailFailedYieldQuiescentSuccessorFailure");
         Assert.True(fastPathMatch.Success, "Could not extract the fallback-V6 bootstrap GUI fast path.");
         var fastPathBody = fastPathMatch.Groups["body"].Value;
         var scriptText = $$"""

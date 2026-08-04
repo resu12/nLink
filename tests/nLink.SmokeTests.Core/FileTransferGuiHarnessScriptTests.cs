@@ -2969,6 +2969,50 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeFailureClassification_FailedFallbackTailYieldUsesIndexedFastPath()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFileTransferFailureClassificationResult", "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-failed-tail-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                @(
+                    'event=filetransfer_fallback_tail_yield_issued; session_id=sess; transfer_id=transfer; direction=outbound; route=post_tuna_fallback_v6; authority_id=failed; yield_generation=1; owner_key=owner; pair_key=pair; route_publication_generation=3; route_commit_generation=0; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; checkpoint_generation=1; checkpoint_request_id=(none); data_session_identity=data:1; data_session_generation=1; yield_kind=Failed; log_writer_id=writer',
+                    'event=filetransfer_fallback_tail_quiescence_timeout; session_id=sess; transfer_id=transfer; direction=outbound; route=post_tuna_fallback_v6; log_writer_id=writer',
+                    'event=filetransfer_v6_handoff_tail_unblocked; session_id=sess; transfer_id=transfer; direction=outbound; transport_epoch=1; log_writer_id=writer',
+                    'event=filetransfer_runtime_owner_stale_update_rejected; session_id=sess; transfer_id=transfer; direction=outbound; route=post_tuna_fallback_v6; attempted_action=fallback_tail_quiescent; reason=fallback_tail_yield_operation_conflict; log_writer_id=writer'
+                ) | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($result.Phase -ne 'route_runtime' -or
+                    $result.Reason -ne 'same_scope_failed_fallback_tail_yield_blocked_quiescent_successor' -or
+                    -not $result.FallbackTailFailedYieldQuiescentSuccessorMissing -or
+                    $result.ClassificationSource -ne 'immutable_evidence_fallback_tail_failed_yield_index' -or
+                    [long]$result.EvidenceLineVisitCount -ne 4) {
+                    throw "failed fallback-tail fast path mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+                Write-Output 'gui-failed-fallback-tail-fast-path-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(result.ExitCode == 0, $"Failed fallback-tail GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-failed-fallback-tail-fast-path-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GuiSmokeFailureClassification_InvalidFallbackBootstrapFrontierUsesIndexedFastPath()
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
@@ -2981,7 +3025,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             "Get-TunaGuiRetiredPendingAnswerHandoffFailure");
         var fastPathMatch = System.Text.RegularExpressions.Regex.Match(
             nestedFunctionText,
-            @"(?s)function\s+Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure\s*\{(?<body>.*?)\r?\n\}\s*\r?\n\s*\$responderPeerProbeFastPath");
+            @"(?s)function\s+Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure\s*\{(?<body>.*?)\r?\n\}\s*\r?\n\s*function\s+Get-TunaGuiFallbackTailFailedYieldQuiescentSuccessorFailure");
         Assert.True(
             fastPathMatch.Success,
             "Could not extract the fallback-V6 bootstrap GUI fast path.");
