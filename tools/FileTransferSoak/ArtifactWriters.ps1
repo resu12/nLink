@@ -42196,7 +42196,17 @@ function Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation {
                 (Get-FileTransferEventField -Event $_ -Name 'yield_generation' -Default '0') -eq $generation -and
                 (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default 'Accepted') -in
                     @('Accepted', 'Idempotent', 'Applied')
-            } | Select-Object -First 1)
+            } | Sort-Object `
+                @{ Expression = {
+                        if ($_.EventName -eq 'filetransfer_fallback_tail_local_proof_receipt_decided') {
+                            0
+                        }
+                        else {
+                            1
+                        }
+                    } }, `
+                Sequence, LineNumber |
+                Select-Object -First 1)
         if ($localProof.Count -ne 1) { continue }
         $localProofIdentity = Get-FileTransferEventField -Event $localProof[0] -Name 'local_proof_identity' -Default (
             Get-FileTransferEventField -Event $localProof[0] -Name 'proof_identity' -Default '')
