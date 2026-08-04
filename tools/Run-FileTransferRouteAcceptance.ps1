@@ -836,6 +836,7 @@ function Complete-RouteAcceptanceRunEvidence {
                     -LogLedgerPath $ledgerPath `
                     -AnalyzerDiagnosticsPath $diagnosticsPath `
                     -AnalyzerInputPath $analyzerInputPath `
+                    -DirectManifestPath ([string]$attemptFinalization.ManifestPath) `
                     -DirectManifestSha256 $directManifestSha256
             }
         )

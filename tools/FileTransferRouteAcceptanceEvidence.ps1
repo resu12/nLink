@@ -7,6 +7,7 @@ $script:RouteAcceptanceEvidenceWriterChronologyCache = @{}
 $script:RouteAcceptanceEvidenceWriterChronologyBuildCount = 0L
 $script:RouteAcceptanceEvidenceWriterChronologyLineVisitCount = 0L
 $script:RouteAcceptanceEvidenceWriterChronologyCacheHitCount = 0L
+$script:RouteAcceptanceEvidenceWriterChronologyReceiptReuseCount = 0L
 
 function Get-RouteAcceptanceEvidencePropertyValue {
     param(
@@ -739,17 +740,115 @@ function Get-RouteAcceptanceEvidenceWriterChronology {
     return $result
 }
 
+function Get-RouteAcceptanceProducerWriterChronologyReceipt {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$DirectManifestPath,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$DirectManifestSha256,
+        [Parameter(Mandatory = $true)][string]$AcceptanceRunId,
+        [Parameter(Mandatory = $true)][string]$ScenarioRunId,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$LedgerPath,
+        [Parameter(Mandatory = $true)]$Ledger,
+        [Parameter(Mandatory = $true)][string]$WriterEvidenceSlicePath,
+        [Parameter(Mandatory = $true)]$WriterEvidenceSliceSnapshot
+    )
+
+    $invalid = [pscustomobject]@{ valid = $false }
+    if ([string]::IsNullOrWhiteSpace($DirectManifestPath) -or
+        [string]::IsNullOrWhiteSpace($DirectManifestSha256) -or
+        [string]::IsNullOrWhiteSpace($LedgerPath) -or
+        -not (Test-Path -LiteralPath $DirectManifestPath -PathType Leaf)) {
+        return $invalid
+    }
+
+    $resolvedManifestPath = [System.IO.Path]::GetFullPath($DirectManifestPath)
+    if (-not [string]::Equals(
+            (Get-RouteAcceptanceEvidenceSha256 -Path $resolvedManifestPath),
+            $DirectManifestSha256,
+            [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $invalid
+    }
+
+    try {
+        $manifest = Get-Content -LiteralPath $resolvedManifestPath -Raw | ConvertFrom-Json
+    }
+    catch {
+        return $invalid
+    }
+
+    $manifestLedgerPath = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $manifest -Name 'ledgerPath' -DefaultValue '')
+    $manifestWriterSlicePath = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $manifest -Name 'writerEvidenceSlicePath' -DefaultValue '')
+    if ([string]::IsNullOrWhiteSpace($manifestLedgerPath) -or
+        [string]::IsNullOrWhiteSpace($manifestWriterSlicePath)) {
+        return $invalid
+    }
+    $writerEvidenceSlice = Get-RouteAcceptanceEvidencePropertyValue -Object $Ledger -Name 'writerEvidenceSlice' -DefaultValue $null
+    $ledgerWriterSliceSha256 = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $writerEvidenceSlice -Name 'sha256' -DefaultValue '')
+    $ledgerWriterSliceLineCount = ConvertTo-RouteAcceptanceEvidenceInt64 `
+        -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $writerEvidenceSlice -Name 'lineCount' -DefaultValue -1) `
+        -DefaultValue -1
+    $manifestWriterSliceLineCount = ConvertTo-RouteAcceptanceEvidenceInt64 `
+        -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $manifest -Name 'writerEvidenceSliceLineCount' -DefaultValue -1) `
+        -DefaultValue -1
+    $ledgerInversionCount = ConvertTo-RouteAcceptanceEvidenceInt64 `
+        -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $Ledger -Name 'writerChronologyInversionCount' -DefaultValue -1) `
+        -DefaultValue -1
+    $ledgerCollisionCount = ConvertTo-RouteAcceptanceEvidenceInt64 `
+        -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $Ledger -Name 'writerChronologyCollisionCount' -DefaultValue -1) `
+        -DefaultValue -1
+
+    $valid =
+        [string]::Equals([string](Get-RouteAcceptanceEvidencePropertyValue -Object $manifest -Name 'event' -DefaultValue ''), 'filetransfer_tuna_gui_direct_evidence_manifest', [System.StringComparison]::Ordinal) -and
+        [string]::Equals([string](Get-RouteAcceptanceEvidencePropertyValue -Object $manifest -Name 'acceptanceRunId' -DefaultValue ''), $AcceptanceRunId, [System.StringComparison]::Ordinal) -and
+        [string]::Equals([string](Get-RouteAcceptanceEvidencePropertyValue -Object $manifest -Name 'scenarioRunId' -DefaultValue ''), $ScenarioRunId, [System.StringComparison]::Ordinal) -and
+        (ConvertTo-RouteAcceptanceEvidenceBoolean -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $manifest -Name 'artifactFinalized' -DefaultValue $false)) -and
+        (ConvertTo-RouteAcceptanceEvidenceBoolean -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $manifest -Name 'currentRuntimeProof' -DefaultValue $false)) -and
+        [string]::Equals([string](Get-RouteAcceptanceEvidencePropertyValue -Object $manifest -Name 'cursorIntegrityVerdict' -DefaultValue ''), 'pass', [System.StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals([string](Get-RouteAcceptanceEvidencePropertyValue -Object $manifest -Name 'writerIntegrityVerdict' -DefaultValue ''), 'pass', [System.StringComparison]::OrdinalIgnoreCase) -and
+        (ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $manifest -Name 'writerEvidenceVersion' -DefaultValue 0)) -eq 3 -and
+        [string]::Equals([System.IO.Path]::GetFullPath($manifestLedgerPath), [System.IO.Path]::GetFullPath($LedgerPath), [System.StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals([System.IO.Path]::GetFullPath($manifestWriterSlicePath), [System.IO.Path]::GetFullPath($WriterEvidenceSlicePath), [System.StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals([string](Get-RouteAcceptanceEvidencePropertyValue -Object $manifest -Name 'ledgerSha256' -DefaultValue ''), (Get-RouteAcceptanceEvidenceSha256 -Path $LedgerPath), [System.StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals([string](Get-RouteAcceptanceEvidencePropertyValue -Object $manifest -Name 'writerEvidenceSliceSha256' -DefaultValue ''), $ledgerWriterSliceSha256, [System.StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals($ledgerWriterSliceSha256, [string]$WriterEvidenceSliceSnapshot.sha256, [System.StringComparison]::OrdinalIgnoreCase) -and
+        $manifestWriterSliceLineCount -eq $ledgerWriterSliceLineCount -and
+        $ledgerWriterSliceLineCount -eq [long]$WriterEvidenceSliceSnapshot.lineCount -and
+        [string]::Equals([string](Get-RouteAcceptanceEvidencePropertyValue -Object $manifest -Name 'writerChronologyVerdict' -DefaultValue ''), 'pass', [System.StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals([string](Get-RouteAcceptanceEvidencePropertyValue -Object $Ledger -Name 'writerChronologyVerdict' -DefaultValue ''), 'pass', [System.StringComparison]::OrdinalIgnoreCase) -and
+        $ledgerInversionCount -eq 0 -and
+        $ledgerCollisionCount -eq 0 -and
+        (ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $manifest -Name 'writerChronologyInversionCount' -DefaultValue -1)) -eq $ledgerInversionCount -and
+        (ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $manifest -Name 'writerChronologyCollisionCount' -DefaultValue -1)) -eq $ledgerCollisionCount
+
+    if (-not $valid) {
+        return $invalid
+    }
+
+    return [pscustomobject]@{
+        valid = $true
+        inversionCount = $ledgerInversionCount
+        collisionCount = $ledgerCollisionCount
+        batchEvidenceValid = $true
+        timedOut = $false
+        lineVisits = 0L
+        elapsedMs = 0L
+        receiptReused = $true
+    }
+}
+
 function Get-RouteAcceptanceCursorEvidence {
     param(
         [Parameter(Mandatory = $true)][AllowNull()]$LogLedger,
         [Parameter(Mandatory = $true)][AllowNull()]$AnalyzerDiagnostics,
         [Parameter(Mandatory = $true)][string]$AcceptanceRunId,
-        [Parameter(Mandatory = $true)][string]$ScenarioRunId
+        [Parameter(Mandatory = $true)][string]$ScenarioRunId,
+        [AllowEmptyString()][string]$DirectManifestPath = '',
+        [AllowEmptyString()][string]$DirectManifestSha256 = ''
     )
 
     $writerChronologyBuildCountAtStart = $script:RouteAcceptanceEvidenceWriterChronologyBuildCount
     $writerChronologyLineVisitCountAtStart = $script:RouteAcceptanceEvidenceWriterChronologyLineVisitCount
     $writerChronologyCacheHitCountAtStart = $script:RouteAcceptanceEvidenceWriterChronologyCacheHitCount
+    $writerChronologyReceiptReuseCountAtStart = $script:RouteAcceptanceEvidenceWriterChronologyReceiptReuseCount
     $reasons = New-Object System.Collections.Generic.List[string]
     $ledgerResult = Resolve-RouteAcceptanceEvidenceObject -Value $LogLedger -Kind 'cursor_ledger'
     $diagnosticsResult = Resolve-RouteAcceptanceEvidenceObject -Value $AnalyzerDiagnostics -Kind 'analyzer_diagnostics'
@@ -1187,17 +1286,32 @@ function Get-RouteAcceptanceCursorEvidence {
     else {
         $writerEvidenceSliceSha256 = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $writerEvidenceSlice -Name 'sha256' -DefaultValue '')
         $writerEvidenceSliceLineCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $writerEvidenceSlice -Name 'lineCount' -DefaultValue -1) -DefaultValue -1
+        $writerEvidenceSliceSnapshot = Get-RouteAcceptanceEvidencePhysicalSnapshot -Path $writerEvidenceSlicePath
         if (-not (Test-RouteAcceptanceEvidenceSha256Value -Value $writerEvidenceSliceSha256) -or
-            -not [string]::Equals((Get-RouteAcceptanceEvidenceSha256 -Path $writerEvidenceSlicePath), $writerEvidenceSliceSha256, [System.StringComparison]::OrdinalIgnoreCase)) {
+            -not [string]::Equals([string]$writerEvidenceSliceSnapshot.sha256, $writerEvidenceSliceSha256, [System.StringComparison]::OrdinalIgnoreCase)) {
             $reasons.Add('cursor_writer_evidence_slice_sha256_mismatch') | Out-Null
         }
-        if ((Get-RouteAcceptanceEvidenceLineCount -Path $writerEvidenceSlicePath) -ne $writerEvidenceSliceLineCount) {
+        if ([long]$writerEvidenceSliceSnapshot.lineCount -ne $writerEvidenceSliceLineCount) {
             $reasons.Add('cursor_writer_evidence_slice_line_count_mismatch') | Out-Null
         }
         if ($writerEvidenceVersion -eq 3) {
-            $recomputedWriterChronology = Get-RouteAcceptanceEvidenceWriterChronology `
-                -Path $writerEvidenceSlicePath `
-                -CacheIdentity ('{0}|{1}' -f $AcceptanceRunId, $ScenarioRunId)
+            $recomputedWriterChronology = Get-RouteAcceptanceProducerWriterChronologyReceipt `
+                -DirectManifestPath $DirectManifestPath `
+                -DirectManifestSha256 $DirectManifestSha256 `
+                -AcceptanceRunId $AcceptanceRunId `
+                -ScenarioRunId $ScenarioRunId `
+                -LedgerPath $ledgerResult.Path `
+                -Ledger $ledger `
+                -WriterEvidenceSlicePath $writerEvidenceSlicePath `
+                -WriterEvidenceSliceSnapshot $writerEvidenceSliceSnapshot
+            if ($recomputedWriterChronology.valid) {
+                $script:RouteAcceptanceEvidenceWriterChronologyReceiptReuseCount++
+            }
+            else {
+                $recomputedWriterChronology = Get-RouteAcceptanceEvidenceWriterChronology `
+                    -Path $writerEvidenceSlicePath `
+                    -CacheIdentity ('{0}|{1}' -f $AcceptanceRunId, $ScenarioRunId)
+            }
             if ($recomputedWriterChronology.timedOut) {
                 $reasons.Add('writer_chronology_validation_timeout') | Out-Null
             }
@@ -1398,6 +1512,7 @@ function Get-RouteAcceptanceCursorEvidence {
         writerChronologyBuildCount = $script:RouteAcceptanceEvidenceWriterChronologyBuildCount - $writerChronologyBuildCountAtStart
         writerChronologyLineVisitCount = $script:RouteAcceptanceEvidenceWriterChronologyLineVisitCount - $writerChronologyLineVisitCountAtStart
         writerChronologyCacheHitCount = $script:RouteAcceptanceEvidenceWriterChronologyCacheHitCount - $writerChronologyCacheHitCountAtStart
+        writerChronologyReceiptReuseCount = $script:RouteAcceptanceEvidenceWriterChronologyReceiptReuseCount - $writerChronologyReceiptReuseCountAtStart
     }
 }
 
@@ -1412,7 +1527,8 @@ function Get-RouteAcceptanceScenarioEvidence {
         [Parameter(Mandatory = $true)][string]$LogLedgerPath,
         [Parameter(Mandatory = $true)][string]$AnalyzerDiagnosticsPath,
         [Parameter(Mandatory = $true)][string]$AnalyzerInputPath,
-        [string]$DirectManifestSha256 = '',
+        [AllowEmptyString()][string]$DirectManifestPath = '',
+        [AllowEmptyString()][string]$DirectManifestSha256 = '',
         [bool]$Selected = $true,
         [string]$SelectionDisposition = 'selected_finalized_attempt'
     )
@@ -1422,7 +1538,9 @@ function Get-RouteAcceptanceScenarioEvidence {
             -LogLedger $LogLedgerPath `
             -AnalyzerDiagnostics $AnalyzerDiagnosticsPath `
             -AcceptanceRunId $AcceptanceRunId `
-            -ScenarioRunId $ScenarioRunId
+            -ScenarioRunId $ScenarioRunId `
+            -DirectManifestPath $DirectManifestPath `
+            -DirectManifestSha256 $DirectManifestSha256
     }
     else {
         [pscustomobject][ordered]@{
@@ -1460,6 +1578,7 @@ function Get-RouteAcceptanceScenarioEvidence {
             writerChronologyBuildCount = 0L
             writerChronologyLineVisitCount = 0L
             writerChronologyCacheHitCount = 0L
+            writerChronologyReceiptReuseCount = 0L
             producerWriterIntegrityVerdict = ''
             producerWriterIntegrityReasons = @()
             writerIntegrityVerdict = 'FAIL'
@@ -1528,6 +1647,7 @@ function Get-RouteAcceptanceScenarioEvidence {
             writerChronologyBuildCount = $cursor.writerChronologyBuildCount
             writerChronologyLineVisitCount = $cursor.writerChronologyLineVisitCount
             writerChronologyCacheHitCount = $cursor.writerChronologyCacheHitCount
+            writerChronologyReceiptReuseCount = $cursor.writerChronologyReceiptReuseCount
             writerIntegrityVerdict = $cursor.writerIntegrityVerdict
             writerIntegrityReasons = @($cursor.writerIntegrityReasons)
             producerWriterIntegrityVerdict = $cursor.producerWriterIntegrityVerdict
@@ -1562,6 +1682,8 @@ function Get-RouteAcceptanceScenarioEvidence {
             retainedSliceSha256 = $cursor.retainedSliceSha256
             retainedSliceLineCount = $cursor.retainedSliceLineCount
         }
+        directManifestPath = $(if ([string]::IsNullOrWhiteSpace($DirectManifestPath)) { '' } else { [System.IO.Path]::GetFullPath($DirectManifestPath) })
+        directManifestSha256 = $DirectManifestSha256
     }
 }
 
@@ -1755,6 +1877,7 @@ function Get-RouteAcceptanceEvidenceManifestValidation {
     $writerChronologyBuildCountAtStart = $script:RouteAcceptanceEvidenceWriterChronologyBuildCount
     $writerChronologyLineVisitCountAtStart = $script:RouteAcceptanceEvidenceWriterChronologyLineVisitCount
     $writerChronologyCacheHitCountAtStart = $script:RouteAcceptanceEvidenceWriterChronologyCacheHitCount
+    $writerChronologyReceiptReuseCountAtStart = $script:RouteAcceptanceEvidenceWriterChronologyReceiptReuseCount
     $structuralReasons = New-Object System.Collections.Generic.List[string]
     $provenanceReasons = New-Object System.Collections.Generic.List[string]
     $cursorReasons = New-Object System.Collections.Generic.List[string]
@@ -2211,7 +2334,9 @@ function Get-RouteAcceptanceEvidenceManifestValidation {
                 -LogLedger $ledgerPath `
                 -AnalyzerDiagnostics $diagnosticsPath `
                 -AcceptanceRunId $runId `
-                -ScenarioRunId $scenarioRunId
+                -ScenarioRunId $scenarioRunId `
+                -DirectManifestPath ([string](Get-RouteAcceptanceEvidencePropertyValue -Object $scenarioAttempt -Name 'directManifestPath' -DefaultValue '')) `
+                -DirectManifestSha256 ([string](Get-RouteAcceptanceEvidencePropertyValue -Object $scenarioAttempt -Name 'directManifestSha256' -DefaultValue ''))
             if ($currentCursor.verdict -ne 'PASS') {
                 foreach ($currentCursorReason in @($currentCursor.reasons)) {
                     $cursorReasons.Add([string]$currentCursorReason) | Out-Null
@@ -2316,6 +2441,7 @@ function Get-RouteAcceptanceEvidenceManifestValidation {
         writerChronologyBuildCount = $script:RouteAcceptanceEvidenceWriterChronologyBuildCount - $writerChronologyBuildCountAtStart
         writerChronologyLineVisitCount = $script:RouteAcceptanceEvidenceWriterChronologyLineVisitCount - $writerChronologyLineVisitCountAtStart
         writerChronologyCacheHitCount = $script:RouteAcceptanceEvidenceWriterChronologyCacheHitCount - $writerChronologyCacheHitCountAtStart
+        writerChronologyReceiptReuseCount = $script:RouteAcceptanceEvidenceWriterChronologyReceiptReuseCount - $writerChronologyReceiptReuseCountAtStart
         writerChronologyCacheEntryCount = $script:RouteAcceptanceEvidenceWriterChronologyCache.Count
     }
 }

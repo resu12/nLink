@@ -899,6 +899,93 @@ Assert-Equal ($script:RouteAcceptanceEvidenceWriterChronologyBuildCount - $build
         AssertScriptPassed(result);
     }
 
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task EvidenceWriterChronology_UsesExactProducerReceiptAndRejectsMutation()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunEvidenceScriptAsync(
+            FixturePrelude +
+            """
+$writerPath = Join-Path $script:EvidenceTempRoot 'writer-evidence.log'
+$ledgerPath = Join-Path $script:EvidenceTempRoot 'ledger.json'
+$manifestPath = Join-Path $script:EvidenceTempRoot 'direct-manifest.json'
+[System.IO.File]::WriteAllText(
+    $writerPath,
+    "event=a; log_writer_id=writer-a; log_writer_sequence=1; log_writer_batch_generation=1; log_writer_batch_first_sequence=1; log_writer_batch_last_sequence=1; log_writer_attempt_utc_ticks=100`n",
+    [System.Text.UTF8Encoding]::new($false))
+$writerSnapshot = Get-RouteAcceptanceEvidencePhysicalSnapshot -Path $writerPath
+$ledger = [ordered]@{
+    writerEvidenceSlice = [ordered]@{
+        path = $writerPath
+        sha256 = $writerSnapshot.sha256
+        lineCount = $writerSnapshot.lineCount
+    }
+    writerChronologyVerdict = 'pass'
+    writerChronologyInversionCount = 0
+    writerChronologyCollisionCount = 0
+}
+Write-JsonNoBom -Path $ledgerPath -Value $ledger
+$ledgerSha = Get-RouteAcceptanceEvidenceSha256 -Path $ledgerPath
+$manifest = [ordered]@{
+    schemaVersion = 1
+    event = 'filetransfer_tuna_gui_direct_evidence_manifest'
+    acceptanceRunId = 'run-a'
+    scenarioRunId = 'scenario-a'
+    artifactFinalized = $true
+    currentRuntimeProof = $true
+    cursorIntegrityVerdict = 'pass'
+    writerEvidenceVersion = 3
+    writerIntegrityVerdict = 'pass'
+    ledgerPath = $ledgerPath
+    ledgerSha256 = $ledgerSha
+    writerEvidenceSlicePath = $writerPath
+    writerEvidenceSliceSha256 = $writerSnapshot.sha256
+    writerEvidenceSliceLineCount = $writerSnapshot.lineCount
+    writerChronologyVerdict = 'pass'
+    writerChronologyInversionCount = 0
+    writerChronologyCollisionCount = 0
+}
+Write-JsonNoBom -Path $manifestPath -Value $manifest
+$manifestSha = Get-RouteAcceptanceEvidenceSha256 -Path $manifestPath
+$buildsBefore = $script:RouteAcceptanceEvidenceWriterChronologyBuildCount
+$lineVisitsBefore = $script:RouteAcceptanceEvidenceWriterChronologyLineVisitCount
+$receipt = Get-RouteAcceptanceProducerWriterChronologyReceipt `
+    -DirectManifestPath $manifestPath `
+    -DirectManifestSha256 $manifestSha `
+    -AcceptanceRunId 'run-a' `
+    -ScenarioRunId 'scenario-a' `
+    -LedgerPath $ledgerPath `
+    -Ledger ([pscustomobject]$ledger) `
+    -WriterEvidenceSlicePath $writerPath `
+    -WriterEvidenceSliceSnapshot $writerSnapshot
+Assert-True $receipt.valid 'exact producer receipt accepted'
+Assert-True $receipt.receiptReused 'producer receipt marked reused'
+Assert-Equal ($script:RouteAcceptanceEvidenceWriterChronologyBuildCount - $buildsBefore) 0 'receipt avoids chronology build'
+Assert-Equal ($script:RouteAcceptanceEvidenceWriterChronologyLineVisitCount - $lineVisitsBefore) 0 'receipt avoids writer line visits'
+
+$manifest.writerEvidenceSliceSha256 = ('f' * 64)
+Write-JsonNoBom -Path $manifestPath -Value $manifest
+$mutatedManifestSha = Get-RouteAcceptanceEvidenceSha256 -Path $manifestPath
+$mutated = Get-RouteAcceptanceProducerWriterChronologyReceipt `
+    -DirectManifestPath $manifestPath `
+    -DirectManifestSha256 $mutatedManifestSha `
+    -AcceptanceRunId 'run-a' `
+    -ScenarioRunId 'scenario-a' `
+    -LedgerPath $ledgerPath `
+    -Ledger ([pscustomobject]$ledger) `
+    -WriterEvidenceSlicePath $writerPath `
+    -WriterEvidenceSliceSnapshot $writerSnapshot
+Assert-False $mutated.valid 'mutated producer receipt rejected'
+""");
+
+        AssertScriptPassed(result);
+    }
+
     private static async Task<ScriptResult> RunEvidenceScriptAsync(string script)
     {
         var helperPath = Path.Combine(FindRepoRoot(), "tools", "FileTransferRouteAcceptanceEvidence.ps1");

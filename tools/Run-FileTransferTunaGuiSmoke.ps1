@@ -1671,6 +1671,13 @@ function Write-TunaGuiDirectEvidenceManifest {
     $ledger = if (Test-Path -LiteralPath $ledgerPath -PathType Leaf) { Get-Content -LiteralPath $ledgerPath -Raw | ConvertFrom-Json } else { $null }
     $captureSha = if (Test-Path -LiteralPath $capturePath -PathType Leaf) { (Get-FileHash -LiteralPath $capturePath -Algorithm SHA256).Hash.ToLowerInvariant() } else { '' }
     $analyzerInputSha = if (Test-Path -LiteralPath $analyzerInputPath -PathType Leaf) { (Get-FileHash -LiteralPath $analyzerInputPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { '' }
+    $ledgerSha = if (Test-Path -LiteralPath $ledgerPath -PathType Leaf) { (Get-FileHash -LiteralPath $ledgerPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { '' }
+    $writerEvidenceSlice = if ($null -ne $ledger -and $ledger.PSObject.Properties.Name -contains 'writerEvidenceSlice') {
+        $ledger.writerEvidenceSlice
+    }
+    else {
+        $null
+    }
     $stateCaptureSha = if ($null -ne $state -and $state.PSObject.Properties.Name -contains 'captureSha256') { [string]$state.captureSha256 } else { '' }
     $ledgerCaptureSha = if ($null -ne $ledger -and $null -ne $ledger.analyzerInput) { [string]$ledger.analyzerInput.captureSha256 } else { '' }
     $captureMatches = -not [string]::IsNullOrWhiteSpace($captureSha) -and
@@ -1783,6 +1790,13 @@ function Write-TunaGuiDirectEvidenceManifest {
         wrapperSha256 = & $hashFile (Join-Path $RepoRoot 'tools\Run-FileTransferTunaGuiSmoke.ps1')
         finalizationStatePath = $statePath
         ledgerPath = $ledgerPath
+        ledgerSha256 = $ledgerSha
+        writerEvidenceSlicePath = $(if ($null -ne $writerEvidenceSlice) { [string]$writerEvidenceSlice.path } else { '' })
+        writerEvidenceSliceSha256 = $(if ($null -ne $writerEvidenceSlice) { [string]$writerEvidenceSlice.sha256 } else { '' })
+        writerEvidenceSliceLineCount = $(if ($null -ne $writerEvidenceSlice) { [long]$writerEvidenceSlice.lineCount } else { -1L })
+        writerChronologyInversionCount = $(if ($null -ne $ledger) { [long]$ledger.writerChronologyInversionCount } else { -1L })
+        writerChronologyCollisionCount = $(if ($null -ne $ledger) { [long]$ledger.writerChronologyCollisionCount } else { -1L })
+        writerChronologyVerdict = $(if ($null -ne $ledger) { [string]$ledger.writerChronologyVerdict } else { '' })
         capturePath = $capturePath
         captureSha256 = $captureSha
         analyzerInputPath = $analyzerInputPath
