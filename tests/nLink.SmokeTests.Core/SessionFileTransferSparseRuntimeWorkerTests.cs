@@ -2589,6 +2589,197 @@ public sealed partial class SessionFileTransferV4SenderTests
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "SparseWorkerHandoff")]
+    public async Task OutboundSparseWorker_CoordinatorResumedCheckpointAppliesDeliveredAcrossInstallReplacement()
+    {
+        const string transferId = "transfer_sparse_checkpoint_delivery_install_replaced";
+        using var harness = new SparseWorkerHarness(transferId);
+        var service = harness.Service;
+        var context = harness.Context;
+        var serviceType = typeof(SessionFileTransferService);
+        object? successorInstall = null;
+        RecordingDataSession? dataSession = null;
+        dataSession = new RecordingDataSession(
+            $"session_{transferId}",
+            transferId,
+            (_, _) =>
+            {
+                lock (GetServiceGate(service))
+                {
+                    var stagedSuccessor = StageSparsePumpInstall(
+                        service,
+                        context,
+                        GetPrivatePropertyValue(context, "InstalledOutboundSparsePump"),
+                        "unit_test_checkpoint_delivery_sparse_successor");
+                    Assert.True(stagedSuccessor.Accepted, stagedSuccessor.Reason);
+                    var committedSuccessor = CommitSparsePumpInstall(
+                        service,
+                        context,
+                        stagedSuccessor.Install!,
+                        dataSession!);
+                    Assert.True(committedSuccessor.Accepted, committedSuccessor.Reason);
+                    successorInstall = committedSuccessor.Install;
+                }
+            });
+        ReplaceOutboundDataSession(service, context, dataSession);
+
+        var coordinatorState = CreateCoordinatorStateForTest(context);
+        var owner = Assert.IsType<RuntimeOwnerToken>(coordinatorState.CurrentRuntimeOwner);
+        var publication = Assert.IsType<RoutePublicationToken>(
+            coordinatorState.CurrentRoutePublicationToken);
+        var leg = Assert.IsType<FileTransferLeg>(coordinatorState.CurrentLeg);
+        var observation = new FileTransferReceiveRecoveryObservation(
+            coordinatorState.SessionId,
+            coordinatorState.TransferId,
+            coordinatorState.Direction,
+            coordinatorState.RouteSelection.Route,
+            coordinatorState.RouteSelection.TelemetryToken,
+            coordinatorState.RouteSelection.ProtocolVersion,
+            coordinatorState.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            owner,
+            publication,
+            coordinatorState.CurrentRouteCommit,
+            coordinatorState.TerminalGeneration,
+            leg.Generation,
+            leg.TransportEpochId,
+            leg.BridgeRecoveryGeneration,
+            leg.CheckpointRequestId,
+            coordinatorState.CurrentDataSessionIdentity!,
+            coordinatorState.CurrentDataSessionGeneration,
+            "unit_test",
+            "fallback_checkpoint_sparse_handoff",
+            "fallback-checkpoint-sparse-handoff-observation",
+            1,
+            1);
+        var issued = FileTransferCoordinator.IssueReceiveRecoveryOperation(
+            coordinatorState,
+            observation,
+            BridgeRecoveryKind.ReceiveRecoveryRequest,
+            leg.CheckpointRequestId);
+        Assert.True(issued.Accepted, issued.Reason);
+        var authority = Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+            issued.Authority);
+        var terminalReceipt = new FileTransferBridgeRecoveryExecutionReceipt(
+            authority.ExecutionCommand,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            "soft",
+            "bridge_recovery_completed");
+        var started = FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(
+            issued.State,
+            new FileTransferBridgeRecoveryExecutionStartResult(
+                authority.ExecutionCommand,
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                "bridge_recovery_execution_started",
+                Task.FromResult(terminalReceipt)),
+            observedUtcMs: 10);
+        Assert.True(started.Accepted, started.Reason);
+        SetPrivateProperty(context, "CoordinatorPersistentState", started.State.PersistentState);
+
+        var request = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = coordinatorState.SessionId,
+            TransferId = coordinatorState.TransferId,
+            TransportEpoch = leg.TransportEpochId,
+            RepairRequestId = "v6-regular-nkn-state-refresh:1",
+            RequestCorrelationId =
+                $"receive-recovery-fallback-checkpoint:{authority.OperationGeneration}:v6-regular-nkn-state-refresh:1",
+            MissingRanges =
+            [
+                new FileTransferRangeV4
+                {
+                    StartChunkIndex = 100,
+                    ChunkCount = 1,
+                },
+            ],
+            Priority = "state_refresh",
+            RecoveryMode = "post_tuna_fallback_state_refresh",
+        };
+        serviceType
+            .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, request, "unit_test_checkpoint_delivery"]);
+        var boundState = CreateCoordinatorStateForTest(context);
+        var command = Assert.IsType<FileTransferReceiveRecoveryFallbackCheckpointDeliveryCommand>(
+            FileTransferCoordinator.GetReceiveRecoverySubstate(boundState)
+                .PendingFallbackCheckpointDeliveryCommand);
+        var held = FileTransferCoordinator.ApplyReceiveRecoveryFallbackCheckpointDeliveryReceipt(
+            boundState,
+            new FileTransferReceiveRecoveryFallbackCheckpointDeliveryReceipt(
+                command,
+                FileTransferReceiveRecoveryFallbackCheckpointDeliveryState.Held,
+                command.Binding.FrameIdentity.Sha256,
+                "submission_barrier_closed"),
+            observedUtcMs: 15);
+        Assert.True(held.Accepted, held.Reason);
+        var completed = FileTransferCoordinator.ObserveReceiveRecoveryExecutionReceipt(
+            held.State,
+            terminalReceipt,
+            observedUtcMs: 20);
+        Assert.True(completed.Accepted, completed.Reason);
+        var resumed = FileTransferCoordinator.ReserveReceiveRecoveryFallbackCheckpointDeliveryResume(
+            completed.State,
+            new FileTransferReceiveRecoveryFallbackCheckpointResumeEvidence(
+                command,
+                FileTransferReceiveRecoveryFallbackCheckpointResumeTrigger.RecoveryCompleted,
+                21));
+        Assert.True(resumed.Accepted, resumed.Reason);
+        var reservation = Assert.IsType<FileTransferReceiveRecoveryFallbackCheckpointResumeReservation>(
+            resumed.FallbackCheckpointResumeReservation);
+        SetPrivateProperty(context, "CoordinatorPersistentState", resumed.State.PersistentState);
+
+        var stagedPredecessor = StageSparsePumpInstall(
+            service,
+            context,
+            predecessor: null,
+            "unit_test_checkpoint_delivery_sparse_predecessor");
+        Assert.True(stagedPredecessor.Accepted, stagedPredecessor.Reason);
+        var committedPredecessor = CommitSparsePumpInstall(
+            service,
+            context,
+            stagedPredecessor.Install!,
+            dataSession);
+        Assert.True(committedPredecessor.Accepted, committedPredecessor.Reason);
+        var predecessorInstall = committedPredecessor.Install!;
+        var predecessorOwner = Assert.IsType<RuntimeOwnerToken>(
+            GetPrivatePropertyValue(predecessorInstall, "RuntimeOwner"));
+        var dataSessionGeneration = GetPrivateProperty<long>(context, "DataSessionGeneration");
+
+        serviceType
+            .GetMethod("QueueOutboundV4SparseRuntimeStateRefreshIfCurrent", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    context,
+                    dataSession,
+                    request,
+                    "unit_test_checkpoint_delivery_resume",
+                    predecessorInstall,
+                    predecessorOwner,
+                    dataSession,
+                    dataSessionGeneration,
+                    reservation,
+                ]);
+
+        await WaitUntilAsync(
+            () => FileTransferCoordinator.GetReceiveRecoverySubstate(
+                    CreateCoordinatorStateForTest(context))
+                .LastFallbackCheckpointDeliveryReceipt?.State ==
+                FileTransferReceiveRecoveryFallbackCheckpointDeliveryState.Delivered,
+            timeoutMs: 5000);
+
+        Assert.NotNull(successorInstall);
+        Assert.Same(successorInstall, GetPrivatePropertyValue(context, "InstalledOutboundSparsePump"));
+        Assert.Single(dataSession.SentFrames.OfType<FileTransferFrontierRequestFrameV6>());
+        var recovery = FileTransferCoordinator.GetReceiveRecoverySubstate(
+            CreateCoordinatorStateForTest(context));
+        Assert.Null(recovery.PendingFallbackCheckpointDeliveryCommand);
+        Assert.Null(recovery.PendingFallbackCheckpointResumeReservation);
+        Assert.Equal(
+            command,
+            Assert.IsType<FileTransferReceiveRecoveryFallbackCheckpointDeliveryReceipt>(
+                recovery.LastFallbackCheckpointDeliveryReceipt).Command);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "SparseWorkerHandoff")]
     public async Task OutboundSparseWorker_TailReconciliationSupersededAfterQueueBeforeSendCannotAlterSuccessor()
     {
         const string transferId = "transfer_sparse_tail_reconciliation_pre_send_superseded";

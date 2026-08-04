@@ -23481,14 +23481,14 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             RecoveryMode = "regular_nkn_state_refresh",
         };
         serviceType
-            .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, currentRequest, "test_pending_checkpoint_reuse"]);
+            .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, currentRequest, "test_pending_checkpoint_reuse"]);
 
         var logStart = GetOperationalLogLength();
         var reissueRequest = Assert.IsType<FileTransferFrontierRequestFrameV6>(serviceType
-            .GetMethod("CreateOutboundV4SparseRuntimeStateRefreshRequestLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .GetMethod("CreateOutboundV4SparseRuntimeStateRefreshRequestLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(
-                null,
+                service,
                 [
                     context,
                     DateTimeOffset.UtcNow,
@@ -23644,8 +23644,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             RecoveryMode = "regular_nkn_state_refresh",
         };
         serviceType
-            .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, oldRequest, "test_checkpoint_response_timeout"]);
+            .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, oldRequest, "test_checkpoint_response_timeout"]);
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestedUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(20));
 
@@ -23734,8 +23734,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             RecoveryMode = "regular_nkn_state_refresh",
         };
         serviceType
-            .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, oldRequest, "test_checkpoint_superseded_by_peer_state"]);
+            .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, oldRequest, "test_checkpoint_superseded_by_peer_state"]);
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestedUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(20));
         SetPrivateProperty(context, "V6RegularNknStateRefreshSendInFlight", 1);
@@ -23758,8 +23758,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
         var logStart = GetOperationalLogLength();
         var accepted = (bool)serviceType
-            .GetMethod("TryAcceptOutboundFallbackCheckpointLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, receiverState, "receiver_state_sparse_runtime"])!;
+            .GetMethod("TryAcceptOutboundFallbackCheckpointLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, receiverState, "receiver_state_sparse_runtime"])!;
 
         Assert.True(accepted);
         var currentLeg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
@@ -23816,8 +23816,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             RecoveryMode = "regular_nkn_state_refresh",
         };
         serviceType
-            .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, request, "test_same_epoch_checkpoint_peer_state"]);
+            .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, request, "test_same_epoch_checkpoint_peer_state"]);
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         SetPrivateProperty(leg, "CheckpointRequestedUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(20));
         SetPrivateProperty(context, "V6RegularNknStateRefreshSendInFlight", 1);
@@ -23842,8 +23842,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
         var logStart = GetOperationalLogLength();
         var accepted = (bool)serviceType
-            .GetMethod("TryAcceptOutboundFallbackCheckpointLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, receiverState, "receiver_state_sparse_runtime"])!;
+            .GetMethod("TryAcceptOutboundFallbackCheckpointLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, receiverState, "receiver_state_sparse_runtime"])!;
 
         Assert.True(accepted);
         var currentLeg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
@@ -23897,8 +23897,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             RecoveryMode = "regular_nkn_state_refresh",
         };
         serviceType
-            .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, request, "test_duplicate_checkpoint_coalesced"]);
+            .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, request, "test_duplicate_checkpoint_coalesced"]);
 
         var logStart = GetOperationalLogLength();
         serviceType

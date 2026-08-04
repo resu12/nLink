@@ -5280,7 +5280,9 @@ public sealed partial class SessionFileTransferService
         OutboundSparsePumpInstall? requiredReceiveInstall,
         RuntimeOwnerToken? requiredReceiveRuntimeOwner,
         IFileTransferDataSession? requiredReceiveDataSession,
-        long requiredReceiveDataSessionGeneration)
+        long requiredReceiveDataSessionGeneration,
+        FileTransferReceiveRecoveryFallbackCheckpointResumeReservation?
+            resumeReservation = null)
     {
         FileTransferReceiveRecoveryRequest? recoveryRequest = null;
         long sendGeneration;
@@ -5292,7 +5294,8 @@ public sealed partial class SessionFileTransferService
                 context.IsTerminal ||
                 (requiredReceiveDataSession is not null &&
                  !ReferenceEquals(dataSession, requiredReceiveDataSession)) ||
-                (requiredReceiveDataSession is not null &&
+                (resumeReservation is null &&
+                 requiredReceiveDataSession is not null &&
                  !IsOutboundSparseReceiveResultCurrentLocked(
                      context,
                      requiredReceiveInstall,
@@ -5428,7 +5431,8 @@ public sealed partial class SessionFileTransferService
                 request,
                 sendGeneration,
                 requiredReceiveInstall,
-                requiredReceiveDataSession)
+                requiredReceiveDataSession,
+                resumeReservation)
             : SendOutboundV4SparseRuntimeStateRefreshAsync(
                 context,
                 dataSession,
@@ -5710,7 +5714,8 @@ public sealed partial class SessionFileTransferService
             stateRefreshInstall,
             stateRefreshInstall.RuntimeOwner,
             dataSession,
-            stateRefreshInstall.DataSessionGeneration);
+            stateRefreshInstall.DataSessionGeneration,
+            resumeReservation);
     }
 
     private static bool HasCurrentCoordinatorHeldFallbackCheckpointDeliveryLocked(
@@ -5917,6 +5922,81 @@ public sealed partial class SessionFileTransferService
         }
     }
 
+    private bool IsOutboundReceiveRecoveryFallbackCheckpointResumeCurrentLocked(
+        OutboundTransferContext context,
+        IFileTransferDataSession dataSession,
+        FileTransferFrontierRequestFrameV6 request,
+        FileTransferReceiveRecoveryFallbackCheckpointResumeReservation
+            reservation,
+        out FileTransferReceiveRecoveryFallbackCheckpointDeliveryCommand command,
+        out string rejectionReason)
+    {
+        command = reservation.Command;
+        rejectionReason = "accepted";
+        if (!ReferenceEquals(outboundTransfer, context) ||
+            context.IsTerminal)
+        {
+            rejectionReason = "transfer_not_current";
+            return false;
+        }
+
+        if (!ReferenceEquals(context.DataSession, dataSession))
+        {
+            rejectionReason = "data_session_replaced";
+            return false;
+        }
+
+        var recovery =
+            context.CoordinatorPersistentState.FileTransferReceiveRecovery;
+        if (recovery.PendingFallbackCheckpointResumeReservation is not
+                { } currentReservation ||
+            currentReservation != reservation)
+        {
+            rejectionReason = "resume_reservation_not_current";
+            return false;
+        }
+
+        if (!FileTransferCoordinator
+                .TryGetReceiveRecoveryFallbackCheckpointDeliveryCommand(
+                    CreateCoordinatorStateLocked(context),
+                    out var currentCommand,
+                    out rejectionReason) ||
+            currentCommand != reservation.Command)
+        {
+            if (string.Equals(rejectionReason, "accepted", StringComparison.Ordinal))
+            {
+                rejectionReason = "checkpoint_delivery_command_not_current";
+            }
+
+            return false;
+        }
+
+        if (!currentCommand.Binding.FrameIdentity.Matches(request))
+        {
+            rejectionReason = "checkpoint_frame_identity_mismatch";
+            return false;
+        }
+
+        command = currentCommand;
+        return true;
+    }
+
+    private static long GetOutboundSparseInstallGeneration(
+        OutboundTransferContext context)
+        => context.InstalledOutboundSparsePump?.InstallGeneration ?? 0;
+
+    private void LogOutboundReceiveRecoveryFallbackCheckpointPostSendDecision(
+        OutboundTransferContext context,
+        FileTransferReceiveRecoveryFallbackCheckpointResumeReservation
+            reservation,
+        OutboundSparsePumpInstall? capturedInstall,
+        long currentInstallGeneration,
+        string outcome,
+        string reason)
+        => LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_receive_recovery_fallback_checkpoint_command_scoped_post_send_decided; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; recovery_operation_authority_id={FormatProtocolLogValue(reservation.Command.Binding.ParentAuthority.AuthorityId.ToString())}; recovery_operation_generation={reservation.Command.Binding.ParentAuthority.OperationGeneration}; effective_checkpoint_request_id={FormatProtocolLogValue(reservation.Command.Binding.EffectiveCheckpointRequestId)}; checkpoint_binding_generation={reservation.Command.Binding.BindingGeneration}; checkpoint_delivery_generation={reservation.Command.DeliveryGeneration}; frame_fingerprint={FormatProtocolLogValue(reservation.Command.Binding.FrameIdentity.Sha256)}; reservation_observed_utc_ms={reservation.ObservedUtcMs}; physical_epoch={reservation.Command.Binding.TransportEpoch}; captured_sparse_install_generation={capturedInstall?.InstallGeneration ?? 0}; current_sparse_install_generation={currentInstallGeneration}; validation_mode=coordinator_resume_reservation; receipt_outcome={FormatProtocolLogValue(outcome)}; decision_reason={FormatProtocolLogValue(reason)}");
+
     private Task SendOutboundV4SparseRuntimeStateRefreshAsync(
         OutboundTransferContext context,
         IFileTransferDataSession dataSession,
@@ -5936,14 +6016,17 @@ public sealed partial class SessionFileTransferService
         FileTransferFrontierRequestFrameV6 request,
         long sendGeneration,
         OutboundSparsePumpInstall requiredInstall,
-        IFileTransferDataSession requiredDataSession)
+        IFileTransferDataSession requiredDataSession,
+        FileTransferReceiveRecoveryFallbackCheckpointResumeReservation?
+            resumeReservation = null)
         => SendOutboundV4SparseRuntimeStateRefreshCoreAsync(
             context,
             dataSession,
             request,
             sendGeneration,
             requiredInstall,
-            requiredDataSession);
+            requiredDataSession,
+            resumeReservation);
 
     private async Task SendOutboundV4SparseRuntimeStateRefreshCoreAsync(
         OutboundTransferContext context,
@@ -5951,7 +6034,9 @@ public sealed partial class SessionFileTransferService
         FileTransferFrontierRequestFrameV6 request,
         long sendGeneration,
         OutboundSparsePumpInstall? requiredInstall,
-        IFileTransferDataSession? requiredDataSession)
+        IFileTransferDataSession? requiredDataSession,
+        FileTransferReceiveRecoveryFallbackCheckpointResumeReservation?
+            resumeReservation = null)
     {
         var retiredSendObserved = false;
         FileTransferReceiveRecoveryFallbackCheckpointDeliveryCommand?
@@ -5969,7 +6054,8 @@ public sealed partial class SessionFileTransferService
             FileTransferControlPlaneDeliveryRequest? controlPlaneRequest = null;
             lock (gate)
             {
-                if (requiredInstall is not null &&
+                if (resumeReservation is null &&
+                    requiredInstall is not null &&
                     !IsOutboundSparseStateRefreshInstallCurrentLocked(
                         context,
                         dataSession,
@@ -5985,7 +6071,8 @@ public sealed partial class SessionFileTransferService
                     return;
                 }
 
-                if (TryObserveRetiredOutboundV4SparseRuntimeStateRefreshSendLocked(
+                if (resumeReservation is null &&
+                    TryObserveRetiredOutboundV4SparseRuntimeStateRefreshSendLocked(
                         context,
                         request,
                         sendGeneration,
@@ -5995,7 +6082,29 @@ public sealed partial class SessionFileTransferService
                     return;
                 }
 
-                if (FileTransferCoordinator
+                if (resumeReservation is { } reservation)
+                {
+                    if (!IsOutboundReceiveRecoveryFallbackCheckpointResumeCurrentLocked(
+                            context,
+                            dataSession,
+                            request,
+                            reservation,
+                            out var reservedCommand,
+                            out var reservationRejectionReason))
+                    {
+                        LogOutboundReceiveRecoveryFallbackCheckpointPostSendDecision(
+                            context,
+                            reservation,
+                            requiredInstall,
+                            GetOutboundSparseInstallGeneration(context),
+                            "rejected_before_send",
+                            reservationRejectionReason);
+                        return;
+                    }
+
+                    checkpointDeliveryCommand = reservedCommand;
+                }
+                else if (FileTransferCoordinator
                     .TryGetReceiveRecoveryFallbackCheckpointDeliveryCommand(
                         CreateCoordinatorStateLocked(context),
                         out var currentCheckpointDeliveryCommand,
@@ -6044,7 +6153,64 @@ public sealed partial class SessionFileTransferService
                 await dataSession.SendAsync(request, timeoutCts.Token).ConfigureAwait(false);
             }
 
-            if (requiredInstall is not null &&
+            var commandScopedReceiptApplied = false;
+            if (resumeReservation is { } completedReservation)
+            {
+                lock (gate)
+                {
+                    var currentInstallGeneration =
+                        GetOutboundSparseInstallGeneration(context);
+                    if (!IsOutboundReceiveRecoveryFallbackCheckpointResumeCurrentLocked(
+                            context,
+                            dataSession,
+                            request,
+                            completedReservation,
+                            out var currentCommand,
+                            out var reservationRejectionReason) ||
+                        checkpointDeliveryCommand is null ||
+                        currentCommand != checkpointDeliveryCommand)
+                    {
+                        if (string.Equals(
+                                reservationRejectionReason,
+                                "accepted",
+                                StringComparison.Ordinal))
+                        {
+                            reservationRejectionReason =
+                                "checkpoint_delivery_command_changed";
+                        }
+                        LogOutboundReceiveRecoveryFallbackCheckpointPostSendDecision(
+                            context,
+                            completedReservation,
+                            requiredInstall,
+                            currentInstallGeneration,
+                            "rejected",
+                            reservationRejectionReason);
+                        return;
+                    }
+
+                    commandScopedReceiptApplied =
+                        ApplyOutboundReceiveRecoveryFallbackCheckpointDeliveryReceiptLocked(
+                            context,
+                            currentCommand,
+                            FileTransferReceiveRecoveryFallbackCheckpointDeliveryState
+                                .Delivered,
+                            "fallback_checkpoint_control_delivered");
+                    LogOutboundReceiveRecoveryFallbackCheckpointPostSendDecision(
+                        context,
+                        completedReservation,
+                        requiredInstall,
+                        currentInstallGeneration,
+                        commandScopedReceiptApplied ? "applied" : "rejected",
+                        commandScopedReceiptApplied
+                            ? "fallback_checkpoint_delivery_delivered"
+                            : "fallback_checkpoint_delivery_receipt_rejected");
+                    if (!commandScopedReceiptApplied)
+                    {
+                        return;
+                    }
+                }
+            }
+            else if (requiredInstall is not null &&
                 !TryValidateOutboundSparseStateRefreshInstall(
                     context,
                     dataSession,
@@ -6055,7 +6221,8 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
-            if (TryObserveRetiredOutboundV4SparseRuntimeStateRefreshSend(
+            if (resumeReservation is null &&
+                TryObserveRetiredOutboundV4SparseRuntimeStateRefreshSend(
                     context,
                     request,
                     sendGeneration,
@@ -6071,7 +6238,8 @@ public sealed partial class SessionFileTransferService
             {
                 sentOutcomeCurrent = ReferenceEquals(outboundTransfer, context) &&
                     !context.IsTerminal &&
-                    (requiredInstall is null ||
+                    (commandScopedReceiptApplied ||
+                     requiredInstall is null ||
                      IsOutboundSparseStateRefreshInstallCurrentLocked(
                          context,
                          dataSession,
@@ -6105,7 +6273,8 @@ public sealed partial class SessionFileTransferService
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_v6_regular_nkn_state_refresh_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; request_id={FormatProtocolLogValue(request.RepairRequestId)}; generation={sendGeneration}; reused_pending_checkpoint={(reusedPendingCheckpoint ? 1 : 0)}; transport_epoch={request.TransportEpoch}; remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; credit_until_chunk_index_exclusive={context.RemoteGrantedUntilExclusive}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}");
-            if (checkpointDeliveryCommand is not null)
+            if (checkpointDeliveryCommand is not null &&
+                !commandScopedReceiptApplied)
             {
                 ApplyOutboundReceiveRecoveryFallbackCheckpointDeliveryReceipt(
                     context,
