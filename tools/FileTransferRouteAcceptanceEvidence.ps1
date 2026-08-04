@@ -3,6 +3,10 @@ Set-StrictMode -Version Latest
 $script:RouteAcceptanceEvidencePhysicalSnapshotCache = @{}
 $script:RouteAcceptanceEvidencePhysicalSnapshotVisitCount = 0L
 $script:RouteAcceptanceEvidencePhysicalSnapshotCacheHitCount = 0L
+$script:RouteAcceptanceEvidenceWriterChronologyCache = @{}
+$script:RouteAcceptanceEvidenceWriterChronologyBuildCount = 0L
+$script:RouteAcceptanceEvidenceWriterChronologyLineVisitCount = 0L
+$script:RouteAcceptanceEvidenceWriterChronologyCacheHitCount = 0L
 
 function Get-RouteAcceptanceEvidencePropertyValue {
     param(
@@ -549,7 +553,37 @@ function Get-RouteAcceptanceOperationalLogMarkerCounts {
 }
 
 function Get-RouteAcceptanceEvidenceWriterChronology {
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$CacheIdentity = ''
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $snapshot = Get-RouteAcceptanceEvidencePhysicalSnapshot -Path $fullPath
+    $cacheKey = '{0}|{1}|{2}|{3}|{4}|{5}' -f `
+        ([string]$CacheIdentity).Trim().ToLowerInvariant(),
+        $fullPath.ToLowerInvariant(),
+        [long]$snapshot.length,
+        [long]$snapshot.lastWriteUtcTicks,
+        ([string]$snapshot.sha256).ToLowerInvariant(),
+        [long]$snapshot.lineCount
+    if ($script:RouteAcceptanceEvidenceWriterChronologyCache.ContainsKey($cacheKey)) {
+        $script:RouteAcceptanceEvidenceWriterChronologyCacheHitCount++
+        return $script:RouteAcceptanceEvidenceWriterChronologyCache[$cacheKey]
+    }
+
+    $timeoutSeconds = 120
+    $timeoutOverride = [Environment]::GetEnvironmentVariable(
+        'NLINK_ROUTE_ACCEPTANCE_WRITER_CHRONOLOGY_TIMEOUT_SECONDS')
+    $parsedTimeoutSeconds = 0
+    if (-not [string]::IsNullOrWhiteSpace($timeoutOverride) -and
+        [int]::TryParse($timeoutOverride, [ref]$parsedTimeoutSeconds) -and
+        $parsedTimeoutSeconds -gt 0) {
+        $timeoutSeconds = $parsedTimeoutSeconds
+    }
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $lineVisits = 0L
+    $timedOut = $false
 
     $writerBatchesById = [System.Collections.Generic.Dictionary[string, object]]::new(
         [System.StringComparer]::OrdinalIgnoreCase)
@@ -557,7 +591,15 @@ function Get-RouteAcceptanceEvidenceWriterChronology {
         [System.StringComparer]::OrdinalIgnoreCase)
     $batchOrdinal = 0L
     $invalid = $false
-    foreach ($line in [System.IO.File]::ReadLines([System.IO.Path]::GetFullPath($Path))) {
+    foreach ($line in [System.IO.File]::ReadLines($fullPath)) {
+        $lineVisits++
+        $script:RouteAcceptanceEvidenceWriterChronologyLineVisitCount++
+        if (($lineVisits % 1024L) -eq 0 -and
+            $stopwatch.Elapsed.TotalSeconds -ge $timeoutSeconds) {
+            $timedOut = $true
+            $invalid = $true
+            break
+        }
         $fields = ConvertFrom-RouteAcceptanceEvidenceStructuredFields -Line ([string]$line)
         $writerId = [string]$fields['log_writer_id']
         $sequence = ConvertTo-RouteAcceptanceEvidenceInt64 -Value $fields['log_writer_sequence']
@@ -637,7 +679,8 @@ function Get-RouteAcceptanceEvidenceWriterChronology {
 
     $inversionCount = 0L
     $collisionCount = 0L
-    foreach ($writerEntry in $writerBatchesById.GetEnumerator()) {
+    if (-not $timedOut) {
+      foreach ($writerEntry in $writerBatchesById.GetEnumerator()) {
         $validBatches = New-Object System.Collections.Generic.List[object]
         foreach ($batch in $writerEntry.Value.Values) {
             $batchValid = -not [bool]$batch.WriterIdMutated -and
@@ -672,13 +715,28 @@ function Get-RouteAcceptanceEvidenceWriterChronology {
                 $collisionCount++
             }
         }
+      }
     }
 
-    return [pscustomobject][ordered]@{
+    $stopwatch.Stop()
+    $currentFile = Get-Item -LiteralPath $fullPath
+    if ($currentFile.Length -ne [long]$snapshot.length -or
+        $currentFile.LastWriteTimeUtc.Ticks -ne [long]$snapshot.lastWriteUtcTicks) {
+        throw ("Route acceptance writer evidence changed during chronology validation: {0}" -f $fullPath)
+    }
+
+    $script:RouteAcceptanceEvidenceWriterChronologyBuildCount++
+    $result = [pscustomobject][ordered]@{
         inversionCount = $inversionCount
         collisionCount = $collisionCount
-        batchEvidenceValid = -not $invalid
+        batchEvidenceValid = -not $invalid -and -not $timedOut
+        timedOut = $timedOut
+        lineVisits = $lineVisits
+        elapsedMs = [long]$stopwatch.ElapsedMilliseconds
+        cacheKey = $cacheKey
     }
+    $script:RouteAcceptanceEvidenceWriterChronologyCache[$cacheKey] = $result
+    return $result
 }
 
 function Get-RouteAcceptanceCursorEvidence {
@@ -689,6 +747,9 @@ function Get-RouteAcceptanceCursorEvidence {
         [Parameter(Mandatory = $true)][string]$ScenarioRunId
     )
 
+    $writerChronologyBuildCountAtStart = $script:RouteAcceptanceEvidenceWriterChronologyBuildCount
+    $writerChronologyLineVisitCountAtStart = $script:RouteAcceptanceEvidenceWriterChronologyLineVisitCount
+    $writerChronologyCacheHitCountAtStart = $script:RouteAcceptanceEvidenceWriterChronologyCacheHitCount
     $reasons = New-Object System.Collections.Generic.List[string]
     $ledgerResult = Resolve-RouteAcceptanceEvidenceObject -Value $LogLedger -Kind 'cursor_ledger'
     $diagnosticsResult = Resolve-RouteAcceptanceEvidenceObject -Value $AnalyzerDiagnostics -Kind 'analyzer_diagnostics'
@@ -1134,7 +1195,12 @@ function Get-RouteAcceptanceCursorEvidence {
             $reasons.Add('cursor_writer_evidence_slice_line_count_mismatch') | Out-Null
         }
         if ($writerEvidenceVersion -eq 3) {
-            $recomputedWriterChronology = Get-RouteAcceptanceEvidenceWriterChronology -Path $writerEvidenceSlicePath
+            $recomputedWriterChronology = Get-RouteAcceptanceEvidenceWriterChronology `
+                -Path $writerEvidenceSlicePath `
+                -CacheIdentity ('{0}|{1}' -f $AcceptanceRunId, $ScenarioRunId)
+            if ($recomputedWriterChronology.timedOut) {
+                $reasons.Add('writer_chronology_validation_timeout') | Out-Null
+            }
             if (-not $recomputedWriterChronology.batchEvidenceValid) {
                 $reasons.Add('cursor_writer_chronology_batch_invalid') | Out-Null
             }
@@ -1329,6 +1395,9 @@ function Get-RouteAcceptanceCursorEvidence {
         retainedSliceSha256 = $retainedSha256
         retainedSliceLineCount = $retainedLineCount
         finalLineCount = $finalLineCount
+        writerChronologyBuildCount = $script:RouteAcceptanceEvidenceWriterChronologyBuildCount - $writerChronologyBuildCountAtStart
+        writerChronologyLineVisitCount = $script:RouteAcceptanceEvidenceWriterChronologyLineVisitCount - $writerChronologyLineVisitCountAtStart
+        writerChronologyCacheHitCount = $script:RouteAcceptanceEvidenceWriterChronologyCacheHitCount - $writerChronologyCacheHitCountAtStart
     }
 }
 
@@ -1388,6 +1457,9 @@ function Get-RouteAcceptanceScenarioEvidence {
             writerDrainMissingCount = 0L
             writerRecoveryVerdict = ''
             writerChronologyVerdict = ''
+            writerChronologyBuildCount = 0L
+            writerChronologyLineVisitCount = 0L
+            writerChronologyCacheHitCount = 0L
             producerWriterIntegrityVerdict = ''
             producerWriterIntegrityReasons = @()
             writerIntegrityVerdict = 'FAIL'
@@ -1453,6 +1525,9 @@ function Get-RouteAcceptanceScenarioEvidence {
             writerDrainMissingCount = $cursor.writerDrainMissingCount
             writerRecoveryVerdict = $cursor.writerRecoveryVerdict
             writerChronologyVerdict = $cursor.writerChronologyVerdict
+            writerChronologyBuildCount = $cursor.writerChronologyBuildCount
+            writerChronologyLineVisitCount = $cursor.writerChronologyLineVisitCount
+            writerChronologyCacheHitCount = $cursor.writerChronologyCacheHitCount
             writerIntegrityVerdict = $cursor.writerIntegrityVerdict
             writerIntegrityReasons = @($cursor.writerIntegrityReasons)
             producerWriterIntegrityVerdict = $cursor.producerWriterIntegrityVerdict
@@ -1677,6 +1752,9 @@ function Get-RouteAcceptanceEvidenceManifestValidation {
 
     $physicalVisitCountAtStart = $script:RouteAcceptanceEvidencePhysicalSnapshotVisitCount
     $physicalCacheHitCountAtStart = $script:RouteAcceptanceEvidencePhysicalSnapshotCacheHitCount
+    $writerChronologyBuildCountAtStart = $script:RouteAcceptanceEvidenceWriterChronologyBuildCount
+    $writerChronologyLineVisitCountAtStart = $script:RouteAcceptanceEvidenceWriterChronologyLineVisitCount
+    $writerChronologyCacheHitCountAtStart = $script:RouteAcceptanceEvidenceWriterChronologyCacheHitCount
     $structuralReasons = New-Object System.Collections.Generic.List[string]
     $provenanceReasons = New-Object System.Collections.Generic.List[string]
     $cursorReasons = New-Object System.Collections.Generic.List[string]
@@ -2235,6 +2313,10 @@ function Get-RouteAcceptanceEvidenceManifestValidation {
         physicalArtifactVisitCount = $script:RouteAcceptanceEvidencePhysicalSnapshotVisitCount - $physicalVisitCountAtStart
         physicalArtifactCacheHitCount = $script:RouteAcceptanceEvidencePhysicalSnapshotCacheHitCount - $physicalCacheHitCountAtStart
         physicalArtifactCacheEntryCount = $script:RouteAcceptanceEvidencePhysicalSnapshotCache.Count
+        writerChronologyBuildCount = $script:RouteAcceptanceEvidenceWriterChronologyBuildCount - $writerChronologyBuildCountAtStart
+        writerChronologyLineVisitCount = $script:RouteAcceptanceEvidenceWriterChronologyLineVisitCount - $writerChronologyLineVisitCountAtStart
+        writerChronologyCacheHitCount = $script:RouteAcceptanceEvidenceWriterChronologyCacheHitCount - $writerChronologyCacheHitCountAtStart
+        writerChronologyCacheEntryCount = $script:RouteAcceptanceEvidenceWriterChronologyCache.Count
     }
 }
 

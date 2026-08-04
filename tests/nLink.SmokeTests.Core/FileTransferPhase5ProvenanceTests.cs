@@ -856,6 +856,49 @@ Assert-Equal ($script:RouteAcceptanceEvidencePhysicalSnapshotVisitCount - $visit
         AssertScriptPassed(result);
     }
 
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task EvidenceWriterChronology_BuildsOnceAndInvalidatesOnImmutableStampChange()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunEvidenceScriptAsync(
+            FixturePrelude +
+            """
+$path = Join-Path $script:EvidenceTempRoot 'writer-chronology.log'
+$lines = @(
+    'event=a; log_writer_id=writer-a; log_writer_sequence=1; log_writer_batch_generation=1; log_writer_batch_first_sequence=1; log_writer_batch_last_sequence=2; log_writer_attempt_utc_ticks=100',
+    'event=b; log_writer_id=writer-a; log_writer_sequence=2; log_writer_batch_generation=1; log_writer_batch_first_sequence=1; log_writer_batch_last_sequence=2; log_writer_attempt_utc_ticks=100',
+    'event=c; log_writer_id=writer-b; log_writer_sequence=1; log_writer_batch_generation=1; log_writer_batch_first_sequence=1; log_writer_batch_last_sequence=2; log_writer_attempt_utc_ticks=200',
+    'event=d; log_writer_id=writer-b; log_writer_sequence=2; log_writer_batch_generation=1; log_writer_batch_first_sequence=1; log_writer_batch_last_sequence=2; log_writer_attempt_utc_ticks=200'
+)
+[System.IO.File]::WriteAllLines($path, $lines, [System.Text.UTF8Encoding]::new($false))
+$buildsBefore = $script:RouteAcceptanceEvidenceWriterChronologyBuildCount
+$visitsBefore = $script:RouteAcceptanceEvidenceWriterChronologyLineVisitCount
+$hitsBefore = $script:RouteAcceptanceEvidenceWriterChronologyCacheHitCount
+$first = Get-RouteAcceptanceEvidenceWriterChronology -Path $path -CacheIdentity 'run|scenario'
+$second = Get-RouteAcceptanceEvidenceWriterChronology -Path $path -CacheIdentity 'run|scenario'
+Assert-True $first.batchEvidenceValid 'first chronology valid'
+Assert-Equal $first.cacheKey $second.cacheKey 'same immutable chronology identity'
+Assert-Equal ($script:RouteAcceptanceEvidenceWriterChronologyBuildCount - $buildsBefore) 1 'one chronology build'
+Assert-Equal ($script:RouteAcceptanceEvidenceWriterChronologyLineVisitCount - $visitsBefore) 4 'one visit per writer line'
+Assert-Equal ($script:RouteAcceptanceEvidenceWriterChronologyCacheHitCount - $hitsBefore) 1 'second validation reuses receipt'
+
+[System.IO.File]::AppendAllText(
+    $path,
+    "event=e; log_writer_id=writer-a; log_writer_sequence=3; log_writer_batch_generation=2; log_writer_batch_first_sequence=3; log_writer_batch_last_sequence=3; log_writer_attempt_utc_ticks=300`n",
+    [System.Text.UTF8Encoding]::new($false))
+$third = Get-RouteAcceptanceEvidenceWriterChronology -Path $path -CacheIdentity 'run|scenario'
+Assert-False ([string]::Equals($first.cacheKey, $third.cacheKey, [System.StringComparison]::Ordinal)) 'mutation changes chronology identity'
+Assert-Equal ($script:RouteAcceptanceEvidenceWriterChronologyBuildCount - $buildsBefore) 2 'mutation rebuilds chronology'
+""");
+
+        AssertScriptPassed(result);
+    }
+
     private static async Task<ScriptResult> RunEvidenceScriptAsync(string script)
     {
         var helperPath = Path.Combine(FindRepoRoot(), "tools", "FileTransferRouteAcceptanceEvidence.ps1");
