@@ -1929,7 +1929,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_epoch_tail_unblocked') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided') +
-        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded')
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_frontier_repair_contract_settled') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_authority_request_published') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_paired_release_reserved') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_paired_release_consumed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_prepared')
     )
     $runtimeUnlockRetryFallbackTailUnblockRecheckProof =
         Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation `
@@ -2458,11 +2464,20 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 -Default 'runtime_generation_mismatch'
         }) | Out-Null
     }
+    $fallbackRepairSettlementRecheckSequences = @{}
+    foreach ($candidateEvent in @($runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementUnresolvedCandidateEvents)) {
+        $fallbackRepairSettlementRecheckSequences[[int64]$candidateEvent.Sequence] = $true
+    }
     foreach ($candidateEvent in @($runtimeUnlockRetryFallbackTailUnblockRecheckProof.UnresolvedCandidateEvents)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing'
             Event = $candidateEvent
-            Reason = 'fallback_tail_unblock_retry_recheck_missing'
+            Reason = if ($fallbackRepairSettlementRecheckSequences.ContainsKey([int64]$candidateEvent.Sequence)) {
+                'settled_fallback_frontier_repair_did_not_republish_held_paired_tail_retry_request'
+            }
+            else {
+                'fallback_tail_unblock_retry_recheck_missing'
+            }
         }) | Out-Null
     }
     foreach ($candidateEvent in @($runtimeUnlockRetryZeroOfferSuccessorProof.UnresolvedCandidateEvents)) {
@@ -3167,6 +3182,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing',
             'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired',
             'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired',
+            'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
             'runtime_unlock_precommit_probe_start_handoff_missing',
             'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing',
             'runtime_unlock_precommit_fallback_recovery_handoff_suppressed',
@@ -3509,6 +3525,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.RecoveredCount),
        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.UnresolvedCount),
        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.Verdict),
+       ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_raw_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementRawCount),
+       ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_distinct_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementDistinctCount),
+       ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_recovered_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementRecoveredCount),
+       ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_unresolved_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementUnresolvedCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_rejected_raw_count={0}" -f $runtimeUnlockRetryZeroOfferSuccessorProof.RawCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_rejected_distinct_count={0}" -f $runtimeUnlockRetryZeroOfferSuccessorProof.DistinctCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_rejected_recovered_count={0}" -f $runtimeUnlockRetryZeroOfferSuccessorProof.RecoveredCount),
@@ -4948,6 +4968,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.RecoveredCount
         runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.UnresolvedCount
         runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.Verdict
+        runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_raw_count = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementRawCount
+        runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_distinct_count = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementDistinctCount
+        runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_recovered_count = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementRecoveredCount
+        runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_unresolved_count = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementUnresolvedCount
         runtime_unlock_retry_dispatch_zero_offer_successor_rejected_raw_count = $runtimeUnlockRetryZeroOfferSuccessorProof.RawCount
         runtime_unlock_retry_dispatch_zero_offer_successor_rejected_distinct_count = $runtimeUnlockRetryZeroOfferSuccessorProof.DistinctCount
         runtime_unlock_retry_dispatch_zero_offer_successor_rejected_recovered_count = $runtimeUnlockRetryZeroOfferSuccessorProof.RecoveredCount
