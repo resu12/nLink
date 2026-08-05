@@ -10612,6 +10612,18 @@ internal static class FileTransferCoordinator
             return false;
         }
 
+        return IsFallbackTailPeerProofExactForSharedPairScope(
+            scope,
+            proof,
+            out rejectionReason);
+    }
+
+    private static bool IsFallbackTailPeerProofExactForSharedPairScope(
+        FileTransferFallbackTailYieldScope scope,
+        FileTransferFallbackTailPeerProof proof,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
         var expectedOwnerKey = BuildFallbackTailYieldOwnerKey(
             scope.SessionId,
             scope.TransferId,
@@ -10634,8 +10646,6 @@ internal static class FileTransferCoordinator
             !string.Equals(proof.TransferId, scope.TransferId, StringComparison.Ordinal) ||
             !AreFallbackTailProofDirectionsOpposite(scope.Direction, proof.Direction) ||
             proof.LiveRouteEpoch != scope.LiveRouteEpoch ||
-            proof.LegGeneration != scope.LegGeneration ||
-            proof.BridgeRecoveryGeneration != scope.BridgeRecoveryGeneration ||
             proof.TransportEpoch != scope.TransportEpoch ||
             !string.Equals(proof.OwnerKey, expectedOwnerKey, StringComparison.Ordinal) ||
             !string.Equals(proof.PairKey, expectedPairKey, StringComparison.Ordinal) ||
@@ -11205,55 +11215,11 @@ internal static class FileTransferCoordinator
             return false;
         }
 
-        var expectedOwnerKey = BuildFallbackTailYieldOwnerKey(
-            scope.SessionId,
-            scope.TransferId,
-            scope.RouteToken,
-            scope.ProtocolVersion,
-            proof.LiveRouteEpoch,
-            proof.LegGeneration,
-            proof.BridgeRecoveryGeneration,
-            proof.TransportEpoch,
-            proof.CheckpointRequestIdSnapshot);
-        var expectedPairKey = BuildFallbackTailYieldPairKey(
-            scope.SessionId,
-            scope.TransferId,
-            scope.RouteToken,
-            scope.ProtocolVersion,
-            proof.LiveRouteEpoch,
-            proof.TransportEpoch,
-            proof.CheckpointRequestIdSnapshot);
-        if (!string.Equals(
-                proof.SessionId,
-                scope.SessionId,
-                StringComparison.Ordinal) ||
-            !string.Equals(
-                proof.TransferId,
-                scope.TransferId,
-                StringComparison.Ordinal) ||
-            !AreFallbackTailProofDirectionsOpposite(
-                scope.Direction,
-                proof.Direction) ||
-            proof.LiveRouteEpoch != scope.LiveRouteEpoch ||
-            proof.TransportEpoch != scope.TransportEpoch ||
-            !string.Equals(
-                proof.OwnerKey,
-                expectedOwnerKey,
-                StringComparison.Ordinal) ||
-            !string.Equals(
-                proof.PairKey,
-                expectedPairKey,
-                StringComparison.Ordinal) ||
-            !string.Equals(
-                proof.PairKey,
-                scope.PairKey,
-                StringComparison.Ordinal) ||
-            !string.Equals(
-                proof.CheckpointRequestIdSnapshot,
-                scope.CheckpointRequestIdSnapshot,
-                StringComparison.Ordinal))
+        if (!IsFallbackTailPeerProofExactForSharedPairScope(
+                scope,
+                proof,
+                out rejectionReason))
         {
-            rejectionReason = "fallback_tail_peer_proof_scope_mismatch";
             return false;
         }
 
@@ -12206,6 +12172,7 @@ internal static class FileTransferCoordinator
                             exactReauthorization)
                         : null);
         if (pendingInitialPeerProof is { } initialPeer &&
+            initialPeer.ObservationScope == candidateOperation.Scope &&
             IsFallbackTailPeerProofExactForOperation(
                 substate,
                 candidateOperation,
