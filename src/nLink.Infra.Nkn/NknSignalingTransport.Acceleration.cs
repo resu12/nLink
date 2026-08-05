@@ -208,6 +208,8 @@ public sealed partial class NknSignalingTransport
         pendingCoordinatorQueuedRuntimeUnlockRetryDispatchAuthorityRequest;
     private RuntimeUnlockRetryDispatchAuthorityRequest?
         lastRaisedCoordinatorQueuedRuntimeUnlockRetryDispatchAuthorityRequest;
+    private FileTransferFallbackTailYieldRetryDispatchRecheckCommand?
+        lastRaisedFallbackTailYieldRetryDispatchRecheckCommand;
     private long runtimeUnlockPostTunaFallbackActivationOperationNextGeneration;
     private event EventHandler<RuntimeUnlockRetryDispatchInitialEvaluationRequestedEventArgs>?
         runtimeUnlockRetryDispatchInitialEvaluationRequested;
@@ -558,7 +560,8 @@ public sealed partial class NknSignalingTransport
 
     private sealed record CoordinatorQueuedRuntimeUnlockRetryDispatchAuthorityRequest(
         RuntimeUnlockRetryDispatchAuthorityRequest Request,
-        long QueueGeneration);
+        long QueueGeneration,
+        FileTransferFallbackTailYieldRetryDispatchRecheckCommand? RecheckCommand = null);
 
     private sealed record RuntimeUnlockRetryDispatchHistoricalSettlement(
         RuntimeUnlockRetryDispatchSettlementReport Report,
@@ -14885,6 +14888,7 @@ public sealed partial class NknSignalingTransport
                 request.RecoveryContractGeneration);
             runtimeUnlockRecoveryRetryState = current;
             lastRaisedCoordinatorQueuedRuntimeUnlockRetryDispatchAuthorityRequest = null;
+            lastRaisedFallbackTailYieldRetryDispatchRecheckCommand = null;
             queued = new CoordinatorQueuedRuntimeUnlockRetryDispatchAuthorityRequest(
                 request,
                 ++runtimeUnlockRetryDispatchAuthorityRequestQueueNextGeneration);
@@ -14894,6 +14898,87 @@ public sealed partial class NknSignalingTransport
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=runtime_unlock_retry_dispatch_authority_request_queued; {FormatRuntimeUnlockRetryDispatchAuthorityRequestTuple(request)}; queue_generation={queued.QueueGeneration}; delay_ms={(long)AccelerationNegotiationRetryBaseDelay.TotalMilliseconds}; decision_reason=coordinator_request_queued");
+        lock (runtimeUnlockRetryDispatchAuthorityRequestQueueGate)
+        {
+            var predecessor = runtimeUnlockRetryDispatchAuthorityRequestQueueTail;
+            runtimeUnlockRetryDispatchAuthorityRequestQueueTail = Task.Run(
+                async () =>
+                {
+                    await predecessor.ConfigureAwait(false);
+                    await Task.Delay(
+                            AccelerationNegotiationRetryBaseDelay,
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                    PublishCoordinatorQueuedRuntimeUnlockRetryDispatchAuthorityRequest(
+                        queued);
+                },
+                CancellationToken.None);
+        }
+
+        return true;
+    }
+
+    bool IRuntimeUnlockRetryDispatchAuthorityBridge
+        .QueueFallbackTailYieldRetryDispatchRecheck(
+            FileTransferFallbackTailYieldRetryDispatchRecheckCommand command)
+    {
+        if (command.IsDefault)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                "event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided; recheck_generation=0; decision_status=Rejected; decision_reason=recheck_command_invalid");
+            return false;
+        }
+
+        var request = command.Request;
+        CoordinatorQueuedRuntimeUnlockRetryDispatchAuthorityRequest queued;
+        lock (accelerationGate)
+        {
+            if (runtimeUnlockRetryDispatchAuthorityRequested is null &&
+                RuntimeUnlockRetryDispatchAuthorityDecisionOverrideForTests is null)
+            {
+                return false;
+            }
+
+            var current = runtimeUnlockRecoveryRetryState;
+            if (current is null ||
+                current.ContractState is SessionRecoveryContractState.Completed or
+                    SessionRecoveryContractState.Failed ||
+                current.PendingDispatchAuthorityRequest != request ||
+                current.DispatchAuthorityGranted ||
+                current.DispatchContract is not null ||
+                lastRaisedCoordinatorQueuedRuntimeUnlockRetryDispatchAuthorityRequest !=
+                    request)
+            {
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided; {FormatRuntimeUnlockRetryDispatchAuthorityRequestTuple(request)}; recheck_generation={command.RecheckGeneration}; decision_status=Rejected; decision_reason=recheck_request_not_current");
+                return false;
+            }
+
+            if ((pendingCoordinatorQueuedRuntimeUnlockRetryDispatchAuthorityRequest is
+                 { RecheckCommand: { } pendingCommand } &&
+                 pendingCommand == command) ||
+                lastRaisedFallbackTailYieldRetryDispatchRecheckCommand == command)
+            {
+                return true;
+            }
+
+            if (pendingCoordinatorQueuedRuntimeUnlockRetryDispatchAuthorityRequest is not null)
+            {
+                return false;
+            }
+
+            queued = new CoordinatorQueuedRuntimeUnlockRetryDispatchAuthorityRequest(
+                request,
+                ++runtimeUnlockRetryDispatchAuthorityRequestQueueNextGeneration,
+                command);
+            pendingCoordinatorQueuedRuntimeUnlockRetryDispatchAuthorityRequest = queued;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested; {FormatRuntimeUnlockRetryDispatchAuthorityRequestTuple(request)}; recheck_generation={command.RecheckGeneration}; queue_generation={queued.QueueGeneration}; decision_status=Queued; decision_reason=exact_settled_fallback_frontier_repair_recheck_queued");
         lock (runtimeUnlockRetryDispatchAuthorityRequestQueueGate)
         {
             var predecessor = runtimeUnlockRetryDispatchAuthorityRequestQueueTail;
@@ -14940,6 +15025,11 @@ public sealed partial class NknSignalingTransport
             pendingCoordinatorQueuedRuntimeUnlockRetryDispatchAuthorityRequest = null;
             lastRaisedCoordinatorQueuedRuntimeUnlockRetryDispatchAuthorityRequest =
                 queued.Request;
+            if (queued.RecheckCommand is { } recheckCommand)
+            {
+                lastRaisedFallbackTailYieldRetryDispatchRecheckCommand =
+                    recheckCommand;
+            }
         }
 
         try
@@ -14947,6 +15037,12 @@ public sealed partial class NknSignalingTransport
             LocalOperationalLog.Info(
                 "NKN.Tuna",
                 $"event=runtime_unlock_retry_dispatch_authority_request_published; {FormatRuntimeUnlockRetryDispatchAuthorityRequestTuple(queued.Request)}; queue_generation={queued.QueueGeneration}; decision_reason=coordinator_request_published");
+            if (queued.RecheckCommand is { } recheckCommand)
+            {
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided; {FormatRuntimeUnlockRetryDispatchAuthorityRequestTuple(queued.Request)}; recheck_generation={recheckCommand.RecheckGeneration}; queue_generation={queued.QueueGeneration}; decision_status=Published; decision_reason=exact_settled_fallback_frontier_repair_recheck_published");
+            }
             if (subscriber is not null)
             {
                 subscriber.Invoke(
