@@ -4700,6 +4700,7 @@ function New-TunaGuiFileTransferFailureClassificationResult {
         RuntimeUnlockResponderPeerProbeHandoffMissing = $false
         FallbackTailFailedYieldQuiescentSuccessorMissing = $false
         FallbackTailPeerProofBeforeLocalYieldNotRetained = $false
+        FallbackTailPeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetained = $false
         InitialActivationReceiveRecoveryHoldNotPreserved = $false
         InitialActivationReceiveRecoveryHoldReleasedOfferExpired = $false
         RouteTransitionDrainingTransportGraceTerminalization = $false
@@ -5712,10 +5713,12 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             $transferId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'transfer_id'
             $direction = Get-TunaGuiLogLineFieldValue -Line $line -Name 'direction'
 
+            $peerProofDecisionReason = Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_reason'
             if ($eventName -eq 'filetransfer_fallback_tail_peer_proof_receipt_decided' -and
                 (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -eq 'Rejected' -and
-                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_reason') -eq
-                    'fallback_tail_yield_operation_missing') {
+                $peerProofDecisionReason -in @(
+                    'fallback_tail_yield_operation_missing',
+                    'fallback_tail_peer_proof_scope_mismatch')) {
                 $pairKey = Get-TunaGuiLogLineFieldValue -Line $line -Name 'peer_pair_key'
                 $identity = Get-TunaGuiLogLineFieldValue -Line $line -Name 'peer_observation_identity'
                 $fingerprint = Get-TunaGuiLogLineFieldValue -Line $line -Name 'peer_frame_fingerprint'
@@ -5727,7 +5730,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     -not [string]::IsNullOrWhiteSpace($fingerprint)) {
                     $key = "$writer|$sessionId|$transferId|$pairKey".ToLowerInvariant()
                     if (-not $missingByScope.ContainsKey($key)) {
-                        $missingByScope[$key] = "$identity|$fingerprint"
+                        $missingByScope[$key] = [pscustomobject]@{
+                            Identity = $identity
+                            Fingerprint = $fingerprint
+                            Reason = $peerProofDecisionReason
+                        }
                     }
                 }
                 continue
@@ -5819,6 +5826,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                             Direction = $direction
                             AuthorityId = $local.AuthorityId
                             YieldGeneration = $local.YieldGeneration
+                            MissingReason = $missingByScope[$missingKey].Reason
                             Bound = $false
                             Paired = $false
                             Consumed = $false
@@ -5846,10 +5854,19 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             }
         }
 
-        return [pscustomobject]@{
-            Unresolved = @($candidates.Values | Where-Object {
+        $unresolved = @($candidates.Values | Where-Object {
                     -not ($_.Bound -and $_.Paired -and $_.Consumed -and $_.Prepared)
-                }).Count -gt 0
+                })
+        return [pscustomobject]@{
+            Unresolved = $unresolved.Count -gt 0
+            Reason = if (@($unresolved | Where-Object {
+                        $_.MissingReason -eq 'fallback_tail_peer_proof_scope_mismatch'
+                    }).Count -gt 0) {
+                'direction_local_recovery_generation_treated_as_shared_pair_scope'
+            }
+            else {
+                'reciprocal_fallback_tail_peer_proof_not_rebound_after_local_quiescent_yield'
+            }
             LineVisits = $visits
         }
     }
@@ -5880,7 +5897,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     if ($fallbackTailPeerFirstFastPath.Unresolved) {
         $result = New-TunaGuiFileTransferFailureClassificationResult `
             -Phase 'route_runtime' `
-            -Reason 'reciprocal_fallback_tail_peer_proof_not_rebound_after_local_quiescent_yield' `
+            -Reason $fallbackTailPeerFirstFastPath.Reason `
             -RouteMode $RouteMode `
             -ClassificationSource "${classificationSource}_fallback_tail_peer_first_index" `
             -EvidenceLineVisitCount ([long]$fallbackTailPeerFirstFastPath.LineVisits) `
@@ -5888,6 +5905,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -EvidenceLookupCount 0L `
             -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
         $result.FallbackTailPeerProofBeforeLocalYieldNotRetained = $true
+        $result.FallbackTailPeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetained =
+            $fallbackTailPeerFirstFastPath.Reason -eq
+                'direction_local_recovery_generation_treated_as_shared_pair_scope'
         return $result
     }
 

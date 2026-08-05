@@ -14351,6 +14351,10 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("peer_proof_before_local_yield_not_retained_distinct_count={0}" -f $RecoveryClassification.PeerProofBeforeLocalYieldNotRetainedDistinctCount)) | Out-Null
     $lines.Add(("peer_proof_before_local_yield_not_retained_recovered_count={0}" -f $RecoveryClassification.PeerProofBeforeLocalYieldNotRetainedRecoveredCount)) | Out-Null
     $lines.Add(("peer_proof_before_local_yield_not_retained_unresolved_count={0}" -f $RecoveryClassification.PeerProofBeforeLocalYieldNotRetainedUnresolvedCount)) | Out-Null
+    $lines.Add(("peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_raw_count={0}" -f $RecoveryClassification.PeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetainedRawCount)) | Out-Null
+    $lines.Add(("peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_distinct_count={0}" -f $RecoveryClassification.PeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetainedDistinctCount)) | Out-Null
+    $lines.Add(("peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_recovered_count={0}" -f $RecoveryClassification.PeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetainedRecoveredCount)) | Out-Null
+    $lines.Add(("peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_unresolved_count={0}" -f $RecoveryClassification.PeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetainedUnresolvedCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_raw_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialOfferRetryLifecycleHandoffMissingRawCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_distinct_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialOfferRetryLifecycleHandoffMissingDistinctCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_offer_retry_lifecycle_handoff_missing_recovered_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount)) | Out-Null
@@ -16455,6 +16459,10 @@ function New-FileTransferStabilityGateSummaryLines {
         ("peer_proof_before_local_yield_not_retained_distinct_count={0}" -f $recoveryClassification.PeerProofBeforeLocalYieldNotRetainedDistinctCount),
         ("peer_proof_before_local_yield_not_retained_recovered_count={0}" -f $recoveryClassification.PeerProofBeforeLocalYieldNotRetainedRecoveredCount),
         ("peer_proof_before_local_yield_not_retained_unresolved_count={0}" -f $recoveryClassification.PeerProofBeforeLocalYieldNotRetainedUnresolvedCount),
+        ("peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_raw_count={0}" -f $recoveryClassification.PeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetainedRawCount),
+        ("peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_distinct_count={0}" -f $recoveryClassification.PeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetainedDistinctCount),
+        ("peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_recovered_count={0}" -f $recoveryClassification.PeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetainedRecoveredCount),
+        ("peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_unresolved_count={0}" -f $recoveryClassification.PeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetainedUnresolvedCount),
         ("runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount),
         ("runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount),
         ("runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount),
@@ -42677,7 +42685,6 @@ function Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation {
         $localProofIdentity = ''
         [object[]]$localProof = @($localProofEvents | Where-Object {
                 [int64]$_.Sequence -gt [int64]$localYield.Sequence -and
-                [int64]$_.Sequence -lt $sequence -and
                 (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
                 (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq $authority -and
                 (Get-FileTransferEventField -Event $_ -Name 'yield_generation' -Default '0') -eq $generation -and
@@ -42729,11 +42736,17 @@ function Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation {
                 (Get-FileTransferEventField -Event $_ -Name 'data_session_generation' -Default '') -eq
                     (Get-FileTransferEventField -Event $localYield -Name 'data_session_generation' -Default '') -and
                 (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -eq 'Rejected' -and
-                (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq
-                    'fallback_tail_yield_operation_missing' -and
+                (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -in @(
+                    'fallback_tail_yield_operation_missing',
+                    'fallback_tail_peer_proof_scope_mismatch') -and
                 (Get-FileTransferEventField -Event $_ -Name 'peer_predecessor_authority_id' -Default '(none)') -in
                     @('(none)', 'none') -and
                 (Get-FileTransferEventField -Event $_ -Name 'peer_pair_key' -Default '') -eq $pairKey -and
+                (Get-FileTransferFallbackTailSharedPairKeyForEvent -Event $_ -Peer) -eq $pairKey -and
+                (Test-FileTransferFallbackTailOwnerKeyMatchesEvent `
+                    -Event $_ `
+                    -OwnerKeyField 'peer_owner_key' `
+                    -Peer) -and
                 (Get-FileTransferEventField -Event $_ -Name 'peer_observation_identity' -Default '') -notin
                     @('', '(none)', 'none') -and
                 (Get-FileTransferEventField -Event $_ -Name 'peer_frame_fingerprint' -Default '') -notin
@@ -42741,10 +42754,13 @@ function Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation {
             } | Sort-Object Sequence, LineNumber)
         if ($missingProofs.Count -eq 0) { continue }
         $missingProof = $missingProofs[0]
+        $missingProofReason = Get-FileTransferEventField `
+            -Event $missingProof `
+            -Name 'decision_reason' `
+            -Default ''
 
         [object[]]$reciprocalPairing = @($pairingEvents | Where-Object {
                 [int64]$_.Sequence -gt [int64]$localProof[0].Sequence -and
-                [int64]$_.Sequence -lt $sequence -and
                 (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -ne $writer -and
                 (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
                 (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
@@ -42758,7 +42774,6 @@ function Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation {
         $reciprocalGeneration = Get-FileTransferEventField -Event $reciprocalPairing[0] -Name 'yield_generation' -Default '0'
         [object[]]$reciprocalConsumption = @($consumptionEvents | Where-Object {
                 [int64]$_.Sequence -gt [int64]$reciprocalPairing[0].Sequence -and
-                [int64]$_.Sequence -lt $sequence -and
                 (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq
                     (Get-FileTransferEventField -Event $reciprocalPairing[0] -Name 'log_writer_id' -Default '') -and
                 (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq $reciprocalAuthority -and
@@ -42783,14 +42798,36 @@ function Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation {
                 (Get-FileTransferEventField -Event $missingProof -Name 'peer_frame_fingerprint' -Default ''),
                 (Get-FileTransferEventField -Event $reciprocalPairing[0] -Name 'log_writer_id' -Default ''),
                 $writer) + $scopeParts -join '|').ToLowerInvariant()
-        $rawEvents.Add($denial) | Out-Null
+        if ($missingProofReason -eq 'fallback_tail_peer_proof_scope_mismatch') {
+            foreach ($duplicateProof in $missingProofs) {
+                $rawEvents.Add($duplicateProof) | Out-Null
+            }
+        }
+        else {
+            $rawEvents.Add($denial) | Out-Null
+        }
         if (-not $recordsByKey.ContainsKey($key)) {
             $recordsByKey[$key] = [pscustomobject]@{
-                Event = $denial
+                Event = if ($missingProofReason -eq 'fallback_tail_peer_proof_scope_mismatch') {
+                    $missingProof
+                }
+                else {
+                    $denial
+                }
                 LocalYieldEvent = $localYield
                 MissingPeerProofEvent = $missingProof
-                Reason = 'reciprocal_fallback_tail_peer_proof_not_rebound_after_local_quiescent_yield'
-                Variant = 'peer_proof_before_local_yield_not_retained'
+                Reason = if ($missingProofReason -eq 'fallback_tail_peer_proof_scope_mismatch') {
+                    'direction_local_recovery_generation_treated_as_shared_pair_scope'
+                }
+                else {
+                    'reciprocal_fallback_tail_peer_proof_not_rebound_after_local_quiescent_yield'
+                }
+                Variant = if ($missingProofReason -eq 'fallback_tail_peer_proof_scope_mismatch') {
+                    'peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained'
+                }
+                else {
+                    'peer_proof_before_local_yield_not_retained'
+                }
                 DistinctKey = $key
                 Recovered = $false
             }
@@ -42798,7 +42835,9 @@ function Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation {
     }
 
     foreach ($record in @($recordsByKey.Values)) {
-        if ($record.Variant -eq 'peer_proof_before_local_yield_not_retained') {
+        if ($record.Variant -in @(
+                'peer_proof_before_local_yield_not_retained',
+                'peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained')) {
             $yield = $record.LocalYieldEvent
             $writer = Get-FileTransferEventField -Event $yield -Name 'log_writer_id' -Default ''
             $session = Get-FileTransferEventField -Event $yield -Name 'session_id' -Default ''
@@ -42923,7 +42962,13 @@ function Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation {
             $_.Variant -eq 'failed_yield_quiescent_successor_missing'
         })
     [object[]]$peerFirstRecords = @($records | Where-Object {
-            $_.Variant -eq 'peer_proof_before_local_yield_not_retained'
+            $_.Variant -in @(
+                'peer_proof_before_local_yield_not_retained',
+                'peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained')
+        })
+    [object[]]$peerFirstAsymmetricRecoveryScopeRecords = @($records | Where-Object {
+            $_.Variant -eq
+                'peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained'
         })
     return [pscustomobject]@{
         RawCount = $rawEvents.Count
@@ -42947,6 +42992,16 @@ function Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation {
         PeerFirstDistinctCount = $peerFirstRecords.Count
         PeerFirstRecoveredCount = @($peerFirstRecords | Where-Object { $_.Recovered }).Count
         PeerFirstUnresolvedCount = @($peerFirstRecords | Where-Object { -not $_.Recovered }).Count
+        PeerFirstAsymmetricRecoveryScopeRawCount = @($rawEvents.ToArray() | Where-Object {
+                $_.EventName -eq 'filetransfer_fallback_tail_peer_proof_receipt_decided' -and
+                (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq
+                    'fallback_tail_peer_proof_scope_mismatch'
+            }).Count
+        PeerFirstAsymmetricRecoveryScopeDistinctCount = $peerFirstAsymmetricRecoveryScopeRecords.Count
+        PeerFirstAsymmetricRecoveryScopeRecoveredCount = @(
+            $peerFirstAsymmetricRecoveryScopeRecords | Where-Object { $_.Recovered }).Count
+        PeerFirstAsymmetricRecoveryScopeUnresolvedCount = @(
+            $peerFirstAsymmetricRecoveryScopeRecords | Where-Object { -not $_.Recovered }).Count
     }
 }
 
@@ -47525,6 +47580,7 @@ function Get-FileTransferRecoveryFailureClassification {
                 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid',
                 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing',
                 'fallback_tail_yield_authority_invalid',
+                'paired_fallback_tail_yield_missing',
                 'regular_v4_frontier_tail_repair_state_publication_missing',
                 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery',
                 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch',
@@ -47702,6 +47758,10 @@ function Get-FileTransferRecoveryFailureClassification {
         PeerProofBeforeLocalYieldNotRetainedDistinctCount = $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstDistinctCount
         PeerProofBeforeLocalYieldNotRetainedRecoveredCount = $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstRecoveredCount
         PeerProofBeforeLocalYieldNotRetainedUnresolvedCount = $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstUnresolvedCount
+        PeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetainedRawCount = $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstAsymmetricRecoveryScopeRawCount
+        PeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetainedDistinctCount = $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstAsymmetricRecoveryScopeDistinctCount
+        PeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetainedRecoveredCount = $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstAsymmetricRecoveryScopeRecoveredCount
+        PeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetainedUnresolvedCount = $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstAsymmetricRecoveryScopeUnresolvedCount
         RuntimeUnlockRegularV4RecoveryLeaseNotIssuedRawCount = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount
         RuntimeUnlockRegularV4RecoveryLeaseNotIssuedDistinctCount = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount
         RuntimeUnlockRegularV4RecoveryLeaseNotIssuedRecoveredCount = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RecoveredCount
@@ -48619,6 +48679,10 @@ function New-FileTransferInvariantLedgerObject {
         peer_proof_before_local_yield_not_retained_distinct_count = [string]$recoveryClassification.PeerProofBeforeLocalYieldNotRetainedDistinctCount
         peer_proof_before_local_yield_not_retained_recovered_count = [string]$recoveryClassification.PeerProofBeforeLocalYieldNotRetainedRecoveredCount
         peer_proof_before_local_yield_not_retained_unresolved_count = [string]$recoveryClassification.PeerProofBeforeLocalYieldNotRetainedUnresolvedCount
+        peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_raw_count = [string]$recoveryClassification.PeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetainedRawCount
+        peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_distinct_count = [string]$recoveryClassification.PeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetainedDistinctCount
+        peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_recovered_count = [string]$recoveryClassification.PeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetainedRecoveredCount
+        peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_unresolved_count = [string]$recoveryClassification.PeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetainedUnresolvedCount
         runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_raw_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRawCount
         runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_distinct_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedDistinctCount
         runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved_recovered_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureHoldNotPreservedRecoveredCount
@@ -49124,7 +49188,7 @@ function Write-FileTransferDiagnosticsArtifacts {
     elseif ($recoveryClassification.Class -eq 'runtime_unlock_initial_activation_answer_peer_delivery_missing') {
         'route_runtime'
     }
-    elseif ($recoveryClassification.Class -in @('filetransfer_receive_recovery_operation_incomplete', 'filetransfer_receive_recovery_completed_unproven_successor_missing', 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved', 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing', 'filetransfer_receive_recovery_completed_proven_successor_missing', 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'filetransfer_bridge_recovery_execution_payload_hold_missing', 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing', 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing', 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing', 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing', 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved', 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing', 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired', 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'fallback_tail_yield_authority_invalid', 'filetransfer_route_transition_draining_transport_grace_terminalization', 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing', 'filetransfer_route_transition_incomplete', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
+    elseif ($recoveryClassification.Class -in @('filetransfer_receive_recovery_operation_incomplete', 'filetransfer_receive_recovery_completed_unproven_successor_missing', 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved', 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing', 'filetransfer_receive_recovery_completed_proven_successor_missing', 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'filetransfer_bridge_recovery_execution_payload_hold_missing', 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing', 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing', 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing', 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing', 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved', 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing', 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired', 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'fallback_tail_yield_authority_invalid', 'paired_fallback_tail_yield_missing', 'filetransfer_route_transition_draining_transport_grace_terminalization', 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing', 'filetransfer_route_transition_incomplete', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
         'route_runtime'
     }
     elseif ($invariantMayOwnAcceptanceFailure) {
@@ -49219,6 +49283,10 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("peer_proof_before_local_yield_not_retained_distinct_count={0}" -f $recoveryClassification.PeerProofBeforeLocalYieldNotRetainedDistinctCount),
         ("peer_proof_before_local_yield_not_retained_recovered_count={0}" -f $recoveryClassification.PeerProofBeforeLocalYieldNotRetainedRecoveredCount),
         ("peer_proof_before_local_yield_not_retained_unresolved_count={0}" -f $recoveryClassification.PeerProofBeforeLocalYieldNotRetainedUnresolvedCount),
+        ("peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_raw_count={0}" -f $recoveryClassification.PeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetainedRawCount),
+        ("peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_distinct_count={0}" -f $recoveryClassification.PeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetainedDistinctCount),
+        ("peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_recovered_count={0}" -f $recoveryClassification.PeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetainedRecoveredCount),
+        ("peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_unresolved_count={0}" -f $recoveryClassification.PeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetainedUnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseNotIssuedRawCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseNotIssuedDistinctCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseNotIssuedRecoveredCount),

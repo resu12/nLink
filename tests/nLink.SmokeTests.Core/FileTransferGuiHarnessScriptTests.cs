@@ -3012,13 +3012,22 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("gui-failed-fallback-tail-fast-path-ok", result.Stdout, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task GuiSmokeFailureClassification_PeerFirstFallbackTailProofUsesIndexedFastPath()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GuiSmokeFailureClassification_PeerFirstFallbackTailProofUsesIndexedFastPath(
+        bool asymmetricRecoveryScope)
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
         var resultBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFileTransferFailureClassificationResult", "Get-TunaGuiExplicitFailureClassification");
         var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
         var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var decisionReason = asymmetricRecoveryScope
+            ? "fallback_tail_peer_proof_scope_mismatch"
+            : "fallback_tail_yield_operation_missing";
+        var expectedReason = asymmetricRecoveryScope
+            ? "direction_local_recovery_generation_treated_as_shared_pair_scope"
+            : "reciprocal_fallback_tail_peer_proof_not_rebound_after_local_quiescent_yield";
         var scriptText = $$"""
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
@@ -3031,7 +3040,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             try {
                 $path = Join-Path $tempRoot 'evidence.log'
                 @(
-                    'event=filetransfer_fallback_tail_peer_proof_receipt_decided; session_id=sess; transfer_id=transfer; direction=inbound; peer_pair_key=pair; peer_observation_identity=peer-proof; peer_frame_fingerprint=frame; decision_status=Rejected; decision_reason=fallback_tail_yield_operation_missing; log_writer_id=writer-in',
+                    'event=filetransfer_fallback_tail_peer_proof_receipt_decided; session_id=sess; transfer_id=transfer; direction=inbound; peer_pair_key=pair; peer_observation_identity=peer-proof; peer_frame_fingerprint=frame; decision_status=Rejected; decision_reason={{decisionReason}}; log_writer_id=writer-in',
                     'event=filetransfer_fallback_tail_yield_issued; session_id=sess; transfer_id=transfer; direction=inbound; route=post_tuna_fallback_v6; authority_id=inbound-yield; yield_generation=1; pair_key=pair; yield_kind=Quiescent; log_writer_id=writer-in',
                     'event=filetransfer_fallback_tail_local_proof_receipt_decided; session_id=sess; transfer_id=transfer; direction=inbound; authority_id=inbound-yield; yield_generation=1; local_proof_identity=inbound-local-proof; decision_status=Accepted; log_writer_id=writer-in',
                     'event=filetransfer_fallback_tail_pairing_committed; session_id=sess; transfer_id=transfer; direction=outbound; authority_id=outbound-yield; peer_direction=inbound; peer_observation_identity=inbound-local-proof; log_writer_id=writer-out',
@@ -3040,8 +3049,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 ) | Set-Content -LiteralPath $path
                 $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
                 if ($result.Phase -ne 'route_runtime' -or
-                    $result.Reason -ne 'reciprocal_fallback_tail_peer_proof_not_rebound_after_local_quiescent_yield' -or
+                    $result.Reason -ne '{{expectedReason}}' -or
                     -not $result.FallbackTailPeerProofBeforeLocalYieldNotRetained -or
+                    [bool]$result.FallbackTailPeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetained -ne ${{asymmetricRecoveryScope.ToString().ToLowerInvariant()}} -or
                     $result.ClassificationSource -ne 'immutable_evidence_fallback_tail_peer_first_index' -or
                     [long]$result.EvidenceLineVisitCount -ne 6) {
                     throw "peer-first fallback-tail fast path mismatch: $($result | ConvertTo-Json -Compress)"

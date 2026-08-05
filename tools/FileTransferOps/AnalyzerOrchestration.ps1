@@ -3092,6 +3092,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing',
                 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound',
                 'fallback_tail_yield_authority_invalid',
+                'paired_fallback_tail_yield_missing',
                 'filetransfer_route_transition_draining_transport_grace_terminalization',
                 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing',
                 'filetransfer_route_transition_incomplete',
@@ -3190,6 +3191,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid',
             'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing',
             'fallback_tail_yield_authority_invalid',
+            'paired_fallback_tail_yield_missing',
             'regular_v4_frontier_tail_repair_state_publication_missing',
             'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery',
             'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch',
@@ -3440,6 +3442,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("peer_proof_before_local_yield_not_retained_distinct_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstDistinctCount),
         ("peer_proof_before_local_yield_not_retained_recovered_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstRecoveredCount),
         ("peer_proof_before_local_yield_not_retained_unresolved_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstUnresolvedCount),
+        ("peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_raw_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstAsymmetricRecoveryScopeRawCount),
+        ("peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_distinct_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstAsymmetricRecoveryScopeDistinctCount),
+        ("peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_recovered_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstAsymmetricRecoveryScopeRecoveredCount),
+        ("peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_unresolved_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstAsymmetricRecoveryScopeUnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RecoveredCount),
@@ -4883,6 +4889,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         peer_proof_before_local_yield_not_retained_distinct_count = $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstDistinctCount
         peer_proof_before_local_yield_not_retained_recovered_count = $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstRecoveredCount
         peer_proof_before_local_yield_not_retained_unresolved_count = $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstUnresolvedCount
+        peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_raw_count = $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstAsymmetricRecoveryScopeRawCount
+        peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_distinct_count = $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstAsymmetricRecoveryScopeDistinctCount
+        peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_recovered_count = $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstAsymmetricRecoveryScopeRecoveredCount
+        peer_proof_before_local_yield_asymmetric_recovery_scope_not_retained_unresolved_count = $fallbackTailFailedYieldQuiescentSuccessorProof.PeerFirstAsymmetricRecoveryScopeUnresolvedCount
         runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount
         runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount
         runtime_unlock_regular_v4_recovery_lease_not_issued_recovered_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RecoveredCount
