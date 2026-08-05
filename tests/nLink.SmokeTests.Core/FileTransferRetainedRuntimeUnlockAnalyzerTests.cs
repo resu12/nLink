@@ -5298,6 +5298,88 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task AnalyzeRetained_ZeroOfferMissingDispatchSuccessorEvaluationSuppressed_SelectsIntent(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_zero_offer_successor_suppressed";
+        static string PairedRelease(string line)
+            => line
+                .Replace(
+                    "release_kind=RegularV4RepairSettlement",
+                    "release_kind=FallbackPairedTailYield",
+                    StringComparison.Ordinal)
+                .Replace(
+                    "release_authority_id=fta2-regular-v4-release-1",
+                    "release_authority_id=fta2-fallback-tail-yield-1",
+                    StringComparison.Ordinal)
+                .Replace(
+                    "release_outcome=ProgressObserved",
+                    "release_outcome=Quiescent",
+                    StringComparison.Ordinal);
+
+        var baseFixture = BuildRuntimeUnlockZeroOfferSuccessorCurrentArtifactFixture(
+            transferId,
+            rejectSuccessor: false);
+        var lines = baseFixture.Take(6).Select(PairedRelease).ToList();
+        lines.Insert(
+            2,
+            LogLine(
+                $"event=filetransfer_fallback_tail_paired_release_consumed; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=outbound; authority_id=fta2-fallback-tail-yield-1; yield_generation=3; retry_authority_id=fta2-runtime-unlock-test-1; decision_status=Accepted; decision_reason=runtime_unlock_retry_lifecycle_transition",
+                secondsOffset: 2));
+        var intent = PairedRelease(RuntimeUnlockRetrySchema2Line(
+                "runtime_unlock_retry_missing_dispatch_successor_intent_created",
+                transferId,
+                retiredGeneration: 0,
+                suffix: "; predecessor_settlement_outcome=MissingDispatch; failed_offer_generation=0; request_active_predecessor_supersession=0; intent_disposition=Created",
+                decisionReason: "retry_dispatch_deadline_elapsed"))
+            .Replace("offer_generation=12", "offer_generation=0", StringComparison.Ordinal)
+            .Replace("offer_nonce=nonce-1", "offer_nonce=(none)", StringComparison.Ordinal);
+        lines.Add(LogLine(intent, secondsOffset: 7));
+        lines.Add(baseFixture[^2]);
+        lines.Add(baseFixture[^1]);
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines.ToArray(),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        if (!compact)
+        {
+            Assert.Equal("runtime_unlock_retry_dispatch_zero_offer_successor_rejected", verdict["recovery_failure_class"]);
+            Assert.Equal("runtime_unlock_retry_missing_dispatch_successor_intent_created", verdict["first_proof_chain_failure_event"]);
+            Assert.Equal(
+                "pre_offer_missing_dispatch_successor_evaluation_suppressed_as_default",
+                verdict["first_proof_chain_failure_reason"]);
+        }
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_rejected_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_rejected_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_rejected_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_rejected_unresolved_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_evaluation_suppressed_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_evaluation_suppressed_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_evaluation_suppressed_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_evaluation_suppressed_unresolved_count"]);
+        if (!compact)
+        {
+            Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_count"]);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task AnalyzeRetained_StagedIssuedSuccessorGrantWithoutCommit_DoesNotRecoverZeroOfferRejection(
         bool compact)
     {

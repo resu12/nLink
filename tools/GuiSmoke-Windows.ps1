@@ -4751,6 +4751,12 @@ function Get-TunaGuiExplicitFailureClassification {
             'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch' {
                 return [pscustomobject]@{ Phase = 'runtime_unlock_retry'; Reason = $failureClass }
             }
+            'runtime_unlock_retry_dispatch_zero_offer_successor_rejected' {
+                return [pscustomobject]@{
+                    Phase = 'runtime_unlock_retry'
+                    Reason = 'pre_offer_missing_dispatch_successor_evaluation_suppressed_as_default'
+                }
+            }
             'runtime_unlock_retry_dispatch_grant_bypassed_by_retry_budget' {
                 return [pscustomobject]@{ Phase = 'runtime_unlock_retry'; Reason = $failureClass }
             }
