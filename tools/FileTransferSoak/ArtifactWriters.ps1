@@ -24986,7 +24986,6 @@ function Get-FileTransferRuntimeUnlockRetryZeroOfferSuccessorCorrelation {
         $releaseGeneration =
             Get-FileTransferEventField -Event $intent -Name 'release_generation' -Default ''
         $releaseConsumption = @($pairedReleaseConsumedEvents | Where-Object {
-            [int64]$_.Sequence -gt [int64]$predecessorGrant[0].Sequence -and
             [int64]$_.Sequence -lt [int64]$matchingSettlement[0].Sequence -and
             (Get-FileTransferEventField -Event $_ -Name 'retry_authority_id' -Default '') -eq
                 $authorityId -and

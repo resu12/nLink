@@ -4565,8 +4565,7 @@ internal static class FileTransferCoordinator
 
         if (predecessorAuthorityId.IsDefault ||
             lifecycle.InstalledAttempt is not { } predecessor ||
-            predecessor.Authority.AuthorityId != predecessorAuthorityId ||
-            retiredOfferGeneration <= 0)
+            predecessor.Authority.AuthorityId != predecessorAuthorityId)
         {
             return Decision(
                 RuntimeUnlockRetryDispatchSuccessorDecisionStatus.Rejected,
@@ -4582,6 +4581,27 @@ internal static class FileTransferCoordinator
             return Decision(
                 RuntimeUnlockRetryDispatchSuccessorDecisionStatus.Rejected,
                 "retry_dispatch_successor_retired_offer_mismatch");
+        }
+
+        var preOfferMissingDispatch = retiredOfferGeneration == 0;
+        if (preOfferMissingDispatch &&
+            (predecessor.Authority.RetiredOfferGeneration != 0 ||
+             predecessor.OfferGeneration != 0 ||
+             !string.IsNullOrWhiteSpace(predecessor.OfferNonce) ||
+             predecessor.DispatchObserved ||
+             predecessor.State != RuntimeUnlockRetryLifecycleAttemptState.Settled ||
+             predecessor.Settlement is not
+             {
+                 Outcome: RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch,
+                 OfferGeneration: 0,
+                 DispatchObserved: false,
+             } preOfferSettlement ||
+             !string.IsNullOrWhiteSpace(preOfferSettlement.OfferNonce) ||
+             lifecycle.LastSettlement != preOfferSettlement))
+        {
+            return Decision(
+                RuntimeUnlockRetryDispatchSuccessorDecisionStatus.Rejected,
+                "retry_dispatch_successor_pre_offer_profile_invalid");
         }
 
         if (!IsRuntimeUnlockRetryLifecyclePredecessorCurrentForSuccessor(

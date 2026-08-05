@@ -1174,8 +1174,14 @@ internal readonly record struct RuntimeUnlockRetryDispatchSuccessorEvaluation(
     RuntimeUnlockRetryDispatchAuthority PredecessorAuthority,
     long RetiredOfferGeneration)
 {
+    public long PredecessorOfferGeneration { get; init; }
+
+    public string? PredecessorOfferNonce { get; init; }
+
+    public bool PredecessorDispatchObserved { get; init; }
+
     public bool IsDefault => PredecessorAuthority.IsDefault ||
-                             RetiredOfferGeneration <= 0;
+                             RetiredOfferGeneration < 0;
 }
 
 internal sealed class RuntimeUnlockRetryDispatchContract

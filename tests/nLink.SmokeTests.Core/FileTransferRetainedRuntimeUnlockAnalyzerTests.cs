@@ -5327,10 +5327,10 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             rejectSuccessor: false);
         var lines = baseFixture.Take(6).Select(PairedRelease).ToList();
         lines.Insert(
-            2,
+            1,
             LogLine(
                 $"event=filetransfer_fallback_tail_paired_release_consumed; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=outbound; authority_id=fta2-fallback-tail-yield-1; yield_generation=3; retry_authority_id=fta2-runtime-unlock-test-1; decision_status=Accepted; decision_reason=runtime_unlock_retry_lifecycle_transition",
-                secondsOffset: 2));
+                secondsOffset: 1));
         var intent = PairedRelease(RuntimeUnlockRetrySchema2Line(
                 "runtime_unlock_retry_missing_dispatch_successor_intent_created",
                 transferId,

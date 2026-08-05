@@ -12969,13 +12969,19 @@ public sealed partial class NknSignalingTransport
     {
         if (evaluation.IsDefault)
         {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=runtime_unlock_retry_dispatch_successor_evaluation_suppressed; retired_generation={evaluation.RetiredOfferGeneration}; successor_profile={(evaluation.RetiredOfferGeneration == 0 ? "pre_offer_missing_dispatch" : "invalid")}; decision_status=Rejected; decision_reason=successor_evaluation_invalid");
             return;
         }
 
         var subscriber = runtimeUnlockRetryDispatchSuccessorEvaluationRequested;
+        var successorProfile = evaluation.RetiredOfferGeneration == 0
+            ? "pre_offer_missing_dispatch"
+            : "offer_bound";
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=runtime_unlock_retry_dispatch_successor_evaluation_requested; {FormatRuntimeUnlockRetryDispatchAuthorityTuple(evaluation.PredecessorAuthority)}; retired_generation={evaluation.RetiredOfferGeneration}; trigger={SanitizeLogToken(trigger)}; subscriber_present={(subscriber is null ? 0 : 1)}; decision_reason={(subscriber is null ? "successor_evaluation_subscriber_missing" : "reported_to_core")}");
+            $"event=runtime_unlock_retry_dispatch_successor_evaluation_requested; {FormatRuntimeUnlockRetryDispatchAuthorityTuple(evaluation.PredecessorAuthority)}; retired_generation={evaluation.RetiredOfferGeneration}; successor_profile={successorProfile}; predecessor_offer_generation={evaluation.PredecessorOfferGeneration}; predecessor_offer_nonce={SanitizeLogToken(evaluation.PredecessorOfferNonce ?? "(none)")}; predecessor_dispatch_observed={(evaluation.PredecessorDispatchObserved ? 1 : 0)}; trigger={SanitizeLogToken(trigger)}; subscriber_present={(subscriber is null ? 0 : 1)}; decision_reason={(subscriber is null ? "successor_evaluation_subscriber_missing" : "reported_to_core")}");
         if (subscriber is null)
         {
             return;
@@ -18107,7 +18113,15 @@ public sealed partial class NknSignalingTransport
                             successorEvaluation =
                                 new RuntimeUnlockRetryDispatchSuccessorEvaluation(
                                     currentContract.Authority,
-                                    retiredOfferGeneration);
+                                    retiredOfferGeneration)
+                                {
+                                    PredecessorOfferGeneration =
+                                        currentContract.OfferGeneration,
+                                    PredecessorOfferNonce =
+                                        currentContract.OfferNonce,
+                                    PredecessorDispatchObserved =
+                                        currentContract.Lifecycle.DispatchObserved,
+                                };
                             state.PendingDispatchInitialEvaluation = null;
                             state.PendingDispatchAuthorityRequest = null;
                             state.DispatchAuthorityGranted = false;
@@ -18422,7 +18436,15 @@ public sealed partial class NknSignalingTransport
                             currentContract.OfferGeneration > 0
                                 ? currentContract.OfferGeneration
                                 : currentContract.Authority
-                                    .RetiredOfferGeneration);
+                                    .RetiredOfferGeneration)
+                        {
+                            PredecessorOfferGeneration =
+                                currentContract.OfferGeneration,
+                            PredecessorOfferNonce =
+                                currentContract.OfferNonce,
+                            PredecessorDispatchObserved =
+                                currentContract.Lifecycle.DispatchObserved,
+                        };
                     state.PendingDispatchAuthorityRequest = null;
                     state.RetryAuthorityPending = true;
                 }
@@ -22691,7 +22713,14 @@ public sealed partial class NknSignalingTransport
                 preservedDispatchEvaluation =
                     new RuntimeUnlockRetryDispatchSuccessorEvaluation(
                         activeContract.Authority,
-                        retiredOfferGeneration);
+                        retiredOfferGeneration)
+                    {
+                        PredecessorOfferGeneration =
+                            activeContract.OfferGeneration,
+                        PredecessorOfferNonce = activeContract.OfferNonce,
+                        PredecessorDispatchObserved =
+                            activeContract.Lifecycle.DispatchObserved,
+                    };
 
                 preservedDispatchState = activeDispatchState;
             }
