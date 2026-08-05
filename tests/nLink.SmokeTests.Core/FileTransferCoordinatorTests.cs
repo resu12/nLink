@@ -11292,6 +11292,117 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void FallbackTailUnblockRecheck_ExactRepairSettlementRequeuesHeldRequestOnce()
+    {
+        var (pairedState, request, _) =
+            AuthorizeFallbackRuntimeUnlockRetryDispatchSource();
+        var repairDecision = FileTransferCoordinator.AuthorizeAction(
+            pairedState,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RepairReplay,
+                pairedState.CurrentRuntimeOwner!.Value,
+                pairedState.CurrentLeg!,
+                repairReplayKind: RepairReplayKind.FrontierStallRepair));
+        Assert.True(repairDecision.Accepted);
+        Assert.True(
+            FileTransferCoordinator.TryIssueFallbackFrontierRepairAuthority(
+                repairDecision.RepairReplayDecision!.Value,
+                new FallbackFrontierRepairAuthorityRequest(
+                    "fallback-frontier:12:1:frng-recheck",
+                    "frng-recheck",
+                    FrontierChunkIndex: 12,
+                    DurableReceivedHighestChunkIndex: 12,
+                    RangeCount: 1,
+                    RequestedChunkCount: 1,
+                    FallbackFrontierRepairSourceKind.PeerRequest,
+                    ProtocolRepairRequestId: "v6-frontier:12:1",
+                    RequestCorrelationId: "frq-recheck",
+                    CheckpointRequestId: "(none)",
+                    Priority: "frontier",
+                    RecoveryMode: "regular_nkn_frontier_stall_control_bulk",
+                    DecisionReason: "fallback_frontier_request_received"),
+                out var authority,
+                out var issueReason),
+            issueReason);
+
+        var held = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            repairDecision.State,
+            request,
+            RuntimeUnlockRetryReleaseKind.Unknown,
+            null,
+            0,
+            "pending");
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Held, held.Status);
+        var currentOwner = held.State.CurrentRuntimeOwner!.Value;
+        var currentLeg = held.State.CurrentLeg!;
+        var currentPublication = held.State.CurrentRoutePublicationToken!.Value;
+        var currentAuthority = authority!.Value with
+        {
+            RuntimeOwner = currentOwner,
+            LiveRouteEpoch = held.State.CurrentLiveRouteEpoch!.EpochId,
+            RuntimeGeneration = currentOwner.RuntimeGeneration,
+            TerminalGeneration = held.State.TerminalGeneration,
+            LegGeneration = currentLeg.Generation,
+            TransportEpoch = currentLeg.TransportEpochId,
+            BridgeRecoveryGeneration = currentLeg.BridgeRecoveryGeneration,
+            RoutePublicationGeneration = currentPublication.PublicationGeneration,
+            RouteCommitGeneration = currentPublication.RouteCommitGeneration,
+            CheckpointRequestId = currentLeg.CheckpointRequestId!,
+        };
+        var bound = FileTransferCoordinator.BindFallbackTailYieldRetryDispatchHold(
+            held.State,
+            request,
+            currentAuthority);
+        Assert.True(bound.Accepted, bound.Reason);
+        var hold = Assert.IsType<FileTransferFallbackTailYieldRetryDispatchHold>(
+            bound.State.PersistentState.FallbackTailYield.CurrentRetryDispatchHold);
+        var observation =
+            new FileTransferFallbackTailYieldRetryDispatchRecheckObservation(
+                hold,
+                currentAuthority,
+                "ProgressObserved",
+                SuccessorAuthorityId: null,
+                ObservedUtcMs: 25_000);
+
+        var issued = FileTransferCoordinator.IssueFallbackTailYieldRetryDispatchRecheck(
+            bound.State,
+            observation);
+        Assert.True(issued.Accepted, issued.Reason);
+        var command = Assert.IsType<FileTransferFallbackTailYieldRetryDispatchRecheckCommand>(
+            issued.State.PersistentState.FallbackTailYield.PendingRetryDispatchRecheckCommand);
+        var duplicate = FileTransferCoordinator.IssueFallbackTailYieldRetryDispatchRecheck(
+            issued.State,
+            observation);
+        Assert.Equal(
+            FileTransferFallbackTailYieldTransitionStatus.Idempotent,
+            duplicate.Status);
+        Assert.Equal(
+            command,
+            duplicate.State.PersistentState.FallbackTailYield.PendingRetryDispatchRecheckCommand);
+
+        var queued = FileTransferCoordinator.ApplyFallbackTailYieldRetryDispatchRecheckReceipt(
+            duplicate.State,
+            new FileTransferFallbackTailYieldRetryDispatchRecheckReceipt(
+                command,
+                FileTransferFallbackTailYieldRetryDispatchRecheckReceiptStatus.Queued,
+                "queued"));
+        Assert.True(queued.Accepted, queued.Reason);
+        Assert.Equal(
+            command,
+            queued.State.PersistentState.FallbackTailYield.PendingRetryDispatchRecheckCommand);
+        var queuedDuplicate =
+            FileTransferCoordinator.ApplyFallbackTailYieldRetryDispatchRecheckReceipt(
+                queued.State,
+                new FileTransferFallbackTailYieldRetryDispatchRecheckReceipt(
+                    command,
+                    FileTransferFallbackTailYieldRetryDispatchRecheckReceiptStatus.Queued,
+                    "queued"));
+        Assert.Equal(
+            FileTransferFallbackTailYieldTransitionStatus.Idempotent,
+            queuedDuplicate.Status);
+    }
+
+    [Fact]
     public void RuntimeUnlockRetryDispatchAuthority_FallbackMissingDispatchSuccessorPreservesCanonicalReleaseAcrossTransportEpoch()
     {
         var (state, request, tailYield) = AuthorizeFallbackRuntimeUnlockRetryDispatchSource();

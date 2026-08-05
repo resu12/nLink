@@ -6581,6 +6581,10 @@ public sealed partial class SessionFileTransferService :
             releaseAuthorityId,
             releaseGeneration,
             releaseOutcome);
+        decision = BindFallbackTailYieldRetryDispatchHoldLocked(
+            context,
+            request,
+            decision);
         ApplyRuntimeUnlockRetryDispatchAuthorityDecisionLocked(context, request, decision);
 
         return decision;
@@ -6641,11 +6645,50 @@ public sealed partial class SessionFileTransferService :
             releaseAuthorityId,
             releaseGeneration,
             releaseOutcome);
+        decision = BindFallbackTailYieldRetryDispatchHoldLocked(
+            context,
+            request,
+            decision);
         ApplyRuntimeUnlockRetryDispatchAuthorityDecisionLocked(
             context,
             decision.Request.IsDefault ? request : decision.Request,
             decision);
         return decision;
+    }
+
+    private static RuntimeUnlockRetryDispatchDecision
+        BindFallbackTailYieldRetryDispatchHoldLocked(
+            OutboundTransferContext context,
+            RuntimeUnlockRetryDispatchAuthorityRequest request,
+            RuntimeUnlockRetryDispatchDecision decision)
+    {
+        if (decision.Status != RuntimeUnlockRetryDispatchDecisionStatus.Held ||
+            !string.Equals(
+                decision.Reason,
+                "fallback_paired_tail_yield_pending",
+                StringComparison.Ordinal) ||
+            context.CurrentFallbackFrontierRepairContract is not
+            {
+                Lifecycle.IsSettled: false,
+            } blockingRepair)
+        {
+            return decision;
+        }
+
+        var binding =
+            FileTransferCoordinator.BindFallbackTailYieldRetryDispatchHold(
+                decision.State ?? CreateCoordinatorStateLocked(context),
+                request,
+                blockingRepair.Authority);
+        if (!binding.Accepted)
+        {
+            return decision;
+        }
+
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=runtime_unlock_retry_dispatch_fallback_tail_hold_bound; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(blockingRepair.Authority.AuthorityId.ToString())}; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; repair_generation={blockingRepair.Authority.DecisionGeneration}; hold_generation={binding.State.PersistentState.FallbackTailYield.CurrentRetryDispatchHold?.HoldGeneration ?? 0}; decision_status={FormatProtocolLogValue(binding.Status.ToString())}; decision_reason={FormatProtocolLogValue(binding.Reason)}");
+        return decision with { State = binding.State };
     }
 
     private static RuntimeUnlockRetryDispatchDecision AuthorizeRuntimeUnlockRetryDispatchLocked(
@@ -16067,6 +16110,13 @@ public sealed partial class SessionFileTransferService :
         FileTransferFallbackTailPairedReleaseReceipt pairedRelease,
         string reason)
     {
+        if (TryQueueFallbackTailYieldRetryDispatchUnblockRecheckLocked(
+                context,
+                pairedRelease))
+        {
+            return;
+        }
+
         var state = CreateCoordinatorStateLocked(context);
         var request = default(RuntimeUnlockRetryDispatchAuthorityRequest);
         var rejectionReason =
@@ -22665,6 +22715,13 @@ public sealed partial class SessionFileTransferService :
             PendingRegularV4FrontierRepairPressureInstallRetry { get; set; }
 
         public FallbackFrontierRepairContract? CurrentFallbackFrontierRepairContract { get; set; }
+
+        public FallbackFrontierRepairAuthority?
+            LastSettledFallbackFrontierRepairAuthority { get; set; }
+
+        public string? LastSettledFallbackFrontierRepairOutcome { get; set; }
+
+        public long LastSettledFallbackFrontierRepairUtcMs { get; set; }
 
         public int LastRepairReplayGeneration { get; set; }
 

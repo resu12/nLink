@@ -631,11 +631,21 @@ public sealed partial class SessionFileTransferService
         FallbackFrontierRepairSettlementOutcome outcome,
         string reason)
     {
-        TrySettleFallbackFrontierRepairContract(
-            context.CurrentFallbackFrontierRepairContract,
+        var contract = context.CurrentFallbackFrontierRepairContract;
+        var settled = TrySettleFallbackFrontierRepairContract(
+            contract,
             outcome,
             reason);
         context.CurrentFallbackFrontierRepairContract = null;
+        if (settled && contract is not null)
+        {
+            context.LastSettledFallbackFrontierRepairAuthority =
+                contract.Authority;
+            context.LastSettledFallbackFrontierRepairOutcome =
+                outcome.ToString();
+            context.LastSettledFallbackFrontierRepairUtcMs =
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        }
     }
 
     private static void SettleAndClearFallbackFrontierRepairContractLocked(
@@ -648,6 +658,92 @@ public sealed partial class SessionFileTransferService
             outcome,
             reason);
         context.CurrentFallbackFrontierRepairContract = null;
+    }
+
+    private bool TryQueueFallbackTailYieldRetryDispatchUnblockRecheckLocked(
+        OutboundTransferContext context,
+        FileTransferFallbackTailPairedReleaseReceipt pairedRelease)
+    {
+        if (context.IsTerminal ||
+            context.CoordinatorPersistentState.FallbackTailYield
+                .CurrentRetryDispatchHold is not { } hold ||
+            hold.Release != pairedRelease ||
+            context.CurrentFallbackFrontierRepairContract is { Lifecycle.IsSettled: false } ||
+            context.LastSettledFallbackFrontierRepairAuthority is not
+                { } settledRepair ||
+            hold.BlockingRepair != settledRepair ||
+            string.IsNullOrWhiteSpace(
+                context.LastSettledFallbackFrontierRepairOutcome) ||
+            context.LastSettledFallbackFrontierRepairOutcome is
+                nameof(FallbackFrontierRepairSettlementOutcome.Superseded) or
+                nameof(FallbackFrontierRepairSettlementOutcome.TransferTerminal) or
+                nameof(FallbackFrontierRepairSettlementOutcome.TerminalRejected) ||
+            context.LastSettledFallbackFrontierRepairUtcMs <= 0)
+        {
+            return false;
+        }
+
+        var observation =
+            new FileTransferFallbackTailYieldRetryDispatchRecheckObservation(
+                hold,
+                settledRepair,
+                context.LastSettledFallbackFrontierRepairOutcome,
+                SuccessorAuthorityId: null,
+                context.LastSettledFallbackFrontierRepairUtcMs);
+        var issuance =
+            FileTransferCoordinator.IssueFallbackTailYieldRetryDispatchRecheck(
+                CreateCoordinatorStateLocked(context),
+                observation);
+        ApplyRuntimeUnlockRetryLifecycleStateLocked(context, issuance.State);
+        var command = issuance.State.PersistentState.FallbackTailYield
+            .PendingRetryDispatchRecheckCommand;
+        if (!issuance.Accepted || command is not { IsDefault: false } currentCommand)
+        {
+            LogFallbackTailYieldRetryDispatchUnblockRecheck(
+                context,
+                hold,
+                command,
+                issuance.Status.ToString(),
+                issuance.Reason);
+            return issuance.Accepted;
+        }
+
+        var queued =
+            transport is IRuntimeUnlockRetryDispatchAuthorityBridge bridge &&
+            bridge.QueueFallbackTailYieldRetryDispatchRecheck(currentCommand);
+        var receipt =
+            new FileTransferFallbackTailYieldRetryDispatchRecheckReceipt(
+                currentCommand,
+                queued
+                    ? FileTransferFallbackTailYieldRetryDispatchRecheckReceiptStatus.Queued
+                    : FileTransferFallbackTailYieldRetryDispatchRecheckReceiptStatus.Rejected,
+                queued
+                    ? "fallback_tail_retry_dispatch_recheck_queued"
+                    : "fallback_tail_retry_dispatch_recheck_queue_rejected");
+        var application =
+            FileTransferCoordinator.ApplyFallbackTailYieldRetryDispatchRecheckReceipt(
+                CreateCoordinatorStateLocked(context),
+                receipt);
+        ApplyRuntimeUnlockRetryLifecycleStateLocked(context, application.State);
+        LogFallbackTailYieldRetryDispatchUnblockRecheck(
+            context,
+            hold,
+            currentCommand,
+            application.Status.ToString(),
+            application.Reason);
+        return queued;
+    }
+
+    private static void LogFallbackTailYieldRetryDispatchUnblockRecheck(
+        OutboundTransferContext context,
+        FileTransferFallbackTailYieldRetryDispatchHold hold,
+        FileTransferFallbackTailYieldRetryDispatchRecheckCommand? command,
+        string status,
+        string reason)
+    {
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(hold.Release.ReleaseAuthorityId.ToString())}; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; release_generation={hold.Release.ReleaseGeneration}; repair_authority_id={FormatProtocolLogValue(hold.BlockingRepair.AuthorityId.ToString())}; repair_generation={hold.BlockingRepair.DecisionGeneration}; hold_generation={hold.HoldGeneration}; recheck_generation={command?.RecheckGeneration ?? 0}; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(reason)}");
     }
 
     private static string FormatFallbackFrontierRepairAuthorityTuple(
@@ -1573,7 +1669,7 @@ public sealed partial class SessionFileTransferService
         return IsFallbackFrontierRepairContractCurrent(context, contract, out rejectionReason);
     }
 
-    private static void TrySettleOutboundFallbackFrontierProgressLocked(
+    private void TrySettleOutboundFallbackFrontierProgressLocked(
         OutboundTransferContext context,
         int previousFrontierChunkIndex,
         int currentFrontierChunkIndex,
@@ -1603,6 +1699,19 @@ public sealed partial class SessionFileTransferService
                 reason))
         {
             return;
+        }
+
+        context.LastSettledFallbackFrontierRepairAuthority = contract.Authority;
+        context.LastSettledFallbackFrontierRepairOutcome =
+            nameof(FallbackFrontierRepairSettlementOutcome.ProgressObserved);
+        context.LastSettledFallbackFrontierRepairUtcMs =
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        if (context.CoordinatorPersistentState.FallbackTailYield
+                .CurrentRetryDispatchHold is { } hold)
+        {
+            TryQueueFallbackTailYieldRetryDispatchUnblockRecheckLocked(
+                context,
+                hold.Release);
         }
 
         var authority = contract.Authority;
@@ -1983,6 +2092,20 @@ public sealed partial class SessionFileTransferService
             decisionReason,
             successor.Authority.AuthorityId);
         context.CurrentFallbackFrontierRepairContract = successor;
+        if (context.CoordinatorPersistentState.FallbackTailYield
+                .CurrentRetryDispatchHold is { } hold &&
+            hold.BlockingRepair != successor.Authority)
+        {
+            var rebound =
+                FileTransferCoordinator.BindFallbackTailYieldRetryDispatchHold(
+                    CreateCoordinatorStateLocked(context),
+                    hold.Request,
+                    successor.Authority);
+            ApplyRuntimeUnlockRetryLifecycleStateLocked(context, rebound.State);
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=runtime_unlock_retry_dispatch_fallback_tail_hold_bound; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(successor.Authority.AuthorityId.ToString())}; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; repair_generation={successor.Authority.DecisionGeneration}; hold_generation={rebound.State.PersistentState.FallbackTailYield.CurrentRetryDispatchHold?.HoldGeneration ?? 0}; decision_status={FormatProtocolLogValue(rebound.Status.ToString())}; decision_reason={FormatProtocolLogValue(rebound.Reason)}");
+        }
         return true;
     }
 

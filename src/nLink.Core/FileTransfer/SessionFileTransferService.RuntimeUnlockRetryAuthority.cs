@@ -936,10 +936,14 @@ public sealed partial class SessionFileTransferService
 
         if (decision.Status ==
                 RuntimeUnlockRetryDispatchDecisionStatus.Held &&
-            string.Equals(
-                decision.Reason,
-                "receive_recovery_lease_pending",
-                StringComparison.Ordinal) &&
+            (string.Equals(
+                 decision.Reason,
+                 "receive_recovery_lease_pending",
+                 StringComparison.Ordinal) ||
+             string.Equals(
+                 decision.Reason,
+                 "fallback_paired_tail_yield_pending",
+                 StringComparison.Ordinal)) &&
             decision.State is not null)
         {
             ApplyRuntimeUnlockRetryLifecycleStateLocked(

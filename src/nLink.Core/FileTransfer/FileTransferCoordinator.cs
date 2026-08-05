@@ -690,6 +690,71 @@ internal readonly record struct FileTransferFallbackTailYieldOperation(
     public bool IsDefault => Decision.IsDefault || Scope.IsDefault;
 }
 
+internal readonly record struct FileTransferFallbackTailYieldRetryDispatchHold(
+    RuntimeUnlockRetryDispatchAuthorityRequest Request,
+    FileTransferFallbackTailPairedReleaseReceipt Release,
+    FallbackFrontierRepairAuthority BlockingRepair,
+    string DataSessionIdentity,
+    long DataSessionGeneration,
+    int HoldGeneration)
+{
+    public bool IsDefault =>
+        Request.IsDefault ||
+        Release.IsDefault ||
+        BlockingRepair.IsDefault ||
+        string.IsNullOrWhiteSpace(DataSessionIdentity) ||
+        DataSessionGeneration <= 0 ||
+        HoldGeneration <= 0;
+}
+
+internal readonly record struct
+    FileTransferFallbackTailYieldRetryDispatchRecheckObservation(
+        FileTransferFallbackTailYieldRetryDispatchHold Hold,
+        FallbackFrontierRepairAuthority SettledRepair,
+        string SettlementOutcome,
+        FileTransferAuthorityId? SuccessorAuthorityId,
+        long ObservedUtcMs)
+{
+    public bool IsDefault =>
+        Hold.IsDefault ||
+        SettledRepair.IsDefault ||
+        string.IsNullOrWhiteSpace(SettlementOutcome) ||
+        ObservedUtcMs <= 0;
+}
+
+internal readonly record struct
+    FileTransferFallbackTailYieldRetryDispatchRecheckCommand(
+        FileTransferFallbackTailYieldRetryDispatchHold Hold,
+        FileTransferFallbackTailYieldRetryDispatchRecheckObservation Observation,
+        int RecheckGeneration)
+{
+    public RuntimeUnlockRetryDispatchAuthorityRequest Request => Hold.Request;
+
+    public bool IsDefault =>
+        Hold.IsDefault ||
+        Observation.IsDefault ||
+        Observation.Hold != Hold ||
+        RecheckGeneration <= 0;
+}
+
+internal enum FileTransferFallbackTailYieldRetryDispatchRecheckReceiptStatus
+{
+    Queued = 0,
+    Idempotent = 1,
+    Rejected = 2,
+}
+
+internal readonly record struct
+    FileTransferFallbackTailYieldRetryDispatchRecheckReceipt(
+        FileTransferFallbackTailYieldRetryDispatchRecheckCommand Command,
+        FileTransferFallbackTailYieldRetryDispatchRecheckReceiptStatus Status,
+        string Reason)
+{
+    public bool IsDefault =>
+        Command.IsDefault ||
+        string.IsNullOrWhiteSpace(Reason);
+}
+
 internal sealed record FileTransferFallbackTailYieldSubstate(
     FileTransferFallbackTailYieldOperation? CurrentOperation = null,
     FallbackTailYieldDecision? RetainedPredecessor = null,
@@ -700,6 +765,12 @@ internal sealed record FileTransferFallbackTailYieldSubstate(
         PendingPeerProofBeforeLocalYield = null,
     RuntimeUnlockRetryDispatchAuthorityRequest?
         PendingRetryRecheckRequest = null,
+    FileTransferFallbackTailYieldRetryDispatchHold?
+        CurrentRetryDispatchHold = null,
+    FileTransferFallbackTailYieldRetryDispatchRecheckCommand?
+        PendingRetryDispatchRecheckCommand = null,
+    FileTransferFallbackTailYieldRetryDispatchRecheckReceipt?
+        LastRetryDispatchRecheckReceipt = null,
     FileTransferFallbackTailPairedReleaseReservation? CurrentReservation = null,
     FileTransferFallbackTailPairedReleaseReservation? LastConsumedReservation = null,
     RuntimeUnlockRetryDispatchInstallReceipt? LastConsumingInstallReceipt = null,
@@ -710,7 +781,9 @@ internal sealed record FileTransferFallbackTailYieldSubstate(
     int LastYieldGeneration = 0,
     int LastReauthorizationGeneration = 0,
     long LastPairingGeneration = 0,
-    long LastReservationGeneration = 0)
+    long LastReservationGeneration = 0,
+    int LastRetryDispatchHoldGeneration = 0,
+    int LastRetryDispatchRecheckGeneration = 0)
 {
     internal static FileTransferFallbackTailYieldSubstate Empty { get; } =
         new();
@@ -10909,6 +10982,8 @@ internal static class FileTransferCoordinator
         {
             CurrentOperation = nextOperation,
             CurrentReservation = reservation,
+            CurrentRetryDispatchHold = null,
+            PendingRetryDispatchRecheckCommand = null,
             LastReservationGeneration = reservationGeneration,
         };
         return FallbackTailYieldTransition(
@@ -11877,6 +11952,8 @@ internal static class FileTransferCoordinator
                 PendingReauthorizationPeerProof = null,
                 PendingPeerProofBeforeLocalYield = null,
                 PendingRetryRecheckRequest = null,
+                CurrentRetryDispatchHold = null,
+                PendingRetryDispatchRecheckCommand = null,
                 CurrentReservation = null,
                 LastTerminalOperation = lastTerminal,
                 LastInvalidatedReauthorization =
@@ -19984,6 +20061,325 @@ internal static class FileTransferCoordinator
             token.TargetTransport,
             token.ActionKind.ToString(),
             coordinatorDecisionReason ?? token.Reason);
+    }
+
+    internal static bool
+        IsFallbackTailYieldRetryDispatchRecheckCommandCurrent(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackTailYieldRetryDispatchRecheckCommand command,
+            out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (command.IsDefault ||
+            state.PersistentState.FallbackTailYield
+                .PendingRetryDispatchRecheckCommand != command)
+        {
+            rejectionReason = "fallback_tail_retry_dispatch_recheck_stale";
+            return false;
+        }
+
+        var hold = command.Hold;
+        var substate = state.PersistentState.FallbackTailYield;
+        if (substate.CurrentRetryDispatchHold != hold ||
+            substate.PendingRetryRecheckRequest != hold.Request ||
+            substate.CurrentReservation is not null ||
+            substate.CurrentOperation is not
+            {
+                PairingState: FileTransferFallbackTailYieldPairingState.Paired,
+                PairedRelease: { } release,
+            } operation ||
+            release != hold.Release ||
+            state.IsTerminal ||
+            state.Direction != FileTransferDirection.Outbound ||
+            !IsFallbackTailYieldScopeCurrent(
+                state,
+                GetEffectiveFallbackTailYieldScope(operation),
+                out rejectionReason) ||
+            !IsFallbackFrontierRepairAuthorityCurrentForRetryRecheck(
+                state,
+                hold.BlockingRepair,
+                hold.DataSessionIdentity,
+                hold.DataSessionGeneration))
+        {
+            if (string.Equals(rejectionReason, "accepted", StringComparison.Ordinal))
+            {
+                rejectionReason = "fallback_tail_retry_dispatch_recheck_scope_replaced";
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    internal static FileTransferFallbackTailYieldTransitionDecision
+        BindFallbackTailYieldRetryDispatchHold(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockRetryDispatchAuthorityRequest request,
+            FallbackFrontierRepairAuthority blockingRepair)
+    {
+        var substate = state.PersistentState.FallbackTailYield;
+        var rejectionReason = "accepted";
+        if (state.IsTerminal ||
+            state.Direction != FileTransferDirection.Outbound ||
+            request.IsDefault ||
+            blockingRepair.IsDefault ||
+            substate.PendingRetryRecheckRequest != request ||
+            substate.CurrentReservation is not null ||
+            substate.CurrentOperation is not
+            {
+                PairingState: FileTransferFallbackTailYieldPairingState.Paired,
+                PairedRelease: { IsDefault: false } release,
+            } operation ||
+            !IsFallbackTailYieldScopeCurrent(
+                state,
+                GetEffectiveFallbackTailYieldScope(operation),
+                out rejectionReason) ||
+            !IsFallbackFrontierRepairAuthorityCurrentForRetryRecheck(
+                state,
+                blockingRepair,
+                state.CurrentDataSessionIdentity,
+                state.CurrentDataSessionGeneration))
+        {
+            return FallbackTailYieldTransitionRejected(
+                state,
+                string.Equals(rejectionReason, "accepted", StringComparison.Ordinal)
+                    ? "fallback_tail_retry_dispatch_hold_scope_mismatch"
+                    : rejectionReason);
+        }
+
+        var holdGeneration = Math.Max(
+            1,
+            substate.LastRetryDispatchHoldGeneration + 1);
+        var hold = new FileTransferFallbackTailYieldRetryDispatchHold(
+            request,
+            release,
+            blockingRepair,
+            state.CurrentDataSessionIdentity!,
+            state.CurrentDataSessionGeneration,
+            holdGeneration);
+        if (substate.CurrentRetryDispatchHold is { } current &&
+            current.Request == request &&
+            current.Release == release &&
+            current.BlockingRepair == blockingRepair &&
+            string.Equals(
+                current.DataSessionIdentity,
+                state.CurrentDataSessionIdentity,
+                StringComparison.Ordinal) &&
+            current.DataSessionGeneration == state.CurrentDataSessionGeneration)
+        {
+            return FallbackTailYieldTransition(
+                state,
+                FileTransferFallbackTailYieldTransitionStatus.Idempotent,
+                "fallback_tail_retry_dispatch_hold_idempotent");
+        }
+
+        var nextSubstate = substate with
+        {
+            CurrentRetryDispatchHold = hold,
+            PendingRetryDispatchRecheckCommand = null,
+            LastRetryDispatchHoldGeneration = holdGeneration,
+        };
+        return FallbackTailYieldTransition(
+            ApplyFallbackTailYieldSubstate(state, nextSubstate),
+            FileTransferFallbackTailYieldTransitionStatus.Accepted,
+            "fallback_tail_retry_dispatch_hold_bound");
+    }
+
+    internal static FileTransferFallbackTailYieldTransitionDecision
+        IssueFallbackTailYieldRetryDispatchRecheck(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackTailYieldRetryDispatchRecheckObservation observation)
+    {
+        var substate = state.PersistentState.FallbackTailYield;
+        if (observation.IsDefault ||
+            observation.SuccessorAuthorityId is { IsDefault: false } ||
+            string.Equals(
+                observation.SettlementOutcome,
+                "Superseded",
+                StringComparison.Ordinal) ||
+            substate.CurrentRetryDispatchHold is not { } hold ||
+            observation.Hold != hold ||
+            observation.SettledRepair != hold.BlockingRepair ||
+            substate.PendingRetryRecheckRequest != hold.Request ||
+            substate.CurrentReservation is not null ||
+            state.CurrentFallbackCheckpointLease is not null ||
+            state.CurrentFallbackControlPlaneToken is not null ||
+            state.CurrentFallbackControlPlanePressureToken is not null ||
+            GetRuntimeUnlockRetryLifecycle(state).CurrentAuthorizedAuthority is not null)
+        {
+            return FallbackTailYieldTransitionRejected(
+                state,
+                "fallback_tail_retry_dispatch_recheck_not_eligible");
+        }
+
+        if (substate.PendingRetryDispatchRecheckCommand is { } pending)
+        {
+            return pending.Observation == observation
+                ? FallbackTailYieldTransition(
+                    state,
+                    FileTransferFallbackTailYieldTransitionStatus.Idempotent,
+                    "fallback_tail_retry_dispatch_recheck_idempotent")
+                : FallbackTailYieldTransitionRejected(
+                    state,
+                    "fallback_tail_retry_dispatch_recheck_conflict");
+        }
+
+        if (!IsFallbackTailYieldRetryDispatchHoldCurrent(
+                state,
+                hold,
+                out var rejectionReason))
+        {
+            return FallbackTailYieldTransitionRejected(state, rejectionReason);
+        }
+
+        var recheckGeneration = Math.Max(
+            1,
+            substate.LastRetryDispatchRecheckGeneration + 1);
+        var command =
+            new FileTransferFallbackTailYieldRetryDispatchRecheckCommand(
+                hold,
+                observation,
+                recheckGeneration);
+        return FallbackTailYieldTransition(
+            ApplyFallbackTailYieldSubstate(
+                state,
+                substate with
+                {
+                    PendingRetryDispatchRecheckCommand = command,
+                    LastRetryDispatchRecheckGeneration = recheckGeneration,
+                }),
+            FileTransferFallbackTailYieldTransitionStatus.Accepted,
+            "fallback_tail_retry_dispatch_recheck_issued");
+    }
+
+    internal static FileTransferFallbackTailYieldTransitionDecision
+        ApplyFallbackTailYieldRetryDispatchRecheckReceipt(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackTailYieldRetryDispatchRecheckReceipt receipt)
+    {
+        var substate = state.PersistentState.FallbackTailYield;
+        var rejectionReason = "fallback_tail_retry_dispatch_recheck_receipt_stale";
+        if (receipt.IsDefault)
+        {
+            return FallbackTailYieldTransitionRejected(
+                state,
+                "fallback_tail_retry_dispatch_recheck_receipt_invalid");
+        }
+
+        if (substate.LastRetryDispatchRecheckReceipt == receipt)
+        {
+            return FallbackTailYieldTransition(
+                state,
+                FileTransferFallbackTailYieldTransitionStatus.Idempotent,
+                "fallback_tail_retry_dispatch_recheck_receipt_idempotent");
+        }
+
+        if (substate.PendingRetryDispatchRecheckCommand != receipt.Command ||
+            !IsFallbackTailYieldRetryDispatchHoldCurrent(
+                state,
+                receipt.Command.Hold,
+                out rejectionReason))
+        {
+            return FallbackTailYieldTransitionRejected(state, rejectionReason);
+        }
+
+        var terminalReceipt = receipt.Status ==
+            FileTransferFallbackTailYieldRetryDispatchRecheckReceiptStatus.Rejected;
+        return FallbackTailYieldTransition(
+            ApplyFallbackTailYieldSubstate(
+                state,
+                substate with
+                {
+                    PendingRetryDispatchRecheckCommand = terminalReceipt
+                        ? null
+                        : receipt.Command,
+                    LastRetryDispatchRecheckReceipt = receipt,
+                }),
+            FileTransferFallbackTailYieldTransitionStatus.Accepted,
+            receipt.Status ==
+                FileTransferFallbackTailYieldRetryDispatchRecheckReceiptStatus.Rejected
+                ? "fallback_tail_retry_dispatch_recheck_rejected"
+                : "fallback_tail_retry_dispatch_recheck_queued");
+    }
+
+    private static bool IsFallbackTailYieldRetryDispatchHoldCurrent(
+        FileTransferCoordinatorState state,
+        FileTransferFallbackTailYieldRetryDispatchHold hold,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        var substate = state.PersistentState.FallbackTailYield;
+        if (hold.IsDefault ||
+            substate.CurrentRetryDispatchHold != hold ||
+            substate.PendingRetryRecheckRequest != hold.Request ||
+            substate.CurrentReservation is not null ||
+            substate.CurrentOperation is not
+            {
+                PairingState: FileTransferFallbackTailYieldPairingState.Paired,
+                PairedRelease: { } release,
+            } operation ||
+            release != hold.Release ||
+            state.IsTerminal ||
+            state.Direction != FileTransferDirection.Outbound ||
+            !IsFallbackTailYieldScopeCurrent(
+                state,
+                GetEffectiveFallbackTailYieldScope(operation),
+                out rejectionReason) ||
+            !IsFallbackFrontierRepairAuthorityCurrentForRetryRecheck(
+                state,
+                hold.BlockingRepair,
+                hold.DataSessionIdentity,
+                hold.DataSessionGeneration))
+        {
+            if (string.Equals(rejectionReason, "accepted", StringComparison.Ordinal))
+            {
+                rejectionReason = "fallback_tail_retry_dispatch_hold_stale";
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsFallbackFrontierRepairAuthorityCurrentForRetryRecheck(
+        FileTransferCoordinatorState state,
+        FallbackFrontierRepairAuthority authority,
+        string? dataSessionIdentity,
+        long dataSessionGeneration)
+    {
+        var leg = state.CurrentLeg;
+        var owner = state.CurrentRuntimeOwner;
+        var publication = state.CurrentRoutePublicationToken;
+        return !authority.IsDefault &&
+               leg is not null &&
+               owner is { } currentOwner &&
+               publication is { } currentPublication &&
+               string.Equals(authority.SessionId, state.SessionId, StringComparison.Ordinal) &&
+               string.Equals(authority.TransferId, state.TransferId, StringComparison.Ordinal) &&
+               authority.Direction == state.Direction &&
+               authority.Direction == FileTransferDirection.Outbound &&
+               authority.RuntimeOwner == currentOwner &&
+               authority.Route == state.RouteSelection.Route &&
+               authority.ProtocolVersion == state.RouteSelection.ProtocolVersion &&
+               authority.LiveRouteEpoch == (state.CurrentLiveRouteEpoch?.EpochId ?? 0) &&
+               authority.RuntimeGeneration == currentOwner.RuntimeGeneration &&
+               authority.TerminalGeneration == state.TerminalGeneration &&
+               authority.LegGeneration == leg.Generation &&
+               authority.TransportEpoch == leg.TransportEpochId &&
+               authority.BridgeRecoveryGeneration == leg.BridgeRecoveryGeneration &&
+               authority.RoutePublicationGeneration == currentPublication.PublicationGeneration &&
+               authority.RouteCommitGeneration == currentPublication.RouteCommitGeneration &&
+               string.Equals(
+                   authority.CheckpointRequestId,
+                   leg.CheckpointRequestId,
+                   StringComparison.Ordinal) &&
+               string.Equals(
+                   dataSessionIdentity,
+                   state.CurrentDataSessionIdentity,
+                   StringComparison.Ordinal) &&
+               dataSessionGeneration == state.CurrentDataSessionGeneration;
     }
 
     internal static bool

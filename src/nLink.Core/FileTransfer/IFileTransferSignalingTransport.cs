@@ -1833,6 +1833,10 @@ internal interface IRuntimeUnlockRetryDispatchAuthorityBridge
         RuntimeUnlockRetryDispatchAuthorityRequest request)
         => false;
 
+    bool QueueFallbackTailYieldRetryDispatchRecheck(
+        FileTransferFallbackTailYieldRetryDispatchRecheckCommand command)
+        => false;
+
     bool ObserveRuntimeUnlockRetryDispatchNonGrantDecision(
         RuntimeUnlockRetryDispatchDecision decision);
 
