@@ -8679,6 +8679,7 @@ function Get-FileTransferFileTunaV4DataPathEventNames {
         'filetransfer_live_route_epoch_recovered',
         'filetransfer_live_route_epoch_terminal',
         'tuna_acceleration_reset',
+        'tuna_acceleration_timeline',
         'tuna_runtime_locked',
         'file_transfer_outbound_terminal',
         'file_transfer_inbound_terminal',
@@ -11046,6 +11047,9 @@ function Get-FileTransferGuiLiveFallbackFaultWindowCorrelation {
             ($_.EventName -eq 'tuna_acceleration_reset' -and
                 (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq
                     'header_switch_off') -or
+            ($_.EventName -eq 'tuna_acceleration_timeline' -and
+                (Get-FileTransferEventField -Event $_ -Name 'status' -Default '') -eq
+                    'header_switch_off') -or
             ($_.EventName -eq 'tuna_runtime_locked' -and
                 (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq
                     'header_switch_off') -or
@@ -11075,6 +11079,53 @@ function Get-FileTransferGuiLiveFallbackFaultWindowCorrelation {
             }
         }
         return $true
+    }
+
+    function Test-FaultWindowHeaderSwitch {
+        param($Event)
+
+        return (($Event.EventName -eq 'tuna_acceleration_reset' -and
+                (Get-FileTransferEventField -Event $Event -Name 'reason' -Default '') -eq 'header_switch_off') -or
+            ($Event.EventName -eq 'tuna_acceleration_timeline' -and
+                (Get-FileTransferEventField -Event $Event -Name 'status' -Default '') -eq 'header_switch_off') -or
+            ($Event.EventName -eq 'tuna_runtime_locked' -and
+                (Get-FileTransferEventField -Event $Event -Name 'reason' -Default '') -eq 'header_switch_off'))
+    }
+
+    function Test-FaultWindowFallbackBoundaryMatch {
+        param($Commit, $Terminal, $Boundary)
+
+        if (Test-FaultWindowScopeMatch -Left $Commit -Right $Boundary) { return $true }
+        if (-not (Test-FaultWindowHeaderSwitch -Event $Boundary)) { return $false }
+
+        $writerId = Get-FileTransferEventField -Event $Commit -Name 'log_writer_id' -Default ''
+        $boundaryWriterId = Get-FileTransferEventField -Event $Boundary -Name 'log_writer_id' -Default ''
+        if ([string]::IsNullOrWhiteSpace($writerId) -or
+            -not [string]::Equals($writerId, $boundaryWriterId, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+
+        $boundarySequence = [int64]$Boundary.Sequence
+        [object[]]$candidateIntervals = @(
+            foreach ($candidateTerminal in $terminals) {
+                if ([int64]$candidateTerminal.Sequence -le $boundarySequence -or
+                    -not [string]::Equals(
+                        (Get-FileTransferEventField -Event $candidateTerminal -Name 'log_writer_id' -Default ''),
+                        $writerId,
+                        [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+                foreach ($candidateCommit in $commits) {
+                    if ([int64]$candidateCommit.Sequence -ge $boundarySequence -or
+                        -not [string]::Equals(
+                            (Get-FileTransferEventField -Event $candidateCommit -Name 'log_writer_id' -Default ''),
+                            $writerId,
+                            [System.StringComparison]::OrdinalIgnoreCase) -or
+                        -not (Test-FaultWindowScopeMatch -Left $candidateCommit -Right $candidateTerminal)) { continue }
+                    [pscustomobject]@{ Commit = $candidateCommit; Terminal = $candidateTerminal }
+                }
+            })
+        return $candidateIntervals.Count -eq 1 -and
+            [int64]$candidateIntervals[0].Commit.Sequence -eq [int64]$Commit.Sequence -and
+            [int64]$candidateIntervals[0].Terminal.Sequence -eq [int64]$Terminal.Sequence
     }
 
     $records = New-Object System.Collections.Generic.List[object]
@@ -11130,8 +11181,7 @@ function Get-FileTransferGuiLiveFallbackFaultWindowCorrelation {
         [object[]]$fallback = @($fallbackBoundaries | Where-Object {
                 [int64]$_.Sequence -gt $commitSequence -and
                 [int64]$_.Sequence -lt $terminalSequence -and
-                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq
-                    (Get-FileTransferEventField -Event $commit -Name 'session_id' -Default '')
+                (Test-FaultWindowFallbackBoundaryMatch -Commit $commit -Terminal $terminal -Boundary $_)
             } | Select-Object -First 1)
         if ($publication.Count -ne 1 -or
             $disposition.Count -ne 1 -or

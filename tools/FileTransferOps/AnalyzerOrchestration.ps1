@@ -2277,6 +2277,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_recovered') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_terminal') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_reset') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_timeline') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_runtime_locked') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_outbound_terminal') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_inbound_terminal') +

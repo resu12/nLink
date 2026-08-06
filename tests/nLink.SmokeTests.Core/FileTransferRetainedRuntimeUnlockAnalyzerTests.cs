@@ -322,7 +322,8 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         }
 
         const string scope =
-            "session_id=sess_fault_window; transfer_id=transfer_fault_window; direction=inbound";
+            "session_id=sess_fault_window; transfer_id=transfer_fault_window; direction=inbound; " +
+            "log_writer_id=writer_fault_window";
         var messages = new List<string>
         {
             $"event=filetransfer_route_transition_committed; {scope}; authority_id=transition-1; " +
@@ -341,11 +342,18 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         if (injected)
         {
             messages.Add(
-                $"event=tuna_acceleration_reset; {scope}; reason=header_switch_off");
+                "event=tuna_acceleration_timeline; status=header_switch_off; " +
+                "log_writer_id=writer_fault_window");
         }
         messages.Add(
             $"event=filetransfer_live_route_epoch_terminal; {scope}; route=file_tuna_v4; " +
             "terminal_state=completed; log_writer_sequence=30462");
+        if (!injected)
+        {
+            messages.Add(
+                "event=tuna_acceleration_timeline; status=header_switch_off; " +
+                "log_writer_id=writer_fault_window");
+        }
 
         var result = await RunAnalyzeFixtureAsync(
             messages.Select(LogLine).ToArray(),
