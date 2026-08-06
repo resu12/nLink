@@ -1595,6 +1595,38 @@ function Write-TunaGuiFailureSummaryIfMissing {
         }
     }
 
+    $faultWindow = [ordered]@{
+        terminalCompletedBeforeFault = $false
+        faultInjected = $false
+        faultActionClaimed = $false
+        faultActionInvoked = $false
+        faultRuntimeEvidenceObserved = $false
+        faultInjectedBeforeTerminal = $false
+    }
+    $milestonePath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-milestone-evidence.log'
+    if (Test-Path -LiteralPath $milestonePath -PathType Leaf) {
+        $faultLine = Get-Content -LiteralPath $milestonePath |
+            Where-Object { ([string]$_).IndexOf('event=filetransfer_tuna_gui_fault_window', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 } |
+            Select-Object -Last 1
+        if (-not [string]::IsNullOrWhiteSpace([string]$faultLine)) {
+            foreach ($entry in @(
+                    @{ Property = 'terminalCompletedBeforeFault'; Field = 'terminal_before_click' },
+                    @{ Property = 'faultActionClaimed'; Field = 'fault_action_claimed' },
+                    @{ Property = 'faultActionInvoked'; Field = 'fault_action_invoked' },
+                    @{ Property = 'faultRuntimeEvidenceObserved'; Field = 'fault_runtime_evidence_observed' },
+                    @{ Property = 'faultInjectedBeforeTerminal'; Field = 'fault_injected_before_terminal' })) {
+                $match = [regex]::Match([string]$faultLine, ('(?:^|;\s*){0}=([^;]*)' -f [regex]::Escape([string]$entry.Field)), [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                if ($match.Success) {
+                    $faultWindow[[string]$entry.Property] = [string]::Equals($match.Groups[1].Value.Trim(), '1', [System.StringComparison]::Ordinal)
+                }
+            }
+            $faultWindow.faultInjected = [bool]$faultWindow.faultInjectedBeforeTerminal
+            if ([bool]$faultWindow.faultActionInvoked -and -not [bool]$faultWindow.faultInjectedBeforeTerminal) {
+                $faultWindow.terminalCompletedBeforeFault = $true
+            }
+        }
+    }
+
     $summary = [ordered]@{
         event = 'filetransfer_tuna_gui_handoff_summary'
         routeMode = $RouteMode
@@ -1606,6 +1638,12 @@ function Write-TunaGuiFailureSummaryIfMissing {
         outboundState = '(unknown)'
         inboundErrorCode = '(unknown)'
         outboundErrorCode = '(unknown)'
+        terminalCompletedBeforeFault = [bool]$faultWindow.terminalCompletedBeforeFault
+        faultInjected = [bool]$faultWindow.faultInjected
+        faultActionClaimed = [bool]$faultWindow.faultActionClaimed
+        faultActionInvoked = [bool]$faultWindow.faultActionInvoked
+        faultRuntimeEvidenceObserved = [bool]$faultWindow.faultRuntimeEvidenceObserved
+        faultInjectedBeforeTerminal = [bool]$faultWindow.faultInjectedBeforeTerminal
     }
 
     Write-TunaGuiAtomicJson -Path $summaryPath -Value $summary

@@ -1407,6 +1407,12 @@ function New-RouteAcceptanceRunResult {
         transferEvidenceStatus = 'not_started'
         runtimeCorrectnessVerdict = 'incomplete_proof'
         runtimeFailureCandidate = '(none)'
+        terminalCompletedBeforeFault = $false
+        faultInjected = $false
+        faultActionClaimed = $false
+        faultActionInvoked = $false
+        faultRuntimeEvidenceObserved = $false
+        faultInjectedBeforeTerminal = $false
         runtimeUnlockRetryDispatchAuthorityGrantedRawCount = 0
         runtimeUnlockRetryDispatchAuthorityGrantedCount = 0
         runtimeUnlockRetryDispatchPostGrantHoldCount = 0
@@ -2915,6 +2921,12 @@ function Assert-TunaRouteAcceptanceRun {
 
     if (Assert-RouteAcceptanceFileExists -Result $result -RelativePath 'filetransfer-tuna-gui-summary.json') {
         $summary = Get-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Raw | ConvertFrom-Json
+        $result.terminalCompletedBeforeFault = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $summary -Name 'terminalCompletedBeforeFault' -DefaultValue $false)
+        $result.faultActionClaimed = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $summary -Name 'faultActionClaimed' -DefaultValue $false)
+        $result.faultActionInvoked = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $summary -Name 'faultActionInvoked' -DefaultValue $false)
+        $result.faultRuntimeEvidenceObserved = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $summary -Name 'faultRuntimeEvidenceObserved' -DefaultValue $false)
+        $result.faultInjectedBeforeTerminal = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $summary -Name 'faultInjectedBeforeTerminal' -DefaultValue $false)
+        $result.faultInjected = $result.faultInjectedBeforeTerminal
         $result.controlledRestartAnalysis = Get-JsonPropertyValue -Object $summary -Name 'controlledRestartAnalysis' -DefaultValue $null
         $result.completed = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $summary -Name 'completed' -DefaultValue $false)
         $result.integrityOk = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $summary -Name 'integrityOk' -DefaultValue $false)
@@ -3922,6 +3934,12 @@ function Assert-Phase4ScenarioRun {
 
         if (Assert-RouteAcceptanceFileExists -Result $result -RelativePath 'filetransfer-tuna-gui-summary.json') {
             $summary = Get-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Raw | ConvertFrom-Json
+            $result.terminalCompletedBeforeFault = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $summary -Name 'terminalCompletedBeforeFault' -DefaultValue $false)
+            $result.faultActionClaimed = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $summary -Name 'faultActionClaimed' -DefaultValue $false)
+            $result.faultActionInvoked = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $summary -Name 'faultActionInvoked' -DefaultValue $false)
+            $result.faultRuntimeEvidenceObserved = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $summary -Name 'faultRuntimeEvidenceObserved' -DefaultValue $false)
+            $result.faultInjectedBeforeTerminal = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $summary -Name 'faultInjectedBeforeTerminal' -DefaultValue $false)
+            $result.faultInjected = $result.faultInjectedBeforeTerminal
             $measuredPhase = Get-JsonPropertyValue -Object $summary -Name 'measuredPhase' -DefaultValue $null
             if ($Scenario.Name -eq 'second-transfer-after-reactivation') {
                 $secondTransferPhase = Get-JsonPropertyValue -Object $summary -Name 'secondTransfer' -DefaultValue $null
@@ -9334,6 +9352,12 @@ function New-RouteAcceptanceSummaryRunDto {
         transferEvidenceStatus = [string]$Result.transferEvidenceStatus
         runtimeCorrectnessVerdict = [string]$Result.runtimeCorrectnessVerdict
         runtimeFailureCandidate = [string]$Result.runtimeFailureCandidate
+        terminalCompletedBeforeFault = [bool]$Result.terminalCompletedBeforeFault
+        faultInjected = [bool]$Result.faultInjectedBeforeTerminal
+        faultActionClaimed = [bool]$Result.faultActionClaimed
+        faultActionInvoked = [bool]$Result.faultActionInvoked
+        faultRuntimeEvidenceObserved = [bool]$Result.faultRuntimeEvidenceObserved
+        faultInjectedBeforeTerminal = [bool]$Result.faultInjectedBeforeTerminal
         runtimeUnlockRetryDispatchAuthorityGrantedRawCount = [int]$Result.runtimeUnlockRetryDispatchAuthorityGrantedRawCount
         runtimeUnlockRetryDispatchAuthorityGrantedCount = [int]$Result.runtimeUnlockRetryDispatchAuthorityGrantedCount
         runtimeUnlockRetryDispatchPostGrantHoldCount = [int]$Result.runtimeUnlockRetryDispatchPostGrantHoldCount
@@ -9571,6 +9595,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     )
     $dtoStopwatch.Stop()
     $diagnostics.dtoBuildMs = [long]$dtoStopwatch.ElapsedMilliseconds
+    $terminalCompletedBeforeFault = @($runDtos | Where-Object { [bool]$_.terminalCompletedBeforeFault }).Count -gt 0
+    $faultActionClaimed = @($runDtos | Where-Object { [bool]$_.faultActionClaimed }).Count -gt 0
+    $faultActionInvoked = @($runDtos | Where-Object { [bool]$_.faultActionInvoked }).Count -gt 0
+    $faultRuntimeEvidenceObserved = @($runDtos | Where-Object { [bool]$_.faultRuntimeEvidenceObserved }).Count -gt 0
+    $faultInjectedBeforeTerminal = @($runDtos | Where-Object { [bool]$_.faultInjectedBeforeTerminal }).Count -gt 0
 
     $transferEvidenceStatus = if ($runDtos.Count -eq 0) {
         'not_started'
@@ -10360,6 +10389,12 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("transfer_evidence_status={0}" -f $transferEvidenceStatus),
         ("runtime_correctness_verdict={0}" -f $runtimeCorrectnessVerdict),
         ("runtime_failure_candidate={0}" -f $runtimeFailureCandidate),
+        ("terminal_completed_before_fault={0}" -f ($(if ($terminalCompletedBeforeFault) { 1 } else { 0 }))),
+        ("fault_injected={0}" -f ($(if ($faultInjectedBeforeTerminal) { 1 } else { 0 }))),
+        ("fault_action_claimed={0}" -f ($(if ($faultActionClaimed) { 1 } else { 0 }))),
+        ("fault_action_invoked={0}" -f ($(if ($faultActionInvoked) { 1 } else { 0 }))),
+        ("fault_runtime_evidence_observed={0}" -f ($(if ($faultRuntimeEvidenceObserved) { 1 } else { 0 }))),
+        ("fault_injected_before_terminal={0}" -f ($(if ($faultInjectedBeforeTerminal) { 1 } else { 0 }))),
         ("runtime_unlock_retry_dispatch_authority_granted_raw_count={0}" -f $runtimeUnlockRetryDispatchAuthorityGrantedRawCount),
         ("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $runtimeUnlockRetryDispatchAuthorityGrantedCount),
         ("runtime_unlock_retry_dispatch_post_grant_hold_count={0}" -f $runtimeUnlockRetryDispatchPostGrantHoldCount),
@@ -10719,6 +10754,12 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.transfer_evidence_status={1}" -f $prefix, $result.transferEvidenceStatus)
         $textLines += ("{0}.runtime_correctness_verdict={1}" -f $prefix, $result.runtimeCorrectnessVerdict)
         $textLines += ("{0}.runtime_failure_candidate={1}" -f $prefix, $result.runtimeFailureCandidate)
+        $textLines += ("{0}.terminal_completed_before_fault={1}" -f $prefix, ($(if ([bool]$result.terminalCompletedBeforeFault) { 1 } else { 0 })))
+        $textLines += ("{0}.fault_injected={1}" -f $prefix, ($(if ([bool]$result.faultInjectedBeforeTerminal) { 1 } else { 0 })))
+        $textLines += ("{0}.fault_action_claimed={1}" -f $prefix, ($(if ([bool]$result.faultActionClaimed) { 1 } else { 0 })))
+        $textLines += ("{0}.fault_action_invoked={1}" -f $prefix, ($(if ([bool]$result.faultActionInvoked) { 1 } else { 0 })))
+        $textLines += ("{0}.fault_runtime_evidence_observed={1}" -f $prefix, ($(if ([bool]$result.faultRuntimeEvidenceObserved) { 1 } else { 0 })))
+        $textLines += ("{0}.fault_injected_before_terminal={1}" -f $prefix, ($(if ([bool]$result.faultInjectedBeforeTerminal) { 1 } else { 0 })))
         $textLines += ("{0}.runtime_unlock_retry_dispatch_authority_granted_raw_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchAuthorityGrantedRawCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_authority_granted_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchAuthorityGrantedCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_post_grant_hold_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchPostGrantHoldCount)
@@ -11021,6 +11062,12 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         transferEvidenceStatus = $transferEvidenceStatus
         runtimeCorrectnessVerdict = $runtimeCorrectnessVerdict
         runtimeFailureCandidate = $runtimeFailureCandidate
+        terminalCompletedBeforeFault = $terminalCompletedBeforeFault
+        faultInjected = $faultInjectedBeforeTerminal
+        faultActionClaimed = $faultActionClaimed
+        faultActionInvoked = $faultActionInvoked
+        faultRuntimeEvidenceObserved = $faultRuntimeEvidenceObserved
+        faultInjectedBeforeTerminal = $faultInjectedBeforeTerminal
         runtimeUnlockRetryDispatchAuthorityGrantedRawCount = $runtimeUnlockRetryDispatchAuthorityGrantedRawCount
         runtimeUnlockRetryDispatchAuthorityGrantedCount = $runtimeUnlockRetryDispatchAuthorityGrantedCount
         runtimeUnlockRetryDispatchPostGrantHoldCount = $runtimeUnlockRetryDispatchPostGrantHoldCount
