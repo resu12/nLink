@@ -13037,6 +13037,177 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatchCurrentListenerAdoption_ReusesPhysicalListenerAndCreatesOffer()
+    {
+        FakeNknClient.ResetNetwork();
+        var previousHelpeePriorityDelay =
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
+        NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests =
+            TimeSpan.Zero;
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient(
+                "host.runtime-unlock-current-listener-adoption.address");
+            var helperClient = new FakeNknClient(
+                "helper.runtime-unlock-current-listener-adoption.address");
+            var tuna = new RetryableTunaAccelerationSession(
+                canListen: true,
+                failedDialAttemptsBeforeSuccess: 0,
+                supportedLanes: NknAccelerationLaneKind.File);
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity(
+                    "host-runtime-unlock-current-listener-adoption-id",
+                    hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                tuna);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity(
+                    "helper-runtime-unlock-current-listener-adoption-id",
+                    helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            const string transferId =
+                "transfer_runtime_unlock_current_listener_adoption";
+            _ = await host.OpenFileTransferDataSessionAsync(
+                sessionId,
+                transferId,
+                cts.Token);
+            tuna.MarkCoordinatorScopedListenerAvailableForTests(
+                helperClient.Address);
+
+            var logStart = GetOperationalLogLength();
+            var request =
+                QueueExactFallbackPairedTailYieldRuntimeUnlockRetryForTests(
+                    host,
+                    sessionId,
+                    transferId,
+                    "runtime_unlock_offer_send_not_observed",
+                    "post_tuna_fallback_tail_unblocked");
+            Assert.Equal(
+                RuntimeUnlockRetryDispatchListenerExecutionMode
+                    .AdoptCurrentCoordinatorScoped,
+                request.ListenerExecutionMode);
+            await host
+                .DrainCoordinatorQueuedRuntimeUnlockRetryDispatchAuthorityRequestsForTestsAsync();
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
+
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_retry_dispatch_listener_adoption_applied;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(8));
+
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.True(tuna.ListenerAdoptionCalls == 1, tail);
+            Assert.Equal(0, tuna.EnsureListenerCalls);
+            Assert.Contains("status=Accepted", tail, StringComparison.Ordinal);
+            Assert.Contains("physical_process_id=16704", tail, StringComparison.Ordinal);
+            Assert.Contains(
+                "listener_execution_mode=AdoptCurrentCoordinatorScoped",
+                tail,
+                StringComparison.Ordinal);
+            Assert.NotEqual(
+                "test-current-coordinator-listener",
+                tuna.LastListenerRequest?.ExecutionIdentity);
+        }
+        finally
+        {
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests =
+                previousHelpeePriorityDelay;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatchCurrentListenerAdoption_MissingListenerRemainsHeld()
+    {
+        FakeNknClient.ResetNetwork();
+        var previousHelpeePriorityDelay =
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
+        NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests =
+            TimeSpan.Zero;
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient(
+                "host.runtime-unlock-current-listener-held.address");
+            var helperClient = new FakeNknClient(
+                "helper.runtime-unlock-current-listener-held.address");
+            var tuna = new RetryableTunaAccelerationSession(
+                canListen: true,
+                failedDialAttemptsBeforeSuccess: 0,
+                supportedLanes: NknAccelerationLaneKind.File);
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity(
+                    "host-runtime-unlock-current-listener-held-id",
+                    hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                tuna);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity(
+                    "helper-runtime-unlock-current-listener-held-id",
+                    helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            const string transferId =
+                "transfer_runtime_unlock_current_listener_held";
+            _ = await host.OpenFileTransferDataSessionAsync(
+                sessionId,
+                transferId,
+                cts.Token);
+
+            var logStart = GetOperationalLogLength();
+            _ = QueueExactFallbackPairedTailYieldRuntimeUnlockRetryForTests(
+                host,
+                sessionId,
+                transferId,
+                "runtime_unlock_offer_send_not_observed",
+                "post_tuna_fallback_tail_unblocked");
+            await host
+                .DrainCoordinatorQueuedRuntimeUnlockRetryDispatchAuthorityRequestsForTestsAsync();
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "decision_reason=current_coordinator_scoped_listener_missing",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(8));
+
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Equal(0, tuna.EnsureListenerCalls);
+            Assert.Equal(0, tuna.ListenerAdoptionCalls);
+            Assert.DoesNotContain("event=tuna_path_lease_started;", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("settlement_outcome=MissingDispatch", tail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests =
+                previousHelpeePriorityDelay;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task RuntimeUnlockRetryAfterPostTunaFallback_ReacquiresFallbackDispatchAuthorityBeforeObservedSend()
     {
         FakeNknClient.ResetNetwork();
@@ -13190,6 +13361,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 "DispatchContract");
             Assert.Equal(RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield, successor.Authority.ReleaseKind);
             Assert.Equal(nameof(FallbackTailYieldKind.Quiescent), successor.Authority.ReleaseOutcome);
+            Assert.Equal(
+                RuntimeUnlockRetryDispatchListenerExecutionMode
+                    .AdoptCurrentCoordinatorScoped,
+                successor.Authority.ListenerExecutionMode);
             Assert.False(successor.RequestActivePredecessorSupersession);
 
             var tail = ReadOperationalLogTail(logStart);
@@ -29555,7 +29730,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         private int ensureListenerCalls;
         private int startDialerCalls;
         private int stopCalls;
+        private int listenerAdoptionCalls;
         private string? lastStopReason;
+        private NknTunaListenerAdoptionSnapshot? listenerAdoptionSnapshot;
 
         public RetryableTunaAccelerationSession(
             bool canListen,
@@ -29598,6 +29775,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
         public int StopCalls => Volatile.Read(ref stopCalls);
 
+        public int ListenerAdoptionCalls =>
+            Volatile.Read(ref listenerAdoptionCalls);
+
         public string? LastStopReason => Volatile.Read(ref lastStopReason);
 
         public NknTunaListenerStartRequest? LastListenerRequest { get; private set; }
@@ -29610,6 +29790,60 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             LocalTunaAddress = "nlink-tuna-sidecar.test-listener-address";
             IsLocalPaidListenerActive = true;
             Volatile.Write(ref available, 1);
+        }
+
+        public void MarkCoordinatorScopedListenerAvailableForTests(
+            string expectedRemotePeer)
+        {
+            var request = new NknTunaListenerStartRequest(
+                expectedRemotePeer,
+                supportedLanes,
+                NknTunaListenerLifetimePolicy.CoordinatorScopedInitialActivation,
+                "test-current-coordinator-listener");
+            LocalTunaAddress = "nlink-tuna-sidecar.test-listener-address";
+            LastListenerRequest = request;
+            listenerAdoptionSnapshot = new NknTunaListenerAdoptionSnapshot(
+                request,
+                new NknTunaListenerSidecarEndpoint(
+                    "127.0.0.1:30303",
+                    LocalTunaAddress),
+                ProcessId: 16704,
+                ProcessRunId: "test-current-listener-run",
+                ProcessStartedUtc: DateTimeOffset.UtcNow.AddMinutes(-4));
+            IsLocalPaidListenerActive = true;
+            Volatile.Write(ref available, 1);
+        }
+
+        public NknTunaListenerAdoptionSnapshot?
+            CaptureCurrentListenerAdoptionSnapshot()
+            => IsAvailable ? listenerAdoptionSnapshot : null;
+
+        public bool TryAdoptCurrentListener(
+            NknTunaListenerAdoptionSnapshot snapshot,
+            NknTunaListenerStartRequest successorRequest,
+            out NknTunaListenerAdoptionReceipt receipt)
+        {
+            if (!IsAvailable ||
+                listenerAdoptionSnapshot != snapshot ||
+                snapshot.CurrentRequest.ExpectedRemotePeer !=
+                    successorRequest.ExpectedRemotePeer ||
+                snapshot.CurrentRequest.Lanes != successorRequest.Lanes)
+            {
+                receipt = default!;
+                return false;
+            }
+
+            Interlocked.Increment(ref listenerAdoptionCalls);
+            LastListenerRequest = successorRequest;
+            listenerAdoptionSnapshot = snapshot with
+            {
+                CurrentRequest = successorRequest,
+            };
+            receipt = new NknTunaListenerAdoptionReceipt(
+                snapshot,
+                successorRequest,
+                snapshot.Endpoint.TunaAddress);
+            return true;
         }
 
         public event EventHandler<NknIncomingMessage>? MessageReceived

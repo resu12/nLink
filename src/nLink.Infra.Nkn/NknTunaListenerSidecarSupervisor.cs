@@ -118,6 +118,61 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         }
     }
 
+    public NknTunaListenerAdoptionSnapshot? CaptureCurrentListenerAdoptionSnapshot()
+    {
+        lock (gate)
+        {
+            if (disposed ||
+                endpoint is null ||
+                currentRequest is null ||
+                processOwner is not { IsRunning: true } owner)
+            {
+                return null;
+            }
+
+            return new NknTunaListenerAdoptionSnapshot(
+                currentRequest,
+                endpoint,
+                owner.Pid,
+                owner.RunId,
+                owner.StartedUtc);
+        }
+    }
+
+    public bool TryAdoptCurrentListener(
+        NknTunaListenerAdoptionSnapshot snapshot,
+        NknTunaListenerStartRequest successorRequest)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        ArgumentNullException.ThrowIfNull(successorRequest);
+        lock (gate)
+        {
+            if (disposed ||
+                endpoint != snapshot.Endpoint ||
+                currentRequest != snapshot.CurrentRequest ||
+                processOwner is not { IsRunning: true } owner ||
+                owner.Pid != snapshot.ProcessId ||
+                !string.Equals(owner.RunId, snapshot.ProcessRunId, StringComparison.Ordinal) ||
+                owner.StartedUtc != snapshot.ProcessStartedUtc ||
+                snapshot.CurrentRequest.LifetimePolicy !=
+                    NknTunaListenerLifetimePolicy.CoordinatorScopedInitialActivation ||
+                successorRequest.LifetimePolicy !=
+                    NknTunaListenerLifetimePolicy.CoordinatorScopedInitialActivation ||
+                !string.Equals(
+                    snapshot.CurrentRequest.ExpectedRemotePeer,
+                    successorRequest.ExpectedRemotePeer,
+                    StringComparison.Ordinal) ||
+                snapshot.CurrentRequest.Lanes != successorRequest.Lanes)
+            {
+                return false;
+            }
+
+            currentRequest = successorRequest;
+            expectedRemotePeer = successorRequest.ExpectedRemotePeer;
+            return true;
+        }
+    }
+
     public async Task<NknTunaListenerSidecarEndpoint?> EnsureStartedAsync(NknTunaListenerStartRequest request, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(request.ExpectedRemotePeer))

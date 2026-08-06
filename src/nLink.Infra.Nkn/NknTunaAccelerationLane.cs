@@ -185,6 +185,66 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         return true;
     }
 
+    public NknTunaListenerAdoptionSnapshot? CaptureCurrentListenerAdoptionSnapshot()
+    {
+        lock (gate)
+        {
+            if (disposed ||
+                client?.IsAvailable != true ||
+                clientRole != ClientRole.Listener ||
+                listenerRequest is null ||
+                listenerSupervisor is null)
+            {
+                return null;
+            }
+
+            var snapshot = listenerSupervisor.CaptureCurrentListenerAdoptionSnapshot();
+            return snapshot is not null &&
+                   snapshot.CurrentRequest == listenerRequest &&
+                   string.Equals(
+                       snapshot.Endpoint.TunaAddress,
+                       client.LocalTunaAddress,
+                       StringComparison.Ordinal)
+                ? snapshot
+                : null;
+        }
+    }
+
+    public bool TryAdoptCurrentListener(
+        NknTunaListenerAdoptionSnapshot snapshot,
+        NknTunaListenerStartRequest successorRequest,
+        out NknTunaListenerAdoptionReceipt receipt)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        ArgumentNullException.ThrowIfNull(successorRequest);
+        lock (gate)
+        {
+            if (disposed ||
+                client?.IsAvailable != true ||
+                clientRole != ClientRole.Listener ||
+                listenerRequest != snapshot.CurrentRequest ||
+                listenerSupervisor is null ||
+                !string.Equals(
+                    snapshot.Endpoint.TunaAddress,
+                    client.LocalTunaAddress,
+                    StringComparison.Ordinal) ||
+                !listenerSupervisor.TryAdoptCurrentListener(
+                    snapshot,
+                    successorRequest))
+            {
+                receipt = default!;
+                return false;
+            }
+
+            listenerRequest = successorRequest;
+            receipt = new NknTunaListenerAdoptionReceipt(
+                snapshot,
+                successorRequest,
+                client.LocalTunaAddress ?? snapshot.Endpoint.TunaAddress);
+            return true;
+        }
+    }
+
     public async Task<bool> StartDialerSidecarAsync(string tunaAddress, string expectedRemotePeer, CancellationToken ct)
     {
         Task<bool> startTask;

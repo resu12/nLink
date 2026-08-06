@@ -101,6 +101,18 @@ internal interface INknTunaAccelerationSession : INknAccelerationLane
         CancellationToken ct)
         => EnsureListenerSidecarConnectedAsync(request.ExpectedRemotePeer, ct);
 
+    NknTunaListenerAdoptionSnapshot? CaptureCurrentListenerAdoptionSnapshot()
+        => null;
+
+    bool TryAdoptCurrentListener(
+        NknTunaListenerAdoptionSnapshot snapshot,
+        NknTunaListenerStartRequest successorRequest,
+        out NknTunaListenerAdoptionReceipt receipt)
+    {
+        receipt = default!;
+        return false;
+    }
+
     Task<bool> StartDialerSidecarAsync(string tunaAddress, string expectedRemotePeer, CancellationToken ct);
 
     Task StopAsync(string reason, CancellationToken ct);
@@ -121,6 +133,18 @@ internal sealed record NknTunaListenerStartRequest(
 
 internal sealed record NknTunaListenerSidecarEndpoint(
     string LocalIpc,
+    string TunaAddress);
+
+internal sealed record NknTunaListenerAdoptionSnapshot(
+    NknTunaListenerStartRequest CurrentRequest,
+    NknTunaListenerSidecarEndpoint Endpoint,
+    int ProcessId,
+    string ProcessRunId,
+    DateTimeOffset ProcessStartedUtc);
+
+internal sealed record NknTunaListenerAdoptionReceipt(
+    NknTunaListenerAdoptionSnapshot Previous,
+    NknTunaListenerStartRequest SuccessorRequest,
     string TunaAddress);
 
 internal sealed record NknTunaPaymentTelemetry(
@@ -155,6 +179,14 @@ internal interface INknTunaListenerSidecarSupervisor : IDisposable
     bool CanOfferListener { get; }
 
     Task<NknTunaListenerSidecarEndpoint?> EnsureStartedAsync(NknTunaListenerStartRequest request, CancellationToken ct);
+
+    NknTunaListenerAdoptionSnapshot? CaptureCurrentListenerAdoptionSnapshot()
+        => null;
+
+    bool TryAdoptCurrentListener(
+        NknTunaListenerAdoptionSnapshot snapshot,
+        NknTunaListenerStartRequest successorRequest)
+        => false;
 
     void Stop(string reason);
 

@@ -775,6 +775,9 @@ public sealed partial class NknSignalingTransport
         public RuntimeUnlockRetryDispatchListenerRearmRequirement
             ListenerRearmRequirement { get; set; }
 
+        public RuntimeUnlockRetryDispatchListenerExecutionMode
+            ListenerExecutionMode { get; set; }
+
         public bool ListenerRearmCompleted { get; set; }
 
         public bool CutThroughPending { get; set; }
@@ -8941,7 +8944,7 @@ public sealed partial class NknSignalingTransport
         var routeCommitGeneration = publication.RouteCommitGeneration is { } commitGeneration
             ? commitGeneration.ToString(CultureInfo.InvariantCulture)
             : "(none)";
-        return $"session_id={SanitizeLogToken(request.SessionId)}; transfer_id={SanitizeLogToken(request.TransferId)}; direction={request.Direction.ToString().ToLowerInvariant()}; contract_generation={request.RecoveryContractGeneration}; retired_generation={request.RetiredOfferGeneration}; dispatch_attempt_generation={request.DispatchAttemptGeneration}; missing_dispatch_successor_generation={request.MissingDispatchSuccessorGeneration}; predecessor_authority_id={SanitizeLogToken(request.PredecessorAuthorityId?.ToString() ?? "(none)")}; request_active_predecessor_supersession={(request.RequestActivePredecessorSupersession ? 1 : 0)}; listener_rearm_requirement={SanitizeLogToken(request.ListenerRearmRequirement.ToString())}; retry_reason={SanitizeLogToken(request.RetryReason)}; recovery_reason={SanitizeLogToken(request.RecoveryReason)}; regular_v4_liveness_generation={request.RegularV4LivenessGeneration}; bridge_decision_generation={request.BridgeDecisionGeneration}; source_session_id={SanitizeLogToken(publication.SessionId)}; source_transfer_id={SanitizeLogToken(publication.TransferId)}; source_direction={publication.Direction.ToString().ToLowerInvariant()}; source_route={SanitizeLogToken(publication.RouteToken)}; source_protocol_version={publication.ProtocolVersion}; source_live_route_epoch={publication.LiveRouteEpoch}; source_runtime_generation={publication.RuntimeGeneration}; source_terminal_generation={publication.TerminalGeneration}; source_leg_generation={publication.LegGeneration}; source_route_publication_generation={publication.RoutePublicationGeneration}; source_route_commit_generation={routeCommitGeneration}; source_route_commit_generation_present={(publication.RouteCommitGeneration.HasValue ? 1 : 0)}; source_target_route={SanitizeLogToken(publication.TargetRouteToken)}; source_target_protocol_version={publication.TargetProtocolVersion}; source_target_transport={FormatFileTransferTransportKindForLog(publication.TargetTransport)}; source_route_publication_action_kind={SanitizeLogToken(publication.RoutePublicationActionKind)}; source_coordinator_decision_reason={SanitizeLogToken(publication.CoordinatorDecisionReason)}";
+        return $"session_id={SanitizeLogToken(request.SessionId)}; transfer_id={SanitizeLogToken(request.TransferId)}; direction={request.Direction.ToString().ToLowerInvariant()}; contract_generation={request.RecoveryContractGeneration}; retired_generation={request.RetiredOfferGeneration}; dispatch_attempt_generation={request.DispatchAttemptGeneration}; missing_dispatch_successor_generation={request.MissingDispatchSuccessorGeneration}; predecessor_authority_id={SanitizeLogToken(request.PredecessorAuthorityId?.ToString() ?? "(none)")}; request_active_predecessor_supersession={(request.RequestActivePredecessorSupersession ? 1 : 0)}; listener_rearm_requirement={SanitizeLogToken(request.ListenerRearmRequirement.ToString())}; listener_execution_mode={SanitizeLogToken(request.ListenerExecutionMode.ToString())}; retry_reason={SanitizeLogToken(request.RetryReason)}; recovery_reason={SanitizeLogToken(request.RecoveryReason)}; regular_v4_liveness_generation={request.RegularV4LivenessGeneration}; bridge_decision_generation={request.BridgeDecisionGeneration}; source_session_id={SanitizeLogToken(publication.SessionId)}; source_transfer_id={SanitizeLogToken(publication.TransferId)}; source_direction={publication.Direction.ToString().ToLowerInvariant()}; source_route={SanitizeLogToken(publication.RouteToken)}; source_protocol_version={publication.ProtocolVersion}; source_live_route_epoch={publication.LiveRouteEpoch}; source_runtime_generation={publication.RuntimeGeneration}; source_terminal_generation={publication.TerminalGeneration}; source_leg_generation={publication.LegGeneration}; source_route_publication_generation={publication.RoutePublicationGeneration}; source_route_commit_generation={routeCommitGeneration}; source_route_commit_generation_present={(publication.RouteCommitGeneration.HasValue ? 1 : 0)}; source_target_route={SanitizeLogToken(publication.TargetRouteToken)}; source_target_protocol_version={publication.TargetProtocolVersion}; source_target_transport={FormatFileTransferTransportKindForLog(publication.TargetTransport)}; source_route_publication_action_kind={SanitizeLogToken(publication.RoutePublicationActionKind)}; source_coordinator_decision_reason={SanitizeLogToken(publication.CoordinatorDecisionReason)}";
     }
 
     private bool EnsureFileTransferFallbackRecoveredStateFromV6Epoch(
@@ -11086,6 +11089,7 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockInitialActivationReceiveRecoveryExpectedScope?
             runtimeUnlockInitialActivationExpectedScope = null;
         FileTransferAuthorityId? runtimeUnlockDispatchAuthorityId = null;
+        RuntimeUnlockRetryDispatchContract? capturedDispatchContract = null;
         if (isRuntimeUnlockActivation &&
             IsFileTransferRuntimeUnlockContextObserved(sessionId))
         {
@@ -11134,7 +11138,7 @@ public sealed partial class NknSignalingTransport
             TryGetInstalledRuntimeUnlockRetryDispatchContract(
                 sessionId,
                 out _,
-                out var capturedDispatchContract))
+                out capturedDispatchContract))
         {
             runtimeUnlockDispatchAuthorityId = capturedDispatchContract!.Authority.AuthorityId;
         }
@@ -11365,6 +11369,75 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        var listenerAdoptionContract = capturedDispatchContract;
+        var adoptCurrentCoordinatorScopedListener =
+            usesInstalledRetryAuthority &&
+            listenerAdoptionContract is not null &&
+            listenerAdoptionContract.Authority.ListenerExecutionMode ==
+                RuntimeUnlockRetryDispatchListenerExecutionMode
+                    .AdoptCurrentCoordinatorScoped;
+        NknTunaListenerAdoptionReceipt? listenerAdoptionReceipt = null;
+        NknTunaListenerStartRequest? adoptedListenerRequest = null;
+        if (adoptCurrentCoordinatorScopedListener)
+        {
+            var exactListenerAdoptionContract = listenerAdoptionContract!;
+            if (!ValidateOfferAuthority("listener_adoption_prevalidation"))
+            {
+                return;
+            }
+
+            var adoptionSnapshot =
+                tunaSession.CaptureCurrentListenerAdoptionSnapshot();
+            if (adoptionSnapshot is null)
+            {
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=runtime_unlock_retry_dispatch_listener_adoption_decided; {RuntimeUnlockRetryDispatchTelemetry.FormatAuthorityTuple(exactListenerAdoptionContract.Authority)}; install_generation={expectedInstallReceipt?.InstallGeneration ?? 0}; status=Held; physical_process_id=0; physical_process_run_id=(none); previous_request_identity=(none); successor_request_identity=(none); decision_reason=current_coordinator_scoped_listener_missing");
+                ResumeActivationPauseIfNeeded(
+                    "tuna_activation_failed_regular_v4_resumed",
+                    "current_coordinator_scoped_listener_missing");
+                return;
+            }
+
+            adoptedListenerRequest = new NknTunaListenerStartRequest(
+                remoteEndpoint,
+                preflightLanes,
+                NknTunaListenerLifetimePolicy.CoordinatorScopedInitialActivation,
+                string.Join(
+                    "|",
+                    sessionId,
+                    exactListenerAdoptionContract.Authority.TransferId,
+                    exactListenerAdoptionContract.Authority.AuthorityId,
+                    expectedInstallReceipt?.InstallGeneration ?? 0,
+                    exactListenerAdoptionContract.Authority.DispatchAttemptGeneration));
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=runtime_unlock_retry_dispatch_listener_adoption_decided; {RuntimeUnlockRetryDispatchTelemetry.FormatAuthorityTuple(exactListenerAdoptionContract.Authority)}; install_generation={expectedInstallReceipt?.InstallGeneration ?? 0}; status=Accepted; physical_process_id={adoptionSnapshot.ProcessId}; physical_process_run_id={SanitizeLogToken(adoptionSnapshot.ProcessRunId)}; physical_process_started_utc_ms={adoptionSnapshot.ProcessStartedUtc.ToUnixTimeMilliseconds()}; previous_request_identity={SanitizeLogToken(adoptionSnapshot.CurrentRequest.ExecutionIdentity)}; successor_request_identity={SanitizeLogToken(adoptedListenerRequest.ExecutionIdentity)}; decision_reason=current_coordinator_scoped_listener_exact");
+            if (!tunaSession.TryAdoptCurrentListener(
+                    adoptionSnapshot,
+                    adoptedListenerRequest,
+                    out var appliedAdoptionReceipt))
+            {
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=runtime_unlock_retry_dispatch_listener_adoption_applied; {RuntimeUnlockRetryDispatchTelemetry.FormatAuthorityTuple(exactListenerAdoptionContract.Authority)}; install_generation={expectedInstallReceipt?.InstallGeneration ?? 0}; status=Held; physical_process_id={adoptionSnapshot.ProcessId}; physical_process_run_id={SanitizeLogToken(adoptionSnapshot.ProcessRunId)}; previous_request_identity={SanitizeLogToken(adoptionSnapshot.CurrentRequest.ExecutionIdentity)}; successor_request_identity={SanitizeLogToken(adoptedListenerRequest.ExecutionIdentity)}; decision_reason=current_coordinator_scoped_listener_changed");
+                ResumeActivationPauseIfNeeded(
+                    "tuna_activation_failed_regular_v4_resumed",
+                    "current_coordinator_scoped_listener_changed");
+                return;
+            }
+
+            listenerAdoptionReceipt = appliedAdoptionReceipt;
+            if (!ValidateOfferAuthority("listener_adoption_applied"))
+            {
+                return;
+            }
+
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=runtime_unlock_retry_dispatch_listener_adoption_applied; {RuntimeUnlockRetryDispatchTelemetry.FormatAuthorityTuple(exactListenerAdoptionContract.Authority)}; install_generation={expectedInstallReceipt?.InstallGeneration ?? 0}; status=Accepted; physical_process_id={appliedAdoptionReceipt.Previous.ProcessId}; physical_process_run_id={SanitizeLogToken(appliedAdoptionReceipt.Previous.ProcessRunId)}; physical_process_started_utc_ms={appliedAdoptionReceipt.Previous.ProcessStartedUtc.ToUnixTimeMilliseconds()}; tuna_address={SanitizeLogToken(appliedAdoptionReceipt.TunaAddress)}; previous_request_identity={SanitizeLogToken(appliedAdoptionReceipt.Previous.CurrentRequest.ExecutionIdentity)}; successor_request_identity={SanitizeLogToken(appliedAdoptionReceipt.SuccessorRequest.ExecutionIdentity)}; release_authority_id={SanitizeLogToken(exactListenerAdoptionContract.Authority.ReleaseAuthorityId?.ToString() ?? "(none)")}; release_generation={exactListenerAdoptionContract.Authority.ReleaseGeneration}; decision_reason=current_coordinator_scoped_listener_adopted");
+        }
+
         NotifyTransportAccelerationStateChanged("selected_payer_starting_listener");
         NotifyTransportAccelerationStateChanged("listener_starting");
         var runtimeUnlockTunaPathLease = RuntimeUnlockTunaPathLeaseSnapshot.None;
@@ -11388,8 +11461,8 @@ public sealed partial class NknSignalingTransport
                 $"event=filetransfer_tuna_activation_negotiation_regular_nkn_pause_deferred; session_id={SanitizeLogToken(sessionId)}; reason=runtime_unlock_listener_starting; trigger={SanitizeLogToken(reason)}");
         }
 
-        var listenerStartRequest =
-            isRuntimeUnlockActivation &&
+        var listenerStartRequest = adoptedListenerRequest ??
+            (isRuntimeUnlockActivation &&
             offerAuthorityMode == RuntimeUnlockOfferAuthorityMode.InitialActivation &&
             runtimeUnlockFileTransferOwnerAuthority is { } listenerOwner
                 ? new NknTunaListenerStartRequest(
@@ -11409,10 +11482,11 @@ public sealed partial class NknSignalingTransport
                         runtimeUnlockTunaPathLease.ListenerRunId))
                 : new NknTunaListenerStartRequest(
                     remoteEndpoint,
-                    preflightLanes);
-        if (!await tunaSession.EnsureListenerSidecarConnectedAsync(
-                listenerStartRequest,
-                ct).ConfigureAwait(false) ||
+                    preflightLanes));
+        if ((listenerAdoptionReceipt is null &&
+             !await tunaSession.EnsureListenerSidecarConnectedAsync(
+                     listenerStartRequest,
+                     ct).ConfigureAwait(false)) ||
             string.IsNullOrWhiteSpace(tunaSession.LocalTunaAddress))
         {
             NotifyTransportAccelerationStateChanged("listener_sidecar_unavailable");
@@ -11487,6 +11561,37 @@ public sealed partial class NknSignalingTransport
                 sessionId,
                 reason,
                 expectedInstallReceipt);
+        }
+
+        bool IsListenerAdoptionCurrent(string stage)
+        {
+            if (listenerAdoptionReceipt is not { } adoption)
+            {
+                return true;
+            }
+
+            var current = tunaSession.CaptureCurrentListenerAdoptionSnapshot();
+            var isCurrent = current is not null &&
+                            current.CurrentRequest == adoption.SuccessorRequest &&
+                            current.ProcessId == adoption.Previous.ProcessId &&
+                            string.Equals(
+                                current.ProcessRunId,
+                                adoption.Previous.ProcessRunId,
+                                StringComparison.Ordinal) &&
+                            current.ProcessStartedUtc ==
+                                adoption.Previous.ProcessStartedUtc &&
+                            string.Equals(
+                                current.Endpoint.TunaAddress,
+                                adoption.TunaAddress,
+                                StringComparison.Ordinal);
+            if (!isCurrent)
+            {
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=runtime_unlock_retry_dispatch_listener_adoption_currentness_rejected; session_id={SanitizeLogToken(sessionId)}; transfer_id={SanitizeLogToken(runtimeUnlockFileTransferOwnerAuthority?.TransferId ?? "(none)")}; stage={SanitizeLogToken(stage)}; physical_process_id={adoption.Previous.ProcessId}; physical_process_run_id={SanitizeLogToken(adoption.Previous.ProcessRunId)}; successor_request_identity={SanitizeLogToken(adoption.SuccessorRequest.ExecutionIdentity)}; decision_reason=listener_adoption_not_current");
+            }
+
+            return isCurrent;
         }
 
         NotifyTransportAccelerationStateChanged("listener_ready");
@@ -11637,7 +11742,8 @@ public sealed partial class NknSignalingTransport
 
         if (usesInstalledRetryAuthority)
         {
-            if (!ValidateOfferAuthority("offer_creation"))
+            if (!ValidateOfferAuthority("offer_creation") ||
+                !IsListenerAdoptionCurrent("offer_alias_creation"))
             {
                 return;
             }
@@ -12147,6 +12253,12 @@ public sealed partial class NknSignalingTransport
             RuntimeUnlockInitialActivationReceiveRecoveryHoldPrevalidation?
                 holdPrevalidation = null)
         {
+            if (!IsListenerAdoptionCurrent("physical_submission"))
+            {
+                return Task.FromResult(
+                    AccelerationControlSendResult.StaleCallback);
+            }
+
             var currentEnvelope = envelope;
             var currentBoundary = runtimeUnlockOfferAuthorityBoundary;
             if (currentBoundary is
@@ -14882,6 +14994,7 @@ public sealed partial class NknSignalingTransport
                 SourcePublicationAuthority = publication,
                 PendingDispatchAuthorityRequest = request,
                 RetryAuthorityPending = true,
+                ListenerExecutionMode = request.ListenerExecutionMode,
             };
             runtimeUnlockRecoveryContractNextGeneration = Math.Max(
                 runtimeUnlockRecoveryContractNextGeneration,
@@ -15844,7 +15957,9 @@ public sealed partial class NknSignalingTransport
            evaluation.FallbackPairedTailYieldEvidence ==
                request.FallbackPairedTailYieldEvidence &&
            evaluation.ListenerRearmRequirement ==
-               request.ListenerRearmRequirement;
+               request.ListenerRearmRequirement &&
+           evaluation.ListenerExecutionMode ==
+               request.ListenerExecutionMode;
 
     private static bool TryBindCoordinatorPreparedInitialRequestUnsafe(
         RuntimeUnlockRecoveryRetryState state,
@@ -15861,6 +15976,7 @@ public sealed partial class NknSignalingTransport
 
         state.PendingDispatchInitialEvaluation = null;
         state.PendingDispatchAuthorityRequest = decision.Request;
+        state.ListenerExecutionMode = decision.Request.ListenerExecutionMode;
         return true;
     }
 
@@ -16571,6 +16687,8 @@ public sealed partial class NknSignalingTransport
                         }
 
                         state.PendingDispatchAuthorityRequest = successorRequest;
+                        state.ListenerExecutionMode =
+                            successorRequest.ListenerExecutionMode;
                         state.DispatchPredecessorContract = predecessor;
                         state.DispatchDecisionStatus = null;
                         state.DispatchAuthorityGranted = false;
@@ -16581,6 +16699,11 @@ public sealed partial class NknSignalingTransport
 
                     case RuntimeUnlockRetryDispatchSuccessorDecisionStatus.Held:
                         state.PendingDispatchAuthorityRequest = request;
+                        if (request is { } heldRequest)
+                        {
+                            state.ListenerExecutionMode =
+                                heldRequest.ListenerExecutionMode;
+                        }
                         state.DispatchPredecessorContract = predecessor;
                         state.DispatchDecisionStatus =
                             RuntimeUnlockRetryDispatchDecisionStatus.Held;
@@ -18570,6 +18693,8 @@ public sealed partial class NknSignalingTransport
                     {
                         ListenerRearmRequirement =
                             state.ListenerRearmRequirement,
+                        ListenerExecutionMode =
+                            state.ListenerExecutionMode,
                     };
                     state.TransferId = publication.TransferId;
                     state.PendingDispatchInitialEvaluation = initialEvaluation;
@@ -19297,6 +19422,8 @@ public sealed partial class NknSignalingTransport
         state.LivenessDeferralDeadlineUtcMs = 0;
         state.AuthorizedObservedLane = null;
         state.RequiresLocalListenerRetry = false;
+        state.ListenerExecutionMode =
+            RuntimeUnlockRetryDispatchListenerExecutionMode.Default;
         state.ListenerRearmCompleted = false;
         state.CutThroughPending = false;
         state.CutThroughActive = false;
@@ -19360,6 +19487,8 @@ public sealed partial class NknSignalingTransport
         state.DispatchDecisionReason = decisionReason;
         state.AuthorityFailureReason = decisionReason;
         state.RequiresLocalListenerRetry = false;
+        state.ListenerExecutionMode =
+            RuntimeUnlockRetryDispatchListenerExecutionMode.Default;
         state.ListenerRearmCompleted = false;
         state.CutThroughPending = false;
         state.CutThroughActive = false;
@@ -22842,6 +22971,8 @@ public sealed partial class NknSignalingTransport
                     ListenerRearmRequirement = requiresLocalListenerRetry
                         ? listenerRearmRequirement
                         : RuntimeUnlockRetryDispatchListenerRearmRequirement.None,
+                    ListenerExecutionMode =
+                        RuntimeUnlockRetryDispatchListenerExecutionMode.Default,
                     CutThroughPending = cutThroughPending,
                     CutThroughAttempt = previousCutThroughAttempt,
                     SourcePublicationAuthority = sourcePublicationAuthority,
