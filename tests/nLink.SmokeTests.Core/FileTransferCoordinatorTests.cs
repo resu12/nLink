@@ -9640,6 +9640,10 @@ public sealed class FileTransferCoordinatorTests
                 Task.FromResult(receipt)),
             observedUtcMs: 10);
         Assert.True(started.Accepted, started.Reason);
+        var answerTimeoutHoldRequest =
+            CreateInitialActivationReceiveRecoveryHoldRequest(
+                started.State,
+                payerDecisionId: 104);
 
         var leg = Assert.IsType<FileTransferLeg>(started.State.CurrentLeg);
         var frame = new FileTransferFrontierRequestFrameV6
@@ -9706,12 +9710,26 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(
             FileTransferReceiveRecoveryFallbackCheckpointBindingState.Pending,
             binding.State);
+        var answerTimeoutHold = FileTransferCoordinator
+            .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                requested.State,
+                answerTimeoutHoldRequest);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held,
+            answerTimeoutHold.Decision.Status);
+        Assert.Equal(
+            authority,
+            answerTimeoutHold.Decision.ReceiveRecoveryOperation?.Authority);
+        Assert.NotNull(
+            FileTransferCoordinator.GetReceiveRecoverySubstate(
+                    answerTimeoutHold.State)
+                .CurrentInitialActivationHold);
         var command =
             Assert.IsType<FileTransferReceiveRecoveryFallbackCheckpointDeliveryCommand>(
                 requested.ReceiveRecoveryFallbackCheckpointDeliveryCommand);
         var held = FileTransferCoordinator
             .ApplyReceiveRecoveryFallbackCheckpointDeliveryReceipt(
-                requested.State,
+                answerTimeoutHold.State,
                 new FileTransferReceiveRecoveryFallbackCheckpointDeliveryReceipt(
                     command,
                     FileTransferReceiveRecoveryFallbackCheckpointDeliveryState
@@ -9816,6 +9834,9 @@ public sealed class FileTransferCoordinatorTests
                     "checkpoint_delivered"),
                 observedUtcMs: 25);
         Assert.True(delivered.Accepted, delivered.Reason);
+        Assert.NotNull(
+            FileTransferCoordinator.GetReceiveRecoverySubstate(delivered.State)
+                .CurrentInitialActivationHold);
         Assert.Null(
             FileTransferCoordinator.GetReceiveRecoverySubstate(delivered.State)
                 .PendingFallbackCheckpointDeliveryCommand);
@@ -9827,12 +9848,79 @@ public sealed class FileTransferCoordinatorTests
                 "receive_proof_observed",
                 21));
         Assert.True(proof.Accepted, proof.Reason);
+        var release = Assert.IsType<
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision>(
+            proof.InitialActivationHoldDecision);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Released,
+            release.Status);
+        var refresh = Assert.IsType<
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshCommand>(
+            release.EnvelopeRefreshCommand);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshReleaseProfile
+                .PostTunaFallbackCheckpointProof,
+            refresh.ReleaseProfile);
+        Assert.Equal(0, refresh.ClosureGeneration);
+        Assert.Equal(
+            FileTransferReceiveRecoveryFallbackCheckpointBindingState.Pending,
+            refresh.FallbackCheckpointBinding?.State);
+        Assert.Equal(frameIdentity, refresh.FallbackCheckpointBinding?.FrameIdentity);
+        var refreshReceipt =
+            new RuntimeUnlockInitialActivationOfferEnvelopeRefreshReceipt(
+                refresh,
+                "post-fallback-successor-envelope-fingerprint",
+                SecureSequence: 19,
+                MessageId: "post-fallback-refresh-message-1");
+        var capturedBinding = Assert.IsType<
+            RuntimeUnlockInitialActivationReceiveRecoveryFallbackCheckpointBinding>(
+            refresh.FallbackCheckpointBinding);
+        var mutatedRefresh = refresh with
+        {
+            FallbackCheckpointBinding = capturedBinding with
+            {
+                BindingGeneration = capturedBinding.BindingGeneration + 1,
+            },
+        };
+        var mutatedRefreshDecision = FileTransferCoordinator
+            .CommitRuntimeUnlockInitialActivationOfferEnvelopeRefresh(
+                proof.State,
+                new RuntimeUnlockInitialActivationOfferEnvelopeRefreshReceipt(
+                    mutatedRefresh,
+                    "mutated-post-fallback-successor-envelope-fingerprint",
+                    SecureSequence: 20,
+                    MessageId: "mutated-post-fallback-refresh-message-1"));
+        Assert.Equal(
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshStatus.Rejected,
+            mutatedRefreshDecision.Decision.Status);
+        var acceptedBeforeRefresh = AcceptFallbackCheckpoint(
+            proof.State,
+            fallback,
+            frame.RepairRequestId,
+            frame.TransportEpoch,
+            committedChunk: 7,
+            highestObservedChunk: 7);
+        var refreshCommittedAfterAcceptance = FileTransferCoordinator
+            .CommitRuntimeUnlockInitialActivationOfferEnvelopeRefresh(
+                acceptedBeforeRefresh.State,
+                refreshReceipt);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshStatus.Accepted,
+            refreshCommittedAfterAcceptance.Decision.Status);
+        var refreshCommitted = FileTransferCoordinator
+            .CommitRuntimeUnlockInitialActivationOfferEnvelopeRefresh(
+                proof.State,
+                refreshReceipt);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshStatus.Accepted,
+            refreshCommitted.Decision.Status);
         Assert.NotNull(
-            FileTransferCoordinator.GetReceiveRecoverySubstate(proof.State)
+            FileTransferCoordinator.GetReceiveRecoverySubstate(
+                    refreshCommitted.State)
                 .CurrentOperation);
 
         var accepted = AcceptFallbackCheckpoint(
-            proof.State,
+            refreshCommitted.State,
             fallback,
             frame.RepairRequestId,
             frame.TransportEpoch,

@@ -13355,6 +13355,10 @@ public sealed partial class NknSignalingTransport
             requestMatchesBoundary &&
             RuntimeUnlockInitialActivationReceiveRecoveryHoldDecisionMatchesRequest(
                 prevalidation.Decision) &&
+            (prevalidation.Decision.EnvelopeRefreshCommand is not
+                { } refreshCommand ||
+             RuntimeUnlockInitialActivationEnvelopeRefreshProfileMatchesCurrentScope(
+                 refreshCommand)) &&
             ValidateRuntimeUnlockOfferAuthorityBoundary(
                 boundary,
                 "initial_activation_hold_send_prevalidation",
@@ -13891,7 +13895,9 @@ public sealed partial class NknSignalingTransport
                     StringComparison.Ordinal) ||
                 !IsRuntimeUnlockOfferAuthorityBoundaryCurrentUnsafe(
                     current.Boundary,
-                    allowDispatchObservedSettlement: true))
+                    allowDispatchObservedSettlement: true) ||
+                !RuntimeUnlockInitialActivationEnvelopeRefreshProfileMatchesCurrentScope(
+                    command))
             {
                 LocalOperationalLog.Warn(
                     "NKN.Tuna",
@@ -13904,7 +13910,7 @@ public sealed partial class NknSignalingTransport
 
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=runtime_unlock_initial_activation_offer_envelope_refresh_issued; {FormatRuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(command.HoldRequest)}; refresh_generation={command.RefreshGeneration}; successor_envelope_generation={command.SuccessorEnvelopeGeneration}; successor_sent_at_unix_ms={command.SuccessorSentAtUnixMs}; successor_expires_at_unix_ms={command.SuccessorExpiresAtUnixMs}; decision_reason=coordinator_refresh_command_current");
+            $"event=runtime_unlock_initial_activation_offer_envelope_refresh_issued; {FormatRuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(command.HoldRequest)}; refresh_generation={command.RefreshGeneration}; refresh_release_profile={command.ReleaseProfile}; successor_envelope_generation={command.SuccessorEnvelopeGeneration}; successor_sent_at_unix_ms={command.SuccessorSentAtUnixMs}; successor_expires_at_unix_ms={command.SuccessorExpiresAtUnixMs}; decision_reason=coordinator_refresh_command_current");
         var refreshedOffer = new TransportAccelerationOfferPayload
         {
             SessionId = predecessor.Offer.SessionId,
@@ -14006,8 +14012,61 @@ public sealed partial class NknSignalingTransport
 
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=runtime_unlock_initial_activation_offer_envelope_refresh_committed; {FormatRuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(command.HoldRequest)}; refresh_generation={command.RefreshGeneration}; successor_envelope_generation={command.SuccessorEnvelopeGeneration}; successor_envelope_fingerprint={SanitizeLogToken(refreshedFingerprint)}; successor_sent_at_unix_ms={command.SuccessorSentAtUnixMs}; successor_expires_at_unix_ms={command.SuccessorExpiresAtUnixMs}; secure_sequence={receipt.SecureSequence}; message_id={SanitizeLogToken(receipt.MessageId)}; decision_status={decision.Status}; decision_reason={SanitizeLogToken(decision.Reason)}");
+            $"event=runtime_unlock_initial_activation_offer_envelope_refresh_committed; {FormatRuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(command.HoldRequest)}; refresh_generation={command.RefreshGeneration}; refresh_release_profile={command.ReleaseProfile}; successor_envelope_generation={command.SuccessorEnvelopeGeneration}; successor_envelope_fingerprint={SanitizeLogToken(refreshedFingerprint)}; successor_sent_at_unix_ms={command.SuccessorSentAtUnixMs}; successor_expires_at_unix_ms={command.SuccessorExpiresAtUnixMs}; secure_sequence={receipt.SecureSequence}; message_id={SanitizeLogToken(receipt.MessageId)}; decision_status={decision.Status}; decision_reason={SanitizeLogToken(decision.Reason)}");
         return true;
+    }
+
+    private bool
+        RuntimeUnlockInitialActivationEnvelopeRefreshProfileMatchesCurrentScope(
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshCommand command)
+    {
+        if (command.ReleaseProfile ==
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshReleaseProfile
+                .RegularV4Closure)
+        {
+            return command.ClosureGeneration > 0;
+        }
+
+        if (command.ReleaseProfile !=
+                RuntimeUnlockInitialActivationOfferEnvelopeRefreshReleaseProfile
+                    .PostTunaFallbackCheckpointProof ||
+            command.ReceiveRecoveryProof is not { IsDefault: false } proof ||
+            proof.Authority != command.ReceiveRecoveryAuthority ||
+            command.FallbackCheckpointBinding is not
+                { IsDefault: false } binding ||
+            command.HoldRequest.ExpectedScope.SourcePublicationAuthority is not
+                { } sourcePublicationAuthority ||
+            !TryCaptureRuntimeUnlockInitialActivationReceiveRecoveryExpectedScope(
+                sourcePublicationAuthority,
+                out var current,
+                out _) ||
+            current.SourcePublicationAuthority !=
+                command.HoldRequest.ExpectedScope.SourcePublicationAuthority ||
+            current.TransportEpoch != binding.TransportEpoch ||
+            current.BridgeRecoveryGeneration !=
+                command.HoldRequest.ExpectedScope.BridgeRecoveryGeneration ||
+            !string.Equals(
+                current.DataSessionIdentity,
+                command.HoldRequest.ExpectedScope.DataSessionIdentity,
+                StringComparison.Ordinal) ||
+            current.DataSessionGeneration !=
+                command.HoldRequest.ExpectedScope.DataSessionGeneration)
+        {
+            return false;
+        }
+
+        return binding.State switch
+        {
+            FileTransferReceiveRecoveryFallbackCheckpointBindingState.Pending =>
+                string.Equals(
+                    current.CheckpointRequestId,
+                    binding.EffectiveCheckpointRequestId,
+                    StringComparison.Ordinal),
+            FileTransferReceiveRecoveryFallbackCheckpointBindingState.Accepted or
+            FileTransferReceiveRecoveryFallbackCheckpointBindingState.Retired =>
+                current.CheckpointRequestId is null,
+            _ => false,
+        };
     }
 
     private void
@@ -14173,16 +14232,25 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
+        var checkpointCurrent = checkpointBinding.State switch
+        {
+            FileTransferReceiveRecoveryFallbackCheckpointBindingState.Pending =>
+                string.Equals(
+                    currentExpectedScope.CheckpointRequestId,
+                    checkpointBinding.EffectiveCheckpointRequestId,
+                    StringComparison.Ordinal),
+            FileTransferReceiveRecoveryFallbackCheckpointBindingState.Accepted or
+            FileTransferReceiveRecoveryFallbackCheckpointBindingState.Retired =>
+                currentExpectedScope.CheckpointRequestId is null,
+            _ => false,
+        };
         return currentExpectedScope.SourcePublicationAuthority ==
                    expected.SourcePublicationAuthority &&
                currentExpectedScope.TransportEpoch ==
                    checkpointBinding.TransportEpoch &&
                currentExpectedScope.BridgeRecoveryGeneration ==
                    expected.BridgeRecoveryGeneration &&
-               string.Equals(
-                   currentExpectedScope.CheckpointRequestId,
-                   checkpointBinding.EffectiveCheckpointRequestId,
-                   StringComparison.Ordinal) &&
+               checkpointCurrent &&
                string.Equals(
                    currentExpectedScope.DataSessionIdentity,
                    expected.DataSessionIdentity,

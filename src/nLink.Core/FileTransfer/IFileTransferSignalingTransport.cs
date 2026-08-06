@@ -2039,15 +2039,27 @@ internal readonly record struct
         long TransportEpoch,
         FileTransferReceiveRecoveryFallbackCheckpointBindingState State)
 {
+    public long BindingGeneration { get; init; }
+
+    public PostTunaFallbackPeerProofFrameIdentity? FrameIdentity { get; init; }
+
     public bool IsDefault =>
         ParentAuthorityId.IsDefault ||
         ParentOperationGeneration <= 0 ||
         string.IsNullOrWhiteSpace(EffectiveCheckpointRequestId) ||
         EffectiveCheckpointGeneration <= 0 ||
         TransportEpoch <= 0 ||
+        BindingGeneration <= 0 ||
+        FrameIdentity is not { IsComplete: true } ||
         State ==
             FileTransferReceiveRecoveryFallbackCheckpointBindingState
                 .Invalidated;
+}
+
+internal enum RuntimeUnlockInitialActivationOfferEnvelopeRefreshReleaseProfile
+{
+    RegularV4Closure = 0,
+    PostTunaFallbackCheckpointProof = 1,
 }
 
 internal readonly record struct
@@ -2088,15 +2100,42 @@ internal sealed record
         long SuccessorSentAtUnixMs,
         long SuccessorExpiresAtUnixMs)
 {
+    public RuntimeUnlockInitialActivationOfferEnvelopeRefreshReleaseProfile
+        ReleaseProfile { get; init; }
+
+    public FileTransferReceiveRecoveryProof? ReceiveRecoveryProof { get; init; }
+
+    public RuntimeUnlockInitialActivationReceiveRecoveryFallbackCheckpointBinding?
+        FallbackCheckpointBinding { get; init; }
+
     public bool IsDefault =>
         HoldRequest.IsDefault ||
         HoldGeneration <= 0 ||
         ReceiveRecoveryAuthority.IsDefault ||
-        ClosureGeneration <= 0 ||
         RefreshGeneration <= 0 ||
         SuccessorEnvelopeGeneration != HoldRequest.EnvelopeGeneration + 1 ||
         SuccessorSentAtUnixMs <= 0 ||
-        SuccessorExpiresAtUnixMs <= SuccessorSentAtUnixMs;
+        SuccessorExpiresAtUnixMs <= SuccessorSentAtUnixMs ||
+        ReleaseProfile switch
+        {
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshReleaseProfile
+                .RegularV4Closure =>
+                ClosureGeneration <= 0 ||
+                ReceiveRecoveryProof is not null ||
+                FallbackCheckpointBinding is not null,
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshReleaseProfile
+                .PostTunaFallbackCheckpointProof =>
+                ClosureGeneration != 0 ||
+                ReceiveRecoveryProof is not { IsDefault: false } proof ||
+                proof.Authority != ReceiveRecoveryAuthority ||
+                FallbackCheckpointBinding is not
+                    { IsDefault: false } binding ||
+                binding.ParentAuthorityId !=
+                    ReceiveRecoveryAuthority.AuthorityId ||
+                binding.ParentOperationGeneration !=
+                    ReceiveRecoveryAuthority.OperationGeneration,
+            _ => true,
+        };
 }
 
 internal sealed record

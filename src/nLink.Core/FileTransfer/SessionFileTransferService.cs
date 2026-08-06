@@ -5711,9 +5711,11 @@ public sealed partial class SessionFileTransferService :
         var receipt = decision.Receipt;
         var command = receipt.Command;
         var request = command.HoldRequest;
+        var proof = command.ReceiveRecoveryProof;
+        var binding = command.FallbackCheckpointBinding;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event={eventName}; session_id={FormatProtocolLogValue(request.SessionId)}; transfer_id={FormatProtocolLogValue(request.TransferId)}; direction={request.Direction.ToString().ToLowerInvariant()}; payer_decision_id={request.PayerDecisionId}; offer_generation={request.OfferGeneration}; transaction_generation={request.TransactionGeneration}; tuna_path_lease_generation={request.TunaPathLeaseGeneration}; semantic_offer_fingerprint={FormatProtocolLogValue(request.SemanticOfferFingerprint)}; predecessor_envelope_generation={request.EnvelopeGeneration}; predecessor_envelope_fingerprint={FormatProtocolLogValue(request.ControlEnvelopeFingerprint)}; predecessor_sent_at_unix_ms={request.EnvelopeSentAtUnixMs}; predecessor_expires_at_unix_ms={request.EnvelopeExpiresAtUnixMs}; refresh_generation={command.RefreshGeneration}; successor_envelope_generation={command.SuccessorEnvelopeGeneration}; successor_envelope_fingerprint={FormatProtocolLogValue(receipt.SuccessorEnvelopeFingerprint)}; successor_sent_at_unix_ms={command.SuccessorSentAtUnixMs}; successor_expires_at_unix_ms={command.SuccessorExpiresAtUnixMs}; secure_sequence={receipt.SecureSequence}; message_id={FormatProtocolLogValue(receipt.MessageId)}; receive_recovery_operation_generation={command.ReceiveRecoveryAuthority.OperationGeneration}; closure_generation={command.ClosureGeneration}; decision_status={decision.Status}; decision_reason={FormatProtocolLogValue(decision.Reason)}");
+            $"event={eventName}; session_id={FormatProtocolLogValue(request.SessionId)}; transfer_id={FormatProtocolLogValue(request.TransferId)}; direction={request.Direction.ToString().ToLowerInvariant()}; payer_decision_id={request.PayerDecisionId}; offer_generation={request.OfferGeneration}; transaction_generation={request.TransactionGeneration}; tuna_path_lease_generation={request.TunaPathLeaseGeneration}; semantic_offer_fingerprint={FormatProtocolLogValue(request.SemanticOfferFingerprint)}; predecessor_envelope_generation={request.EnvelopeGeneration}; predecessor_envelope_fingerprint={FormatProtocolLogValue(request.ControlEnvelopeFingerprint)}; predecessor_sent_at_unix_ms={request.EnvelopeSentAtUnixMs}; predecessor_expires_at_unix_ms={request.EnvelopeExpiresAtUnixMs}; refresh_generation={command.RefreshGeneration}; refresh_release_profile={command.ReleaseProfile}; successor_envelope_generation={command.SuccessorEnvelopeGeneration}; successor_envelope_fingerprint={FormatProtocolLogValue(receipt.SuccessorEnvelopeFingerprint)}; successor_sent_at_unix_ms={command.SuccessorSentAtUnixMs}; successor_expires_at_unix_ms={command.SuccessorExpiresAtUnixMs}; secure_sequence={receipt.SecureSequence}; message_id={FormatProtocolLogValue(receipt.MessageId)}; receive_recovery_operation_authority_id={FormatProtocolLogValue(command.ReceiveRecoveryAuthority.AuthorityId.ToString())}; receive_recovery_operation_generation={command.ReceiveRecoveryAuthority.OperationGeneration}; receive_proof_identity={FormatProtocolLogValue(proof?.ProofIdentity ?? "(none)")}; closure_generation={command.ClosureGeneration}; checkpoint_match_mode={(binding is null ? "direct_root" : "fallback_checkpoint_child")}; root_checkpoint_request_id={FormatProtocolLogValue(binding?.ParentCheckpointRequestId ?? request.ExpectedScope.CheckpointRequestId ?? "(none)")}; effective_checkpoint_request_id={FormatProtocolLogValue(binding?.EffectiveCheckpointRequestId ?? "(none)")}; checkpoint_binding_generation={binding?.BindingGeneration ?? 0}; checkpoint_binding_state={FormatProtocolLogValue(binding?.State.ToString() ?? "(none)")}; checkpoint_frame_fingerprint={FormatProtocolLogValue(binding?.FrameIdentity?.Sha256 ?? "(none)")}; checkpoint_transport_epoch={binding?.TransportEpoch ?? request.ExpectedScope.TransportEpoch}; decision_status={decision.Status}; decision_reason={FormatProtocolLogValue(decision.Reason)}");
     }
 
     private FileTransferLeg? EnsureOutboundTransferLegLocked(
@@ -7478,6 +7480,8 @@ public sealed partial class SessionFileTransferService :
         return binding is { } exact &&
                exact.State is
                    FileTransferReceiveRecoveryFallbackCheckpointBindingState
+                       .Pending or
+                   FileTransferReceiveRecoveryFallbackCheckpointBindingState
                        .Accepted or
                    FileTransferReceiveRecoveryFallbackCheckpointBindingState
                        .Retired
@@ -7489,6 +7493,10 @@ public sealed partial class SessionFileTransferService :
                 exact.EffectiveCheckpointGeneration,
                 exact.TransportEpoch,
                 exact.State)
+            {
+                BindingGeneration = exact.BindingGeneration,
+                FrameIdentity = exact.FrameIdentity,
+            }
             : null;
     }
 
