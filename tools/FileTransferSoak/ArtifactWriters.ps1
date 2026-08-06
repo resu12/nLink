@@ -14392,6 +14392,10 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("filetransfer_bridge_recovery_execution_payload_hold_missing_recovered_count={0}" -f $RecoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount)) | Out-Null
     $lines.Add(("filetransfer_bridge_recovery_execution_payload_hold_missing_unresolved_count={0}" -f $RecoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount)) | Out-Null
     $lines.Add(("filetransfer_bridge_recovery_execution_payload_hold_verdict={0}" -f $RecoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldVerdict)) | Out-Null
+    $lines.Add(("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_raw_count={0}" -f $RecoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldPostTunaSubmissionEpochRawCount)) | Out-Null
+    $lines.Add(("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_distinct_count={0}" -f $RecoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldPostTunaSubmissionEpochDistinctCount)) | Out-Null
+    $lines.Add(("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_recovered_count={0}" -f $RecoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldPostTunaSubmissionEpochRecoveredCount)) | Out-Null
+    $lines.Add(("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_unresolved_count={0}" -f $RecoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldPostTunaSubmissionEpochUnresolvedCount)) | Out-Null
     $lines.Add(("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_raw_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRawCount)) | Out-Null
     $lines.Add(("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_distinct_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedDistinctCount)) | Out-Null
     $lines.Add(("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_recovered_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount)) | Out-Null
@@ -16500,6 +16504,10 @@ function New-FileTransferStabilityGateSummaryLines {
         ("filetransfer_bridge_recovery_execution_payload_hold_missing_recovered_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount),
         ("filetransfer_bridge_recovery_execution_payload_hold_missing_unresolved_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount),
         ("filetransfer_bridge_recovery_execution_payload_hold_verdict={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldVerdict),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_raw_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldPostTunaSubmissionEpochRawCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_distinct_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldPostTunaSubmissionEpochDistinctCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_recovered_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldPostTunaSubmissionEpochRecoveredCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_unresolved_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldPostTunaSubmissionEpochUnresolvedCount),
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_raw_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRawCount),
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_distinct_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedDistinctCount),
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_recovered_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount),
@@ -18807,6 +18815,196 @@ function Get-FileTransferBridgeRecoveryExecutionSoftToHardHandoffCorrelation {
     }
 }
 
+function Get-FileTransferPostTunaFallbackSubmissionEpochFailureCorrelation {
+    param(
+        [AllowEmptyCollection()][object[]]$Events = @(),
+        [switch]$AlreadyChronologicallyOrdered
+    )
+
+    [object[]]$orderedEvents = if ($null -eq $Events -or $Events.Count -eq 0) {
+        ,([object[]]@())
+    }
+    elseif ($AlreadyChronologicallyOrdered) {
+        @($Events)
+    }
+    else {
+        @($Events | Where-Object { $null -ne $_ } | Sort-Object Sequence, LineNumber)
+    }
+
+    function Test-PostTunaRecoveryIdentity {
+        param($Left, $Right, [switch]$RequireDirection)
+        foreach ($field in @('session_id', 'transfer_id')) {
+            $leftValue = Get-FileTransferEventField -Event $Left -Name $field -Default ''
+            $rightValue = Get-FileTransferEventField -Event $Right -Name $field -Default ''
+            if ([string]::IsNullOrWhiteSpace($leftValue) -or
+                [string]::IsNullOrWhiteSpace($rightValue) -or
+                -not [string]::Equals($leftValue, $rightValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+        if ($RequireDirection) {
+            $leftDirection = Get-FileTransferEventField -Event $Left -Name 'direction' -Default ''
+            $rightDirection = Get-FileTransferEventField -Event $Right -Name 'direction' -Default ''
+            if ([string]::IsNullOrWhiteSpace($leftDirection) -or
+                -not [string]::Equals($leftDirection, $rightDirection, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+        return Test-FileTransferBridgeRecoveryExecutionWriterMatch -Left $Left -Right $Right -RequirePresent
+    }
+
+    [object[]]$issuedEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_receive_recovery_operation_issued' -and
+        ((Get-FileTransferEventField -Event $_ -Name 'route' -Default '').ToLowerInvariant() -replace '[^a-z0-9]', '') -eq
+            'posttunafallbackv6' -and
+        (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq '6' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '').ToLowerInvariant() -eq 'outbound'
+    })
+    [object[]]$runningEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_receive_recovery_operation_execution_start_decided' -and
+        (Get-FileTransferEventField -Event $_ -Name 'execution_state' -Default '').ToLowerInvariant() -eq 'running'
+    })
+    [object[]]$commandEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_bridge_recovery_execution_command_issued'
+    })
+    [object[]]$barrierEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'nkn_bridge_recovery_submission_barrier_closed'
+    })
+    [object[]]$hardEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'nkn_bridge_recovery_execution_hard_restart_decided' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '').ToLowerInvariant() -eq 'started' -and
+        (Get-FileTransferEventInt64Field -Event $_ -Name 'remaining_total_ms' -Default 0) -gt 0
+    })
+    [object[]]$rejectionEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'nkn_bridge_submission_rejected' -and
+        (Get-FileTransferEventField -Event $_ -Name 'recovery_barrier_active' -Default '0') -eq '1' -and
+        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -in @(
+            'bridge_submission_epoch_not_ready',
+            'bridge_submission_epoch_changed',
+            'bridge_process_epoch_not_ready',
+            'bridge_process_epoch_changed')
+    })
+    [object[]]$senderFailures = @($orderedEvents | Where-Object { $_.EventName -eq 'filetransfer_v4_sender_failed' })
+    [object[]]$invalidations = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_receive_recovery_operation_invalidated' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '').ToLowerInvariant() -eq 'terminal_state'
+    })
+    [object[]]$deferrals = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_post_tuna_fallback_recovery_submission_failure_deferred' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default 'accepted').ToLowerInvariant() -in @('accepted', 'idempotent')
+    })
+    [object[]]$completions = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_receive_recovery_operation_execution_receipt_applied' -and
+        (Get-FileTransferEventField -Event $_ -Name 'execution_state' -Default '').ToLowerInvariant() -eq 'completed' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '').ToLowerInvariant() -in @('accepted', 'idempotent')
+    })
+    [object[]]$resumes = @($orderedEvents | Where-Object {
+        $_.EventName -in @(
+            'filetransfer_post_tuna_fallback_recovery_submission_resumed',
+            'filetransfer_outbound_payload_resumed_after_receive_recovery')
+    })
+
+    $raw = New-Object System.Collections.Generic.List[object]
+    $distinct = New-Object System.Collections.Generic.List[object]
+    $recovered = New-Object System.Collections.Generic.List[object]
+    $unresolved = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    foreach ($failure in $senderFailures) {
+        $issued = @($issuedEvents | Where-Object {
+            [int64]$_.Sequence -lt [int64]$failure.Sequence -and
+            (Test-PostTunaRecoveryIdentity -Left $_ -Right $failure)
+        } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        if ($issued.Count -ne 1) { continue }
+        $operation = $issued[0]
+        $authority = Get-FileTransferEventField -Event $operation -Name 'receive_recovery_operation_authority_id' -Default ''
+        $generation = Get-FileTransferEventField -Event $operation -Name 'receive_recovery_operation_generation' -Default ''
+        if ([string]::IsNullOrWhiteSpace($authority) -or [string]::IsNullOrWhiteSpace($generation)) { continue }
+        $isOperation = {
+            param($candidate)
+            (Test-PostTunaRecoveryIdentity -Left $operation -Right $candidate -RequireDirection) -and
+                (Get-FileTransferEventField -Event $candidate -Name 'receive_recovery_operation_authority_id' -Default '') -eq $authority -and
+                (Get-FileTransferEventField -Event $candidate -Name 'receive_recovery_operation_generation' -Default '') -eq $generation
+        }
+        $running = @($runningEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$operation.Sequence -and [int64]$_.Sequence -lt [int64]$failure.Sequence -and (& $isOperation $_)
+        } | Select-Object -First 1)
+        if ($running.Count -ne 1) { continue }
+        $command = @($commandEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$operation.Sequence -and [int64]$_.Sequence -lt [int64]$failure.Sequence -and
+            (Test-PostTunaRecoveryIdentity -Left $operation -Right $_ -RequireDirection) -and
+            (Get-FileTransferEventField -Event $_ -Name 'bridge_recovery_generation' -Default '') -eq
+                (Get-FileTransferEventField -Event $operation -Name 'bridge_recovery_generation' -Default '') -and
+            (Get-FileTransferEventField -Event $_ -Name 'bridge_decision_generation' -Default '') -eq
+                (Get-FileTransferEventField -Event $operation -Name 'bridge_decision_generation' -Default '')
+        } | Select-Object -First 1)
+        if ($command.Count -ne 1) { continue }
+        $barrier = @($barrierEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$command[0].Sequence -and [int64]$_.Sequence -lt [int64]$failure.Sequence -and
+            (Test-FileTransferBridgeRecoveryExecutionCommandTupleMatch -Command $command[0] -Candidate $_)
+        } | Select-Object -First 1)
+        if ($barrier.Count -ne 1) { continue }
+        $hard = @($hardEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$barrier[0].Sequence -and [int64]$_.Sequence -lt [int64]$failure.Sequence -and
+            (Test-FileTransferBridgeRecoveryExecutionCommandTupleMatch -Command $command[0] -Candidate $_)
+        } | Select-Object -First 1)
+        if ($hard.Count -ne 1) { continue }
+        $rejects = @($rejectionEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$barrier[0].Sequence -and [int64]$_.Sequence -lt [int64]$failure.Sequence -and
+            (Test-FileTransferBridgeRecoveryExecutionWriterMatch -Left $command[0] -Right $_ -RequirePresent)
+        })
+        if ($rejects.Count -eq 0) { continue }
+        $invalidation = @($invalidations | Where-Object {
+            [int64]$_.Sequence -gt [int64]$failure.Sequence -and (& $isOperation $_)
+        } | Select-Object -First 1)
+
+        $raw.Add($failure) | Out-Null
+        $key = [string]::Join('|', @(
+            $authority, $generation,
+            (Get-FileTransferEventField -Event $operation -Name 'session_id' -Default ''),
+            (Get-FileTransferEventField -Event $operation -Name 'transfer_id' -Default ''),
+            (Get-FileTransferEventField -Event $operation -Name 'direction' -Default ''),
+            (Get-FileTransferEventField -Event $operation -Name 'route_publication_generation' -Default ''),
+            (Get-FileTransferEventField -Event $operation -Name 'runtime_generation' -Default ''),
+            (Get-FileTransferEventField -Event $operation -Name 'terminal_generation' -Default ''),
+            (Get-FileTransferEventField -Event $operation -Name 'leg_generation' -Default ''),
+            (Get-FileTransferEventField -Event $operation -Name 'transport_epoch' -Default ''),
+            (Get-FileTransferEventField -Event $operation -Name 'bridge_recovery_generation' -Default ''),
+            (Get-FileTransferEventField -Event $operation -Name 'bridge_decision_generation' -Default ''),
+            (Get-FileTransferEventField -Event $operation -Name 'data_session_generation' -Default '')))
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        $distinct.Add($failure) | Out-Null
+
+        $deferral = @($deferrals | Where-Object {
+            [int64]$_.Sequence -gt [int64]$rejects[0].Sequence -and (& $isOperation $_)
+        } | Select-Object -First 1)
+        $completion = @($completions | Where-Object {
+            $deferral.Count -eq 1 -and [int64]$_.Sequence -gt [int64]$deferral[0].Sequence -and (& $isOperation $_)
+        } | Select-Object -First 1)
+        $resume = @($resumes | Where-Object {
+            $completion.Count -eq 1 -and [int64]$_.Sequence -gt [int64]$completion[0].Sequence -and
+            (Test-PostTunaRecoveryIdentity -Left $operation -Right $_ -RequireDirection)
+        } | Select-Object -First 1)
+        if ($deferral.Count -eq 1 -and $completion.Count -eq 1 -and $resume.Count -eq 1 -and $invalidation.Count -eq 0) {
+            $recovered.Add($failure) | Out-Null
+        }
+        elseif ($invalidation.Count -eq 1) {
+            $unresolved.Add($failure) | Out-Null
+        }
+    }
+
+    return [pscustomobject]@{
+        RawCount = $raw.Count
+        DistinctCount = $distinct.Count
+        RecoveredCount = $recovered.Count
+        UnresolvedCount = $unresolved.Count
+        RawCandidateEvents = @($raw.ToArray())
+        DistinctCandidateEvents = @($distinct.ToArray())
+        RecoveredCandidateEvents = @($recovered.ToArray())
+        UnresolvedCandidateEvents = @($unresolved.ToArray())
+    }
+}
+
 function Get-FileTransferBridgeRecoveryStartupRawEvidence {
     param(
         [AllowEmptyCollection()][object[]]$Events = @()
@@ -19119,6 +19317,43 @@ function Get-FileTransferBridgeRecoveryExecutionStartupPayloadIsolationCorrelati
         DistinctCandidateEvents = @($distinctCandidates.ToArray())
         RecoveredCandidateEvents = @()
         UnresolvedCandidateEvents = @($unresolvedCandidates.ToArray())
+    }
+}
+
+function Get-FileTransferBridgeRecoveryExecutionPayloadHoldWithPostTunaCorrelation {
+    param(
+        [AllowEmptyCollection()][object[]]$Events = @(),
+        [switch]$AlreadyChronologicallyOrdered
+    )
+
+    $base = Get-FileTransferBridgeRecoveryExecutionPayloadHoldCorrelation `
+        -Events $Events `
+        -AlreadyChronologicallyOrdered:$AlreadyChronologicallyOrdered
+    $postTuna = Get-FileTransferPostTunaFallbackSubmissionEpochFailureCorrelation `
+        -Events $Events `
+        -AlreadyChronologicallyOrdered:$AlreadyChronologicallyOrdered
+    [object[]]$raw = @($base.RawCandidateEvents) + @($postTuna.RawCandidateEvents)
+    [object[]]$distinct = @($base.DistinctCandidateEvents) + @($postTuna.DistinctCandidateEvents)
+    [object[]]$recovered = @($base.RecoveredCandidateEvents) + @($postTuna.RecoveredCandidateEvents)
+    [object[]]$unresolved = @($base.UnresolvedCandidateEvents) + @($postTuna.UnresolvedCandidateEvents)
+    return [pscustomobject]@{
+        RawCount = $raw.Count
+        DistinctCount = $distinct.Count
+        RecoveredCount = $recovered.Count
+        UnresolvedCount = $unresolved.Count
+        Verdict = if ($unresolved.Count -gt 0) { 'fail' } elseif ($distinct.Count -gt 0) { 'pass' } else { 'none' }
+        RawCandidateEvents = $raw
+        DistinctCandidateEvents = $distinct
+        RecoveredCandidateEvents = $recovered
+        UnresolvedCandidateEvents = $unresolved
+        PostTunaFallbackSubmissionEpochFailureNotDeferredRawCount = $postTuna.RawCount
+        PostTunaFallbackSubmissionEpochFailureNotDeferredDistinctCount = $postTuna.DistinctCount
+        PostTunaFallbackSubmissionEpochFailureNotDeferredRecoveredCount = $postTuna.RecoveredCount
+        PostTunaFallbackSubmissionEpochFailureNotDeferredUnresolvedCount = $postTuna.UnresolvedCount
+        PostTunaFallbackSubmissionEpochFailureNotDeferredRawCandidateEvents = @($postTuna.RawCandidateEvents)
+        PostTunaFallbackSubmissionEpochFailureNotDeferredDistinctCandidateEvents = @($postTuna.DistinctCandidateEvents)
+        PostTunaFallbackSubmissionEpochFailureNotDeferredRecoveredCandidateEvents = @($postTuna.RecoveredCandidateEvents)
+        PostTunaFallbackSubmissionEpochFailureNotDeferredUnresolvedCandidateEvents = @($postTuna.UnresolvedCandidateEvents)
     }
 }
 
@@ -32237,6 +32472,39 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
             'filetransfer_route_transition_physical_send_lease_registered') -and
         (Get-ProofStateField -Event $_ -Names @('direction')) -eq 'outbound'
     })
+    [object[]]$initialActivationRefreshCommittedEvents = @($events | Where-Object {
+        $_.EventName -eq
+            'runtime_unlock_initial_activation_offer_envelope_refresh_committed' -and
+        (Get-ProofStateField -Event $_ -Names @('decision_status')) -eq 'Accepted'
+    })
+    [object[]]$initialActivationHoldReleasedEvents = @($events | Where-Object {
+        $_.EventName -eq
+            'runtime_unlock_initial_activation_receive_recovery_hold_decided' -and
+        (Get-ProofStateField -Event $_ -Names @('offer_authority_mode')) -eq
+            'InitialActivation' -and
+        (Get-ProofStateField -Event $_ -Names @('decision_status')) -eq 'Released' -and
+        (Get-ProofStateField -Event $_ -Names @('closure_state')) -eq 'Adopted'
+    })
+    [object[]]$initialActivationSubmissionEvents = @($events | Where-Object {
+        $_.EventName -eq
+            'runtime_unlock_initial_activation_receive_recovery_hold_post_prevalidation_submission' -and
+        (Get-ProofStateField -Event $_ -Names @('decision_reason')) -eq
+            'exact_prevalidated_envelope_submitted'
+    })
+    [object[]]$runtimeUnlockAnswerReceivedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_transaction_answer_received' -and
+        (Get-ProofStateField -Event $_ -Names @('answer_received')) -eq '1' -and
+        (Get-ProofStateField -Event $_ -Names @('peer_visible_proof')) -eq '1'
+    })
+    [object[]]$runtimeUnlockAnswerAckSentEvents = @($events | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_answer_ack_sent'
+    })
+    [object[]]$runtimeUnlockPreparedEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_prepared' -and
+        (Get-ProofStateField -Event $_ -Names @('transition_kind')) -eq
+            'RegularV4ToTunaV4' -and
+        (Get-ProofStateField -Event $_ -Names @('decision_status')) -eq 'Prepared'
+    })
     [object[]]$recheckDecisions = @($events | Where-Object {
         $_.EventName -eq
             'filetransfer_receive_recovery_proof_state_publication_recheck_decided' -and
@@ -32282,6 +32550,147 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
             'file_transfer_outbound_terminal',
             'filetransfer_runtime_terminalized')
     })
+
+    function Test-ProofStateInitialActivationReleaseChain {
+        param(
+            [Parameter(Mandatory = $true)]$Operation,
+            [Parameter(Mandatory = $true)]$Adopted,
+            [int64]$BeforeSequence = [int64]::MaxValue
+        )
+
+        $release = @($initialActivationHoldReleasedEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$Adopted.Sequence -and
+            [int64]$_.Sequence -lt $BeforeSequence -and
+            (Test-ProofStateOperationMatch -Issued $Operation -Candidate $_)
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($release.Count -ne 1) {
+            return $false
+        }
+
+        $tupleFields = @(
+            'log_writer_id',
+            'session_id',
+            'transfer_id',
+            'payer_decision_id',
+            'offer_generation',
+            'transaction_generation',
+            'tuna_path_lease_generation',
+            'semantic_offer_fingerprint',
+            'refresh_generation',
+            'successor_envelope_generation')
+        $tupleMatches = {
+            param($Candidate)
+            foreach ($field in $tupleFields) {
+                $left = Get-ProofStateField -Event $release[0] -Names @($field)
+                $right = Get-ProofStateField -Event $Candidate -Names @($field)
+                if ([string]::IsNullOrWhiteSpace($left) -or
+                    [string]::IsNullOrWhiteSpace($right) -or
+                    -not [string]::Equals(
+                        $left,
+                        $right,
+                        [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        $refresh = @($initialActivationRefreshCommittedEvents | Where-Object {
+            [int64]$_.Sequence -lt [int64]$release[0].Sequence -and
+            (& $tupleMatches $_)
+        } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        $submission = @($initialActivationSubmissionEvents | Where-Object {
+            $refresh.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$release[0].Sequence -and
+            [int64]$_.Sequence -lt $BeforeSequence -and
+            (Get-ProofStateField -Event $_ -Names @('log_writer_id')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('log_writer_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('session_id')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('session_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('transfer_id')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('transfer_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('payer_decision_id')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('payer_decision_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('offer_generation')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('offer_generation')) -and
+            (Get-ProofStateField -Event $_ -Names @('transaction_generation')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('transaction_generation')) -and
+            (Get-ProofStateField -Event $_ -Names @('tuna_path_lease_generation')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('tuna_path_lease_generation')) -and
+            (Get-ProofStateField -Event $_ -Names @('semantic_offer_fingerprint')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('semantic_offer_fingerprint')) -and
+            (Get-ProofStateField -Event $_ -Names @('refresh_generation')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('refresh_generation')) -and
+            (Get-ProofStateField -Event $_ -Names @('envelope_generation')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('successor_envelope_generation'))
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        $answer = @($runtimeUnlockAnswerReceivedEvents | Where-Object {
+            $submission.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$submission[0].Sequence -and
+            [int64]$_.Sequence -lt $BeforeSequence -and
+            (Get-ProofStateField -Event $_ -Names @('log_writer_id')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('log_writer_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('session_id')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('session_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('transaction_generation')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('transaction_generation')) -and
+            (Get-ProofStateField -Event $_ -Names @('offer_generation')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('offer_generation')) -and
+            (Get-ProofStateField -Event $_ -Names @('tuna_path_lease_generation')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('tuna_path_lease_generation'))
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        $ack = @($runtimeUnlockAnswerAckSentEvents | Where-Object {
+            $answer.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$answer[0].Sequence -and
+            [int64]$_.Sequence -lt $BeforeSequence -and
+            (Get-ProofStateField -Event $_ -Names @('log_writer_id')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('log_writer_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('session_id')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('session_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('payer_decision_id')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('payer_decision_id'))
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        $prepared = @($runtimeUnlockPreparedEvents | Where-Object {
+            $ack.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$ack[0].Sequence -and
+            [int64]$_.Sequence -lt $BeforeSequence -and
+            (Get-ProofStateField -Event $_ -Names @('log_writer_id')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('log_writer_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('session_id')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('session_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('transfer_id')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('transfer_id')) -and
+            (Get-ProofStateField -Event $_ -Names @('direction')) -eq 'outbound' -and
+            (Get-ProofStateField -Event $_ -Names @('transaction_generation')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('transaction_generation')) -and
+            (Get-ProofStateField -Event $_ -Names @('offer_generation')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('offer_generation')) -and
+            (Get-ProofStateField -Event $_ -Names @('tuna_path_lease_generation')) -eq
+                (Get-ProofStateField -Event $release[0] -Names @('tuna_path_lease_generation')) -and
+            (Get-ProofStateField -Event $_ -Names @('source_route')) -eq
+                (Get-ProofStateField -Event $Operation -Names @('route')) -and
+            (Get-ProofStateField -Event $_ -Names @('source_protocol_version')) -eq
+                (Get-ProofStateField -Event $Operation -Names @('protocol_version')) -and
+            (Get-ProofStateField -Event $_ -Names @('source_live_route_epoch')) -eq
+                (Get-ProofStateField -Event $Operation -Names @('live_route_epoch')) -and
+            (Get-ProofStateField -Event $_ -Names @('source_runtime_generation')) -eq
+                (Get-ProofStateField -Event $Operation -Names @('runtime_generation')) -and
+            (Get-ProofStateField -Event $_ -Names @('source_terminal_generation')) -eq
+                (Get-ProofStateField -Event $Operation -Names @('terminal_generation')) -and
+            (Get-ProofStateField -Event $_ -Names @('source_leg_generation')) -eq
+                (Get-ProofStateField -Event $Operation -Names @('leg_generation')) -and
+            (Get-ProofStateField -Event $_ -Names @('source_transport_epoch')) -eq
+                (Get-ProofStateField -Event $Operation -Names @('transport_epoch')) -and
+            (Get-ProofStateField -Event $_ -Names @('source_bridge_recovery_generation')) -eq
+                (Get-ProofStateField -Event $Operation -Names @('bridge_recovery_generation'))
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+
+        return $refresh.Count -eq 1 -and
+            $submission.Count -eq 1 -and
+            $answer.Count -eq 1 -and
+            $ack.Count -eq 1 -and
+            $prepared.Count -eq 1
+    }
 
     function Test-ProofStateExactSuccessorLineageRecovered {
         param(
@@ -33116,9 +33525,17 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
                     -Candidate $_)
             } | Select-Object -First 1)
 
+            $initialActivationReleaseObserved =
+                $adopted.Count -eq 1 -and
+                (Test-ProofStateInitialActivationReleaseChain `
+                    -Operation $record.TargetIssued `
+                    -Adopted $adopted[0] `
+                    -BeforeSequence $releaseBoundary)
+
             $coordinatorReleaseObserved =
                 $resumed.Count -eq 1 -or
-                $payloadAdmission.Count -eq 1
+                $payloadAdmission.Count -eq 1 -or
+                $initialActivationReleaseObserved
 
             if ($decision.Count -eq 1 -and
                 $stateSend.Count -eq 1 -and
@@ -33255,11 +33672,18 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
                 -Names @('predecessor_frame_fingerprint')) -eq
                     (Get-ProofStateFrameFingerprint -Event $publicationReceipt[0])
         } | Select-Object -First 1)
+        $initialActivationReleaseObserved =
+            $adopted.Count -eq 1 -and
+            (Test-ProofStateInitialActivationReleaseChain `
+                -Operation $proof[0] `
+                -Adopted $adopted[0] `
+                -BeforeSequence $releaseBoundary)
         $coordinatorReleaseObserved =
             $resumed.Count -eq 1 -or
             $payloadAdmission.Count -eq 1 -or
             ($returnProof.Count -eq 1 -and $returnAdopted.Count -eq 1) -or
-            $proofOwnedRecheckInvalidation.Count -eq 1
+            $proofOwnedRecheckInvalidation.Count -eq 1 -or
+            $initialActivationReleaseObserved
 
         if ($decision.Count -eq 1 -and
             $stateSend.Count -eq 1 -and
@@ -43491,8 +43915,49 @@ function Get-FileTransferRecoveryFailureClassification {
         Get-FileTransferBridgeRecoveryExecutionSoftToHardHandoffCorrelation -Events $events
     $bridgeRecoveryExecutionStartupPayloadIsolationProof =
         Get-FileTransferBridgeRecoveryExecutionStartupPayloadIsolationCorrelation -Events $events
-    $bridgeRecoveryExecutionPayloadHoldProof =
+    $bridgeRecoveryExecutionPayloadHoldBaseProof =
         Get-FileTransferBridgeRecoveryExecutionPayloadHoldCorrelation -Events $events
+    $bridgeRecoveryExecutionPayloadHoldPostTunaProof =
+        Get-FileTransferPostTunaFallbackSubmissionEpochFailureCorrelation -Events $events
+    [object[]]$bridgeRecoveryExecutionPayloadHoldRawEvents =
+        @($bridgeRecoveryExecutionPayloadHoldBaseProof.RawCandidateEvents) +
+        @($bridgeRecoveryExecutionPayloadHoldPostTunaProof.RawCandidateEvents)
+    [object[]]$bridgeRecoveryExecutionPayloadHoldDistinctEvents =
+        @($bridgeRecoveryExecutionPayloadHoldBaseProof.DistinctCandidateEvents) +
+        @($bridgeRecoveryExecutionPayloadHoldPostTunaProof.DistinctCandidateEvents)
+    [object[]]$bridgeRecoveryExecutionPayloadHoldRecoveredEvents =
+        @($bridgeRecoveryExecutionPayloadHoldBaseProof.RecoveredCandidateEvents) +
+        @($bridgeRecoveryExecutionPayloadHoldPostTunaProof.RecoveredCandidateEvents)
+    [object[]]$bridgeRecoveryExecutionPayloadHoldUnresolvedEvents =
+        @($bridgeRecoveryExecutionPayloadHoldBaseProof.UnresolvedCandidateEvents) +
+        @($bridgeRecoveryExecutionPayloadHoldPostTunaProof.UnresolvedCandidateEvents)
+    $bridgeRecoveryExecutionPayloadHoldProof = [pscustomobject]@{
+        RawCount = $bridgeRecoveryExecutionPayloadHoldRawEvents.Count
+        DistinctCount = $bridgeRecoveryExecutionPayloadHoldDistinctEvents.Count
+        RecoveredCount = $bridgeRecoveryExecutionPayloadHoldRecoveredEvents.Count
+        UnresolvedCount = $bridgeRecoveryExecutionPayloadHoldUnresolvedEvents.Count
+        Verdict = if ($bridgeRecoveryExecutionPayloadHoldUnresolvedEvents.Count -gt 0) {
+            'fail'
+        }
+        elseif ($bridgeRecoveryExecutionPayloadHoldDistinctEvents.Count -gt 0) {
+            'pass'
+        }
+        else {
+            'none'
+        }
+        RawCandidateEvents = $bridgeRecoveryExecutionPayloadHoldRawEvents
+        DistinctCandidateEvents = $bridgeRecoveryExecutionPayloadHoldDistinctEvents
+        RecoveredCandidateEvents = $bridgeRecoveryExecutionPayloadHoldRecoveredEvents
+        UnresolvedCandidateEvents = $bridgeRecoveryExecutionPayloadHoldUnresolvedEvents
+        PostTunaFallbackSubmissionEpochFailureNotDeferredRawCount = $bridgeRecoveryExecutionPayloadHoldPostTunaProof.RawCount
+        PostTunaFallbackSubmissionEpochFailureNotDeferredDistinctCount = $bridgeRecoveryExecutionPayloadHoldPostTunaProof.DistinctCount
+        PostTunaFallbackSubmissionEpochFailureNotDeferredRecoveredCount = $bridgeRecoveryExecutionPayloadHoldPostTunaProof.RecoveredCount
+        PostTunaFallbackSubmissionEpochFailureNotDeferredUnresolvedCount = $bridgeRecoveryExecutionPayloadHoldPostTunaProof.UnresolvedCount
+        PostTunaFallbackSubmissionEpochFailureNotDeferredRawCandidateEvents = @($bridgeRecoveryExecutionPayloadHoldPostTunaProof.RawCandidateEvents)
+        PostTunaFallbackSubmissionEpochFailureNotDeferredDistinctCandidateEvents = @($bridgeRecoveryExecutionPayloadHoldPostTunaProof.DistinctCandidateEvents)
+        PostTunaFallbackSubmissionEpochFailureNotDeferredRecoveredCandidateEvents = @($bridgeRecoveryExecutionPayloadHoldPostTunaProof.RecoveredCandidateEvents)
+        PostTunaFallbackSubmissionEpochFailureNotDeferredUnresolvedCandidateEvents = @($bridgeRecoveryExecutionPayloadHoldPostTunaProof.UnresolvedCandidateEvents)
+    }
     $bridgeRecoveryExecutionSubmissionBarrierDrainIndex =
         New-FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainIndex `
             -SemanticEvents $events `
@@ -46793,8 +47258,16 @@ function Get-FileTransferRecoveryFailureClassification {
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
         -Class 'filetransfer_bridge_recovery_execution_payload_hold_missing' `
-        -Events @($bridgeRecoveryExecutionPayloadHoldProof.UnresolvedCandidateEvents) `
+        -Events @($bridgeRecoveryExecutionPayloadHoldProof.UnresolvedCandidateEvents | Where-Object {
+            $_ -notin @($bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackSubmissionEpochFailureNotDeferredUnresolvedCandidateEvents)
+        }) `
         -DefaultReason 'bridge_recovery_submission_hold_rejection_escalated_to_terminal' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'filetransfer_bridge_recovery_execution_payload_hold_missing' `
+        -Events @($bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackSubmissionEpochFailureNotDeferredUnresolvedCandidateEvents) `
+        -DefaultReason 'current_post_tuna_fallback_recovery_submission_epoch_transition_treated_as_terminal_sender_failure' `
         -UseDefaultReason
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
@@ -48096,6 +48569,10 @@ function Get-FileTransferRecoveryFailureClassification {
         FileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount = $bridgeRecoveryExecutionPayloadHoldProof.RecoveredCount
         FileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount = $bridgeRecoveryExecutionPayloadHoldProof.UnresolvedCount
         FileTransferBridgeRecoveryExecutionPayloadHoldVerdict = $bridgeRecoveryExecutionPayloadHoldProof.Verdict
+        FileTransferBridgeRecoveryExecutionPayloadHoldPostTunaSubmissionEpochRawCount = $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackSubmissionEpochFailureNotDeferredRawCount
+        FileTransferBridgeRecoveryExecutionPayloadHoldPostTunaSubmissionEpochDistinctCount = $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackSubmissionEpochFailureNotDeferredDistinctCount
+        FileTransferBridgeRecoveryExecutionPayloadHoldPostTunaSubmissionEpochRecoveredCount = $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackSubmissionEpochFailureNotDeferredRecoveredCount
+        FileTransferBridgeRecoveryExecutionPayloadHoldPostTunaSubmissionEpochUnresolvedCount = $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackSubmissionEpochFailureNotDeferredUnresolvedCount
         FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRawCount = $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.RawCount
         FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedDistinctCount = $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.DistinctCount
         FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount = $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof.RecoveredCount
@@ -48921,6 +49398,10 @@ function New-FileTransferInvariantLedgerObject {
         filetransfer_bridge_recovery_execution_payload_hold_missing_recovered_count = [string]$recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount
         filetransfer_bridge_recovery_execution_payload_hold_missing_unresolved_count = [string]$recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount
         filetransfer_bridge_recovery_execution_payload_hold_verdict = $recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldVerdict
+        filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_raw_count = [string]$recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldPostTunaSubmissionEpochRawCount
+        filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_distinct_count = [string]$recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldPostTunaSubmissionEpochDistinctCount
+        filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_recovered_count = [string]$recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldPostTunaSubmissionEpochRecoveredCount
+        filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_unresolved_count = [string]$recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldPostTunaSubmissionEpochUnresolvedCount
         filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_raw_count = [string]$recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRawCount
         filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_distinct_count = [string]$recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedDistinctCount
         filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_recovered_count = [string]$recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount
@@ -49625,6 +50106,10 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("filetransfer_bridge_recovery_execution_payload_hold_missing_recovered_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount),
         ("filetransfer_bridge_recovery_execution_payload_hold_missing_unresolved_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount),
         ("filetransfer_bridge_recovery_execution_payload_hold_verdict={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldVerdict),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_raw_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldPostTunaSubmissionEpochRawCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_distinct_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldPostTunaSubmissionEpochDistinctCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_recovered_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldPostTunaSubmissionEpochRecoveredCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_unresolved_count={0}" -f $recoveryClassification.FileTransferBridgeRecoveryExecutionPayloadHoldPostTunaSubmissionEpochUnresolvedCount),
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_raw_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRawCount),
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_distinct_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedDistinctCount),
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_recovered_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount),
