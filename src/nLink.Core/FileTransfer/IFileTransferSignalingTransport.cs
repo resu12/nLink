@@ -1007,6 +1007,9 @@ internal readonly record struct RuntimeUnlockRetryDispatchInitialEvaluation(
     public RuntimeUnlockRetryDispatchListenerRearmRequirement
         ListenerRearmRequirement { get; init; }
 
+    public RuntimeUnlockRetryDispatchListenerExecutionMode
+        ListenerExecutionMode { get; init; }
+
     public bool IsDefault => string.IsNullOrWhiteSpace(SessionId) ||
                              string.IsNullOrWhiteSpace(TransferId) ||
                              SourcePublicationAuthority is null ||
@@ -1035,6 +1038,9 @@ internal readonly record struct RuntimeUnlockRetryDispatchAuthorityRequest(
     public RuntimeUnlockRetryDispatchListenerRearmRequirement
         ListenerRearmRequirement { get; init; }
 
+    public RuntimeUnlockRetryDispatchListenerExecutionMode
+        ListenerExecutionMode { get; init; }
+
     public bool IsDefault => string.IsNullOrWhiteSpace(SessionId) ||
                              string.IsNullOrWhiteSpace(TransferId) ||
                              SourcePublicationAuthority is null ||
@@ -1047,6 +1053,12 @@ internal enum RuntimeUnlockRetryDispatchListenerRearmRequirement
     None = 0,
     Required = 1,
     RequiredBeforeDispatch = 2,
+}
+
+internal enum RuntimeUnlockRetryDispatchListenerExecutionMode
+{
+    Default = 0,
+    AdoptCurrentCoordinatorScoped = 1,
 }
 
 internal readonly record struct RuntimeUnlockRetryDispatchAuthority(
@@ -1086,6 +1098,9 @@ internal readonly record struct RuntimeUnlockRetryDispatchAuthority(
 {
     public RuntimeUnlockRetryDispatchListenerRearmRequirement
         ListenerRearmRequirement { get; init; }
+
+    public RuntimeUnlockRetryDispatchListenerExecutionMode
+        ListenerExecutionMode { get; init; }
 
     public long ReceiveRecoveryOperationGeneration { get; init; }
 

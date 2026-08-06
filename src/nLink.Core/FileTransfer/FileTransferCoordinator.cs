@@ -2862,6 +2862,7 @@ internal static class FileTransferCoordinator
             FallbackPairedTailYieldEvidence =
                 evaluation.FallbackPairedTailYieldEvidence,
             ListenerRearmRequirement = evaluation.ListenerRearmRequirement,
+            ListenerExecutionMode = evaluation.ListenerExecutionMode,
         };
         return true;
     }
@@ -2899,7 +2900,9 @@ internal static class FileTransferCoordinator
            evaluation.FallbackPairedTailYieldEvidence ==
                request.FallbackPairedTailYieldEvidence &&
            evaluation.ListenerRearmRequirement ==
-               request.ListenerRearmRequirement;
+               request.ListenerRearmRequirement &&
+           evaluation.ListenerExecutionMode ==
+               request.ListenerExecutionMode;
 
     internal static bool TryGetPendingRuntimeUnlockRetryDispatchAttempt(
         FileTransferCoordinatorState state,
@@ -4738,6 +4741,8 @@ internal static class FileTransferCoordinator
                 predecessor.Request.FallbackPairedTailYieldEvidence,
             ListenerRearmRequirement =
                 predecessor.Request.ListenerRearmRequirement,
+            ListenerExecutionMode =
+                predecessor.Request.ListenerExecutionMode,
         };
 
         if (!activePredecessorSupersession &&
@@ -15173,6 +15178,7 @@ internal static class FileTransferCoordinator
             predecessorAuthorityId)
         {
             ListenerRearmRequirement = request.ListenerRearmRequirement,
+            ListenerExecutionMode = request.ListenerExecutionMode,
             ReceiveRecoveryOperationGeneration =
                 receiveRecoveryOperationGeneration,
             ReceiveRecoveryDataSessionGeneration =
@@ -19747,6 +19753,13 @@ internal static class FileTransferCoordinator
                 out mismatchField);
         }
 
+        if (authority.ListenerExecutionMode != request.ListenerExecutionMode)
+        {
+            return RuntimeUnlockRetryDispatchMismatch(
+                "request_listener_execution_mode",
+                out mismatchField);
+        }
+
         return true;
     }
 
@@ -20532,6 +20545,9 @@ internal static class FileTransferCoordinator
             MissingDispatchSuccessorGeneration: 0)
         {
             FallbackPairedTailYieldEvidence = pairedYieldEvidence,
+            ListenerExecutionMode =
+                RuntimeUnlockRetryDispatchListenerExecutionMode
+                    .AdoptCurrentCoordinatorScoped,
         };
         if (!TryValidateRuntimeUnlockRetryRelease(
                 state,

@@ -11197,6 +11197,10 @@ public sealed class FileTransferCoordinatorTests
 
         var evidence = Assert.IsType<FallbackPairedTailYieldReleaseEvidence>(
             request.FallbackPairedTailYieldEvidence);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchListenerExecutionMode
+                .AdoptCurrentCoordinatorScoped,
+            request.ListenerExecutionMode);
         var survivalProjectionWithoutPair =
             state.RuntimeUnlockFallbackSurvivalState with
             {
