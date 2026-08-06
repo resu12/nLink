@@ -1472,7 +1472,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
                 'Get-FileTransferRuntimeUnlockRegularV4RecoveryLeaseCorrelation',
                 'Get-FileTransferBridgeRecoveryExecutionSoftToHardHandoffCorrelation',
                 'Get-FileTransferBridgeRecoveryExecutionStartupPayloadIsolationCorrelation',
-                'Get-FileTransferBridgeRecoveryExecutionPayloadHoldCorrelation',
+                'Get-FileTransferBridgeRecoveryExecutionPayloadHoldWithPostTunaCorrelation',
                 'Get-FileTransferRuntimeUnlockRegularV4RecoveryClosureOfferTimeoutCorrelation',
                 'Get-FileTransferRuntimeUnlockInitialOfferRetryLifecycleHandoffCorrelation',
                 'Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrelation',
