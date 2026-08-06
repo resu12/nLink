@@ -5306,6 +5306,52 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryCurrentListenerAdoptionMissing_HasFullCompactParity(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_listener_adoption_missing";
+        const string scope =
+            "session_id=sess_listener_adoption; transfer_id=" + transferId +
+            "; direction=outbound; log_writer_id=writer-listener";
+        var result = await RunAnalyzeFixtureAsync(
+            [
+                LogLine($"event=tuna_sidecar_process_started; role=listener; pid=16704; run_id=listener-run-1; {scope}; log_writer_sequence=1"),
+                LogLine($"event=tuna_runtime_listener_restart_unlock_expired; {scope}; log_writer_sequence=2", 1),
+                LogLine($"event=runtime_unlock_retry_dispatch_install_committed; release_kind=FallbackPairedTailYield; release_authority_id=fta2-fallback-tail-listener-1; release_generation=1; listener_rearm_requirement=None; {scope}; log_writer_sequence=3", 2),
+                LogLine($"event=tuna_path_lease_failed; failure_reason=listener_sidecar_unavailable; lease_generation=3; {scope}; log_writer_sequence=4", 3),
+                LogLine($"event=tuna_path_lease_failed; failure_reason=listener_sidecar_unavailable; lease_generation=4; {scope}; log_writer_sequence=5", 4),
+                LogLine($"event=file_transfer_inbound_terminal; role=Helper; state=Completed; error_code=(none); sha256_match=1; integrity_ok=1; {scope}; log_writer_sequence=6", 5),
+                LogLine($"event=file_transfer_outbound_terminal; role=Helpee; state=Completed; error_code=(none); sha256_match=1; integrity_ok=1; {scope}; log_writer_sequence=7", 6)
+            ],
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("runtime_unlock_retry_dispatch_current_listener_adoption_missing", verdict["recovery_failure_class"]);
+        Assert.Equal("tuna_path_lease_failed", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal(
+            "installed_fallback_retry_did_not_adopt_current_coordinator_scoped_listener",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("2", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_missing_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_missing_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_missing_unresolved_count"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task AnalyzeRetained_ZeroOfferMissingDispatchSuccessorEvaluationSuppressed_SelectsIntent(
         bool compact)
     {

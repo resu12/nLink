@@ -1405,6 +1405,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_listener_sidecar_event') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_path_lease_failed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_path_lease_sidecar_unavailable') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_sidecar_process_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_sidecar_stop_requested') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_runtime_listener_restart_unlock_expired') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_listener_adoption_applied') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_transaction_offer_generation_created') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_offer_received_raw') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_message_rejected') +
@@ -1964,6 +1968,23 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         Get-FileTransferRuntimeUnlockRetryFallbackPairedYieldSuccessorReleaseCorrelation `
             -Events $runtimeUnlockRetryZeroOfferSuccessorEvents `
             -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents
+    [object[]]$runtimeUnlockRetryCurrentListenerAdoptionEvents = @(
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_install_committed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_install_confirmed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_path_lease_failed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_sidecar_process_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_sidecar_stop_requested') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_runtime_listener_restart_unlock_expired') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_listener_adoption_applied') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_listener_adoption_applied') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_offer_sent') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_offer_received') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_prepared') |
+            Sort-Object Sequence, LineNumber
+    )
+    $runtimeUnlockRetryCurrentListenerAdoptionProof =
+        Get-FileTransferRuntimeUnlockRetryCurrentListenerAdoptionCorrelation `
+            -Events $runtimeUnlockRetryCurrentListenerAdoptionEvents
     [object[]]$runtimeUnlockRegularV4RecoverySettlementEvents = @(
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_regular_v4_recovery_settlement_missing') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_blocked_by_regular_v4_receive_recovery') +
@@ -2495,6 +2516,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Reason = $candidateReason
         }) | Out-Null
     }
+    foreach ($candidateEvent in @($runtimeUnlockRetryCurrentListenerAdoptionProof.UnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'runtime_unlock_retry_dispatch_current_listener_adoption_missing'
+            Event = $candidateEvent
+            Reason = 'installed_fallback_retry_did_not_adopt_current_coordinator_scoped_listener'
+        }) | Out-Null
+    }
     foreach ($candidateEvent in @($runtimeUnlockRetryFallbackPairedYieldSuccessorReleaseProof.UnresolvedCandidateEvents)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid'
@@ -3015,6 +3043,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedPathLeaseExpiredProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockInitialActivationReceiveRecoveryHoldReleasedOfferExpiredProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRetryFallbackTailUnblockRecheckProof.UnresolvedCount -gt 0 -or
+        $runtimeUnlockRetryCurrentListenerAdoptionProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RecoverySettlementProof.HandoffBypassCount -gt 0 -or
         $runtimeUnlockUncommittedTunaFallbackPrecommitAuthorityProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockPostTunaFallbackTransportProofHandoffProof.UnresolvedCount -gt 0 -or
@@ -3085,6 +3114,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired',
                 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
                 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected',
+                'runtime_unlock_retry_dispatch_current_listener_adoption_missing',
                 'runtime_unlock_retry_dispatch_authority_tuple_mismatch',
                 'regular_v4_frontier_tail_repair_state_publication_missing',
                 'regular_v4_frontier_repair_missing_range_not_preserved',
@@ -3185,6 +3215,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired',
             'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired',
             'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
+            'runtime_unlock_retry_dispatch_current_listener_adoption_missing',
             'runtime_unlock_precommit_probe_start_handoff_missing',
             'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing',
             'runtime_unlock_precommit_fallback_recovery_handoff_suppressed',
@@ -3545,6 +3576,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_retry_dispatch_zero_offer_successor_evaluation_suppressed_recovered_count={0}" -f $runtimeUnlockRetryZeroOfferSuccessorProof.SuppressedEvaluationRecoveredCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_evaluation_suppressed_unresolved_count={0}" -f $runtimeUnlockRetryZeroOfferSuccessorProof.SuppressedEvaluationUnresolvedCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_verdict={0}" -f $runtimeUnlockRetryZeroOfferSuccessorProof.Verdict),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_missing_raw_count={0}" -f $runtimeUnlockRetryCurrentListenerAdoptionProof.RawCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_missing_distinct_count={0}" -f $runtimeUnlockRetryCurrentListenerAdoptionProof.DistinctCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_missing_recovered_count={0}" -f $runtimeUnlockRetryCurrentListenerAdoptionProof.RecoveredCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_missing_unresolved_count={0}" -f $runtimeUnlockRetryCurrentListenerAdoptionProof.UnresolvedCount),
         ("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_raw_count={0}" -f $runtimeUnlockRetryFallbackPairedYieldSuccessorReleaseProof.RawCount),
         ("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_distinct_count={0}" -f $runtimeUnlockRetryFallbackPairedYieldSuccessorReleaseProof.DistinctCount),
         ("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_recovered_count={0}" -f $runtimeUnlockRetryFallbackPairedYieldSuccessorReleaseProof.RecoveredCount),
@@ -3904,6 +3939,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_retry_dispatch_zero_offer_successor_evaluation_suppressed_recovered_count={0}" -f $runtimeUnlockRetryZeroOfferSuccessorProof.SuppressedEvaluationRecoveredCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_evaluation_suppressed_unresolved_count={0}" -f $runtimeUnlockRetryZeroOfferSuccessorProof.SuppressedEvaluationUnresolvedCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_verdict={0}" -f $runtimeUnlockRetryZeroOfferSuccessorProof.Verdict),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_missing_raw_count={0}" -f $runtimeUnlockRetryCurrentListenerAdoptionProof.RawCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_missing_distinct_count={0}" -f $runtimeUnlockRetryCurrentListenerAdoptionProof.DistinctCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_missing_recovered_count={0}" -f $runtimeUnlockRetryCurrentListenerAdoptionProof.RecoveredCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_missing_unresolved_count={0}" -f $runtimeUnlockRetryCurrentListenerAdoptionProof.UnresolvedCount),
         ("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_raw_count={0}" -f $runtimeUnlockRetryFallbackPairedYieldSuccessorReleaseProof.RawCount),
         ("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_distinct_count={0}" -f $runtimeUnlockRetryFallbackPairedYieldSuccessorReleaseProof.DistinctCount),
         ("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_recovered_count={0}" -f $runtimeUnlockRetryFallbackPairedYieldSuccessorReleaseProof.RecoveredCount),
@@ -4259,6 +4298,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_retry_dispatch_zero_offer_successor_evaluation_suppressed_recovered_count={0}" -f $runtimeUnlockRetryZeroOfferSuccessorProof.SuppressedEvaluationRecoveredCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_evaluation_suppressed_unresolved_count={0}" -f $runtimeUnlockRetryZeroOfferSuccessorProof.SuppressedEvaluationUnresolvedCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_verdict={0}" -f $runtimeUnlockRetryZeroOfferSuccessorProof.Verdict),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_missing_raw_count={0}" -f $runtimeUnlockRetryCurrentListenerAdoptionProof.RawCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_missing_distinct_count={0}" -f $runtimeUnlockRetryCurrentListenerAdoptionProof.DistinctCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_missing_recovered_count={0}" -f $runtimeUnlockRetryCurrentListenerAdoptionProof.RecoveredCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_missing_unresolved_count={0}" -f $runtimeUnlockRetryCurrentListenerAdoptionProof.UnresolvedCount),
         ("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_raw_count={0}" -f $runtimeUnlockRetryFallbackPairedYieldSuccessorReleaseProof.RawCount),
         ("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_distinct_count={0}" -f $runtimeUnlockRetryFallbackPairedYieldSuccessorReleaseProof.DistinctCount),
         ("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_recovered_count={0}" -f $runtimeUnlockRetryFallbackPairedYieldSuccessorReleaseProof.RecoveredCount),
@@ -4601,6 +4644,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_retry_dispatch_zero_offer_successor_evaluation_suppressed_recovered_count={0}" -f $runtimeUnlockRetryZeroOfferSuccessorProof.SuppressedEvaluationRecoveredCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_evaluation_suppressed_unresolved_count={0}" -f $runtimeUnlockRetryZeroOfferSuccessorProof.SuppressedEvaluationUnresolvedCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_verdict={0}" -f $runtimeUnlockRetryZeroOfferSuccessorProof.Verdict),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_missing_raw_count={0}" -f $runtimeUnlockRetryCurrentListenerAdoptionProof.RawCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_missing_distinct_count={0}" -f $runtimeUnlockRetryCurrentListenerAdoptionProof.DistinctCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_missing_recovered_count={0}" -f $runtimeUnlockRetryCurrentListenerAdoptionProof.RecoveredCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_missing_unresolved_count={0}" -f $runtimeUnlockRetryCurrentListenerAdoptionProof.UnresolvedCount),
         ("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_raw_count={0}" -f $runtimeUnlockRetryFallbackPairedYieldSuccessorReleaseProof.RawCount),
         ("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_distinct_count={0}" -f $runtimeUnlockRetryFallbackPairedYieldSuccessorReleaseProof.DistinctCount),
         ("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_recovered_count={0}" -f $runtimeUnlockRetryFallbackPairedYieldSuccessorReleaseProof.RecoveredCount),
@@ -4992,6 +5039,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         runtime_unlock_retry_dispatch_zero_offer_successor_evaluation_suppressed_recovered_count = $runtimeUnlockRetryZeroOfferSuccessorProof.SuppressedEvaluationRecoveredCount
         runtime_unlock_retry_dispatch_zero_offer_successor_evaluation_suppressed_unresolved_count = $runtimeUnlockRetryZeroOfferSuccessorProof.SuppressedEvaluationUnresolvedCount
         runtime_unlock_retry_dispatch_zero_offer_successor_verdict = $runtimeUnlockRetryZeroOfferSuccessorProof.Verdict
+        runtime_unlock_retry_dispatch_current_listener_adoption_missing_raw_count = $runtimeUnlockRetryCurrentListenerAdoptionProof.RawCount
+        runtime_unlock_retry_dispatch_current_listener_adoption_missing_distinct_count = $runtimeUnlockRetryCurrentListenerAdoptionProof.DistinctCount
+        runtime_unlock_retry_dispatch_current_listener_adoption_missing_recovered_count = $runtimeUnlockRetryCurrentListenerAdoptionProof.RecoveredCount
+        runtime_unlock_retry_dispatch_current_listener_adoption_missing_unresolved_count = $runtimeUnlockRetryCurrentListenerAdoptionProof.UnresolvedCount
         runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_raw_count = $runtimeUnlockRetryFallbackPairedYieldSuccessorReleaseProof.RawCount
         runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_distinct_count = $runtimeUnlockRetryFallbackPairedYieldSuccessorReleaseProof.DistinctCount
         runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_recovered_count = $runtimeUnlockRetryFallbackPairedYieldSuccessorReleaseProof.RecoveredCount
