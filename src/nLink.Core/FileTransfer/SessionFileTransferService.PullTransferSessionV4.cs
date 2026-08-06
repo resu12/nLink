@@ -4252,6 +4252,124 @@ public sealed partial class SessionFileTransferService
             requiredInstall: null,
             requiredDataSession: null);
 
+    private static FileTransferDataSessionSubmissionUnavailableException?
+        FindDataSessionSubmissionUnavailableException(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is FileTransferDataSessionSubmissionUnavailableException unavailable)
+            {
+                return unavailable;
+            }
+        }
+
+        return null;
+    }
+
+    private bool TryDeferCurrentPostTunaFallbackRecoverySubmissionFailure(
+        OutboundTransferContext context,
+        Exception exception,
+        OutboundSparsePumpInstall? requiredInstall,
+        IFileTransferDataSession requiredDataSession,
+        long physicalSendLeaseGeneration,
+        string repairRequestKey)
+    {
+        var unavailable = FindDataSessionSubmissionUnavailableException(exception);
+        if (unavailable is null || !unavailable.RecoveryBarrierActive || requiredInstall is null)
+        {
+            return false;
+        }
+
+        FileTransferReceiveRecoveryOperation operation;
+        DateTimeOffset immutableDeadlineUtc;
+        var now = DateTimeOffset.UtcNow;
+        lock (gate)
+        {
+            if (!ReferenceEquals(outboundTransfer, context) ||
+                context.IsTerminal ||
+                context.LifetimeCts.IsCancellationRequested ||
+                context.RouteSelection.Route != FileTransferRoute.PostTunaFallbackV6 ||
+                context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+                context.RouteRuntime.FrameFamily != FileTransferFrameFamily.V6 ||
+                !ReferenceEquals(context.DataSession, requiredDataSession) ||
+                !IsOutboundSparsePumpInstallCurrentLocked(
+                    context,
+                    requiredInstall,
+                    requiredDataSession,
+                    out _))
+            {
+                return false;
+            }
+
+            var state = CreateCoordinatorStateLocked(context);
+            if (!FileTransferCoordinator.TryGetCurrentReceiveRecoveryPayloadSubmissionHold(
+                    state,
+                    out operation,
+                    out _) ||
+                !FileTransferCoordinator.TryGetReceiveRecoveryLivenessDeferral(
+                    state,
+                    out var livenessOperation,
+                    out _,
+                    out immutableDeadlineUtc) ||
+                livenessOperation.Authority != operation.Authority ||
+                operation.ExecutionState is not
+                    (FileTransferReceiveRecoveryExecutionState.Issued or
+                     FileTransferReceiveRecoveryExecutionState.Running) ||
+                immutableDeadlineUtc <= now)
+            {
+                return false;
+            }
+
+            var currentObservation = operation.Authority.Observation;
+            if (currentObservation.Direction != FileTransferDirection.Outbound ||
+                currentObservation.Route != FileTransferRoute.PostTunaFallbackV6 ||
+                currentObservation.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+                currentObservation.RuntimeOwner != requiredInstall.RuntimeOwner ||
+                currentObservation.RoutePublication != requiredInstall.RoutePublication ||
+                currentObservation.TerminalGeneration != requiredInstall.TerminalGeneration ||
+                currentObservation.LegGeneration != requiredInstall.LegGeneration ||
+                currentObservation.DataSessionGeneration != requiredInstall.DataSessionGeneration ||
+                !string.Equals(
+                    currentObservation.DataSessionIdentity,
+                    CreateReceiveRecoveryDataSessionIdentity(
+                        context.TransferId,
+                        requiredDataSession,
+                        requiredInstall.DataSessionGeneration),
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            const string submissionEpochPauseReason =
+                "post_tuna_fallback_receive_recovery_submission_epoch_transition";
+            if (context.PullTransportPaused &&
+                !string.Equals(
+                    context.PullTransportPauseReason,
+                    submissionEpochPauseReason,
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            context.PullTransportPaused = true;
+            context.PullTransportPausedSinceUtc ??= now;
+            context.PullTransportPauseReason = submissionEpochPauseReason;
+            context.PullTransportLastPauseReason = context.PullTransportPauseReason;
+            context.PullTransportResumeRequestPending = true;
+            context.SparseSenderPumpLastWakeReason =
+                "post_tuna_fallback_recovery_submission_failure_deferred";
+            context.V6SenderPumpLastWakeReason =
+                "post_tuna_fallback_recovery_submission_failure_deferred";
+            context.StatusMessage = "Waiting for network recovery.";
+        }
+
+        var observation = operation.Authority.Observation;
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_post_tuna_fallback_recovery_submission_failure_deferred; decision_status=Accepted; decision_reason=current_post_tuna_fallback_recovery_submission_epoch_failure_deferred; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; receive_recovery_operation_authority_id={FormatProtocolLogValue(operation.Authority.AuthorityId.ToString())}; receive_recovery_operation_generation={operation.Authority.OperationGeneration}; physical_send_lease_generation={physicalSendLeaseGeneration}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; typed_rejection_reason={FormatProtocolLogValue(unavailable.Reason.ToString())}; rejection_stage={FormatProtocolLogValue(unavailable.Stage)}; rejection_channel={FormatProtocolLogValue(unavailable.Channel)}; expected_submission_epoch={unavailable.ExpectedSubmissionEpoch}; current_submission_epoch={unavailable.CurrentSubmissionEpoch}; expected_process_epoch={unavailable.ExpectedProcessEpoch}; current_process_epoch={unavailable.CurrentProcessEpoch}; recovery_barrier_active=1; immutable_deadline_utc_ms={immutableDeadlineUtc.ToUnixTimeMilliseconds()}; route={FormatProtocolLogValue(observation.RouteToken)}; protocol_version={observation.ProtocolVersion}; live_route_epoch={observation.LiveRouteEpoch}; runtime_generation={observation.RuntimeOwner.RuntimeGeneration}; route_publication_generation={observation.RoutePublication.PublicationGeneration}; terminal_generation={observation.TerminalGeneration}; leg_generation={observation.LegGeneration}; transport_epoch={observation.TransportEpoch}; bridge_recovery_generation={observation.BridgeRecoveryGeneration}; bridge_decision_generation={operation.Authority.BridgeRecoveryDecision.BridgeDecisionGeneration}; checkpoint_request_id={FormatProtocolLogValue(operation.Authority.ExecutionCommand.CheckpointRequestId ?? "(none)")}; data_session_generation={observation.DataSessionGeneration}");
+        return true;
+    }
+
     private bool TryDeferOutboundPostTunaFallbackTransportSendFailureIfCurrent(
         OutboundTransferContext context,
         string source,
@@ -16702,6 +16820,43 @@ public sealed partial class SessionFileTransferService
 
                 if (sendException is not null)
                 {
+                    if (TryDeferCurrentPostTunaFallbackRecoverySubmissionFailure(
+                            context,
+                            sendException,
+                            pumpInstall,
+                            dataSession,
+                            pendingSend.PhysicalSendLeaseGeneration,
+                            repairRequestKey))
+                    {
+                        FileTransferReceiveRecoveryOperation? deferredOperation = null;
+                        lock (gate)
+                        {
+                            if (ReferenceEquals(outboundTransfer, context) &&
+                                !context.IsTerminal &&
+                                FileTransferCoordinator.TryGetCurrentReceiveRecoveryPayloadSubmissionHold(
+                                    CreateCoordinatorStateLocked(context),
+                                    out var currentOperation,
+                                    out _))
+                            {
+                                deferredOperation = currentOperation;
+                            }
+                        }
+
+                        if (deferredOperation is { } exactDeferredOperation)
+                        {
+                            observeReceiveRecoveryHold?.Invoke(
+                                exactDeferredOperation,
+                                "submission_epoch_failure",
+                                "post_tuna_fallback_receive_recovery_submission_epoch_transition");
+                        }
+
+                        completedWithoutTransportPause = false;
+                        stopForTransportPause = true;
+                        transportStopReason =
+                            "post_tuna_fallback_recovery_submission_failure_deferred";
+                        return;
+                    }
+
                     var deferredForTransportPause = false;
                     var deferredForFileTunaFallbackHandoff = false;
                     var activationPauseStarted = false;
@@ -17218,7 +17373,16 @@ public sealed partial class SessionFileTransferService
                     context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
                     context.RouteRuntime.FrameFamily == FileTransferFrameFamily.V4;
                 observeSendAuthority?.Invoke(sendAuthority);
-                pending.Enqueue(new PendingV4TransportSend(prepared, sendTask, sendAuthority, sendCts, scheduledUtc, sendAttempt, sendAttemptCount, scheduledRegularNknV4FastRuntime));
+                pending.Enqueue(new PendingV4TransportSend(
+                    prepared,
+                    sendTask,
+                    sendAuthority,
+                    sendCts,
+                    scheduledUtc,
+                    sendAttempt,
+                    sendAttemptCount,
+                    scheduledRegularNknV4FastRuntime,
+                    physicalSendLease?.LeaseGeneration ?? 0));
                 pendingRawBytes += prepared.RawBytes;
 
                 lock (gate)

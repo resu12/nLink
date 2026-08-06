@@ -6430,7 +6430,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
     [Trait("Category", "LegacySmoke")]
     [Trait("FileTransferInfraSuite", "BridgeRecoveryExecution")]
     [Fact]
-    public async Task BridgeRecoveryExecution_CoreCommandUsesHardRestartAndCompletesOnce()
+    public async Task BridgeSubmissionUnavailable_BridgeRecoveryExecutionCoreCommandUsesHardRestartAndCompletesOnce()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -6549,11 +6549,16 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                     TimeSpan.FromSeconds(2)));
             Assert.True(
                 freshProcessStarted.Wait(TimeSpan.FromSeconds(5)));
-            await Assert.ThrowsAsync<InvalidOperationException>(
+            var submissionUnavailable = await Assert.ThrowsAsync<FileTransferDataSessionSubmissionUnavailableException>(
                 () => adapter.SendAsync(
                     "fresh-unready-destination",
                     [4, 5, 6],
                     cts.Token));
+            Assert.Equal(
+                FileTransferDataSessionSubmissionUnavailableReason.SubmissionEpochNotReady,
+                submissionUnavailable.Reason);
+            Assert.True(submissionUnavailable.RecoveryBarrierActive);
+            Assert.Equal("control", submissionUnavailable.Channel);
             await Assert.ThrowsAsync<InvalidOperationException>(
                 () => adapter.ConnectAsync(cts.Token));
             releaseFreshProcess.Set();
@@ -6734,9 +6739,14 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 FileTransferBridgeRecoveryExecutionOutcome.Completed,
                 epochRaceReceipt.Outcome);
             releaseStaleAdmission.Set();
-            await Assert.ThrowsAsync<InvalidOperationException>(
-                async () => await staleSubmission.WaitAsync(
-                    TimeSpan.FromSeconds(2)));
+            var staleSubmissionUnavailable =
+                await Assert.ThrowsAsync<FileTransferDataSessionSubmissionUnavailableException>(
+                    async () => await staleSubmission.WaitAsync(
+                        TimeSpan.FromSeconds(2)));
+            Assert.Equal(
+                FileTransferDataSessionSubmissionUnavailableReason.SubmissionEpochChanged,
+                staleSubmissionUnavailable.Reason);
+            Assert.False(staleSubmissionUnavailable.RecoveryBarrierActive);
             connectCount = int.Parse(File.ReadAllText(countFile).Trim());
             Assert.Equal(3, connectCount);
             Assert.Contains(
@@ -6791,11 +6801,15 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Assert.Equal(
                 FileTransferBridgeRecoveryExecutionOutcome.Discarded,
                 invalidatedWhileWaitingReceipt.Outcome);
-            await Assert.ThrowsAsync<InvalidOperationException>(
+            var invalidatedSubmissionUnavailable =
+                await Assert.ThrowsAsync<FileTransferDataSessionSubmissionUnavailableException>(
                 () => adapter.SendAsync(
                     "invalidated-barrier-destination",
                     [13, 14, 15],
                     cts.Token));
+            Assert.Equal(
+                FileTransferDataSessionSubmissionUnavailableReason.SubmissionEpochNotReady,
+                invalidatedSubmissionUnavailable.Reason);
             releaseHeldSubmission.Set();
             await Assert.ThrowsAnyAsync<InvalidOperationException>(
                 async () => await heldSubmission.WaitAsync(
@@ -6819,11 +6833,15 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                     invalidatedReadySnapshot!.GetType()
                         .GetProperty("SubmissionEpoch")!
                         .GetValue(invalidatedReadySnapshot)));
-            await Assert.ThrowsAsync<InvalidOperationException>(
+            var invalidatedUnreadySubmission =
+                await Assert.ThrowsAsync<FileTransferDataSessionSubmissionUnavailableException>(
                 () => adapter.SendAsync(
                     "invalidated-unready-destination",
                     [16, 17, 18],
                     cts.Token));
+            Assert.Equal(
+                FileTransferDataSessionSubmissionUnavailableReason.SubmissionEpochNotReady,
+                invalidatedUnreadySubmission.Reason);
             Assert.Equal(
                 connectCount,
                 int.Parse(File.ReadAllText(countFile).Trim()));

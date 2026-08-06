@@ -24441,7 +24441,8 @@ public sealed partial class SessionFileTransferService :
         DateTimeOffset ScheduledUtc,
         int SendAttempt,
         int SendAttemptCount,
-        bool ScheduledRegularNknV4FastRuntime);
+        bool ScheduledRegularNknV4FastRuntime,
+        long PhysicalSendLeaseGeneration);
 
     private readonly record struct MissingRange(int StartChunkIndex, int EndChunkIndexExclusive);
 }

@@ -3670,7 +3670,16 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 "event=nkn_bridge_submission_rejected; " +
                 $"stage={SanitizeLogToken(stage)}; reason=bridge_submission_epoch_not_ready; channel={channel.ToString().ToLowerInvariant()}; " +
                 $"submission_epoch={currentEpoch}; ready_submission_epoch={readySnapshot.SubmissionEpoch}; ready_process_epoch={readySnapshot.ProcessIdentity.ProcessEpoch}; recovery_barrier_active={(barrierActive ? 1 : 0)}");
-            throw new InvalidOperationException("NKN bridge process is not ready for payload submission.");
+            throw new FileTransferDataSessionSubmissionUnavailableException(
+                FileTransferDataSessionSubmissionUnavailableReason.SubmissionEpochNotReady,
+                stage,
+                channel.ToString().ToLowerInvariant(),
+                readySnapshot.SubmissionEpoch,
+                currentEpoch,
+                readySnapshot.ProcessIdentity.ProcessEpoch,
+                bridgeSupervisor.CurrentProcessIdentity.ProcessEpoch,
+                barrierActive,
+                "NKN bridge process is not ready for payload submission.");
         }
 
         var activeSnapshot = bridgeSupervisor.GetActiveSubmissionSnapshotOrThrow();
@@ -3680,7 +3689,16 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 "event=nkn_bridge_submission_rejected; " +
                 $"stage={SanitizeLogToken(stage)}; reason=bridge_process_epoch_not_ready; channel={channel.ToString().ToLowerInvariant()}; " +
                 $"submission_epoch={currentEpoch}; process_epoch={activeSnapshot.Identity.ProcessEpoch}; ready_process_epoch={readySnapshot.ProcessIdentity.ProcessEpoch}; recovery_barrier_active={(barrierActive ? 1 : 0)}");
-            throw new InvalidOperationException("NKN bridge process is not ready for payload submission.");
+            throw new FileTransferDataSessionSubmissionUnavailableException(
+                FileTransferDataSessionSubmissionUnavailableReason.ProcessEpochNotReady,
+                stage,
+                channel.ToString().ToLowerInvariant(),
+                readySnapshot.SubmissionEpoch,
+                currentEpoch,
+                readySnapshot.ProcessIdentity.ProcessEpoch,
+                activeSnapshot.Identity.ProcessEpoch,
+                barrierActive,
+                "NKN bridge process is not ready for payload submission.");
         }
 
         return new BridgeSubmissionAdmission(
@@ -3712,7 +3730,16 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 "event=nkn_bridge_submission_rejected; " +
                 $"stage={SanitizeLogToken(stage)}; reason=bridge_submission_epoch_changed; channel={channel.ToString().ToLowerInvariant()}; " +
                 $"expected_submission_epoch={expected.SubmissionEpoch}; submission_epoch={currentEpoch}; ready_submission_epoch={readySnapshot.SubmissionEpoch}; expected_process_epoch={expected.ProcessSnapshot.Identity.ProcessEpoch}; ready_process_epoch={readySnapshot.ProcessIdentity.ProcessEpoch}; recovery_barrier_active={(barrierActive ? 1 : 0)}");
-            throw new InvalidOperationException("NKN bridge process changed during payload submission.");
+            throw new FileTransferDataSessionSubmissionUnavailableException(
+                FileTransferDataSessionSubmissionUnavailableReason.SubmissionEpochChanged,
+                stage,
+                channel.ToString().ToLowerInvariant(),
+                expected.SubmissionEpoch,
+                currentEpoch,
+                expected.ProcessSnapshot.Identity.ProcessEpoch,
+                readySnapshot.ProcessIdentity.ProcessEpoch,
+                barrierActive,
+                "NKN bridge process changed during payload submission.");
         }
 
         var currentSnapshot = bridgeSupervisor.GetActiveSubmissionSnapshotOrThrow();
@@ -3721,7 +3748,15 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 currentSnapshot.Writer,
                 expected.ProcessSnapshot.Writer))
         {
-            throw new InvalidOperationException(
+            throw new FileTransferDataSessionSubmissionUnavailableException(
+                FileTransferDataSessionSubmissionUnavailableReason.ProcessEpochChanged,
+                stage,
+                channel.ToString().ToLowerInvariant(),
+                expected.SubmissionEpoch,
+                currentEpoch,
+                expected.ProcessSnapshot.Identity.ProcessEpoch,
+                currentSnapshot.Identity.ProcessEpoch,
+                barrierActive,
                 "NKN bridge process changed before payload submission.");
         }
 
@@ -3729,18 +3764,33 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     }
 
     private void ValidatePhysicalBridgeSubmissionOrThrow(
-        BridgeProcessSubmissionSnapshot expected,
+        BridgeSubmissionAdmission expected,
         string stage,
         NknBridgeChannel channel)
     {
         var current = bridgeSupervisor.CurrentProcessIdentity;
-        if (current != expected.Identity)
+        if (current != expected.ProcessSnapshot.Identity)
         {
+            long currentSubmissionEpoch;
+            bool barrierActive;
+            lock (gate)
+            {
+                currentSubmissionEpoch = bridgeSubmissionEpoch;
+                barrierActive = bridgeRecoverySubmissionBarrierActive;
+            }
             Log(
                 "event=nkn_bridge_submission_rejected; " +
                 $"stage={SanitizeLogToken(stage)}; reason=bridge_process_epoch_changed; channel={channel.ToString().ToLowerInvariant()}; " +
-                $"expected_process_epoch={expected.Identity.ProcessEpoch}; process_epoch={current.ProcessEpoch}");
-            throw new InvalidOperationException(
+                $"expected_process_epoch={expected.ProcessSnapshot.Identity.ProcessEpoch}; process_epoch={current.ProcessEpoch}");
+            throw new FileTransferDataSessionSubmissionUnavailableException(
+                FileTransferDataSessionSubmissionUnavailableReason.ProcessEpochChanged,
+                stage,
+                channel.ToString().ToLowerInvariant(),
+                expected.SubmissionEpoch,
+                currentSubmissionEpoch,
+                expected.ProcessSnapshot.Identity.ProcessEpoch,
+                current.ProcessEpoch,
+                barrierActive,
                 "NKN bridge process changed during payload submission.");
         }
     }
@@ -3759,7 +3809,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                     NknBridgeChannel.Control)
                 .Writer,
             ValidateAfterWrite: _ => ValidatePhysicalBridgeSubmissionOrThrow(
-                admission.ProcessSnapshot,
+                admission,
                 $"{operation}_post_submit",
                 NknBridgeChannel.Control));
     }
@@ -3791,7 +3841,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 .WriteSendFrameAsync(destination, payload, channel, ct)
                 .ConfigureAwait(false);
             ValidatePhysicalBridgeSubmissionOrThrow(
-                submissionSnapshot,
+                admission,
                 "post_submit",
                 channel);
             Volatile.Write(ref lastBridgeSendFrameTick, Stopwatch.GetTimestamp());

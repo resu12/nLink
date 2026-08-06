@@ -17,6 +17,48 @@ public enum FileTransferTransportProfileKind
     ConservativeNknStartup = 1,
 }
 
+internal enum FileTransferDataSessionSubmissionUnavailableReason
+{
+    SubmissionEpochNotReady = 0,
+    SubmissionEpochChanged = 1,
+    ProcessEpochNotReady = 2,
+    ProcessEpochChanged = 3,
+}
+
+internal sealed class FileTransferDataSessionSubmissionUnavailableException : InvalidOperationException
+{
+    internal FileTransferDataSessionSubmissionUnavailableException(
+        FileTransferDataSessionSubmissionUnavailableReason reason,
+        string stage,
+        string channel,
+        long expectedSubmissionEpoch,
+        long currentSubmissionEpoch,
+        long expectedProcessEpoch,
+        long currentProcessEpoch,
+        bool recoveryBarrierActive,
+        string compatibilityMessage)
+        : base(compatibilityMessage)
+    {
+        Reason = reason;
+        Stage = stage;
+        Channel = channel;
+        ExpectedSubmissionEpoch = expectedSubmissionEpoch;
+        CurrentSubmissionEpoch = currentSubmissionEpoch;
+        ExpectedProcessEpoch = expectedProcessEpoch;
+        CurrentProcessEpoch = currentProcessEpoch;
+        RecoveryBarrierActive = recoveryBarrierActive;
+    }
+
+    internal FileTransferDataSessionSubmissionUnavailableReason Reason { get; }
+    internal string Stage { get; }
+    internal string Channel { get; }
+    internal long ExpectedSubmissionEpoch { get; }
+    internal long CurrentSubmissionEpoch { get; }
+    internal long ExpectedProcessEpoch { get; }
+    internal long CurrentProcessEpoch { get; }
+    internal bool RecoveryBarrierActive { get; }
+}
+
 public interface IFileTransferTransportProfileProvider
 {
     FileTransferTransportProfileKind FileTransferTransportProfileKind { get; }

@@ -4938,6 +4938,93 @@ public sealed partial class SessionFileTransferV4SenderTests
             .Invoke(service, [context, runtimeKind]));
     }
 
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "PostTunaFallbackV6RecoverySubmissionFailure")]
+    public void PostTunaFallbackV6RecoverySubmissionFailure_CurrentEpochBarrierIsDeferredWithoutNewAuthority()
+    {
+        var transferId = $"transfer_post_tuna_epoch_deferral_{Guid.NewGuid():N}";
+        var sessionId = $"session_{transferId}";
+        var logStart = GetOperationalLogLength();
+        using var transport = new LoopbackFileTransferTransport(sessionId);
+        using var service = new SessionFileTransferService();
+        using var dataSession = new RecordingDataSession(sessionId, transferId);
+        service.AttachTransport(transport);
+        var context = CreateSparsePostTunaContextWithSourceFactory(
+            transferId,
+            _ => Task.FromResult<Stream>(new MemoryStream(new byte[8 * 21 * 1024], writable: false)),
+            remoteNextExpectedChunkIndex: 0,
+            chunksAcceptedForTransport: 0,
+            remoteGrantedUntilExclusive: 1,
+            chunkCount: 8);
+        SetPrivateProperty(context, "DataSession", dataSession);
+        SetPrivateProperty(context, "DataSessionGeneration", 1L);
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        object install;
+        lock (GetServiceGate(service))
+        {
+            var staged = StageSparsePumpInstall(service, context, predecessor: null, "unit_test_epoch_deferral");
+            Assert.True(staged.Accepted, staged.Reason);
+            var committed = CommitSparsePumpInstall(service, context, staged.Install!, dataSession);
+            Assert.True(committed.Accepted, committed.Reason);
+            install = committed.Install!;
+        }
+
+        Assert.True(Assert.IsType<bool>(typeof(SessionFileTransferService)
+            .GetMethod("TryRequestFileTransferReceiveRecovery", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    new FileTransferReceiveRecoveryRequest(
+                        sessionId,
+                        transferId,
+                        FileTransferDirection.Outbound,
+                        "session_liveness_timeout_pending"),
+                ])));
+        var before = GetPrivateProperty<FileTransferCoordinatorPersistentState>(context, "CoordinatorPersistentState")
+            .FileTransferReceiveRecovery.CurrentOperation;
+        Assert.NotNull(before);
+        Assert.Equal(FileTransferReceiveRecoveryExecutionState.Running, before.Value.ExecutionState);
+        Assert.True(before.Value.LivenessDeferralDeadlineUtcMs > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        var graceBefore = GetPrivatePropertyValue(context, "PullTransportGraceDeadlineUtc");
+
+        var exception = new FileTransferDataSessionSubmissionUnavailableException(
+            FileTransferDataSessionSubmissionUnavailableReason.SubmissionEpochChanged,
+            "send_pre_submit",
+            "bulk",
+            expectedSubmissionEpoch: 3,
+            currentSubmissionEpoch: 4,
+            expectedProcessEpoch: 7,
+            currentProcessEpoch: 8,
+            recoveryBarrierActive: true,
+            "NKN bridge process changed during payload submission.");
+        var deferred = Assert.IsType<bool>(typeof(SessionFileTransferService)
+            .GetMethod(
+                "TryDeferCurrentPostTunaFallbackRecoverySubmissionFailure",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [context, exception, install, dataSession, 91L, "fallback-frontier:test"]));
+
+        Assert.True(deferred);
+        Assert.False(GetPrivateProperty<bool>(context, "IsTerminal"));
+        Assert.True(GetPrivateProperty<bool>(context, "PullTransportPaused"));
+        Assert.True(GetPrivateProperty<bool>(context, "PullTransportResumeRequestPending"));
+        Assert.Equal(graceBefore, GetPrivatePropertyValue(context, "PullTransportGraceDeadlineUtc"));
+        var after = GetPrivateProperty<FileTransferCoordinatorPersistentState>(context, "CoordinatorPersistentState")
+            .FileTransferReceiveRecovery.CurrentOperation;
+        Assert.Equal(before, after);
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains(
+            "event=filetransfer_post_tuna_fallback_recovery_submission_failure_deferred;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains("physical_send_lease_generation=91", log, StringComparison.Ordinal);
+        Assert.Contains("typed_rejection_reason=SubmissionEpochChanged", log, StringComparison.Ordinal);
+    }
+
     private static object CreateSparsePostTunaContextWithSourceFactory(
         string transferId,
         FileTransferReadStreamFactory sourceFactory,

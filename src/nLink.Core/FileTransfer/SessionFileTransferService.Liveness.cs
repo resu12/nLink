@@ -1215,6 +1215,8 @@ public sealed partial class SessionFileTransferService
         FileTransferReceiveRecoveryOperation? completedOperation = null;
         RuntimeUnlockRetryDispatchDecision? retryDispatchDecision = null;
         OutboundTransferContext? fallbackCheckpointToResume = null;
+        OutboundTransferContext? deferredSubmissionToResume = null;
+        FileTransferReceiveRecoveryOperation? deferredSubmissionOperation = null;
         lock (gate)
         {
             executionDecision = ObserveBridgeRecoveryExecutionReceiptLocked(request, receipt);
@@ -1239,6 +1241,35 @@ public sealed partial class SessionFileTransferService
                     StringComparison.Ordinal))
             {
                 fallbackCheckpointToResume = outbound;
+                if (completedOperation is
+                    {
+                        ExecutionState:
+                            FileTransferReceiveRecoveryExecutionState.Completed,
+                    } exactCompletedOperation &&
+                    request.ReceiveRecoveryOperationAuthority is { } requestAuthority &&
+                    exactCompletedOperation.Authority == requestAuthority &&
+                    outbound.PullTransportPaused &&
+                    string.Equals(
+                        outbound.PullTransportPauseReason,
+                        "post_tuna_fallback_receive_recovery_submission_epoch_transition",
+                        StringComparison.Ordinal))
+                {
+                    outbound.PullTransportLastResumeReason =
+                        "post_tuna_fallback_receive_recovery_completed";
+                    outbound.PullTransportLastResumeUtc = DateTimeOffset.UtcNow;
+                    outbound.PullTransportLastPauseReason =
+                        outbound.PullTransportPauseReason;
+                    outbound.PullTransportPaused = false;
+                    outbound.PullTransportPausedSinceUtc = null;
+                    outbound.PullTransportPauseReason = null;
+                    outbound.PullTransportResumeRequestPending = false;
+                    outbound.SparseSenderPumpLastWakeReason =
+                        "post_tuna_fallback_recovery_submission_failure_resumed";
+                    outbound.V6SenderPumpLastWakeReason =
+                        "post_tuna_fallback_recovery_submission_failure_resumed";
+                    deferredSubmissionToResume = outbound;
+                    deferredSubmissionOperation = exactCompletedOperation;
+                }
             }
         }
 
@@ -1270,6 +1301,15 @@ public sealed partial class SessionFileTransferService
             "FileTransferService",
             $"event=filetransfer_receive_recovery_operation_execution_receipt_decision_observed; session_id={FormatProtocolLogValue(request.SessionId)}; transfer_id={FormatProtocolLogValue(request.TransferId)}; direction={request.Direction.ToString().ToLowerInvariant()}; recovery_operation_generation={completedOperation?.Authority.OperationGeneration ?? request.ReceiveRecoveryOperationAuthority?.OperationGeneration ?? 0}; bridge_decision_generation={receipt.Command.Decision.BridgeDecisionGeneration}; recovery_liveness_lease_generation={receipt.Command.RecoveryLivenessLease?.LeaseGeneration ?? 0}; execution_outcome={receipt.Outcome}; execution_mode={FormatProtocolLogValue(receipt.ExecutionMode)}; closure_generation={completedOperation?.ClosureGeneration ?? 0}; closure_state={completedOperation?.ClosureState.ToString() ?? "none"}; decision_status={executionDecision?.Status.ToString() ?? "missing"}; decision_reason={FormatProtocolLogValue(executionDecision?.Reason ?? "current_transfer_missing")}");
         ProcessReceiveRecoveryRetryDispatchDecision(retryDispatchDecision);
+        if (deferredSubmissionToResume is not null &&
+            deferredSubmissionOperation is { } resumedOperation)
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_post_tuna_fallback_recovery_submission_failure_resumed; decision_status=Accepted; decision_reason=exact_receive_recovery_completed; direction=outbound; transfer_id={FormatProtocolLogValue(deferredSubmissionToResume.TransferId)}; session_id={FormatProtocolLogValue(deferredSubmissionToResume.SessionId)}; receive_recovery_operation_authority_id={FormatProtocolLogValue(resumedOperation.Authority.AuthorityId.ToString())}; receive_recovery_operation_generation={resumedOperation.Authority.OperationGeneration}; route={FormatProtocolLogValue(resumedOperation.Authority.Observation.RouteToken)}; protocol_version={resumedOperation.Authority.Observation.ProtocolVersion}; live_route_epoch={resumedOperation.Authority.Observation.LiveRouteEpoch}; data_session_generation={resumedOperation.Authority.Observation.DataSessionGeneration}");
+            SignalOutboundSparseSenderPump(deferredSubmissionToResume);
+        }
+
         if (fallbackCheckpointToResume is not null)
         {
             QueueDeferredOutboundPostTunaFallbackStateRefreshAfterResume(
