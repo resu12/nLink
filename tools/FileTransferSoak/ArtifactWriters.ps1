@@ -8710,8 +8710,15 @@ function Get-FileTransferFileTunaV4DataPathEventNames {
         'filetransfer_receive_recovery_operation_issued',
         'filetransfer_receive_recovery_execution_started',
         'filetransfer_receive_recovery_operation_execution_start_decided',
+        'filetransfer_receive_recovery_operation_execution_receipt_applied',
+        'filetransfer_receive_recovery_operation_proof_decision_observed',
         'filetransfer_receive_recovery_operation_invalidated',
+        'filetransfer_receive_recovery_fallback_checkpoint_bound',
+        'filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied',
         'runtime_unlock_initial_activation_receive_recovery_hold_decided',
+        'runtime_unlock_initial_activation_offer_envelope_refresh_committed',
+        'tuna_acceleration_answer_received',
+        'runtime_unlock_precommit_probe_launch_requested',
         'filetransfer_v6_regular_nkn_state_refresh_requested',
         'filetransfer_fallback_checkpoint_requested',
         'filetransfer_clean_fallback_checkpoint_requested',
@@ -14443,6 +14450,10 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_distinct_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffDistinctCount)) | Out-Null
     $lines.Add(("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_recovered_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffRecoveredCount)) | Out-Null
     $lines.Add(("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_unresolved_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffUnresolvedCount)) | Out-Null
+    $lines.Add(("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_answer_timeout_checkpoint_child_raw_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffAnswerTimeoutCheckpointChildRawCount)) | Out-Null
+    $lines.Add(("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_answer_timeout_checkpoint_child_distinct_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffAnswerTimeoutCheckpointChildDistinctCount)) | Out-Null
+    $lines.Add(("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_answer_timeout_checkpoint_child_recovered_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffAnswerTimeoutCheckpointChildRecoveredCount)) | Out-Null
+    $lines.Add(("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_answer_timeout_checkpoint_child_unresolved_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffAnswerTimeoutCheckpointChildUnresolvedCount)) | Out-Null
     $lines.Add(("paired_fallback_tail_yield_missing_raw_count={0}" -f $RecoveryClassification.PairedFallbackTailYieldMissingRawCount)) | Out-Null
     $lines.Add(("paired_fallback_tail_yield_missing_distinct_count={0}" -f $RecoveryClassification.PairedFallbackTailYieldMissingDistinctCount)) | Out-Null
     $lines.Add(("paired_fallback_tail_yield_missing_recovered_count={0}" -f $RecoveryClassification.PairedFallbackTailYieldMissingRecoveredCount)) | Out-Null
@@ -16555,6 +16566,10 @@ function New-FileTransferStabilityGateSummaryLines {
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_distinct_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffDistinctCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_recovered_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffRecoveredCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_unresolved_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffUnresolvedCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_answer_timeout_checkpoint_child_raw_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffAnswerTimeoutCheckpointChildRawCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_answer_timeout_checkpoint_child_distinct_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffAnswerTimeoutCheckpointChildDistinctCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_answer_timeout_checkpoint_child_recovered_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffAnswerTimeoutCheckpointChildRecoveredCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_answer_timeout_checkpoint_child_unresolved_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffAnswerTimeoutCheckpointChildUnresolvedCount),
         ("paired_fallback_tail_yield_missing_raw_count={0}" -f $recoveryClassification.PairedFallbackTailYieldMissingRawCount),
         ("paired_fallback_tail_yield_missing_distinct_count={0}" -f $recoveryClassification.PairedFallbackTailYieldMissingDistinctCount),
         ("paired_fallback_tail_yield_missing_recovered_count={0}" -f $recoveryClassification.PairedFallbackTailYieldMissingRecoveredCount),
@@ -42781,6 +42796,7 @@ function Get-FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffCorrelatio
     $childBindingMissingRecords = New-Object System.Collections.Generic.List[object]
     $heldDeliveryRetiredRecords = New-Object System.Collections.Generic.List[object]
     $sparsePumpHandoffRecords = New-Object System.Collections.Generic.List[object]
+    $answerTimeoutCheckpointChildRecords = New-Object System.Collections.Generic.List[object]
     $recoveredRecords = New-Object System.Collections.Generic.List[object]
     $unresolvedRecords = New-Object System.Collections.Generic.List[object]
     $keys = New-Object 'System.Collections.Generic.HashSet[string]'
@@ -43186,6 +43202,107 @@ function Get-FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffCorrelatio
             }
         }
     }
+
+    [object[]]$answerTimeoutRejections = @($ordered | Where-Object {
+            $_.EventName -eq 'runtime_unlock_initial_activation_receive_recovery_hold_decided' -and
+            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+            (Get-FileTransferEventField -Event $_ -Name 'hold_boundary' -Default '') -eq 'AnswerTimeout' -and
+            (Get-FileTransferEventField -Event $_ -Name 'expected_route' -Default '') -eq 'post_tuna_fallback_v6' -and
+            (Get-FileTransferEventField -Event $_ -Name 'expected_protocol_version' -Default '0') -eq '6' -and
+            (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -eq 'Rejected' -and
+            (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq 'runtime_unlock_initial_activation_receive_recovery_scope_mismatch'
+        })
+    foreach ($rejection in $answerTimeoutRejections) {
+        $sequence = [int64]$rejection.Sequence
+        $writer = Get-FileTransferEventField -Event $rejection -Name 'log_writer_id' -Default ''
+        $session = Get-FileTransferEventField -Event $rejection -Name 'session_id' -Default ''
+        $transfer = Get-FileTransferEventField -Event $rejection -Name 'transfer_id' -Default ''
+        $generation = Get-FileTransferEventField -Event $rejection -Name 'expected_execution_bridge_decision_generation' -Default '0'
+        $offerGeneration = Get-FileTransferEventField -Event $rejection -Name 'offer_generation' -Default '0'
+        $payerDecision = Get-FileTransferEventField -Event $rejection -Name 'payer_decision_id' -Default '0'
+        $transactionGeneration = Get-FileTransferEventField -Event $rejection -Name 'transaction_generation' -Default '0'
+        $pathLeaseGeneration = Get-FileTransferEventField -Event $rejection -Name 'tuna_path_lease_generation' -Default '0'
+        $transportEpoch = Get-FileTransferEventField -Event $rejection -Name 'expected_transport_epoch' -Default '0'
+        $rootCheckpoint = Get-FileTransferEventField -Event $rejection -Name 'expected_checkpoint_request_id' -Default '(none)'
+        if ([string]::IsNullOrWhiteSpace($writer) -or
+            [string]::IsNullOrWhiteSpace($session) -or
+            [string]::IsNullOrWhiteSpace($transfer) -or
+            [int64]$generation -le 0 -or [int64]$offerGeneration -le 0 -or
+            [int64]$payerDecision -le 0 -or [int64]$transactionGeneration -le 0 -or
+            [int64]$pathLeaseGeneration -le 0 -or [int64]$transportEpoch -le 0) {
+            continue
+        }
+        $sameScope = {
+            param($event)
+            (Get-FileTransferEventField -Event $event -Name 'log_writer_id' -Default '') -eq $writer -and
+            (Get-FileTransferEventField -Event $event -Name 'session_id' -Default '') -eq $session -and
+            (Get-FileTransferEventField -Event $event -Name 'transfer_id' -Default '') -eq $transfer -and
+            (Get-FileTransferEventField -Event $event -Name 'direction' -Default '') -eq 'outbound'
+        }
+        [object[]]$binding = @($ordered | Where-Object {
+                [int64]$_.Sequence -lt $sequence -and
+                $_.EventName -eq 'filetransfer_receive_recovery_fallback_checkpoint_bound' -and
+                (& $sameScope $_) -and
+                (Get-FileTransferEventField -Event $_ -Name 'recovery_operation_generation' -Default '0') -eq $generation -and
+                (Get-FileTransferEventField -Event $_ -Name 'root_checkpoint_request_id' -Default '(none)') -eq $rootCheckpoint -and
+                (Get-FileTransferEventField -Event $_ -Name 'transport_epoch' -Default '0') -eq $transportEpoch -and
+                (Get-FileTransferEventField -Event $_ -Name 'checkpoint_binding_state' -Default '') -eq 'pending'
+            } | Select-Object -Last 1)
+        if ($binding.Count -ne 1) { continue }
+        $effectiveCheckpoint = Get-FileTransferEventField -Event $binding[0] -Name 'effective_checkpoint_request_id' -Default ''
+        $bindingGeneration = Get-FileTransferEventField -Event $binding[0] -Name 'checkpoint_binding_generation' -Default '0'
+        $frameFingerprint = Get-FileTransferEventField -Event $binding[0] -Name 'frame_fingerprint' -Default ''
+        [object[]]$proof = @($ordered | Where-Object {
+                [int64]$_.Sequence -gt $sequence -and
+                $_.EventName -eq 'filetransfer_receive_recovery_operation_proof_decision_observed' -and
+                (& $sameScope $_) -and
+                (Get-FileTransferEventField -Event $_ -Name 'recovery_operation_generation' -Default '0') -eq $generation -and
+                (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in @('Accepted', 'Idempotent')
+            } | Select-Object -First 1)
+        [object[]]$completion = @($ordered | Where-Object {
+                [int64]$_.Sequence -gt $sequence -and
+                $_.EventName -eq 'filetransfer_receive_recovery_operation_execution_receipt_applied' -and
+                (& $sameScope $_) -and
+                (Get-FileTransferEventField -Event $_ -Name 'receive_recovery_operation_generation' -Default '0') -eq $generation -and
+                (Get-FileTransferEventField -Event $_ -Name 'execution_outcome' -Default '') -eq 'Completed'
+            } | Select-Object -First 1)
+        [object[]]$delivery = @($ordered | Where-Object {
+                [int64]$_.Sequence -gt $sequence -and
+                $_.EventName -eq 'filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied' -and
+                (& $sameScope $_) -and
+                (Get-FileTransferEventField -Event $_ -Name 'recovery_operation_generation' -Default '0') -eq $generation -and
+                (Get-FileTransferEventField -Event $_ -Name 'effective_checkpoint_request_id' -Default '') -eq $effectiveCheckpoint -and
+                (Get-FileTransferEventField -Event $_ -Name 'delivery_state' -Default '') -eq 'delivered'
+            } | Select-Object -First 1)
+        if ($proof.Count -ne 1 -or $completion.Count -ne 1 -or $delivery.Count -ne 1) { continue }
+        [object[]]$recovery = @($ordered | Where-Object {
+                [int64]$_.Sequence -gt $sequence -and
+                (& $sameScope $_) -and
+                ($_.EventName -eq 'runtime_unlock_initial_activation_receive_recovery_hold_decided' -and
+                 (Get-FileTransferEventField -Event $_ -Name 'hold_boundary' -Default '') -eq 'AnswerTimeout' -and
+                 (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in @('Held', 'Released') -or
+                 $_.EventName -in @(
+                    'runtime_unlock_initial_activation_offer_envelope_refresh_committed',
+                    'tuna_acceleration_answer_received',
+                    'runtime_unlock_precommit_probe_launch_requested'))
+            })
+        $recovered = @($recovery | Where-Object {
+                $_.EventName -eq 'runtime_unlock_precommit_probe_launch_requested'
+            }).Count -gt 0
+        $key = "$session|$transfer|outbound|$writer|$generation|$offerGeneration|$payerDecision|$transactionGeneration|$pathLeaseGeneration|$rootCheckpoint|$effectiveCheckpoint|$bindingGeneration|$frameFingerprint|$transportEpoch".ToLowerInvariant()
+        if ($keys.Add($key)) {
+            $record = [pscustomobject]@{
+                Event = $rejection
+                Reason = 'post_tuna_fallback_checkpoint_child_rejected_for_initial_activation_answer_timeout_hold'
+                Variant = 'initial_activation_answer_timeout_hold_not_bound_to_checkpoint_child'
+                DistinctKey = $key
+            }
+            $records.Add($record) | Out-Null
+            $answerTimeoutCheckpointChildRecords.Add($record) | Out-Null
+            if ($recovered) { $recoveredRecords.Add($record) | Out-Null }
+            else { $unresolvedRecords.Add($record) | Out-Null }
+        }
+    }
     return [pscustomobject]@{
         RawCount = $records.Count
         DistinctCount = $records.Count
@@ -43205,6 +43322,14 @@ function Get-FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffCorrelatio
                 $recoveredRecords -contains $_
             }).Count
         SparsePumpHandoffUnresolvedCount = @($sparsePumpHandoffRecords | Where-Object {
+                $unresolvedRecords -contains $_
+            }).Count
+        InitialActivationAnswerTimeoutHoldRawCount = $answerTimeoutCheckpointChildRecords.Count
+        InitialActivationAnswerTimeoutHoldDistinctCount = $answerTimeoutCheckpointChildRecords.Count
+        InitialActivationAnswerTimeoutHoldRecoveredCount = @($answerTimeoutCheckpointChildRecords | Where-Object {
+                $recoveredRecords -contains $_
+            }).Count
+        InitialActivationAnswerTimeoutHoldUnresolvedCount = @($answerTimeoutCheckpointChildRecords | Where-Object {
                 $unresolvedRecords -contains $_
             }).Count
         Verdict = if ($unresolvedRecords.Count -gt 0) { 'fail' } else { 'pass' }
@@ -48520,6 +48645,10 @@ function Get-FileTransferRecoveryFailureClassification {
         FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffDistinctCount = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffDistinctCount
         FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffRecoveredCount = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffRecoveredCount
         FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffUnresolvedCount = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.SparsePumpHandoffUnresolvedCount
+        FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffAnswerTimeoutCheckpointChildRawCount = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.InitialActivationAnswerTimeoutHoldRawCount
+        FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffAnswerTimeoutCheckpointChildDistinctCount = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.InitialActivationAnswerTimeoutHoldDistinctCount
+        FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffAnswerTimeoutCheckpointChildRecoveredCount = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.InitialActivationAnswerTimeoutHoldRecoveredCount
+        FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffAnswerTimeoutCheckpointChildUnresolvedCount = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.InitialActivationAnswerTimeoutHoldUnresolvedCount
         PairedFallbackTailYieldMissingRawCount = $fallbackTailFailedYieldQuiescentSuccessorProof.RawCount
         PairedFallbackTailYieldMissingDistinctCount = $fallbackTailFailedYieldQuiescentSuccessorProof.DistinctCount
         PairedFallbackTailYieldMissingRecoveredCount = $fallbackTailFailedYieldQuiescentSuccessorProof.RecoveredCount
@@ -49449,6 +49578,10 @@ function New-FileTransferInvariantLedgerObject {
         filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_distinct_count = [string]$recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffDistinctCount
         filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_recovered_count = [string]$recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffRecoveredCount
         filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_unresolved_count = [string]$recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffUnresolvedCount
+        filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_answer_timeout_checkpoint_child_raw_count = [string]$recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffAnswerTimeoutCheckpointChildRawCount
+        filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_answer_timeout_checkpoint_child_distinct_count = [string]$recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffAnswerTimeoutCheckpointChildDistinctCount
+        filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_answer_timeout_checkpoint_child_recovered_count = [string]$recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffAnswerTimeoutCheckpointChildRecoveredCount
+        filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_answer_timeout_checkpoint_child_unresolved_count = [string]$recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffAnswerTimeoutCheckpointChildUnresolvedCount
         paired_fallback_tail_yield_missing_raw_count = [string]$recoveryClassification.PairedFallbackTailYieldMissingRawCount
         paired_fallback_tail_yield_missing_distinct_count = [string]$recoveryClassification.PairedFallbackTailYieldMissingDistinctCount
         paired_fallback_tail_yield_missing_recovered_count = [string]$recoveryClassification.PairedFallbackTailYieldMissingRecoveredCount
@@ -50057,6 +50190,10 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_distinct_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffDistinctCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_recovered_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffRecoveredCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_sparse_pump_handoff_unresolved_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffSparsePumpHandoffUnresolvedCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_answer_timeout_checkpoint_child_raw_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffAnswerTimeoutCheckpointChildRawCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_answer_timeout_checkpoint_child_distinct_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffAnswerTimeoutCheckpointChildDistinctCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_answer_timeout_checkpoint_child_recovered_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffAnswerTimeoutCheckpointChildRecoveredCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_answer_timeout_checkpoint_child_unresolved_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffAnswerTimeoutCheckpointChildUnresolvedCount),
         ("paired_fallback_tail_yield_missing_raw_count={0}" -f $recoveryClassification.PairedFallbackTailYieldMissingRawCount),
         ("paired_fallback_tail_yield_missing_distinct_count={0}" -f $recoveryClassification.PairedFallbackTailYieldMissingDistinctCount),
         ("paired_fallback_tail_yield_missing_recovered_count={0}" -f $recoveryClassification.PairedFallbackTailYieldMissingRecoveredCount),

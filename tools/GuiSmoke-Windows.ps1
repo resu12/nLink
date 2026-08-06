@@ -7392,6 +7392,32 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         )
         foreach ($rejection in @($indexed | Where-Object {
                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'runtime_unlock_initial_activation_receive_recovery_hold_decided')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'hold_boundary') -eq 'AnswerTimeout' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'expected_route') -eq 'post_tuna_fallback_v6' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq 'Rejected' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_reason') -eq 'runtime_unlock_initial_activation_receive_recovery_scope_mismatch'
+                })) {
+            $writer = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'log_writer_id'
+            $session = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'session_id'
+            $transfer = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'transfer_id'
+            $generation = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'expected_execution_bridge_decision_generation'
+            $binding = @($indexed | Where-Object {
+                    $_.Index -lt $rejection.Index -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_receive_recovery_fallback_checkpoint_bound')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'recovery_operation_generation') -eq $generation -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'checkpoint_binding_state') -eq 'pending'
+                } | Select-Object -Last 1)
+            if ($binding.Count -eq 1) {
+                return $true
+            }
+        }
+        foreach ($rejection in @($indexed | Where-Object {
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                         'filetransfer_outbound_sparse_worker_handoff_rejected')) -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -eq 'outbound' -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'route') -eq 'post_tuna_fallback_v6' -and
@@ -12188,6 +12214,14 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 'event=filetransfer_outbound_sparse_worker_handoff_rejected',
                 'stage=state_refresh_sent',
                 'decision_reason=install_generation_mismatch'))
+    $receiveRecoveryFallbackCheckpointAnswerTimeoutChildMissing =
+        $receiveRecoveryFallbackCheckpointScopeHandoffMissing -and
+        (Test-TunaGuiLogLinesContain -Lines $regularV4EvidenceLineText -Needles @(
+                'event=runtime_unlock_initial_activation_receive_recovery_hold_decided',
+                'hold_boundary=AnswerTimeout',
+                'expected_route=post_tuna_fallback_v6',
+                'decision_status=Rejected',
+                'decision_reason=runtime_unlock_initial_activation_receive_recovery_scope_mismatch'))
     $routeTransitionDrainingTransportGraceTerminalization =
         Test-TunaGuiRouteTransitionDrainingTransportGraceFailure `
             -Lines $regularV4EvidenceLineText
@@ -12336,7 +12370,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     }
     elseif ($receiveRecoveryFallbackCheckpointScopeHandoffMissing) {
         $phase = 'receive_recovery'
-        $reason = if ($receiveRecoveryFallbackCheckpointSparsePumpHandoffMissing) {
+        $reason = if ($receiveRecoveryFallbackCheckpointAnswerTimeoutChildMissing) {
+            'post_tuna_fallback_checkpoint_child_rejected_for_initial_activation_answer_timeout_hold'
+        }
+        elseif ($receiveRecoveryFallbackCheckpointSparsePumpHandoffMissing) {
             'coordinator_resumed_fallback_checkpoint_delivery_not_committed_after_same_scope_sparse_pump_handoff'
         }
         else {

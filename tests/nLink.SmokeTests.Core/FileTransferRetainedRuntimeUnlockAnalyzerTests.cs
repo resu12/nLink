@@ -8432,6 +8432,59 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task AnalyzeRetained_ReceiveRecoveryFallbackCheckpointAnswerTimeoutUsesImmutableRoot(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string scope =
+            "session_id=sess_checkpoint_answer; transfer_id=transfer_checkpoint_answer; " +
+            "direction=outbound; log_writer_id=writer_checkpoint_answer";
+        const string checkpoint =
+            "recovery_operation_generation=2; root_checkpoint_request_id=(none); " +
+            "effective_checkpoint_request_id=v6-regular-nkn-state-refresh:1; " +
+            "effective_checkpoint_generation=1; checkpoint_binding_generation=1; " +
+            "frame_fingerprint=frame-checkpoint-answer; transport_epoch=1";
+        var result = await RunAnalyzeFixtureAsync(
+            [
+                LogLine($"event=filetransfer_receive_recovery_operation_issued; {scope}; route=post_tuna_fallback_v6; protocol_version=6; receive_recovery_operation_generation=2"),
+                LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_bound; {scope}; {checkpoint}; checkpoint_binding_state=pending"),
+                LogLine($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {scope}; hold_boundary=AnswerTimeout; payer_decision_id=6; offer_generation=2; transaction_generation=1; tuna_path_lease_generation=2; expected_route=post_tuna_fallback_v6; expected_protocol_version=6; expected_transport_epoch=1; expected_checkpoint_request_id=(none); expected_execution_bridge_decision_generation=2; decision_status=Rejected; decision_reason=runtime_unlock_initial_activation_receive_recovery_scope_mismatch"),
+                LogLine($"event=filetransfer_receive_recovery_operation_proof_decision_observed; {scope}; recovery_operation_generation=2; decision_status=Accepted"),
+                LogLine($"event=filetransfer_receive_recovery_operation_execution_receipt_applied; {scope}; receive_recovery_operation_generation=2; execution_outcome=Completed"),
+                LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied; {scope}; {checkpoint}; delivery_state=delivered; decision_status=accepted")
+            ],
+            [],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_raw_count"]);
+        Assert.Equal("1", verdict["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_answer_timeout_checkpoint_child_raw_count"]);
+        Assert.Equal("1", verdict["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_answer_timeout_checkpoint_child_unresolved_count"]);
+        Assert.Equal(
+            "filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing",
+            verdict["first_proof_chain_failure_class"]);
+        Assert.Equal(
+            "post_tuna_fallback_checkpoint_child_rejected_for_initial_activation_answer_timeout_hold",
+            verdict["first_proof_chain_failure_reason"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task AnalyzeRetained_BridgeRecoveryExecutionPayloadHold_PostTunaSubmissionEpochFailureIsFirstEdge(
         bool compact)
     {
