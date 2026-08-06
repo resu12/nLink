@@ -45,6 +45,9 @@ function New-GuiSmokeLogLedgerState {
         LastSuccessfulSyncStartedUtc = $null
         LastSuccessfulSyncCompletedUtc = $null
         LastSuccessfulSyncElapsedMilliseconds = 0L
+        AppendOnlyBufferReadCount = 0L
+        AppendOnlyNewlineSearchCount = 0L
+        AppendOnlyIndexedByteCount = 0L
     }
 }
 
@@ -80,6 +83,9 @@ function Reset-GuiSmokeLogLedgerState {
     $State.LastSuccessfulSyncStartedUtc = $null
     $State.LastSuccessfulSyncCompletedUtc = $null
     $State.LastSuccessfulSyncElapsedMilliseconds = 0L
+    $State.AppendOnlyBufferReadCount = 0L
+    $State.AppendOnlyNewlineSearchCount = 0L
+    $State.AppendOnlyIndexedByteCount = 0L
 }
 
 function Enable-GuiSmokeAppendOnlyLogLedgerState {
@@ -714,6 +720,9 @@ function Sync-GuiSmokeAppendOnlyLogLedger {
         $absolutePosition = $consumed
         $lineStart = $consumed
         $committedOffset = $consumed
+        $bufferReadCount = 0L
+        $newlineSearchCount = 0L
+        $indexedByteCount = 0L
         while ($absolutePosition -lt $capturedLength) {
             Invoke-GuiSmokeLogLedgerCancellationProbe -CancellationProbe $CancellationProbe
             $requested = [int][Math]::Min([long]$buffer.Length, $capturedLength - $absolutePosition)
@@ -721,12 +730,17 @@ function Sync-GuiSmokeAppendOnlyLogLedger {
             if ($read -le 0) {
                 break
             }
-            for ($index = 0; $index -lt $read; $index++) {
-                if ($buffer[$index] -eq 10) {
-                    $State.AppendOnlyLineStartOffsets.Add([long]$lineStart) | Out-Null
-                    $committedOffset = $absolutePosition + [long]$index + 1L
-                    $lineStart = $committedOffset
-                }
+            $bufferReadCount++
+            $indexedByteCount += [long]$read
+            $searchStart = 0
+            while ($searchStart -lt $read) {
+                $newlineSearchCount++
+                $index = [Array]::IndexOf($buffer, [byte]10, $searchStart, $read - $searchStart)
+                if ($index -lt 0) { break }
+                $State.AppendOnlyLineStartOffsets.Add([long]$lineStart) | Out-Null
+                $committedOffset = $absolutePosition + [long]$index + 1L
+                $lineStart = $committedOffset
+                $searchStart = $index + 1
             }
             $absolutePosition += [long]$read
         }
@@ -737,6 +751,9 @@ function Sync-GuiSmokeAppendOnlyLogLedger {
         $State.SyncCount++
         $State.LastSuccessfulSyncCompletedUtc = [DateTimeOffset]::UtcNow
         $State.LastSuccessfulSyncElapsedMilliseconds = [long]$stopwatch.ElapsedMilliseconds
+        $State.AppendOnlyBufferReadCount += $bufferReadCount
+        $State.AppendOnlyNewlineSearchCount += $newlineSearchCount
+        $State.AppendOnlyIndexedByteCount += $indexedByteCount
     }
     finally {
         if ($stream) {
@@ -1501,6 +1518,9 @@ function Get-GuiSmokeLogLedgerDiagnostics {
         LastSuccessfulSyncStartedUtc = $State.LastSuccessfulSyncStartedUtc
         LastSuccessfulSyncCompletedUtc = $State.LastSuccessfulSyncCompletedUtc
         LastSuccessfulSyncElapsedMilliseconds = [long]$State.LastSuccessfulSyncElapsedMilliseconds
+        AppendOnlyBufferReadCount = [long]$State.AppendOnlyBufferReadCount
+        AppendOnlyNewlineSearchCount = [long]$State.AppendOnlyNewlineSearchCount
+        AppendOnlyIndexedByteCount = [long]$State.AppendOnlyIndexedByteCount
         FailureCode = if ([string]::IsNullOrWhiteSpace([string]$State.FailureCode)) { '(none)' } else { [string]$State.FailureCode }
         FailureDetail = if ([string]::IsNullOrWhiteSpace([string]$State.FailureDetail)) { '(none)' } else { [string]$State.FailureDetail }
     }
