@@ -12569,22 +12569,26 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 false,
                 dispatchContract.Authority.AuthorityId));
             Assert.True(duplicate);
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
             await WaitUntilAsync(
-                () => ReadOperationalLogTail(logStart)
+                () => ReadTransferOperationalLogSnapshot(logStart, transferId)
                     .Split(
                         "event=runtime_unlock_retry_dispatch_authority_granted;",
                         StringSplitOptions.None)
                     .Length - 1 >= 2,
                 TimeSpan.FromSeconds(2));
-            var tail = ReadOperationalLogTail(logStart);
+            var tail = ReadTransferOperationalLogSnapshot(logStart, transferId);
             Assert.Contains("settlement_outcome=MissingDispatch", tail, StringComparison.Ordinal);
             Assert.Contains("event=runtime_unlock_retry_missing_dispatch_successor_intent_created;", tail, StringComparison.Ordinal);
             Assert.Contains(
                 "event=runtime_unlock_retry_dispatch_successor_evaluation_requested;",
                 tail,
                 StringComparison.Ordinal);
-            Assert.Contains("event=runtime_unlock_retry_dispatch_stale_callback_ignored;", tail, StringComparison.Ordinal);
-            Assert.Contains("decision_reason=callback_authority_not_captured", tail, StringComparison.Ordinal);
+            var staleCallbackTail = ReadOperationalLogSnapshotForToken(
+                logStart,
+                $"current_authority_id={dispatchContract.Authority.AuthorityId};");
+            Assert.Contains("event=runtime_unlock_retry_dispatch_stale_callback_ignored;", staleCallbackTail, StringComparison.Ordinal);
+            Assert.Contains("decision_reason=callback_authority_not_captured", staleCallbackTail, StringComparison.Ordinal);
             Assert.Contains("decision_reason=runtime_unlock_payer_intent_send_rejected_before_retry_dispatch", tail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=session_recovery_contract_failed;", tail, StringComparison.Ordinal);
             Assert.Equal(
@@ -14797,12 +14801,12 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 "tuna_activation_offer_send_timeout");
 
             await WaitUntilAsync(
-                () => ReadOperationalLogTail(logStart).Contains(
+                () => ReadTransferOperationalLogSnapshot(logStart, transferId).Contains(
                     "event=tuna_acceleration_retry_blocked_v6_epoch_unresolved;",
                     StringComparison.Ordinal),
                 TimeSpan.FromSeconds(3));
 
-            var logTail = ReadOperationalLogTail(logStart);
+            var logTail = ReadTransferOperationalLogSnapshot(logStart, transferId);
             Assert.Contains(
                 "event=tuna_acceleration_retry_blocked_v6_epoch_unresolved;",
                 logTail,
@@ -26978,6 +26982,18 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             Environment.NewLine,
             snapshot.Split(Environment.NewLine)
                 .Where(line => line.Contains(sessionId, StringComparison.Ordinal)));
+    }
+
+    private static string ReadTransferOperationalLogSnapshot(int logStart, string transferId)
+        => ReadOperationalLogSnapshotForToken(logStart, $"transfer_id={transferId};");
+
+    private static string ReadOperationalLogSnapshotForToken(int logStart, string token)
+    {
+        return string.Join(
+            Environment.NewLine,
+            ReadOperationalLogTail(logStart)
+                .Split(Environment.NewLine)
+                .Where(line => line.Contains(token, StringComparison.Ordinal)));
     }
 
     private static TransportAccelerationOfferPayload CreateOfferPayload(

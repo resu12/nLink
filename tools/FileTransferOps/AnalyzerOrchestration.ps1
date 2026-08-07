@@ -1505,11 +1505,6 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         New-FileTransferBridgeRecoveryExecutionSubmissionBarrierDrainIndex `
             -SemanticEvents $runtimeUnlockRegularV4RecoveryLeaseEvents `
             -RetirementEvents $bridgeRecoveryExecutionSubmissionBarrierDrainRetirementEvents
-    [object[]]$runtimeUnlockRegularV4RecoveryOrderedEvents = @(
-        $runtimeUnlockRegularV4RecoveryLeaseEvents |
-            Where-Object { $null -ne $_ } |
-            Sort-Object Sequence, LineNumber
-    )
     $postTunaDeferredPhysicalLeaseGenerations = @{}
     foreach ($event in $runtimeUnlockRegularV4RecoveryLeaseEvents) {
         if ($event.EventName -ne 'filetransfer_post_tuna_fallback_recovery_submission_failure_deferred') {
@@ -1528,10 +1523,21 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                     $postTunaDeferredPhysicalLeaseGenerations.ContainsKey($leaseGeneration)
             }
     )
-    [object[]]$bridgeRecoveryExecutionPayloadHoldEvents = @(
+    [object[]]$runtimeUnlockRegularV4RecoveryOrderedEvents = @(
         ($runtimeUnlockRegularV4RecoveryLeaseEvents + $postTunaDeferredPhysicalLeaseRetirementEvents) |
             Where-Object { $null -ne $_ } |
             Sort-Object Sequence, LineNumber
+    )
+    [object[]]$bridgeRecoveryExecutionPayloadHoldEvents = @(
+        $runtimeUnlockRegularV4RecoveryOrderedEvents
+    )
+    [object[]]$runtimeUnlockRegularV4RecoveryOrderedEvents = @(
+        $runtimeUnlockRegularV4RecoveryOrderedEvents |
+            Where-Object {
+                $_.EventName -notin @(
+                    'filetransfer_route_transition_physical_send_lease_retired',
+                    'filetransfer_outbound_physical_send_lease_retired')
+            }
     )
     $fileTransferReceiveRecoveryOperationInput = @(
         $runtimeUnlockRegularV4RecoveryLeaseEvents +
