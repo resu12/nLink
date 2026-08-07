@@ -243,6 +243,111 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task AnalyzeRetained_ReceiveRecoveryFallbackCheckpointDeliveredResponseTimeoutRequiresCoordinatorRedelivery(
+        bool compact,
+        bool recovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string operationScope =
+            "session_id=sess_checkpoint_timeout; transfer_id=transfer_checkpoint_timeout; " +
+            "direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; " +
+            "receive_recovery_operation_generation=3; " +
+            "receive_recovery_operation_authority_id=recovery-authority-3; " +
+            "log_writer_id=writer_checkpoint_timeout";
+        const string checkpointScope =
+            "session_id=sess_checkpoint_timeout; transfer_id=transfer_checkpoint_timeout; " +
+            "direction=outbound; recovery_operation_generation=3; " +
+            "recovery_operation_authority_id=recovery-authority-3; " +
+            "effective_checkpoint_request_id=v6-regular-nkn-state-refresh:1; " +
+            "checkpoint_binding_generation=1; frame_fingerprint=frame-timeout-1; " +
+            "transport_epoch=1; log_writer_id=writer_checkpoint_timeout";
+        var messages = new List<string>
+        {
+            LogLine($"event=filetransfer_receive_recovery_operation_issued; {operationScope}"),
+            LogLine($"event=filetransfer_receive_recovery_operation_execution_start_decided; {operationScope}; execution_state=Running"),
+            LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_bound; {checkpointScope}; checkpoint_binding_state=pending"),
+            LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied; {checkpointScope}; checkpoint_delivery_generation=1; delivery_state=held; decision_status=accepted"),
+            LogLine($"event=filetransfer_receive_recovery_operation_execution_receipt_applied; {operationScope}; execution_outcome=Completed"),
+            LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_delivery_resume_decided; {checkpointScope}; checkpoint_delivery_generation=1; outcome=accepted"),
+            LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied; {checkpointScope}; checkpoint_delivery_generation=1; delivery_state=delivered; decision_status=accepted"),
+            LogLine($"event=filetransfer_v6_regular_nkn_state_refresh_sent; session_id=sess_checkpoint_timeout; transfer_id=transfer_checkpoint_timeout; request_id=v6-regular-nkn-state-refresh:1; transport_epoch=1; log_writer_id=writer_checkpoint_timeout"),
+            LogLine($"event=filetransfer_receive_recovery_operation_proof_decision_observed; {operationScope}; decision_status=Accepted")
+        };
+        for (var index = 0; index < 14; index++)
+        {
+            messages.Add(LogLine(
+                "event=filetransfer_fallback_checkpoint_response_timeout_reissued; " +
+                "session_id=sess_checkpoint_timeout; transfer_id=transfer_checkpoint_timeout; " +
+                "direction=outbound; checkpoint_request_id=v6-regular-nkn-state-refresh:1; " +
+                "transport_epoch=1; log_writer_id=writer_checkpoint_timeout"));
+        }
+        if (recovered)
+        {
+            messages.Add(LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_response_timeout_recheck_decided; {checkpointScope}; previous_checkpoint_delivery_generation=1; checkpoint_delivery_generation=2; status=accepted"));
+            messages.Add(LogLine("event=filetransfer_v6_regular_nkn_state_refresh_sent; " +
+                "session_id=sess_checkpoint_timeout; transfer_id=transfer_checkpoint_timeout; " +
+                "request_id=v6-regular-nkn-state-refresh:1; transport_epoch=1; " +
+                "log_writer_id=writer_checkpoint_timeout"));
+            messages.Add(LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied; {checkpointScope}; checkpoint_delivery_generation=2; delivery_state=delivered; decision_status=accepted"));
+            messages.Add(LogLine("event=filetransfer_v6_receiver_state_received; " +
+                "session_id=sess_checkpoint_timeout; transfer_id=transfer_checkpoint_timeout; " +
+                "repair_request_id=v6-regular-nkn-state-refresh:1; " +
+                "log_writer_id=writer_checkpoint_timeout"));
+            messages.Add(LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_lifecycle_advanced; {checkpointScope}; checkpoint_binding_state=accepted"));
+            messages.Add(LogLine($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {operationScope}; decision_status=Released"));
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            messages,
+            [],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-operator-verdict.txt");
+        Assert.Equal(
+            "14",
+            verdict["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_raw_count"]);
+        Assert.Equal(
+            "1",
+            verdict["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_distinct_count"]);
+        Assert.Equal(
+            "14",
+            verdict["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_raw_count"]);
+        Assert.Equal(
+            recovered ? "1" : "0",
+            verdict["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_recovered_count"]);
+        Assert.Equal(
+            recovered ? "0" : "1",
+            verdict["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_unresolved_count"]);
+        if (!recovered)
+        {
+            Assert.Equal(
+                "filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing",
+                verdict["first_proof_chain_failure_class"]);
+            Assert.Equal(
+                "delivered_receive_recovery_fallback_checkpoint_timeout_did_not_reauthorize_same_command",
+                verdict["first_proof_chain_failure_reason"]);
+        }
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task AnalyzeRetained_InitialActivationAnswerRequiresPeerDelivery(bool compact)
