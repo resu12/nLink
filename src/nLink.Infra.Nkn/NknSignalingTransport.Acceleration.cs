@@ -272,6 +272,8 @@ public sealed partial class NknSignalingTransport
     private long inboundRuntimeUnlockDialPayerDecisionId;
     private int inboundRuntimeUnlockDialPending;
     private string? inboundRuntimeUnlockDialTerminalReason;
+    private long inboundRuntimeUnlockDialAttemptGeneration;
+    private FailedDialAnswerReplyShadow? failedDialAnswerReplyShadow;
     private RuntimeUnlockOfferProofState? runtimeUnlockOfferProofState;
     private long runtimeUnlockQueueAcceptedObservedEscapeGeneration;
     private long runtimeUnlockQueueAcceptedObservedEscapePayerDecisionId;
@@ -421,6 +423,32 @@ public sealed partial class NknSignalingTransport
         long WorkerGeneration,
         string Purpose,
         TaskCompletionSource<bool> FirstSubmissionAccepted);
+
+    private enum InboundRuntimeUnlockDialOfferDisposition
+    {
+        Started = 0,
+        PendingDuplicate = 1,
+        ReplayFailedAnswer = 2,
+        Rejected = 3,
+    }
+
+    private sealed record FailedDialAnswerReplyShadow(
+        string SemanticOfferFingerprint,
+        string SessionId,
+        string Nonce,
+        long PayerDecisionId,
+        long DialAttemptGeneration,
+        Envelope Envelope,
+        string RejectReason,
+        long DeadlineUtcMs,
+        AccelerationReplyTargetEvidence ReplyTarget,
+        System.Collections.Immutable.ImmutableHashSet<string> HandledDuplicateMessageIds,
+        string? InFlightReplayMessageId);
+
+    private sealed record InboundRuntimeUnlockDialOfferDecision(
+        InboundRuntimeUnlockDialOfferDisposition Disposition,
+        string Reason,
+        FailedDialAnswerReplyShadow? FailedAnswerShadow);
 
     private sealed record RuntimeUnlockInitialActivationReceiveRecoveryHoldShadow(
         RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest Request,
@@ -24036,13 +24064,32 @@ public sealed partial class NknSignalingTransport
 
         var isRuntimeUnlockOffer = validation.IsValid && IsRuntimeUnlockActivationReason(offer.Trigger);
         var runtimeUnlockDialAttemptStarted = false;
-        if (isRuntimeUnlockOffer &&
-            !TryBeginInboundRuntimeUnlockDialAttempt(offer, out var dialGateReason))
+        if (isRuntimeUnlockOffer)
         {
-            LocalOperationalLog.Warn(
-                "NKN.Tuna",
-                $"event=runtime_unlock_tuna_dial_offer_duplicate_ignored; session_id={SanitizeLogToken(offer.SessionId)}; payer_decision_id={offer.PayerDecisionId}; reason={SanitizeLogToken(dialGateReason)}; nonce_len={(offer.Nonce?.Length ?? 0)}");
-            return;
+            var dialDecision = DecideInboundRuntimeUnlockDialOffer(
+                offer,
+                replyTarget,
+                messageId);
+            if (dialDecision.Disposition ==
+                InboundRuntimeUnlockDialOfferDisposition.ReplayFailedAnswer &&
+                dialDecision.FailedAnswerShadow is not null)
+            {
+                await ReplayFailedDialAnswerAsync(
+                        dialDecision.FailedAnswerShadow,
+                        messageId,
+                        ct)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (dialDecision.Disposition !=
+                InboundRuntimeUnlockDialOfferDisposition.Started)
+            {
+                LocalOperationalLog.Warn(
+                    "NKN.Tuna",
+                    $"event=runtime_unlock_tuna_dial_offer_duplicate_ignored; session_id={SanitizeLogToken(offer.SessionId)}; payer_decision_id={offer.PayerDecisionId}; reason={SanitizeLogToken(dialDecision.Reason)}; nonce_len={(offer.Nonce?.Length ?? 0)}; disposition={SanitizeLogToken(dialDecision.Disposition.ToString())}");
+                return;
+            }
         }
 
         runtimeUnlockDialAttemptStarted = isRuntimeUnlockOffer;
@@ -24077,7 +24124,14 @@ public sealed partial class NknSignalingTransport
                 : "sidecar_unavailable";
         }
 
-        if (runtimeUnlockDialAttemptStarted)
+        var bindFailedDialAnswerShadow =
+            runtimeUnlockDialAttemptStarted &&
+            !accepted &&
+            string.Equals(
+                rejectReason,
+                "runtime_unlock_tuna_dial_failed",
+                StringComparison.Ordinal);
+        if (runtimeUnlockDialAttemptStarted && !bindFailedDialAnswerShadow)
         {
             CompleteInboundRuntimeUnlockDialAttempt(offer, accepted, rejectReason ?? (accepted ? "connected" : "runtime_unlock_tuna_dial_failed"));
         }
@@ -24121,26 +24175,32 @@ public sealed partial class NknSignalingTransport
                 accepted ? validation.AcceptedLanes : NknAccelerationLaneKind.None,
                 rejectReason,
                 accepted ? GetPendingAccelerationAnswerAckGeneration() : 0,
-                ct)
+                ct,
+                bindFailedDialAnswerShadow: bindFailedDialAnswerShadow)
             .ConfigureAwait(false);
     }
 
-    private bool TryBeginInboundRuntimeUnlockDialAttempt(
+    private InboundRuntimeUnlockDialOfferDecision DecideInboundRuntimeUnlockDialOffer(
         TransportAccelerationOfferPayload offer,
-        out string reason)
+        AccelerationReplyTargetEvidence replyTarget,
+        string duplicateMessageId)
     {
         var sessionId = string.IsNullOrWhiteSpace(offer.SessionId)
             ? currentSessionSecurityState.SessionId?.Value ?? string.Empty
             : offer.SessionId.Trim();
         var nonce = string.IsNullOrWhiteSpace(offer.Nonce) ? string.Empty : offer.Nonce.Trim();
-        reason = "unknown";
         if (string.IsNullOrWhiteSpace(sessionId) ||
             string.IsNullOrWhiteSpace(nonce))
         {
-            reason = "missing_offer_identity";
-            return false;
+            return new InboundRuntimeUnlockDialOfferDecision(
+                InboundRuntimeUnlockDialOfferDisposition.Rejected,
+                "missing_offer_identity",
+                null);
         }
 
+        FailedDialAnswerReplyShadow? replayShadow = null;
+        var disposition = InboundRuntimeUnlockDialOfferDisposition.Started;
+        var reason = "started";
         lock (accelerationGate)
         {
             var sameOffer =
@@ -24152,28 +24212,53 @@ public sealed partial class NknSignalingTransport
                 reason = sameOffer
                     ? "dial_pending"
                     : "other_dial_pending";
-                return false;
+                disposition = InboundRuntimeUnlockDialOfferDisposition.PendingDuplicate;
             }
-
-            if (sameOffer &&
+            else if (sameOffer &&
                 !string.IsNullOrWhiteSpace(inboundRuntimeUnlockDialTerminalReason))
             {
                 reason = inboundRuntimeUnlockDialTerminalReason!;
-                return false;
+                if (string.Equals(
+                        reason,
+                        "runtime_unlock_tuna_dial_failed",
+                        StringComparison.Ordinal) &&
+                    TryClaimFailedDialAnswerReplayLocked(
+                        offer,
+                        replyTarget,
+                        duplicateMessageId,
+                        out replayShadow))
+                {
+                    disposition =
+                        InboundRuntimeUnlockDialOfferDisposition.ReplayFailedAnswer;
+                }
+                else
+                {
+                    disposition = InboundRuntimeUnlockDialOfferDisposition.Rejected;
+                }
             }
-
-            inboundRuntimeUnlockDialSessionId = sessionId;
-            inboundRuntimeUnlockDialNonce = nonce;
-            inboundRuntimeUnlockDialPayerDecisionId = offer.PayerDecisionId;
-            inboundRuntimeUnlockDialPending = 1;
-            inboundRuntimeUnlockDialTerminalReason = null;
+            else
+            {
+                InvalidateFailedDialAnswerShadowLocked("fresh_semantic_offer");
+                inboundRuntimeUnlockDialSessionId = sessionId;
+                inboundRuntimeUnlockDialNonce = nonce;
+                inboundRuntimeUnlockDialPayerDecisionId = offer.PayerDecisionId;
+                inboundRuntimeUnlockDialPending = 1;
+                inboundRuntimeUnlockDialTerminalReason = null;
+                inboundRuntimeUnlockDialAttemptGeneration++;
+            }
         }
 
-        LocalOperationalLog.Info(
-            "NKN.Tuna",
-            $"event=runtime_unlock_tuna_dial_attempt_started; session_id={SanitizeLogToken(sessionId)}; payer_decision_id={offer.PayerDecisionId}; nonce_len={nonce.Length}");
-        reason = "started";
-        return true;
+        if (disposition == InboundRuntimeUnlockDialOfferDisposition.Started)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=runtime_unlock_tuna_dial_attempt_started; session_id={SanitizeLogToken(sessionId)}; payer_decision_id={offer.PayerDecisionId}; nonce_len={nonce.Length}; dial_attempt_generation={inboundRuntimeUnlockDialAttemptGeneration}");
+        }
+
+        return new InboundRuntimeUnlockDialOfferDecision(
+            disposition,
+            reason,
+            replayShadow);
     }
 
     private void CompleteInboundRuntimeUnlockDialAttempt(
@@ -24202,6 +24287,7 @@ public sealed partial class NknSignalingTransport
             inboundRuntimeUnlockDialPending = 0;
             if (accepted)
             {
+                InvalidateFailedDialAnswerShadowLocked("dial_accepted");
                 inboundRuntimeUnlockDialSessionId = null;
                 inboundRuntimeUnlockDialNonce = null;
                 inboundRuntimeUnlockDialPayerDecisionId = 0;
@@ -24216,6 +24302,201 @@ public sealed partial class NknSignalingTransport
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=runtime_unlock_tuna_dial_attempt_{(accepted ? "connected" : "failed")}; session_id={SanitizeLogToken(sessionId)}; payer_decision_id={offer.PayerDecisionId}; reason={SanitizeLogToken(normalizedReason)}; nonce_len={nonce.Length}");
+    }
+
+    private FailedDialAnswerReplyShadow? BindFailedDialAnswerReplyShadow(
+        TransportAccelerationOfferPayload offer,
+        Envelope envelope,
+        AccelerationReplyTargetEvidence replyTarget,
+        string rejectReason,
+        long deadlineUtcMs)
+    {
+        FailedDialAnswerReplyShadow? shadow;
+        lock (accelerationGate)
+        {
+            var sessionId = offer.SessionId.Trim();
+            var nonce = offer.Nonce.Trim();
+            if (disposed ||
+                inboundRuntimeUnlockDialPending == 0 ||
+                !string.Equals(
+                    inboundRuntimeUnlockDialSessionId,
+                    sessionId,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    inboundRuntimeUnlockDialNonce,
+                    nonce,
+                    StringComparison.Ordinal) ||
+                inboundRuntimeUnlockDialPayerDecisionId != offer.PayerDecisionId ||
+                !string.Equals(
+                    rejectReason,
+                    "runtime_unlock_tuna_dial_failed",
+                    StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            inboundRuntimeUnlockDialPending = 0;
+            inboundRuntimeUnlockDialTerminalReason = rejectReason;
+            shadow = new FailedDialAnswerReplyShadow(
+                ComputeRuntimeUnlockInitialActivationSemanticOfferFingerprint(offer),
+                sessionId,
+                nonce,
+                offer.PayerDecisionId,
+                inboundRuntimeUnlockDialAttemptGeneration,
+                envelope,
+                rejectReason,
+                deadlineUtcMs,
+                replyTarget,
+                System.Collections.Immutable.ImmutableHashSet<string>.Empty
+                    .WithComparer(StringComparer.Ordinal),
+                null);
+            failedDialAnswerReplyShadow = shadow;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_tuna_dial_attempt_failed; session_id={SanitizeLogToken(shadow.SessionId)}; payer_decision_id={shadow.PayerDecisionId}; reason={SanitizeLogToken(shadow.RejectReason)}; nonce_len={shadow.Nonce.Length}; dial_attempt_generation={shadow.DialAttemptGeneration}");
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_failed_dial_answer_shadow_bound; session_id={SanitizeLogToken(shadow.SessionId)}; payer_decision_id={shadow.PayerDecisionId}; dial_attempt_generation={shadow.DialAttemptGeneration}; offer_fingerprint={shadow.SemanticOfferFingerprint}; msg_id={SanitizeLogToken(shadow.Envelope.MessageId)}; target_peer_fingerprint={shadow.ReplyTarget.PeerFingerprint}; inbound_msg_id={SanitizeLogToken(shadow.ReplyTarget.InboundMessageId)}; reply_deadline_utc_ms={shadow.DeadlineUtcMs}; disposition=bound; reason={SanitizeLogToken(shadow.RejectReason)}");
+        return shadow;
+    }
+
+    private bool TryClaimFailedDialAnswerReplayLocked(
+        TransportAccelerationOfferPayload offer,
+        AccelerationReplyTargetEvidence replyTarget,
+        string duplicateMessageId,
+        out FailedDialAnswerReplyShadow? claimed)
+    {
+        claimed = null;
+        var current = failedDialAnswerReplyShadow;
+        var nowUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var semanticFingerprint =
+            ComputeRuntimeUnlockInitialActivationSemanticOfferFingerprint(offer);
+        if (current is not null &&
+            !string.Equals(
+                current.SemanticOfferFingerprint,
+                semanticFingerprint,
+                StringComparison.Ordinal))
+        {
+            InvalidateFailedDialAnswerShadowLocked("semantic_offer_mutated");
+            return false;
+        }
+
+        if (current is null ||
+            disposed ||
+            nowUtcMs >= current.DeadlineUtcMs ||
+            !string.Equals(current.SessionId, offer.SessionId.Trim(), StringComparison.Ordinal) ||
+            !string.Equals(current.Nonce, offer.Nonce.Trim(), StringComparison.Ordinal) ||
+            current.PayerDecisionId != offer.PayerDecisionId ||
+            current.DialAttemptGeneration != inboundRuntimeUnlockDialAttemptGeneration ||
+            !string.Equals(
+                current.RejectReason,
+                inboundRuntimeUnlockDialTerminalReason,
+                StringComparison.Ordinal) ||
+            string.IsNullOrWhiteSpace(duplicateMessageId) ||
+            current.HandledDuplicateMessageIds.Contains(duplicateMessageId) ||
+            string.Equals(
+                current.InFlightReplayMessageId,
+                duplicateMessageId,
+                StringComparison.Ordinal) ||
+            !string.Equals(replyTarget.SessionId, current.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(replyTarget.Nonce, current.Nonce, StringComparison.Ordinal) ||
+            replyTarget.PayerDecisionId != current.PayerDecisionId ||
+            !AddressMatchesForSessionPolicy(
+                replyTarget.Target,
+                ResolveExpectedRemotePeerAddressForCurrentSession()))
+        {
+            if (current is not null && nowUtcMs >= current.DeadlineUtcMs)
+            {
+                InvalidateFailedDialAnswerShadowLocked("wire_deadline_expired");
+            }
+
+            return false;
+        }
+
+        claimed = current with
+        {
+            ReplyTarget = replyTarget,
+            HandledDuplicateMessageIds =
+                current.HandledDuplicateMessageIds.Add(duplicateMessageId),
+            InFlightReplayMessageId = duplicateMessageId,
+        };
+        failedDialAnswerReplyShadow = claimed;
+        return true;
+    }
+
+    private async Task ReplayFailedDialAnswerAsync(
+        FailedDialAnswerReplyShadow shadow,
+        string duplicateMessageId,
+        CancellationToken ct)
+    {
+        if (!ValidateAccelerationReplyTarget(
+                shadow.ReplyTarget,
+                shadow.SessionId,
+                shadow.Nonce,
+                shadow.PayerDecisionId,
+                "failed_dial_answer_duplicate_replay"))
+        {
+            CompleteFailedDialAnswerReplayClaim(shadow, duplicateMessageId);
+            return;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_failed_dial_answer_replay_decided; session_id={SanitizeLogToken(shadow.SessionId)}; payer_decision_id={shadow.PayerDecisionId}; dial_attempt_generation={shadow.DialAttemptGeneration}; offer_fingerprint={shadow.SemanticOfferFingerprint}; duplicate_inbound_msg_id={SanitizeLogToken(duplicateMessageId)}; msg_id={SanitizeLogToken(shadow.Envelope.MessageId)}; target_peer_fingerprint={shadow.ReplyTarget.PeerFingerprint}; reply_deadline_utc_ms={shadow.DeadlineUtcMs}; disposition=claimed; reason=exact_semantic_duplicate");
+        var queued = await SendAccelerationControlEnvelopeWithBulkBypassAsync(
+                shadow.ReplyTarget.Target,
+                shadow.Envelope,
+                "answer",
+                ct,
+                requireObservedSend: false,
+                activationSessionId: shadow.SessionId)
+            .ConfigureAwait(false);
+        CompleteFailedDialAnswerReplayClaim(shadow, duplicateMessageId);
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_failed_dial_answer_replay_sent; session_id={SanitizeLogToken(shadow.SessionId)}; payer_decision_id={shadow.PayerDecisionId}; dial_attempt_generation={shadow.DialAttemptGeneration}; offer_fingerprint={shadow.SemanticOfferFingerprint}; duplicate_inbound_msg_id={SanitizeLogToken(duplicateMessageId)}; accepted=0; generation=0; reason={SanitizeLogToken(shadow.RejectReason)}; msg_id={SanitizeLogToken(shadow.Envelope.MessageId)}; target_mode=validated_inbound_source; target_peer_fingerprint={shadow.ReplyTarget.PeerFingerprint}; inbound_msg_id={SanitizeLogToken(shadow.ReplyTarget.InboundMessageId)}; reply_deadline_utc_ms={shadow.DeadlineUtcMs}; remaining_lifetime_ms={Math.Max(0, shadow.DeadlineUtcMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())}; delivery_evidence=local_submission_only; disposition={(queued.Succeeded ? "submitted" : "rejected")}");
+    }
+
+    private void CompleteFailedDialAnswerReplayClaim(
+        FailedDialAnswerReplyShadow expected,
+        string duplicateMessageId)
+    {
+        lock (accelerationGate)
+        {
+            if (failedDialAnswerReplyShadow is not { } current ||
+                !string.Equals(
+                    current.Envelope.MessageId,
+                    expected.Envelope.MessageId,
+                    StringComparison.Ordinal) ||
+                current.DialAttemptGeneration != expected.DialAttemptGeneration ||
+                !string.Equals(
+                    current.InFlightReplayMessageId,
+                    duplicateMessageId,
+                    StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            failedDialAnswerReplyShadow = current with
+            {
+                InFlightReplayMessageId = null,
+            };
+        }
+    }
+
+    private void InvalidateFailedDialAnswerShadowLocked(string reason)
+    {
+        if (failedDialAnswerReplyShadow is not { } current)
+        {
+            return;
+        }
+
+        failedDialAnswerReplyShadow = null;
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_failed_dial_answer_shadow_invalidated; session_id={SanitizeLogToken(current.SessionId)}; payer_decision_id={current.PayerDecisionId}; dial_attempt_generation={current.DialAttemptGeneration}; offer_fingerprint={current.SemanticOfferFingerprint}; msg_id={SanitizeLogToken(current.Envelope.MessageId)}; target_peer_fingerprint={current.ReplyTarget.PeerFingerprint}; reply_deadline_utc_ms={current.DeadlineUtcMs}; disposition=invalidated; reason={SanitizeLogToken(reason)}");
     }
 
     private long BeginPendingAccelerationAnswerAck(
@@ -25303,7 +25584,8 @@ public sealed partial class NknSignalingTransport
         string? rejectReason,
         long pendingAnswerAckGeneration,
         CancellationToken ct,
-        bool scheduleReplay = true)
+        bool scheduleReplay = true,
+        bool bindFailedDialAnswerShadow = false)
     {
         if (!ValidateAccelerationReplyTarget(
                 replyTarget,
@@ -25337,6 +25619,7 @@ public sealed partial class NknSignalingTransport
             pendingAnswerAckGeneration > 0 &&
             IsPendingAccelerationAnswerAckForSession(offer.SessionId);
         PendingAccelerationReplyShadow? replyShadow = null;
+        FailedDialAnswerReplyShadow? failedDialShadow = null;
         var replayWorkerCreated = false;
         if (accepted && pendingAnswerAckGeneration > 0)
         {
@@ -25357,6 +25640,22 @@ public sealed partial class NknSignalingTransport
             envelope = replyShadow.Envelope;
             replyTarget = replyShadow.ReplyTarget;
         }
+        else if (bindFailedDialAnswerShadow)
+        {
+            failedDialShadow = BindFailedDialAnswerReplyShadow(
+                offer,
+                envelope,
+                replyTarget,
+                rejectReason ?? "runtime_unlock_tuna_dial_failed",
+                answer.ExpiresAtUnixMs);
+            if (failedDialShadow is null)
+            {
+                return;
+            }
+
+            envelope = failedDialShadow.Envelope;
+            replyTarget = failedDialShadow.ReplyTarget;
+        }
 
         var queued = await SendAccelerationControlEnvelopeWithBulkBypassAsync(
                 replyTarget.Target,
@@ -25368,7 +25667,7 @@ public sealed partial class NknSignalingTransport
             .ConfigureAwait(false);
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=tuna_acceleration_answer_{(queued.Succeeded ? "sent" : "rejected")}; accepted={(accepted ? 1 : 0)}; reason={SanitizeLogToken(rejectReason)}; lanes={string.Join(",", answer.SupportedLanes)}; payer_decision_id={answer.PayerDecisionId}; generation={pendingAnswerAckGeneration}; target_mode=validated_inbound_source; target_peer_fingerprint={replyTarget.PeerFingerprint}; inbound_msg_id={SanitizeLogToken(replyTarget.InboundMessageId)}; msg_id={SanitizeLogToken(envelope.MessageId)}; reply_deadline_utc_ms={replyShadow?.DeadlineUtcMs ?? answer.ExpiresAtUnixMs}; remaining_lifetime_ms={Math.Max(0, (replyShadow?.DeadlineUtcMs ?? answer.ExpiresAtUnixMs) - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())}; delivery_evidence=local_submission_only");
+            $"event=tuna_acceleration_answer_{(queued.Succeeded ? "sent" : "rejected")}; accepted={(accepted ? 1 : 0)}; reason={SanitizeLogToken(rejectReason)}; lanes={string.Join(",", answer.SupportedLanes)}; payer_decision_id={answer.PayerDecisionId}; generation={pendingAnswerAckGeneration}; target_mode=validated_inbound_source; target_peer_fingerprint={replyTarget.PeerFingerprint}; inbound_msg_id={SanitizeLogToken(replyTarget.InboundMessageId)}; msg_id={SanitizeLogToken(envelope.MessageId)}; reply_deadline_utc_ms={replyShadow?.DeadlineUtcMs ?? failedDialShadow?.DeadlineUtcMs ?? answer.ExpiresAtUnixMs}; remaining_lifetime_ms={Math.Max(0, (replyShadow?.DeadlineUtcMs ?? failedDialShadow?.DeadlineUtcMs ?? answer.ExpiresAtUnixMs) - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())}; delivery_evidence=local_submission_only");
         if (accepted &&
             pendingAnswerAckGeneration > 0 &&
             replayWorkerCreated &&

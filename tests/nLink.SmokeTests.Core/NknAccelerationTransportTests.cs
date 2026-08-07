@@ -20502,6 +20502,150 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockFailedDialAnswer_ExactDuplicateReplaysSameCachedEnvelopeOnce()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-failed-dial-replay.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-failed-dial-replay.address");
+            var helperLane = new RetryableTunaAccelerationSession(
+                canListen: false,
+                failedDialAttemptsBeforeSuccess: 1);
+            var allowRejectedAnswerDelivery = 0;
+            var rejectedAnswerMessageIds = new ConcurrentBag<string>();
+            helperClient.ShouldDeliverSendAsync = (_, payload, _) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out var sent) &&
+                    sent.Type == MsgType.TransportAccelerationAnswer)
+                {
+                    rejectedAnswerMessageIds.Add(sent.MessageId);
+                    return Task.FromResult(
+                        Volatile.Read(ref allowRejectedAnswerDelivery) != 0);
+                }
+
+                return Task.FromResult(true);
+            };
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity(
+                    "host-runtime-unlock-failed-dial-replay-id",
+                    hostClient.Address));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity(
+                    "helper-runtime-unlock-failed-dial-replay-id",
+                    helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                helperLane);
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer |
+                InviteCapabilities.ScreenShare);
+            var offer = CreateOfferPayload(
+                sessionId,
+                "runtime-unlock-failed-dial-replay-nonce",
+                payerDecisionId: 0);
+            offer.Trigger = "runtime_unlock";
+            host.SeedRuntimeUnlockOfferCriticalSectionForTests(
+                sessionId,
+                offer.Nonce,
+                payerDecisionId: offer.PayerDecisionId,
+                generation: 8,
+                observedSend: true,
+                observedLane: "control_priority",
+                peerReceived: true,
+                answerTimeoutScheduled: true);
+            var firstEnvelope = BuildSecureAccelerationEnvelope(
+                host,
+                MsgType.TransportAccelerationOffer,
+                offer,
+                "transport_acceleration_offer",
+                offer.Nonce,
+                sequence: 704);
+            var logStart = GetOperationalLogLength();
+
+            InvokePrivateMethod(
+                helper,
+                "HandleTransportAccelerationOffer",
+                hostClient.Address,
+                firstEnvelope);
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_failed_dial_answer_shadow_bound;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(4));
+
+            Volatile.Write(ref allowRejectedAnswerDelivery, 1);
+            var duplicateEnvelope = BuildSecureAccelerationEnvelope(
+                host,
+                MsgType.TransportAccelerationOffer,
+                offer,
+                "transport_acceleration_offer",
+                offer.Nonce,
+                sequence: 705);
+            InvokePrivateMethod(
+                helper,
+                "HandleTransportAccelerationOffer",
+                hostClient.Address,
+                duplicateEnvelope);
+            InvokePrivateMethod(
+                helper,
+                "HandleTransportAccelerationOffer",
+                hostClient.Address,
+                duplicateEnvelope);
+
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_failed_dial_answer_replay_sent;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(4));
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=tuna_acceleration_answer_rejected; reason=runtime_unlock_tuna_dial_failed",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(4));
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Equal(1, helperLane.StartDialerCalls);
+            Assert.Contains(
+                "event=tuna_acceleration_answer_received_raw;",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=tuna_acceleration_answer_rejected; reason=runtime_unlock_tuna_dial_failed",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.Single(
+                logTail
+                    .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                    .Where(line => line.Contains(
+                        "event=runtime_unlock_failed_dial_answer_replay_sent;",
+                        StringComparison.Ordinal)));
+            Assert.Single(rejectedAnswerMessageIds.Distinct(StringComparer.Ordinal));
+            var replyDeadlines = Regex.Matches(
+                    logTail,
+                    @"event=(?:tuna_acceleration_answer_sent|runtime_unlock_failed_dial_answer_replay_sent);[^\r\n]*reply_deadline_utc_ms=([0-9]+)")
+                .Select(match => match.Groups[1].Value)
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            Assert.Single(replyDeadlines);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task RuntimeUnlockOffer_DuplicateReplayWhileDialPendingIsIgnored()
     {
         FakeNknClient.ResetNetwork();
