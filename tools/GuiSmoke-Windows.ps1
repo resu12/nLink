@@ -8250,6 +8250,67 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         return $false
     }
 
+    function Test-TunaGuiPostTunaLateSubmissionObservationFailure {
+        param(
+            [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+        )
+
+        $indexed = @(
+            for ($index = 0; $index -lt $Lines.Count; $index++) {
+                [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
+            }
+        )
+        foreach ($failure in @($indexed | Where-Object {
+                Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('filetransfer_v4_sender_failed')
+            })) {
+            $issued = @($indexed | Where-Object {
+                $_.Index -lt $failure.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('filetransfer_receive_recovery_operation_issued')) -and
+                ((Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'route').ToLowerInvariant() -replace '[^a-z0-9]', '') -eq 'posttunafallbackv6' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'protocol_version') -eq '6' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction').ToLowerInvariant() -eq 'outbound' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $failure.Line -Name 'log_writer_id')
+            } | Select-Object -Last 1)
+            if ($issued.Count -ne 1) { continue }
+            $authority = Get-TunaGuiLogLineFieldValue -Line $issued[0].Line -Name 'receive_recovery_operation_authority_id'
+            $generation = Get-TunaGuiLogLineFieldValue -Line $issued[0].Line -Name 'receive_recovery_operation_generation'
+            $matchesOperation = {
+                param($candidate)
+                (Get-TunaGuiLogLineFieldValue -Line $candidate.Line -Name 'receive_recovery_operation_authority_id') -eq $authority -and
+                (Get-TunaGuiLogLineFieldValue -Line $candidate.Line -Name 'receive_recovery_operation_generation') -eq $generation
+            }
+            $deferral = @($indexed | Where-Object {
+                $_.Index -gt $issued[0].Index -and $_.Index -lt $failure.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('filetransfer_post_tuna_fallback_recovery_submission_failure_deferred')) -and
+                (& $matchesOperation $_)
+            } | Select-Object -First 1)
+            $completion = @($indexed | Where-Object {
+                $deferral.Count -eq 1 -and $_.Index -gt $deferral[0].Index -and $_.Index -lt $failure.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('filetransfer_receive_recovery_operation_execution_receipt_applied')) -and
+                (& $matchesOperation $_) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'execution_state').ToLowerInvariant() -eq 'completed' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'proof_identity') -notin @('', '(none)')
+            } | Select-Object -First 1)
+            $resume = @($indexed | Where-Object {
+                $completion.Count -eq 1 -and $_.Index -gt $completion[0].Index -and $_.Index -lt $failure.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('filetransfer_post_tuna_fallback_recovery_submission_failure_resumed')) -and
+                (& $matchesOperation $_)
+            } | Select-Object -First 1)
+            $invalidation = @($indexed | Where-Object {
+                $_.Index -gt $failure.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('filetransfer_receive_recovery_operation_invalidated')) -and
+                (& $matchesOperation $_) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_reason') -eq 'terminal_state'
+            } | Select-Object -First 1)
+            if ($deferral.Count -eq 1 -and $completion.Count -eq 1 -and
+                $resume.Count -eq 1 -and $invalidation.Count -eq 1) {
+                return $true
+            }
+        }
+        return $false
+    }
+
     function Test-TunaGuiBridgeRecoveryExecutionPayloadHoldFailure {
         param(
             [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
@@ -12187,6 +12248,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -Lines $regularV4EvidenceLineText
     $bridgeRecoveryExecutionPayloadHoldMissing =
         Test-TunaGuiBridgeRecoveryExecutionPayloadHoldFailure -Lines $regularV4EvidenceLineText
+    $postTunaLateSubmissionObservationFailure =
+        Test-TunaGuiPostTunaLateSubmissionObservationFailure -Lines $regularV4EvidenceLineText
     $receiveRecoveryCompletedUnprovenPayloadHoldNotPreserved =
         Test-TunaGuiReceiveRecoveryCompletedUnprovenPayloadHoldFailure `
             -Lines $regularV4EvidenceLineText
@@ -12312,6 +12375,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $initialActivationReceiveRecoveryHoldReleasedPathLeaseExpired -or
         $initialActivationReceiveRecoveryHoldReleasedOfferExpired -or
         $initialActivationCommittedRefreshPrevalidationRejected -or
+        $postTunaLateSubmissionObservationFailure -or
         $bridgeRecoveryExecutionPayloadHoldMissing -or
         $receiveRecoveryCompletedUnprovenPayloadHoldNotPreserved -or
         $receiveRecoveryCompletedRetainedProofStatePublicationMissing -or
@@ -12434,6 +12498,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $phase = 'receive_recovery'
         $reason =
             'completed_retained_receive_recovery_peer_reachability_not_rechecked_for_v4_state_publication'
+    }
+    elseif ($postTunaLateSubmissionObservationFailure) {
+        $phase = 'bridge_recovery_execution'
+        $reason =
+            'exact_deferred_submission_epoch_rejection_observed_after_completed_proven_recovery_treated_as_terminal_sender_failure'
     }
     elseif ($bridgeRecoveryExecutionPayloadHoldMissing) {
         $phase = 'bridge_recovery_execution'

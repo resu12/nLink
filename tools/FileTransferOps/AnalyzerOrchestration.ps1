@@ -1477,6 +1477,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v4_repair_delivery_both_failed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v4_sender_failed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_post_tuna_fallback_recovery_submission_failure_deferred') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_post_tuna_fallback_recovery_submission_failure_observed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_post_tuna_fallback_recovery_submission_failure_finalized') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_post_tuna_fallback_recovery_submission_failure_resumed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_post_tuna_fallback_recovery_submission_resumed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_frontier_repair_settlement_handoff_adopted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_authority_granted') +
@@ -1504,6 +1507,29 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             -RetirementEvents $bridgeRecoveryExecutionSubmissionBarrierDrainRetirementEvents
     [object[]]$runtimeUnlockRegularV4RecoveryOrderedEvents = @(
         $runtimeUnlockRegularV4RecoveryLeaseEvents |
+            Where-Object { $null -ne $_ } |
+            Sort-Object Sequence, LineNumber
+    )
+    $postTunaDeferredPhysicalLeaseGenerations = @{}
+    foreach ($event in $runtimeUnlockRegularV4RecoveryLeaseEvents) {
+        if ($event.EventName -ne 'filetransfer_post_tuna_fallback_recovery_submission_failure_deferred') {
+            continue
+        }
+        $leaseGeneration = Get-FileTransferEventField -Event $event -Name 'physical_send_lease_generation' -Default ''
+        if (-not [string]::IsNullOrWhiteSpace($leaseGeneration)) {
+            $postTunaDeferredPhysicalLeaseGenerations[$leaseGeneration] = $true
+        }
+    }
+    [object[]]$postTunaDeferredPhysicalLeaseRetirementEvents = @(
+        $bridgeRecoveryExecutionSubmissionBarrierDrainRetirementEvents |
+            Where-Object {
+                $leaseGeneration = Get-FileTransferEventField -Event $_ -Name 'send_lease_generation' -Default ''
+                -not [string]::IsNullOrWhiteSpace($leaseGeneration) -and
+                    $postTunaDeferredPhysicalLeaseGenerations.ContainsKey($leaseGeneration)
+            }
+    )
+    [object[]]$bridgeRecoveryExecutionPayloadHoldEvents = @(
+        ($runtimeUnlockRegularV4RecoveryLeaseEvents + $postTunaDeferredPhysicalLeaseRetirementEvents) |
             Where-Object { $null -ne $_ } |
             Sort-Object Sequence, LineNumber
     )
@@ -1607,10 +1633,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $bridgeRecoveryExecutionPayloadHoldProof =
         Invoke-FileTransferCompactCorrelator `
             -Name 'bridge_recovery_payload_hold' `
-            -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
+            -InputCount $bridgeRecoveryExecutionPayloadHoldEvents.Count `
             -Action {
                 Get-FileTransferBridgeRecoveryExecutionPayloadHoldWithPostTunaCorrelation `
-                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents `
+                    -Events $bridgeRecoveryExecutionPayloadHoldEvents `
                     -AlreadyChronologicallyOrdered
             }
     $bridgeRecoveryExecutionSubmissionBarrierDrainProof =
@@ -2694,10 +2720,15 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     foreach ($candidateEvent in @($bridgeRecoveryExecutionPayloadHoldProof.UnresolvedCandidateEvents)) {
         $postTunaVariant = $candidateEvent -in @(
             $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackSubmissionEpochFailureNotDeferredUnresolvedCandidateEvents)
+        $lateObservationVariant = $candidateEvent -in @(
+            $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackLateSubmissionObservationUnresolvedCandidateEvents)
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'filetransfer_bridge_recovery_execution_payload_hold_missing'
             Event = $candidateEvent
-            Reason = if ($postTunaVariant) {
+            Reason = if ($lateObservationVariant) {
+                'exact_deferred_submission_epoch_rejection_observed_after_completed_proven_recovery_treated_as_terminal_sender_failure'
+            }
+            elseif ($postTunaVariant) {
                 'current_post_tuna_fallback_recovery_submission_epoch_transition_treated_as_terminal_sender_failure'
             }
             else {
@@ -3526,6 +3557,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_distinct_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackSubmissionEpochFailureNotDeferredDistinctCount),
         ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_recovered_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackSubmissionEpochFailureNotDeferredRecoveredCount),
         ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_unresolved_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackSubmissionEpochFailureNotDeferredUnresolvedCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_raw_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackLateSubmissionObservationRawCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_distinct_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackLateSubmissionObservationDistinctCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_recovered_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackLateSubmissionObservationRecoveredCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_unresolved_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackLateSubmissionObservationUnresolvedCount),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_raw_count={0}" -f $bridgeRecoveryExecutionSubmissionBarrierDrainProof.RawCount),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_distinct_count={0}" -f $bridgeRecoveryExecutionSubmissionBarrierDrainProof.DistinctCount),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_recovered_count={0}" -f $bridgeRecoveryExecutionSubmissionBarrierDrainProof.RecoveredCount),
@@ -3901,6 +3936,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_distinct_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackSubmissionEpochFailureNotDeferredDistinctCount),
         ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_recovered_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackSubmissionEpochFailureNotDeferredRecoveredCount),
         ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_unresolved_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackSubmissionEpochFailureNotDeferredUnresolvedCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_raw_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackLateSubmissionObservationRawCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_distinct_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackLateSubmissionObservationDistinctCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_recovered_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackLateSubmissionObservationRecoveredCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_unresolved_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackLateSubmissionObservationUnresolvedCount),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_raw_count={0}" -f $bridgeRecoveryExecutionSubmissionBarrierDrainProof.RawCount),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_distinct_count={0}" -f $bridgeRecoveryExecutionSubmissionBarrierDrainProof.DistinctCount),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_recovered_count={0}" -f $bridgeRecoveryExecutionSubmissionBarrierDrainProof.RecoveredCount),
@@ -4268,6 +4307,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_distinct_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackSubmissionEpochFailureNotDeferredDistinctCount),
         ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_recovered_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackSubmissionEpochFailureNotDeferredRecoveredCount),
         ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_unresolved_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackSubmissionEpochFailureNotDeferredUnresolvedCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_raw_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackLateSubmissionObservationRawCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_distinct_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackLateSubmissionObservationDistinctCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_recovered_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackLateSubmissionObservationRecoveredCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_unresolved_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackLateSubmissionObservationUnresolvedCount),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_raw_count={0}" -f $bridgeRecoveryExecutionSubmissionBarrierDrainProof.RawCount),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_distinct_count={0}" -f $bridgeRecoveryExecutionSubmissionBarrierDrainProof.DistinctCount),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_recovered_count={0}" -f $bridgeRecoveryExecutionSubmissionBarrierDrainProof.RecoveredCount),
@@ -4622,6 +4665,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_distinct_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackSubmissionEpochFailureNotDeferredDistinctCount),
         ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_recovered_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackSubmissionEpochFailureNotDeferredRecoveredCount),
         ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_unresolved_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackSubmissionEpochFailureNotDeferredUnresolvedCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_raw_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackLateSubmissionObservationRawCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_distinct_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackLateSubmissionObservationDistinctCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_recovered_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackLateSubmissionObservationRecoveredCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_unresolved_count={0}" -f $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackLateSubmissionObservationUnresolvedCount),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_raw_count={0}" -f $bridgeRecoveryExecutionSubmissionBarrierDrainProof.RawCount),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_distinct_count={0}" -f $bridgeRecoveryExecutionSubmissionBarrierDrainProof.DistinctCount),
         ("filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_recovered_count={0}" -f $bridgeRecoveryExecutionSubmissionBarrierDrainProof.RecoveredCount),
@@ -5022,6 +5069,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_distinct_count = $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackSubmissionEpochFailureNotDeferredDistinctCount
         filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_recovered_count = $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackSubmissionEpochFailureNotDeferredRecoveredCount
         filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_unresolved_count = $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackSubmissionEpochFailureNotDeferredUnresolvedCount
+        filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_raw_count = $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackLateSubmissionObservationRawCount
+        filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_distinct_count = $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackLateSubmissionObservationDistinctCount
+        filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_recovered_count = $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackLateSubmissionObservationRecoveredCount
+        filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_unresolved_count = $bridgeRecoveryExecutionPayloadHoldProof.PostTunaFallbackLateSubmissionObservationUnresolvedCount
         filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_raw_count = $bridgeRecoveryExecutionSubmissionBarrierDrainProof.RawCount
         filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_distinct_count = $bridgeRecoveryExecutionSubmissionBarrierDrainProof.DistinctCount
         filetransfer_bridge_recovery_execution_submission_barrier_drain_missing_recovered_count = $bridgeRecoveryExecutionSubmissionBarrierDrainProof.RecoveredCount

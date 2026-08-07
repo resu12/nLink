@@ -8544,6 +8544,74 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_BridgeRecoveryExecutionPayloadHold_PostTunaLateSubmissionObservationIsFirstEdge(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_post_tuna_late_submission_observation";
+        const string writerId = "writer-post-tuna-late-submission";
+        const string operationId = "fta2-filetransfer_receive_recovery_operation-post-tuna-late";
+        const string scope =
+            $"session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=outbound; " +
+            "route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; " +
+            "route_publication_generation=3; runtime_generation=3; terminal_generation=0; " +
+            "leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; " +
+            "bridge_decision_generation=3; data_session_generation=1";
+        const string operation =
+            $"receive_recovery_operation_authority_id={operationId}; receive_recovery_operation_generation=3";
+        var lines = new List<string>
+        {
+            LogLine($"event=filetransfer_route_selected; {scope}; runtime_profile=post_tuna_fallback_v6; frame_family=v6", secondsOffset: 0),
+            LogLine($"event=filetransfer_receive_recovery_operation_issued; {operation}; {scope}; data_session_identity={transferId}:1; execution_state=Issued; log_writer_id={writerId}; log_writer_sequence=1", secondsOffset: 1),
+            LogLine($"event=filetransfer_bridge_recovery_execution_command_issued; {scope}; recovery_liveness_lease_generation=0; log_writer_id={writerId}; log_writer_sequence=2", secondsOffset: 2),
+            LogLine($"event=nkn_bridge_recovery_execution_started; {scope}; lease_generation=0; reason=bridge_recovery_execution_started; log_writer_id={writerId}; log_writer_sequence=3", secondsOffset: 3),
+            LogLine($"event=filetransfer_receive_recovery_operation_execution_start_decided; {operation}; {scope}; execution_state=Running; execution_start_status=Started; log_writer_id={writerId}; log_writer_sequence=4", secondsOffset: 4),
+            LogLine($"event=nkn_bridge_recovery_submission_barrier_closed; {scope}; lease_generation=0; submission_epoch=4; recovery_barrier_active=1; log_writer_id={writerId}; log_writer_sequence=5", secondsOffset: 5),
+            LogLine($"event=nkn_bridge_recovery_execution_hard_restart_decided; {scope}; lease_generation=0; decision_status=Started; remaining_total_ms=44983; log_writer_id={writerId}; log_writer_sequence=6", secondsOffset: 6),
+            LogLine($"event=nkn_bridge_submission_rejected; stage=pre_wait; reason=bridge_submission_epoch_not_ready; channel=bulk; submission_epoch=4; recovery_barrier_active=1; log_writer_id={writerId}; log_writer_sequence=7", secondsOffset: 7),
+            LogLine($"event=filetransfer_post_tuna_fallback_recovery_submission_failure_deferred; {operation}; {scope}; physical_send_lease_generation=90; repair_request_key=(none); decision_status=Accepted; typed_rejection_reason=SubmissionEpochNotReady; rejection_stage=pre_wait; rejection_channel=bulk; log_writer_id={writerId}; log_writer_sequence=8", secondsOffset: 8),
+            LogLine($"event=filetransfer_post_tuna_fallback_recovery_submission_failure_deferred; {operation}; {scope}; physical_send_lease_generation=91; repair_request_key=(none); decision_status=Accepted; typed_rejection_reason=SubmissionEpochNotReady; rejection_stage=pre_wait; rejection_channel=bulk; log_writer_id={writerId}; log_writer_sequence=8", secondsOffset: 8),
+            LogLine($"event=filetransfer_outbound_physical_send_lease_retired; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=outbound; send_lease_generation=91; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_route_publication_generation=3; source_terminal_generation=0; source_leg_generation=3; source_transport_epoch=1; source_bridge_recovery_generation=1; source_data_session_generation=1; send_kind=PostTunaFallbackV6Payload; repair_send=0; repair_request_key=(none); log_writer_id={writerId}; log_writer_sequence=9", secondsOffset: 9),
+            LogLine($"event=filetransfer_receive_recovery_operation_execution_receipt_applied; {operation}; {scope}; execution_state=Completed; execution_outcome=Completed; proof_identity=file_transfer_data_frame:bulk:3; closure_state=None; log_writer_id={writerId}; log_writer_sequence=10", secondsOffset: 10),
+            LogLine($"event=filetransfer_post_tuna_fallback_recovery_submission_failure_resumed; {operation}; {scope}; decision_status=Accepted; log_writer_id={writerId}; log_writer_sequence=11", secondsOffset: 11),
+            LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied; {operation}; {scope}; delivery_state=delivered; decision_status=accepted; log_writer_id={writerId}; log_writer_sequence=12", secondsOffset: 12),
+            LogLine($"event=filetransfer_v4_sender_failed; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; error_code=read_failed; log_writer_id={writerId}; log_writer_sequence=55765", secondsOffset: 13),
+            LogLine($"event=filetransfer_receive_recovery_operation_invalidated; {operation}; {scope}; execution_state=Invalidated; decision_reason=terminal_state; log_writer_id={writerId}; log_writer_sequence=55768", secondsOffset: 14),
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("filetransfer_bridge_recovery_execution_payload_hold_missing", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("filetransfer_v4_sender_failed", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("0", verdict["filetransfer_bridge_recovery_execution_payload_hold_post_tuna_submission_epoch_unresolved_count"]);
+        Assert.Equal("1", verdict["filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_unresolved_count"]);
+        Assert.Equal(
+            "exact_deferred_submission_epoch_rejection_observed_after_completed_proven_recovery_treated_as_terminal_sender_failure",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("55765", verdict["first_proof_chain_failure_writer_sequence"]);
+        Assert.Equal("1", verdict["filetransfer_bridge_recovery_execution_payload_hold_missing_raw_count"]);
+        Assert.Equal("1", verdict["filetransfer_bridge_recovery_execution_payload_hold_missing_distinct_count"]);
+        Assert.Equal("0", verdict["filetransfer_bridge_recovery_execution_payload_hold_missing_recovered_count"]);
+        Assert.Equal("1", verdict["filetransfer_bridge_recovery_execution_payload_hold_missing_unresolved_count"]);
+    }
+
+    [Theory]
     [InlineData(false, "source_gate_timeout", "1", "0")]
     [InlineData(true, "source_gate_timeout", "1", "0")]
     [InlineData(false, "drain_completed", "0", "1")]

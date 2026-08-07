@@ -1510,6 +1510,10 @@ function New-RouteAcceptanceRunResult {
         fileTransferBridgeRecoveryExecutionPayloadHoldMissingDistinctCount = 0
         fileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount = 0
         fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount = 0
+        fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationRawCount = 0
+        fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationDistinctCount = 0
+        fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationRecoveredCount = 0
+        fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationUnresolvedCount = 0
         fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRawCount = 0
         fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedDistinctCount = 0
         fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount = 0
@@ -3456,6 +3460,10 @@ function Assert-Phase4OperatorVerdict {
     $Result.fileTransferBridgeRecoveryExecutionPayloadHoldMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_bridge_recovery_execution_payload_hold_missing_distinct_count' -DefaultValue '0')
     $Result.fileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_bridge_recovery_execution_payload_hold_missing_recovered_count' -DefaultValue '0')
     $Result.fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_bridge_recovery_execution_payload_hold_missing_unresolved_count' -DefaultValue '0')
+    $Result.fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_raw_count' -DefaultValue '0')
+    $Result.fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_distinct_count' -DefaultValue '0')
+    $Result.fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_recovered_count' -DefaultValue '0')
+    $Result.fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_unresolved_count' -DefaultValue '0')
     $Result.fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_raw_count' -DefaultValue '0')
     $Result.fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_distinct_count' -DefaultValue '0')
     $Result.fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_recovered_count' -DefaultValue '0')
@@ -9455,6 +9463,10 @@ function New-RouteAcceptanceSummaryRunDto {
         fileTransferBridgeRecoveryExecutionPayloadHoldMissingDistinctCount = [int]$Result.fileTransferBridgeRecoveryExecutionPayloadHoldMissingDistinctCount
         fileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount = [int]$Result.fileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount
         fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount = [int]$Result.fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount
+        fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationRawCount = [int]$Result.fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationRawCount
+        fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationDistinctCount = [int]$Result.fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationDistinctCount
+        fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationRecoveredCount = [int]$Result.fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationRecoveredCount
+        fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationUnresolvedCount = [int]$Result.fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationUnresolvedCount
         fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRawCount = [int]$Result.fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRawCount
         fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedDistinctCount = [int]$Result.fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedDistinctCount
         fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount = [int]$Result.fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount
@@ -9765,6 +9777,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $fileTransferBridgeRecoveryExecutionPayloadHoldMissingDistinctCount = 0
     $fileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount = 0
     $fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount = 0
+    $fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationRawCount = 0
+    $fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationDistinctCount = 0
+    $fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationRecoveredCount = 0
+    $fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationUnresolvedCount = 0
     $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRawCount = 0
     $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedDistinctCount = 0
     $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount = 0
@@ -9975,6 +9991,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $fileTransferBridgeRecoveryExecutionPayloadHoldMissingDistinctCount += [int]$runDto.fileTransferBridgeRecoveryExecutionPayloadHoldMissingDistinctCount
         $fileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount += [int]$runDto.fileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount
         $fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount += [int]$runDto.fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount
+        $fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationRawCount += [int]$runDto.fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationRawCount
+        $fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationDistinctCount += [int]$runDto.fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationDistinctCount
+        $fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationRecoveredCount += [int]$runDto.fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationRecoveredCount
+        $fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationUnresolvedCount += [int]$runDto.fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationUnresolvedCount
         $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRawCount += [int]$runDto.fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRawCount
         $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedDistinctCount += [int]$runDto.fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedDistinctCount
         $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount += [int]$runDto.fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount
@@ -10501,6 +10521,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("filetransfer_bridge_recovery_execution_payload_hold_missing_recovered_count={0}" -f $fileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount),
         ("filetransfer_bridge_recovery_execution_payload_hold_missing_unresolved_count={0}" -f $fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount),
         ("filetransfer_bridge_recovery_execution_payload_hold_verdict={0}" -f ($(if ($fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount -gt 0) { 'fail' } elseif ($fileTransferBridgeRecoveryExecutionPayloadHoldMissingDistinctCount -gt 0) { 'pass' } else { 'none' }))),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_raw_count={0}" -f $fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationRawCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_distinct_count={0}" -f $fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationDistinctCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_recovered_count={0}" -f $fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationRecoveredCount),
+        ("filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_unresolved_count={0}" -f $fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationUnresolvedCount),
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_raw_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRawCount),
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_distinct_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedDistinctCount),
         ("filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount),
@@ -10858,6 +10882,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.filetransfer_bridge_recovery_execution_payload_hold_missing_distinct_count={1}" -f $prefix, $result.fileTransferBridgeRecoveryExecutionPayloadHoldMissingDistinctCount)
         $textLines += ("{0}.filetransfer_bridge_recovery_execution_payload_hold_missing_recovered_count={1}" -f $prefix, $result.fileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount)
         $textLines += ("{0}.filetransfer_bridge_recovery_execution_payload_hold_missing_unresolved_count={1}" -f $prefix, $result.fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount)
+        $textLines += ("{0}.filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_raw_count={1}" -f $prefix, $result.fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationRawCount)
+        $textLines += ("{0}.filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_distinct_count={1}" -f $prefix, $result.fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationDistinctCount)
+        $textLines += ("{0}.filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_recovered_count={1}" -f $prefix, $result.fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationRecoveredCount)
+        $textLines += ("{0}.filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_unresolved_count={1}" -f $prefix, $result.fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationUnresolvedCount)
         $textLines += ("{0}.filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_raw_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRawCount)
         $textLines += ("{0}.filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_distinct_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedDistinctCount)
         $textLines += ("{0}.filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved_recovered_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount)
@@ -11173,6 +11201,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         fileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount = $fileTransferBridgeRecoveryExecutionPayloadHoldMissingRecoveredCount
         fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount = $fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount
         fileTransferBridgeRecoveryExecutionPayloadHoldVerdict = if ($fileTransferBridgeRecoveryExecutionPayloadHoldMissingUnresolvedCount -gt 0) { 'fail' } elseif ($fileTransferBridgeRecoveryExecutionPayloadHoldMissingDistinctCount -gt 0) { 'pass' } else { 'none' }
+        fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationRawCount = $fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationRawCount
+        fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationDistinctCount = $fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationDistinctCount
+        fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationRecoveredCount = $fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationRecoveredCount
+        fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationUnresolvedCount = $fileTransferBridgeRecoveryExecutionPayloadHoldPostTunaLateSubmissionObservationUnresolvedCount
         fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRawCount = $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRawCount
         fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedDistinctCount = $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedDistinctCount
         fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount = $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldNotPreservedRecoveredCount
