@@ -14437,6 +14437,10 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("filetransfer_receive_recovery_completed_proven_successor_missing_recovered_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryCompletedProvenSuccessorMissingRecoveredCount)) | Out-Null
     $lines.Add(("filetransfer_receive_recovery_completed_proven_successor_missing_unresolved_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryCompletedProvenSuccessorMissingUnresolvedCount)) | Out-Null
     $lines.Add(("filetransfer_receive_recovery_completed_proven_successor_verdict={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryCompletedProvenSuccessorVerdict)) | Out-Null
+    $lines.Add(("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_raw_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffMissingRawCount)) | Out-Null
+    $lines.Add(("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_distinct_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffMissingDistinctCount)) | Out-Null
+    $lines.Add(("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_recovered_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffMissingRecoveredCount)) | Out-Null
+    $lines.Add(("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_unresolved_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffMissingUnresolvedCount)) | Out-Null
     $lines.Add(("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_raw_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRawCount)) | Out-Null
     $lines.Add(("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_distinct_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingDistinctCount)) | Out-Null
     $lines.Add(("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_recovered_count={0}" -f $RecoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRecoveredCount)) | Out-Null
@@ -16557,6 +16561,10 @@ function New-FileTransferStabilityGateSummaryLines {
         ("filetransfer_receive_recovery_completed_proven_successor_missing_recovered_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedProvenSuccessorMissingRecoveredCount),
         ("filetransfer_receive_recovery_completed_proven_successor_missing_unresolved_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedProvenSuccessorMissingUnresolvedCount),
         ("filetransfer_receive_recovery_completed_proven_successor_verdict={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedProvenSuccessorVerdict),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_raw_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffMissingRawCount),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_distinct_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffMissingDistinctCount),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_recovered_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffMissingRecoveredCount),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_unresolved_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffMissingUnresolvedCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_raw_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRawCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_distinct_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingDistinctCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_recovered_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRecoveredCount),
@@ -42919,6 +42927,160 @@ function Get-FileTransferRuntimeUnlockRetryDispatchAuthorityTupleMismatchCorrela
     }
 }
 
+function Get-FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffCorrelation {
+    param(
+        [object[]]$Events = @(),
+        [switch]$AlreadyChronologicallyOrdered)
+
+    [object[]]$ordered = if ($AlreadyChronologicallyOrdered) {
+        @($Events | Where-Object { $null -ne $_ })
+    }
+    else {
+        @($Events | Where-Object { $null -ne $_ } | Sort-Object Sequence, LineNumber)
+    }
+    $records = New-Object System.Collections.Generic.List[object]
+    $recoveredRecords = New-Object System.Collections.Generic.List[object]
+    $unresolvedRecords = New-Object System.Collections.Generic.List[object]
+    $keys = New-Object 'System.Collections.Generic.HashSet[string]'
+    [object[]]$invalidations = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_receive_recovery_operation_invalidated' -and
+            (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+            (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '0') -eq '6' -and
+            (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq 'runtime_scope_replaced' -and
+            (Get-FileTransferEventField -Event $_ -Name 'proof_identity' -Default '(none)') -in @('', '(none)', 'none')
+        })
+    foreach ($invalidation in $invalidations) {
+        $sequence = [int64]$invalidation.Sequence
+        $writer = Get-FileTransferEventField -Event $invalidation -Name 'log_writer_id' -Default ''
+        $session = Get-FileTransferEventField -Event $invalidation -Name 'session_id' -Default ''
+        $transfer = Get-FileTransferEventField -Event $invalidation -Name 'transfer_id' -Default ''
+        $direction = Get-FileTransferEventField -Event $invalidation -Name 'direction' -Default ''
+        $authority = Get-FileTransferEventField -Event $invalidation -Name 'receive_recovery_operation_authority_id' -Default ''
+        $generation = Get-FileTransferEventField -Event $invalidation -Name 'receive_recovery_operation_generation' -Default '0'
+        $runtime = Get-FileTransferEventField -Event $invalidation -Name 'runtime_generation' -Default '0'
+        $publication = Get-FileTransferEventField -Event $invalidation -Name 'route_publication_generation' -Default '0'
+        $leg = Get-FileTransferEventField -Event $invalidation -Name 'leg_generation' -Default '0'
+        $liveEpoch = Get-FileTransferEventField -Event $invalidation -Name 'live_route_epoch' -Default '0'
+        $terminal = Get-FileTransferEventField -Event $invalidation -Name 'terminal_generation' -Default '0'
+        $transport = Get-FileTransferEventField -Event $invalidation -Name 'transport_epoch' -Default '0'
+        $bridge = Get-FileTransferEventField -Event $invalidation -Name 'bridge_recovery_generation' -Default '0'
+        $checkpoint = Get-FileTransferEventField -Event $invalidation -Name 'checkpoint_request_id' -Default '(none)'
+        $dataSession = Get-FileTransferEventField -Event $invalidation -Name 'data_session_identity' -Default ''
+        if ([string]::IsNullOrWhiteSpace($writer) -or [string]::IsNullOrWhiteSpace($session) -or
+            [string]::IsNullOrWhiteSpace($transfer) -or [string]::IsNullOrWhiteSpace($direction) -or
+            [string]::IsNullOrWhiteSpace($authority) -or [int64]$generation -le 0) {
+            continue
+        }
+        $sameWriterTransfer = {
+            param($event)
+            (Get-FileTransferEventField -Event $event -Name 'log_writer_id' -Default '') -eq $writer -and
+            (Get-FileTransferEventField -Event $event -Name 'session_id' -Default '') -eq $session -and
+            (Get-FileTransferEventField -Event $event -Name 'transfer_id' -Default '') -eq $transfer
+        }
+        [object[]]$started = @($ordered | Where-Object {
+                [int64]$_.Sequence -lt $sequence -and
+                $_.EventName -eq 'filetransfer_receive_recovery_operation_execution_start_decided' -and
+                (& $sameWriterTransfer $_) -and
+                (Get-FileTransferEventField -Event $_ -Name 'receive_recovery_operation_authority_id' -Default '') -eq $authority -and
+                (Get-FileTransferEventField -Event $_ -Name 'execution_state' -Default '') -eq 'Running'
+            } | Select-Object -Last 1)
+        if ($started.Count -ne 1) { continue }
+        [object[]]$availability = @($ordered | Where-Object {
+                [int64]$_.Sequence -gt [int64]$started[0].Sequence -and [int64]$_.Sequence -lt $sequence -and
+                $_.EventName -eq 'filetransfer_data_session_availability_observed' -and
+                (& $sameWriterTransfer $_) -and
+                (Get-FileTransferEventField -Event $_ -Name 'is_available' -Default '1') -eq '0' -and
+                (Get-FileTransferEventField -Event $_ -Name 'requires_resume_request' -Default '0') -eq '1' -and
+                (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'transport_recovered_unproven' -and
+                (Get-FileTransferEventField -Event $_ -Name 'handoff_kind' -Default '') -eq 'regular_nkn_recovery' -and
+                (Get-FileTransferEventField -Event $_ -Name 'target_transport' -Default '') -eq 'regular_nkn'
+            } | Select-Object -Last 1)
+        if ($availability.Count -ne 1) { continue }
+        [object[]]$epochRestart = @($ordered | Where-Object {
+                [int64]$_.Sequence -gt [int64]$availability[0].Sequence -and [int64]$_.Sequence -lt $sequence -and
+                $_.EventName -eq 'filetransfer_v6_epoch_started' -and
+                (& $sameWriterTransfer $_) -and
+                (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq $direction -and
+                (Get-FileTransferEventField -Event $_ -Name 'transport_epoch' -Default '0') -eq $transport -and
+                (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'transport_recovered_unproven'
+            } | Select-Object -Last 1)
+        [object[]]$lateWorker = @($ordered | Where-Object {
+                [int64]$_.Sequence -gt $sequence -and $_.EventName -eq 'nkn_bridge_recovery_execution_completion_late' -and
+                (& $sameWriterTransfer $_) -and
+                (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq $direction -and
+                (Get-FileTransferEventField -Event $_ -Name 'runtime_generation' -Default '0') -eq $runtime -and
+                (Get-FileTransferEventField -Event $_ -Name 'leg_generation' -Default '0') -eq $leg -and
+                (Get-FileTransferEventField -Event $_ -Name 'transport_epoch' -Default '0') -eq $transport -and
+                (Get-FileTransferEventField -Event $_ -Name 'bridge_recovery_generation' -Default '0') -eq $bridge -and
+                (Get-FileTransferEventField -Event $_ -Name 'total_deadline_expired' -Default '1') -eq '0'
+            } | Select-Object -First 1)
+        [object[]]$successor = @($ordered | Where-Object {
+                [int64]$_.Sequence -gt $sequence -and
+                $_.EventName -eq 'filetransfer_route_hint_authorized_publication_accepted' -and
+                (& $sameWriterTransfer $_) -and
+                (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq $direction -and
+                (Get-FileTransferEventField -Event $_ -Name 'source' -Default '') -eq 'coordinator_route_publication_successor' -and
+                (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+                (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '0') -eq '6' -and
+                (Get-FileTransferEventField -Event $_ -Name 'live_route_epoch' -Default '0') -eq $liveEpoch -and
+                (Get-FileTransferEventField -Event $_ -Name 'terminal_generation' -Default '0') -eq $terminal -and
+                (Get-FileTransferEventField -Event $_ -Name 'fallback_transport_epoch' -Default '0') -eq $transport -and
+                (Get-FileTransferEventField -Event $_ -Name 'fallback_bridge_recovery_generation' -Default '0') -eq $bridge -and
+                [int64](Get-FileTransferEventField -Event $_ -Name 'runtime_generation' -Default '0') -eq ([int64]$runtime + 1) -and
+                [int64](Get-FileTransferEventField -Event $_ -Name 'route_publication_generation' -Default '0') -eq ([int64]$publication + 1) -and
+                [int64](Get-FileTransferEventField -Event $_ -Name 'leg_generation' -Default '0') -eq ([int64]$leg + 1)
+            } | Select-Object -First 1)
+        if ($epochRestart.Count -ne 1 -or $lateWorker.Count -ne 1 -or $successor.Count -ne 1) { continue }
+
+        [object[]]$holdDecisions = @($ordered | Where-Object {
+                [int64]$_.Sequence -gt [int64]$availability[0].Sequence -and
+                $_.EventName -eq 'filetransfer_receive_recovery_post_tuna_epoch_restart_decided' -and
+                (& $sameWriterTransfer $_) -and
+                (Get-FileTransferEventField -Event $_ -Name 'receive_recovery_operation_authority_id' -Default '') -eq $authority -and
+                (Get-FileTransferEventField -Event $_ -Name 'disposition' -Default '') -in @('ActiveHold', 'CompletedAwaitingProofHold', 'CompletedProvenIgnore')
+            })
+        [object[]]$completion = @($ordered | Where-Object {
+                [int64]$_.Sequence -gt [int64]$availability[0].Sequence -and
+                $_.EventName -in @('filetransfer_receive_recovery_operation_receipt_applied', 'filetransfer_receive_recovery_operation_completed') -and
+                (& $sameWriterTransfer $_) -and
+                (Get-FileTransferEventField -Event $_ -Name 'receive_recovery_operation_authority_id' -Default '') -eq $authority -and
+                (Get-FileTransferEventField -Event $_ -Name 'execution_outcome' -Default '') -eq 'Completed'
+            })
+        [object[]]$proof = @($ordered | Where-Object {
+                [int64]$_.Sequence -gt [int64]$availability[0].Sequence -and
+                $_.EventName -in @('filetransfer_receive_recovery_operation_proof_observed', 'filetransfer_receive_recovery_operation_receive_proof_observed') -and
+                (& $sameWriterTransfer $_) -and
+                (Get-FileTransferEventField -Event $_ -Name 'receive_recovery_operation_authority_id' -Default '') -eq $authority
+            })
+        $recovered = $holdDecisions.Count -gt 0 -and $completion.Count -gt 0 -and $proof.Count -gt 0
+        $key = "$writer|$session|$transfer|$direction|$authority|$generation|$runtime|$publication|$leg|$liveEpoch|$terminal|$transport|$bridge|$checkpoint|$dataSession".ToLowerInvariant()
+        if ($keys.Add($key)) {
+            $record = [pscustomobject]@{
+                Event = $invalidation
+                Reason = 'transport_recovered_unproven_same_route_runtime_successor_dropped_active_recovery_liveness_authority'
+                Variant = 'transport_recovered_unproven_successor_invalidated_active_recovery'
+                DistinctKey = $key
+            }
+            $records.Add($record) | Out-Null
+            if ($recovered) { $recoveredRecords.Add($record) | Out-Null }
+            else { $unresolvedRecords.Add($record) | Out-Null }
+        }
+    }
+    return [pscustomobject]@{
+        RawCount = $records.Count
+        DistinctCount = $records.Count
+        RecoveredCount = $recoveredRecords.Count
+        UnresolvedCount = $unresolvedRecords.Count
+        TransportRecoveredUnprovenRawCount = $records.Count
+        TransportRecoveredUnprovenDistinctCount = $records.Count
+        TransportRecoveredUnprovenRecoveredCount = $recoveredRecords.Count
+        TransportRecoveredUnprovenUnresolvedCount = $unresolvedRecords.Count
+        Verdict = if ($unresolvedRecords.Count -gt 0) { 'fail' } else { 'pass' }
+        CandidateRecords = @($records.ToArray())
+        UnresolvedCandidateRecords = @($unresolvedRecords.ToArray())
+    }
+}
+
 function Get-FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffCorrelation {
     param([object[]]$Events = @())
 
@@ -44101,6 +44263,9 @@ function Get-FileTransferRecoveryFailureClassification {
             -Events $events
     $fileTransferReceiveRecoveryCompletedProvenSuccessorProof =
         Get-FileTransferReceiveRecoveryCompletedProvenSuccessorCorrelation `
+            -Events $events
+    $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof =
+        Get-FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffCorrelation `
             -Events $events
     $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof =
         Get-FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffCorrelation `
@@ -47852,6 +48017,14 @@ function Get-FileTransferRecoveryFailureClassification {
             -DefaultReason 'publication_authority_missing' `
             -UseDefaultReason
     }
+    foreach ($candidateRecord in @($fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.UnresolvedCandidateRecords)) {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class 'filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing' `
+            -Events @($candidateRecord.Event) `
+            -DefaultReason ([string]$candidateRecord.Reason) `
+            -UseDefaultReason
+    }
     foreach ($candidateRecord in @($fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.UnresolvedCandidateRecords)) {
         Add-FileTransferProofChainFailureCandidates `
             -Candidates $proofChainFailureCandidates `
@@ -48170,6 +48343,9 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($publicationAuthorityFieldCoverageProof.Verdict -eq 'fail') {
         $class = 'publication_authority_missing'
+    }
+    elseif ($fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.UnresolvedCount -gt 0) {
+        $class = 'filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing'
     }
     elseif ($fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.UnresolvedCount -gt 0) {
         $class = 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing'
@@ -48805,6 +48981,11 @@ function Get-FileTransferRecoveryFailureClassification {
         FileTransferReceiveRecoveryCompletedProvenSuccessorMissingRecoveredCount = $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.RecoveredCount
         FileTransferReceiveRecoveryCompletedProvenSuccessorMissingUnresolvedCount = $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.UnresolvedCount
         FileTransferReceiveRecoveryCompletedProvenSuccessorVerdict = $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.Verdict
+        FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffMissingRawCount = $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.RawCount
+        FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffMissingDistinctCount = $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.DistinctCount
+        FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffMissingRecoveredCount = $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.RecoveredCount
+        FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffMissingUnresolvedCount = $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.UnresolvedCount
+        FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffVerdict = $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.Verdict
         FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRawCount = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.RawCount
         FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingDistinctCount = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.DistinctCount
         FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRecoveredCount = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.RecoveredCount
@@ -49746,6 +49927,10 @@ function New-FileTransferInvariantLedgerObject {
         filetransfer_receive_recovery_completed_proven_successor_missing_recovered_count = [string]$recoveryClassification.FileTransferReceiveRecoveryCompletedProvenSuccessorMissingRecoveredCount
         filetransfer_receive_recovery_completed_proven_successor_missing_unresolved_count = [string]$recoveryClassification.FileTransferReceiveRecoveryCompletedProvenSuccessorMissingUnresolvedCount
         filetransfer_receive_recovery_completed_proven_successor_verdict = $recoveryClassification.FileTransferReceiveRecoveryCompletedProvenSuccessorVerdict
+        filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_raw_count = [string]$recoveryClassification.FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffMissingRawCount
+        filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_distinct_count = [string]$recoveryClassification.FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffMissingDistinctCount
+        filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_recovered_count = [string]$recoveryClassification.FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffMissingRecoveredCount
+        filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_unresolved_count = [string]$recoveryClassification.FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffMissingUnresolvedCount
         filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_raw_count = [string]$recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRawCount
         filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_distinct_count = [string]$recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingDistinctCount
         filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_recovered_count = [string]$recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRecoveredCount
@@ -50293,7 +50478,7 @@ function Write-FileTransferDiagnosticsArtifacts {
     elseif ($recoveryClassification.Class -eq 'runtime_unlock_initial_activation_answer_peer_delivery_missing') {
         'route_runtime'
     }
-    elseif ($recoveryClassification.Class -in @('filetransfer_receive_recovery_operation_incomplete', 'filetransfer_receive_recovery_completed_unproven_successor_missing', 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved', 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing', 'filetransfer_receive_recovery_completed_proven_successor_missing', 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'filetransfer_bridge_recovery_execution_payload_hold_missing', 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing', 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing', 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing', 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing', 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved', 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing', 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired', 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'runtime_unlock_retry_dispatch_current_listener_adoption_missing', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'fallback_tail_yield_authority_invalid', 'paired_fallback_tail_yield_missing', 'filetransfer_route_transition_draining_transport_grace_terminalization', 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing', 'filetransfer_route_transition_incomplete', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
+    elseif ($recoveryClassification.Class -in @('filetransfer_receive_recovery_operation_incomplete', 'filetransfer_receive_recovery_completed_unproven_successor_missing', 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved', 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing', 'filetransfer_receive_recovery_completed_proven_successor_missing', 'filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing', 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'filetransfer_bridge_recovery_execution_payload_hold_missing', 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing', 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing', 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing', 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing', 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved', 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing', 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired', 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'runtime_unlock_retry_dispatch_current_listener_adoption_missing', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'fallback_tail_yield_authority_invalid', 'paired_fallback_tail_yield_missing', 'filetransfer_route_transition_draining_transport_grace_terminalization', 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing', 'filetransfer_route_transition_incomplete', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
         'route_runtime'
     }
     elseif ($invariantMayOwnAcceptanceFailure) {
@@ -50358,6 +50543,10 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("filetransfer_receive_recovery_completed_proven_successor_missing_recovered_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedProvenSuccessorMissingRecoveredCount),
         ("filetransfer_receive_recovery_completed_proven_successor_missing_unresolved_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedProvenSuccessorMissingUnresolvedCount),
         ("filetransfer_receive_recovery_completed_proven_successor_verdict={0}" -f $recoveryClassification.FileTransferReceiveRecoveryCompletedProvenSuccessorVerdict),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_raw_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffMissingRawCount),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_distinct_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffMissingDistinctCount),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_recovered_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffMissingRecoveredCount),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_unresolved_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffMissingUnresolvedCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_raw_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRawCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_distinct_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingDistinctCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_recovered_count={0}" -f $recoveryClassification.FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRecoveredCount),

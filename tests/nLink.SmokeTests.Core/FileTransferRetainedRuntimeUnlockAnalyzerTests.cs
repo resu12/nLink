@@ -14,6 +14,84 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransferOpsScriptsTestBase
 {
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_ReceiveRecoverySameRouteRuntimeSuccessorLivenessHandoff(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string scope =
+            "session_id=sess_same_route; transfer_id=transfer_same_route; " +
+            "direction=inbound; route=post_tuna_fallback_v6; protocol_version=6; " +
+            "live_route_epoch=2; route_publication_generation=3; " +
+            "runtime_generation=3; terminal_generation=0; leg_generation=3; " +
+            "transport_epoch=1; bridge_recovery_generation=1; " +
+            "checkpoint_request_id=(none); data_session_identity=data-session-1; " +
+            "data_session_generation=1; receive_recovery_operation_generation=2; " +
+            "receive_recovery_operation_authority_id=recovery-authority-2; " +
+            "log_writer_id=writer_same_route";
+        var messages = new List<string>
+        {
+            LogLine($"event=filetransfer_receive_recovery_operation_issued; {scope}; execution_state=Issued; proof_identity=(none)"),
+            LogLine($"event=filetransfer_receive_recovery_operation_execution_start_decided; {scope}; execution_state=Running; execution_start_status=Started; proof_identity=(none)"),
+            LogLine("event=filetransfer_data_session_availability_observed; " +
+                "session_id=sess_same_route; transfer_id=transfer_same_route; " +
+                "is_available=0; requires_resume_request=1; " +
+                "reason=transport_recovered_unproven; handoff_kind=regular_nkn_recovery; " +
+                "target_transport=regular_nkn; log_writer_id=writer_same_route"),
+            LogLine("event=filetransfer_v6_epoch_started; session_id=sess_same_route; " +
+                "transfer_id=transfer_same_route; direction=inbound; transport_epoch=1; " +
+                "reason=transport_recovered_unproven; log_writer_id=writer_same_route"),
+            LogLine($"event=filetransfer_receive_recovery_operation_invalidated; {scope}; execution_state=Invalidated; proof_identity=(none); decision_reason=runtime_scope_replaced"),
+            LogLine("event=nkn_bridge_recovery_execution_completion_late; " +
+                "session_id=sess_same_route; transfer_id=transfer_same_route; direction=inbound; " +
+                "runtime_generation=3; leg_generation=3; transport_epoch=1; " +
+                "bridge_recovery_generation=1; total_deadline_expired=0; " +
+                "log_writer_id=writer_same_route"),
+            LogLine("event=filetransfer_route_hint_authorized_publication_accepted; " +
+                "session_id=sess_same_route; transfer_id=transfer_same_route; direction=inbound; " +
+                "route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; " +
+                "source=coordinator_route_publication_successor; runtime_generation=4; " +
+                "route_publication_generation=4; terminal_generation=0; leg_generation=4; " +
+                "fallback_transport_epoch=1; fallback_bridge_recovery_generation=1; " +
+                "log_writer_id=writer_same_route")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            messages,
+            [],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-operator-verdict.txt");
+        Assert.Equal(
+            "1",
+            verdict["filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_raw_count"]);
+        Assert.Equal(
+            "1",
+            verdict["filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_unresolved_count"]);
+        Assert.Equal(
+            "filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing",
+            verdict["first_proof_chain_failure_class"]);
+        Assert.Equal(
+            "transport_recovered_unproven_same_route_runtime_successor_dropped_active_recovery_liveness_authority",
+            verdict["first_proof_chain_failure_reason"]);
+    }
+
+    [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]
     [InlineData(false, true)]

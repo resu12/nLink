@@ -1350,6 +1350,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_operation_terminal_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_operation_completed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_operation_invalidated') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_data_session_availability_observed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_epoch_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_hint_authorized_publication_accepted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_post_tuna_epoch_restart_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_operation_closure_retained') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_operation_closure_adopted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_operation_closure_reserved') +
@@ -1593,6 +1597,15 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
             -Action {
                 Get-FileTransferReceiveRecoveryCompletedProvenSuccessorCorrelation `
+                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents `
+                    -AlreadyChronologicallyOrdered
+            }
+    $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof =
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'receive_recovery_post_tuna_runtime_successor_liveness_handoff' `
+            -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
+            -Action {
+                Get-FileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffCorrelation `
                     -Events $runtimeUnlockRegularV4RecoveryOrderedEvents `
                     -AlreadyChronologicallyOrdered
             }
@@ -2986,6 +2999,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Reason = 'late_answer_ack_did_not_bind_acked_peer_probe_to_responder_route_transition'
         }) | Out-Null
     }
+    foreach ($candidateRecord in @($fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.UnresolvedCandidateRecords)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing'
+            Event = $candidateRecord.Event
+            Reason = $candidateRecord.Reason
+        }) | Out-Null
+    }
     foreach ($candidateRecord in @($fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.UnresolvedCandidateRecords)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing'
@@ -3069,6 +3089,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     elseif ($fileTransferReceiveRecoveryOperationProof.UnresolvedCount -gt 0 -or
         $fileTransferReceiveRecoveryCompletedUnprovenSuccessorProof.UnresolvedCount -gt 0 -or
         $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.UnresolvedCount -gt 0 -or
+        $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.UnresolvedCount -gt 0 -or
         $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.UnresolvedCount -gt 0 -or
         $fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.UnresolvedCount -gt 0 -or
@@ -3142,6 +3163,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing',
                 'filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed',
                 'filetransfer_receive_recovery_completed_proven_successor_missing',
+                'filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing',
                 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing',
                 'runtime_unlock_regular_v4_recovery_lease_not_issued',
                 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted',
@@ -3242,6 +3264,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing',
             'filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed',
             'filetransfer_receive_recovery_completed_proven_successor_missing',
+            'filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing',
             'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing',
             'filetransfer_route_transition_draining_transport_grace_terminalization',
             'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing',
@@ -3490,6 +3513,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_receive_recovery_completed_proven_successor_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.RecoveredCount),
         ("filetransfer_receive_recovery_completed_proven_successor_missing_unresolved_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.UnresolvedCount),
         ("filetransfer_receive_recovery_completed_proven_successor_verdict={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.Verdict),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_raw_count={0}" -f $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.RawCount),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.DistinctCount),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.RecoveredCount),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_unresolved_count={0}" -f $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.UnresolvedCount),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_verdict={0}" -f $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.Verdict),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_raw_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.RawCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.DistinctCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.RecoveredCount),
@@ -3887,6 +3915,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_receive_recovery_completed_proven_successor_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.RecoveredCount),
         ("filetransfer_receive_recovery_completed_proven_successor_missing_unresolved_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.UnresolvedCount),
         ("filetransfer_receive_recovery_completed_proven_successor_verdict={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.Verdict),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_raw_count={0}" -f $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.RawCount),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.DistinctCount),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.RecoveredCount),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_unresolved_count={0}" -f $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.UnresolvedCount),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_verdict={0}" -f $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.Verdict),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_raw_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.RawCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.DistinctCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.RecoveredCount),
@@ -4259,6 +4292,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_receive_recovery_completed_proven_successor_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.RecoveredCount),
         ("filetransfer_receive_recovery_completed_proven_successor_missing_unresolved_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.UnresolvedCount),
         ("filetransfer_receive_recovery_completed_proven_successor_verdict={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.Verdict),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_raw_count={0}" -f $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.RawCount),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.DistinctCount),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.RecoveredCount),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_unresolved_count={0}" -f $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.UnresolvedCount),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_verdict={0}" -f $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.Verdict),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_raw_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.RawCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.DistinctCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.RecoveredCount),
@@ -4615,6 +4653,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_receive_recovery_completed_proven_successor_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.RecoveredCount),
         ("filetransfer_receive_recovery_completed_proven_successor_missing_unresolved_count={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.UnresolvedCount),
         ("filetransfer_receive_recovery_completed_proven_successor_verdict={0}" -f $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.Verdict),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_raw_count={0}" -f $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.RawCount),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.DistinctCount),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.RecoveredCount),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_unresolved_count={0}" -f $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.UnresolvedCount),
+        ("filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_verdict={0}" -f $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.Verdict),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_raw_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.RawCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.DistinctCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.RecoveredCount),
@@ -5001,6 +5044,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         filetransfer_receive_recovery_completed_proven_successor_missing_recovered_count = $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.RecoveredCount
         filetransfer_receive_recovery_completed_proven_successor_missing_unresolved_count = $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.UnresolvedCount
         filetransfer_receive_recovery_completed_proven_successor_verdict = $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.Verdict
+        filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_raw_count = $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.RawCount
+        filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_distinct_count = $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.DistinctCount
+        filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_recovered_count = $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.RecoveredCount
+        filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing_unresolved_count = $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.UnresolvedCount
+        filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_verdict = $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.Verdict
         filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_raw_count = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.RawCount
         filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_distinct_count = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.DistinctCount
         filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_recovered_count = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.RecoveredCount
