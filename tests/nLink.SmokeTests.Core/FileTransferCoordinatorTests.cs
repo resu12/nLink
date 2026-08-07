@@ -9932,7 +9932,10 @@ public sealed class FileTransferCoordinatorTests
                 frame.RequestCorrelationId,
                 "frng-checkpoint-child",
                 frame.Priority,
-                frame.TransportEpoch);
+                frame.TransportEpoch)
+            {
+                Frame = frame,
+            };
         var fallback = FileTransferRouteResolver.Resolve(
             FileTransferRoute.PostTunaFallbackV6);
         var requested = FileTransferCoordinator
@@ -10092,8 +10095,76 @@ public sealed class FileTransferCoordinatorTests
         Assert.Null(
             FileTransferCoordinator.GetReceiveRecoverySubstate(delivered.State)
                 .PendingFallbackCheckpointDeliveryCommand);
-        var proof = FileTransferCoordinator.ObserveReceiveRecoveryProof(
+        var deliveredRetirement = RetireFallbackCheckpoint(
             delivered.State,
+            fallback,
+            frame.RepairRequestId,
+            frame.TransportEpoch);
+        Assert.Equal(
+            "filetransfer_receive_recovery_fallback_checkpoint_peer_proof_required",
+            deliveredRetirement.MutationRejectedReason);
+        Assert.Equal(delivered.State, deliveredRetirement.State);
+
+        var prematureRecheck = FileTransferCoordinator
+            .RecheckReceiveRecoveryFallbackCheckpointDelivery(
+                delivered.State,
+                new FileTransferReceiveRecoveryFallbackCheckpointResponseTimeoutObservation(
+                    Assert.IsType<
+                        FileTransferReceiveRecoveryFallbackCheckpointDeliveryReceipt>(
+                            FileTransferCoordinator.GetReceiveRecoverySubstate(
+                                    delivered.State)
+                                .LastFallbackCheckpointDeliveryReceipt),
+                    ResponseTimeoutMs: 100,
+                    ObservedUtcMs: 124));
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Rejected,
+            prematureRecheck.Status);
+        Assert.Equal(
+            "filetransfer_receive_recovery_fallback_checkpoint_response_timeout_not_elapsed",
+            prematureRecheck.Reason);
+
+        var deliveredReceipt = Assert.IsType<
+            FileTransferReceiveRecoveryFallbackCheckpointDeliveryReceipt>(
+                FileTransferCoordinator.GetReceiveRecoverySubstate(delivered.State)
+                    .LastFallbackCheckpointDeliveryReceipt);
+        var recheck = FileTransferCoordinator
+            .RecheckReceiveRecoveryFallbackCheckpointDelivery(
+                delivered.State,
+                new FileTransferReceiveRecoveryFallbackCheckpointResponseTimeoutObservation(
+                    deliveredReceipt,
+                    ResponseTimeoutMs: 100,
+                    ObservedUtcMs: 125));
+        Assert.True(recheck.Accepted, recheck.Reason);
+        var redelivery = Assert.IsType<
+            FileTransferReceiveRecoveryFallbackCheckpointDeliveryCommand>(
+                recheck.FallbackCheckpointDeliveryCommand);
+        Assert.Equal(command.DeliveryGeneration + 1, redelivery.DeliveryGeneration);
+        Assert.Equal(command.Binding, redelivery.Binding);
+        Assert.Equal(command.Frame, redelivery.Frame);
+        var duplicateRecheck = FileTransferCoordinator
+            .RecheckReceiveRecoveryFallbackCheckpointDelivery(
+                recheck.State,
+                new FileTransferReceiveRecoveryFallbackCheckpointResponseTimeoutObservation(
+                    deliveredReceipt,
+                    ResponseTimeoutMs: 100,
+                    ObservedUtcMs: 126));
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Idempotent,
+            duplicateRecheck.Status);
+        Assert.Equal(redelivery, duplicateRecheck.FallbackCheckpointDeliveryCommand);
+        var redelivered = FileTransferCoordinator
+            .ApplyReceiveRecoveryFallbackCheckpointDeliveryReceipt(
+                duplicateRecheck.State,
+                new FileTransferReceiveRecoveryFallbackCheckpointDeliveryReceipt(
+                    redelivery,
+                    FileTransferReceiveRecoveryFallbackCheckpointDeliveryState
+                        .Delivered,
+                    frameIdentity.Sha256,
+                    "checkpoint_redelivered"),
+                observedUtcMs: 130);
+        Assert.True(redelivered.Accepted, redelivered.Reason);
+        var proof = FileTransferCoordinator.ObserveReceiveRecoveryProof(
+            redelivered.State,
             new FileTransferReceiveRecoveryProof(
                 authority,
                 "post-fallback-checkpoint-proof",

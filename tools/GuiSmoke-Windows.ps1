@@ -7445,14 +7445,16 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     $_.Index -lt $timeout.Index -and (& $sameScope $_) -and
                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                         'filetransfer_receive_recovery_operation_execution_receipt_applied')) -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'receive_recovery_operation_generation') -eq $generation -and
+                    ((Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'receive_recovery_operation_generation') -eq $generation -or
+                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'recovery_operation_generation') -eq $generation) -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'execution_outcome') -eq 'Completed'
                 } | Select-Object -Last 1)
             $proof = @($indexed | Where-Object {
                     $_.Index -lt $timeout.Index -and (& $sameScope $_) -and
                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                         'filetransfer_receive_recovery_operation_proof_decision_observed')) -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'receive_recovery_operation_generation') -eq $generation -and
+                    ((Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'receive_recovery_operation_generation') -eq $generation -or
+                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'recovery_operation_generation') -eq $generation) -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -in @('Accepted', 'Idempotent', 'accepted', 'idempotent')
                 } | Select-Object -Last 1)
             if ($binding.Count -ne 1 -or $sent.Count -ne 1 -or
@@ -7511,7 +7513,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     $_.Index -gt $recheck[0].Index -and (& $sameScope $_) -and
                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                         'runtime_unlock_initial_activation_receive_recovery_hold_decided')) -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'receive_recovery_operation_generation') -eq $generation -and
+                    ((Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'receive_recovery_operation_generation') -eq $generation -or
+                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'recovery_operation_generation') -eq $generation) -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq 'Released'
                 } | Select-Object -First 1)
             if ($resend.Count -ne 1 -or $redelivered.Count -ne 1 -or

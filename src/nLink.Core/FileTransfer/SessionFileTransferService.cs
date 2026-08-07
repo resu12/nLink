@@ -19956,7 +19956,10 @@ public sealed partial class SessionFileTransferService :
             request.RequestCorrelationId,
             rangeIdentity.RangeFingerprint,
             request.Priority,
-            request.TransportEpoch);
+            request.TransportEpoch)
+        {
+            Frame = request,
+        };
     }
 
     private bool TryBeginInboundFallbackCheckpointExchangeLocked(

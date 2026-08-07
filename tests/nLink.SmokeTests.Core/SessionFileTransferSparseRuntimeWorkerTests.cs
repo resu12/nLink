@@ -2670,6 +2670,11 @@ public sealed partial class SessionFileTransferV4SenderTests
             {
                 lock (GetServiceGate(service))
                 {
+                    if (successorInstall is not null)
+                    {
+                        return;
+                    }
+
                     var stagedSuccessor = StageSparsePumpInstall(
                         service,
                         context,
@@ -2841,6 +2846,74 @@ public sealed partial class SessionFileTransferV4SenderTests
             command,
             Assert.IsType<FileTransferReceiveRecoveryFallbackCheckpointDeliveryReceipt>(
                 recovery.LastFallbackCheckpointDeliveryReceipt).Command);
+
+        var deliveredReceipt = Assert.IsType<
+            FileTransferReceiveRecoveryFallbackCheckpointDeliveryReceipt>(
+                recovery.LastFallbackCheckpointDeliveryReceipt);
+        var redeliveryDecision = FileTransferCoordinator
+            .RecheckReceiveRecoveryFallbackCheckpointDelivery(
+                CreateCoordinatorStateForTest(context),
+                new FileTransferReceiveRecoveryFallbackCheckpointResponseTimeoutObservation(
+                    deliveredReceipt,
+                    ResponseTimeoutMs: 1,
+                    ObservedUtcMs:
+                        recovery.LastFallbackCheckpointDeliveredObservedUtcMs + 1));
+        Assert.True(redeliveryDecision.Accepted, redeliveryDecision.Reason);
+        var redeliveryCommand = Assert.IsType<
+            FileTransferReceiveRecoveryFallbackCheckpointDeliveryCommand>(
+                redeliveryDecision.FallbackCheckpointDeliveryCommand);
+        SetPrivateProperty(
+            context,
+            "CoordinatorPersistentState",
+            redeliveryDecision.State.PersistentState);
+        var currentInstall =
+            GetPrivatePropertyValue(context, "InstalledOutboundSparsePump");
+        Assert.NotNull(currentInstall);
+        var currentRuntimeOwner = Assert.IsType<RuntimeOwnerToken>(
+            GetPrivatePropertyValue(currentInstall, "RuntimeOwner"));
+        var currentDataSessionGeneration = GetPrivateProperty<long>(
+            currentInstall,
+            "DataSessionGeneration");
+
+        serviceType
+            .GetMethod("QueueOutboundV4SparseRuntimeStateRefreshIfCurrent", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    context,
+                    dataSession,
+                    redeliveryCommand.Frame,
+                    "unit_test_checkpoint_response_timeout_redelivery",
+                    currentInstall,
+                    currentRuntimeOwner,
+                    dataSession,
+                    currentDataSessionGeneration,
+                    null,
+                ]);
+
+        await WaitUntilAsync(
+            () => FileTransferCoordinator.GetReceiveRecoverySubstate(
+                    CreateCoordinatorStateForTest(context))
+                .LastFallbackCheckpointDeliveryReceipt?.Command ==
+                    redeliveryCommand,
+            timeoutMs: 5000);
+
+        Assert.Equal(
+            2,
+            dataSession.SentFrames
+                .OfType<FileTransferFrontierRequestFrameV6>()
+                .Count());
+        var redeliveryState = FileTransferCoordinator.GetReceiveRecoverySubstate(
+            CreateCoordinatorStateForTest(context));
+        var redeliveryReceipt = Assert.IsType<
+            FileTransferReceiveRecoveryFallbackCheckpointDeliveryReceipt>(
+                redeliveryState.LastFallbackCheckpointDeliveryReceipt);
+        Assert.Equal(
+            FileTransferReceiveRecoveryFallbackCheckpointDeliveryState.Delivered,
+            redeliveryReceipt.State);
+        Assert.Equal(redeliveryCommand, redeliveryReceipt.Command);
+        Assert.Equal(command.Binding, redeliveryCommand.Binding);
+        Assert.Equal(command.Frame, redeliveryCommand.Frame);
     }
 
     [Fact]

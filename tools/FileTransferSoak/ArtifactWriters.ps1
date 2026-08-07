@@ -43716,14 +43716,16 @@ function Get-FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffCorrelatio
                 [int64]$_.Sequence -lt $sequence -and
                 $_.EventName -eq 'filetransfer_receive_recovery_operation_execution_receipt_applied' -and
                 (& $sameScope $_) -and
-                (Get-FileTransferEventField -Event $_ -Name 'receive_recovery_operation_generation' -Default '0') -eq $generation -and
+                ((Get-FileTransferEventField -Event $_ -Name 'receive_recovery_operation_generation' -Default '') -eq $generation -or
+                 (Get-FileTransferEventField -Event $_ -Name 'recovery_operation_generation' -Default '') -eq $generation) -and
                 (Get-FileTransferEventField -Event $_ -Name 'execution_outcome' -Default '') -eq 'Completed'
             } | Select-Object -Last 1)
         [object[]]$proof = @($ordered | Where-Object {
                 [int64]$_.Sequence -lt $sequence -and
                 $_.EventName -eq 'filetransfer_receive_recovery_operation_proof_decision_observed' -and
                 (& $sameScope $_) -and
-                (Get-FileTransferEventField -Event $_ -Name 'receive_recovery_operation_generation' -Default '0') -eq $generation -and
+                ((Get-FileTransferEventField -Event $_ -Name 'receive_recovery_operation_generation' -Default '') -eq $generation -or
+                 (Get-FileTransferEventField -Event $_ -Name 'recovery_operation_generation' -Default '') -eq $generation) -and
                 (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in @('Accepted', 'Idempotent', 'accepted', 'idempotent')
             } | Select-Object -Last 1)
         [object[]]$advancedBeforeTimeout = @($ordered | Where-Object {
@@ -43786,7 +43788,8 @@ function Get-FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffCorrelatio
                     [int64]$_.Sequence -gt [int64]$recheck[0].Sequence -and
                     $_.EventName -eq 'runtime_unlock_initial_activation_receive_recovery_hold_decided' -and
                     (& $sameScope $_) -and
-                    (Get-FileTransferEventField -Event $_ -Name 'receive_recovery_operation_generation' -Default '0') -eq $generation -and
+                    ((Get-FileTransferEventField -Event $_ -Name 'receive_recovery_operation_generation' -Default '') -eq $generation -or
+                     (Get-FileTransferEventField -Event $_ -Name 'recovery_operation_generation' -Default '') -eq $generation) -and
                     (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -eq 'Released'
                 } | Select-Object -First 1)
             $recovered = $resend.Count -eq 1 -and $redelivered.Count -eq 1 -and

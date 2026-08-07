@@ -279,7 +279,10 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_delivery_resume_decided; {checkpointScope}; checkpoint_delivery_generation=1; outcome=accepted"),
             LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied; {checkpointScope}; checkpoint_delivery_generation=1; delivery_state=delivered; decision_status=accepted"),
             LogLine($"event=filetransfer_v6_regular_nkn_state_refresh_sent; session_id=sess_checkpoint_timeout; transfer_id=transfer_checkpoint_timeout; request_id=v6-regular-nkn-state-refresh:1; transport_epoch=1; log_writer_id=writer_checkpoint_timeout"),
-            LogLine($"event=filetransfer_receive_recovery_operation_proof_decision_observed; {operationScope}; decision_status=Accepted")
+            LogLine("event=filetransfer_receive_recovery_operation_proof_decision_observed; " +
+                "session_id=sess_checkpoint_timeout; transfer_id=transfer_checkpoint_timeout; " +
+                "direction=outbound; recovery_operation_generation=3; " +
+                "decision_status=Accepted; log_writer_id=writer_checkpoint_timeout")
         };
         for (var index = 0; index < 14; index++)
         {
