@@ -14505,6 +14505,10 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_activation_answer_peer_delivery_verdict={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryVerdict)) | Out-Null
+    $lines.Add(("runtime_unlock_dial_failed_rejected_answer_not_retained_raw_count={0}" -f $RecoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedRawCount)) | Out-Null
+    $lines.Add(("runtime_unlock_dial_failed_rejected_answer_not_retained_distinct_count={0}" -f $RecoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount)) | Out-Null
+    $lines.Add(("runtime_unlock_dial_failed_rejected_answer_not_retained_recovered_count={0}" -f $RecoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount)) | Out-Null
+    $lines.Add(("runtime_unlock_dial_failed_rejected_answer_not_retained_unresolved_count={0}" -f $RecoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedUnresolvedCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_raw_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_distinct_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount)) | Out-Null
@@ -16643,6 +16647,10 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount),
         ("runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount),
         ("runtime_unlock_initial_activation_answer_peer_delivery_verdict={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryVerdict),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_raw_count={0}" -f $recoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedRawCount),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedUnresolvedCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_raw_count={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount),
@@ -23189,6 +23197,38 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
         (Get-FileTransferEventField -Event $_ -Name 'status' -Default '') -eq
             'accepted'
     })
+    [object[]]$rawOfferReceipts = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_offer_received_raw'
+    })
+    [object[]]$dialAttemptStarts = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_tuna_dial_attempt_started'
+    })
+    [object[]]$dialAttemptFailures = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_tuna_dial_attempt_failed' -and
+        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq
+            'runtime_unlock_tuna_dial_failed'
+    })
+    [object[]]$dialFailureDuplicateOffers = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_tuna_dial_offer_duplicate_ignored' -and
+        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq
+            'runtime_unlock_tuna_dial_failed'
+    })
+    [object[]]$failedDialAnswerReplays = @($orderedEvents | Where-Object {
+        $_.EventName -in @(
+            'runtime_unlock_failed_dial_answer_replay_sent',
+            'tuna_acceleration_answer_replay_sent') -and
+        (Get-FileTransferEventField -Event $_ -Name 'accepted' -Default '1') -eq '0' -and
+        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq
+            'runtime_unlock_tuna_dial_failed'
+    })
+    [object[]]$answerRejections = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_answer_rejected' -and
+        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq
+            'runtime_unlock_tuna_dial_failed'
+    })
+    [object[]]$retryScheduled = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_retry_scheduled'
+    })
 
     function Get-AnswerDeliveryIdentityValue {
         param($Event, [string[]]$Names)
@@ -23209,6 +23249,14 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
     $peerRecoveryReplayWindowUnresolved =
         New-Object System.Collections.Generic.List[object]
     $answerAckSubmissionBarrierUnresolved =
+        New-Object System.Collections.Generic.List[object]
+    $failedDialRejectedAnswerUnresolved =
+        New-Object System.Collections.Generic.List[object]
+    $failedDialRejectedAnswerRaw =
+        New-Object System.Collections.Generic.List[object]
+    $failedDialRejectedAnswerDistinct =
+        New-Object System.Collections.Generic.List[object]
+    $failedDialRejectedAnswerRecovered =
         New-Object System.Collections.Generic.List[object]
     $seen = @{}
     foreach ($timeout in $timeouts) {
@@ -23413,6 +23461,145 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
         }
     }
 
+    foreach ($duplicate in $dialFailureDuplicateOffers) {
+        $sessionId = Get-AnswerDeliveryIdentityValue $duplicate @('session_id')
+        $payerDecisionId = Get-AnswerDeliveryIdentityValue $duplicate @('payer_decision_id')
+        $writer = Get-AnswerDeliveryIdentityValue $duplicate @('log_writer_id')
+        if ([string]::IsNullOrWhiteSpace($sessionId) -or
+            [string]::IsNullOrWhiteSpace($payerDecisionId) -or
+            [string]::IsNullOrWhiteSpace($writer)) {
+            continue
+        }
+
+        $failure = @($dialAttemptFailures | Where-Object {
+            [int64]$_.Sequence -lt [int64]$duplicate.Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -eq $payerDecisionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -Last 1)
+        if ($failure.Count -ne 1) {
+            continue
+        }
+
+        $start = @($dialAttemptStarts | Where-Object {
+            [int64]$_.Sequence -lt [int64]$failure[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -eq $payerDecisionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -Last 1)
+        $rejectedAnswer = @($orderedEvents | Where-Object {
+            $_.EventName -eq 'tuna_acceleration_answer_sent' -and
+            [int64]$_.Sequence -gt [int64]$failure[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$duplicate.Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('accepted')) -eq '0' -and
+            (Get-AnswerDeliveryIdentityValue $_ @('generation')) -eq '0' -and
+            (Get-AnswerDeliveryIdentityValue $_ @('reason')) -eq 'runtime_unlock_tuna_dial_failed' -and
+            (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -eq $payerDecisionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -First 1)
+        if ($start.Count -ne 1 -or $rejectedAnswer.Count -ne 1) {
+            continue
+        }
+
+        $replyTarget = @($replyTargetEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$failure[0].Sequence -and
+            [int64]$_.Sequence -le [int64]$rejectedAnswer[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('purpose')) -eq 'answer' -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -eq $payerDecisionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('generation')) -eq '0' -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -Last 1)
+        $initialOffer = @($rawOfferReceipts | Where-Object {
+            [int64]$_.Sequence -lt [int64]$start[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -Last 1)
+        $duplicateOffer = @($rawOfferReceipts | Where-Object {
+            [int64]$_.Sequence -gt [int64]$rejectedAnswer[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$duplicate.Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -Last 1)
+        if ($replyTarget.Count -ne 1 -or
+            $initialOffer.Count -ne 1 -or
+            $duplicateOffer.Count -ne 1) {
+            continue
+        }
+
+        $failedDialRejectedAnswerRaw.Add($duplicate) | Out-Null
+        $raw.Add($duplicate) | Out-Null
+        $answerMessageId = Get-AnswerDeliveryIdentityValue $rejectedAnswer[0] @('msg_id')
+        $key = [string]::Join('|', @(
+            'failed_dial_rejected_answer',
+            $writer,
+            $sessionId,
+            $payerDecisionId,
+            $answerMessageId)).ToLowerInvariant()
+        if ($seen.ContainsKey($key)) {
+            continue
+        }
+        $seen[$key] = $true
+        $failedDialRejectedAnswerDistinct.Add($duplicate) | Out-Null
+        $distinct.Add($duplicate) | Out-Null
+
+        $replay = @($failedDialAnswerReplays | Where-Object {
+            [int64]$_.Sequence -gt [int64]$duplicateOffer[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -in @('', $payerDecisionId) -and
+            (Get-AnswerDeliveryIdentityValue $_ @('msg_id')) -in @('', $answerMessageId) -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -First 1)
+        $peerRaw = @($rawAnswerReceipts | Where-Object {
+            $replay.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$replay[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -ne $writer
+        } | Select-Object -First 1)
+        $semanticRejection = @($answerRejections | Where-Object {
+            $peerRaw.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$peerRaw[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId) -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -ne $writer
+        } | Select-Object -First 1)
+        $freshRetry = @($retryScheduled | Where-Object {
+            $semanticRejection.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$semanticRejection[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -ne $writer
+        } | Select-Object -First 1)
+        $successorOffer = @($rawOfferReceipts | Where-Object {
+            $freshRetry.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$freshRetry[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -First 1)
+        $positiveAnswer = @($orderedEvents | Where-Object {
+            $successorOffer.Count -eq 1 -and
+            $_.EventName -in @('tuna_acceleration_answer_sent', 'tuna_acceleration_answer_replay_sent') -and
+            [int64]$_.Sequence -gt [int64]$successorOffer[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('accepted')) -ne '0' -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -First 1)
+        $positiveAck = @($answerAcks | Where-Object {
+            $positiveAnswer.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$positiveAnswer[0].Sequence
+        } | Select-Object -First 1)
+        $prepared = @($preCommitEvents | Where-Object {
+            $positiveAck.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$positiveAck[0].Sequence
+        } | Select-Object -First 1)
+        if ($replay.Count -eq 1 -and
+            $peerRaw.Count -eq 1 -and
+            $semanticRejection.Count -eq 1 -and
+            $freshRetry.Count -eq 1 -and
+            $successorOffer.Count -eq 1 -and
+            $positiveAnswer.Count -eq 1 -and
+            $positiveAck.Count -eq 1 -and
+            $prepared.Count -eq 1) {
+            $failedDialRejectedAnswerRecovered.Add($duplicate) | Out-Null
+            $recovered.Add($duplicate) | Out-Null
+        }
+        else {
+            $failedDialRejectedAnswerUnresolved.Add($duplicate) | Out-Null
+            $unresolved.Add($duplicate) | Out-Null
+        }
+    }
+
     return [pscustomobject]@{
         RawCount = $raw.Count
         DistinctCount = $distinct.Count
@@ -23427,6 +23614,12 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
             @($peerRecoveryReplayWindowUnresolved.ToArray())
         AnswerAckSubmissionBarrierUnresolvedCandidateEvents =
             @($answerAckSubmissionBarrierUnresolved.ToArray())
+        FailedDialRejectedAnswerRawCount = $failedDialRejectedAnswerRaw.Count
+        FailedDialRejectedAnswerDistinctCount = $failedDialRejectedAnswerDistinct.Count
+        FailedDialRejectedAnswerRecoveredCount = $failedDialRejectedAnswerRecovered.Count
+        FailedDialRejectedAnswerUnresolvedCount = $failedDialRejectedAnswerUnresolved.Count
+        FailedDialRejectedAnswerUnresolvedCandidateEvents =
+            @($failedDialRejectedAnswerUnresolved.ToArray())
     }
 }
 
@@ -48039,6 +48232,13 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     foreach ($candidateEvent in @($runtimeUnlockInitialActivationAnswerPeerDeliveryProof.UnresolvedCandidateEvents)) {
         $candidateReason = if (@(
+                $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerUnresolvedCandidateEvents |
+                    Where-Object {
+                        [int64]$_.Sequence -eq [int64]$candidateEvent.Sequence
+                    }).Count -gt 0) {
+            'exact_runtime_unlock_dial_failure_rejection_not_replayed_after_same_offer_refresh'
+        }
+        elseif (@(
                 $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.AnswerAckSubmissionBarrierUnresolvedCandidateEvents |
                     Where-Object {
                         [int64]$_.Sequence -eq [int64]$candidateEvent.Sequence
@@ -49320,6 +49520,10 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.RecoveredCount
         RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.UnresolvedCount
         RuntimeUnlockInitialActivationAnswerPeerDeliveryVerdict = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.Verdict
+        RuntimeUnlockDialFailedRejectedAnswerNotRetainedRawCount = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerRawCount
+        RuntimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerDistinctCount
+        RuntimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerRecoveredCount
+        RuntimeUnlockDialFailedRejectedAnswerNotRetainedUnresolvedCount = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerUnresolvedCount
         RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount = $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.RawCount
         RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount = $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.DistinctCount
         RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount = $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.RecoveredCount
@@ -50209,6 +50413,10 @@ function New-FileTransferInvariantLedgerObject {
         runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count = [string]$recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount
         runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count = [string]$recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount
         runtime_unlock_initial_activation_answer_peer_delivery_verdict = $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryVerdict
+        runtime_unlock_dial_failed_rejected_answer_not_retained_raw_count = [string]$recoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedRawCount
+        runtime_unlock_dial_failed_rejected_answer_not_retained_distinct_count = [string]$recoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount
+        runtime_unlock_dial_failed_rejected_answer_not_retained_recovered_count = [string]$recoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount
+        runtime_unlock_dial_failed_rejected_answer_not_retained_unresolved_count = [string]$recoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedUnresolvedCount
         runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_raw_count = [string]$recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount
         runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_distinct_count = [string]$recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount
         runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count = [string]$recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount
@@ -50889,6 +51097,10 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount),
         ("runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount),
         ("runtime_unlock_initial_activation_answer_peer_delivery_verdict={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryVerdict),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_raw_count={0}" -f $recoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedRawCount),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedUnresolvedCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_raw_count={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount),

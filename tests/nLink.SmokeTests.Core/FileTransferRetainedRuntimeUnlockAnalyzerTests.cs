@@ -395,6 +395,72 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task AnalyzeRetained_RuntimeUnlockInitialActivationAnswerPeerDelivery_DialFailureRejectRequiresDuplicateReplay(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string responderScope =
+            "session_id=sess_failed_dial_reply; payer_decision_id=4; " +
+            "log_writer_id=writer_responder";
+        var result = await RunAnalyzeFixtureAsync(
+            [
+                LogLine("event=tuna_acceleration_offer_received_raw; msg_id=offer-1; " +
+                    "log_writer_id=writer_responder"),
+                LogLine($"event=runtime_unlock_tuna_dial_attempt_started; {responderScope}"),
+                LogLine($"event=runtime_unlock_tuna_dial_attempt_failed; {responderScope}; " +
+                    "reason=runtime_unlock_tuna_dial_failed"),
+                LogLine($"event=runtime_unlock_acceleration_reply_target_decided; {responderScope}; " +
+                    "purpose=answer; status=accepted; target_mode=validated_inbound_source; " +
+                    "generation=0; inbound_msg_id=offer-1; target_peer_fingerprint=peer-a"),
+                LogLine("event=tuna_acceleration_answer_sent; payer_decision_id=4; generation=0; " +
+                    "accepted=0; reason=runtime_unlock_tuna_dial_failed; msg_id=answer-1; " +
+                    "inbound_msg_id=offer-1; target_peer_fingerprint=peer-a; " +
+                    "log_writer_id=writer_responder"),
+                LogLine("event=tuna_acceleration_offer_received_raw; msg_id=offer-2; " +
+                    "log_writer_id=writer_responder"),
+                LogLine($"event=runtime_unlock_tuna_dial_offer_duplicate_ignored; {responderScope}; " +
+                    "reason=runtime_unlock_tuna_dial_failed")
+            ],
+            [],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_dial_failed_rejected_answer_not_retained_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_dial_failed_rejected_answer_not_retained_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_dial_failed_rejected_answer_not_retained_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_dial_failed_rejected_answer_not_retained_unresolved_count"]);
+        Assert.Equal(
+            "runtime_unlock_initial_activation_answer_peer_delivery_missing",
+            verdict["first_proof_chain_failure_class"]);
+        Assert.Equal(
+            "runtime_unlock_tuna_dial_offer_duplicate_ignored",
+            verdict["first_proof_chain_failure_event"]);
+        Assert.Equal(
+            "exact_runtime_unlock_dial_failure_rejection_not_replayed_after_same_offer_refresh",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
+        Assert.Equal("fail", verdict["runtime_correctness_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task AnalyzeRetained_InitialActivationAnswerReplayWindowEndsBeforePeerRecovery(
         bool compact)
     {

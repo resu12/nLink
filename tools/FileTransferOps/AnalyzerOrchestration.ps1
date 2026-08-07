@@ -1363,10 +1363,19 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_evaluation_requested') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'session_liveness_timeout_filetransfer_recovery_state_not_deferred') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_offer_queued') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_offer_received_raw') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_tuna_dial_attempt_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_tuna_dial_attempt_failed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_tuna_dial_offer_duplicate_ignored') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_failed_dial_answer_shadow_bound') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_failed_dial_answer_replay_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_failed_dial_answer_replay_sent') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_answer_sent') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_answer_replay_sent') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_acceleration_reply_target_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_answer_received_raw') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_answer_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_retry_scheduled') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_lifecycle_ack_sent') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_offer_authority_boundary_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_outbound_offer_retired') +
@@ -2847,6 +2856,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Class = 'runtime_unlock_initial_activation_answer_peer_delivery_missing'
             Event = $candidateEvent
             Reason = if (@(
+                $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerUnresolvedCandidateEvents |
+                    Where-Object {
+                        [int64]$_.Sequence -eq [int64]$candidateEvent.Sequence
+                    }).Count -gt 0) {
+                'exact_runtime_unlock_dial_failure_rejection_not_replayed_after_same_offer_refresh'
+            }
+            elseif (@(
                 $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.AnswerAckSubmissionBarrierUnresolvedCandidateEvents |
                     Where-Object {
                         [int64]$_.Sequence -eq [int64]$candidateEvent.Sequence
@@ -3629,6 +3645,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.RecoveredCount),
         ("runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.UnresolvedCount),
         ("runtime_unlock_initial_activation_answer_peer_delivery_verdict={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.Verdict),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_raw_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerRawCount),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_distinct_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerDistinctCount),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_recovered_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerRecoveredCount),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_unresolved_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerUnresolvedCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_raw_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.RawCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_distinct_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.DistinctCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.RecoveredCount),
@@ -4017,6 +4037,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.RecoveredCount),
         ("runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.UnresolvedCount),
         ("runtime_unlock_initial_activation_answer_peer_delivery_verdict={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.Verdict),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_raw_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerRawCount),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_distinct_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerDistinctCount),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_recovered_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerRecoveredCount),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_unresolved_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerUnresolvedCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_raw_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.RawCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_distinct_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.DistinctCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.RecoveredCount),
@@ -4397,6 +4421,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.RecoveredCount),
         ("runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.UnresolvedCount),
         ("runtime_unlock_initial_activation_answer_peer_delivery_verdict={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.Verdict),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_raw_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerRawCount),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_distinct_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerDistinctCount),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_recovered_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerRecoveredCount),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_unresolved_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerUnresolvedCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_raw_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.RawCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_distinct_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.DistinctCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.RecoveredCount),
@@ -4764,6 +4792,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.RecoveredCount),
         ("runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.UnresolvedCount),
         ("runtime_unlock_initial_activation_answer_peer_delivery_verdict={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.Verdict),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_raw_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerRawCount),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_distinct_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerDistinctCount),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_recovered_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerRecoveredCount),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_unresolved_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerUnresolvedCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_raw_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.RawCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_distinct_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.DistinctCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.RecoveredCount),
@@ -5176,6 +5208,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.RecoveredCount
         runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.UnresolvedCount
         runtime_unlock_initial_activation_answer_peer_delivery_verdict = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.Verdict
+        runtime_unlock_dial_failed_rejected_answer_not_retained_raw_count = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerRawCount
+        runtime_unlock_dial_failed_rejected_answer_not_retained_distinct_count = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerDistinctCount
+        runtime_unlock_dial_failed_rejected_answer_not_retained_recovered_count = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerRecoveredCount
+        runtime_unlock_dial_failed_rejected_answer_not_retained_unresolved_count = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerUnresolvedCount
         runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_raw_count = $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.RawCount
         runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_distinct_count = $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.DistinctCount
         runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count = $runtimeUnlockInitialOfferReceiveRecoveryHoldProof.RecoveredCount

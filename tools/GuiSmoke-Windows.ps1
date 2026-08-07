@@ -6368,6 +6368,78 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             }
         }
 
+        $failedDialDuplicates = @($indexed | Where-Object {
+            (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                    'runtime_unlock_tuna_dial_offer_duplicate_ignored')) -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'reason') -eq
+                'runtime_unlock_tuna_dial_failed'
+        })
+        foreach ($duplicate in $failedDialDuplicates) {
+            $sessionId = Get-TunaGuiLogLineFieldValue -Line $duplicate.Line -Name 'session_id'
+            $payerDecisionId = Get-TunaGuiLogLineFieldValue -Line $duplicate.Line -Name 'payer_decision_id'
+            $writer = Get-TunaGuiLogLineFieldValue -Line $duplicate.Line -Name 'log_writer_id'
+            if ([string]::IsNullOrWhiteSpace($sessionId) -or
+                [string]::IsNullOrWhiteSpace($payerDecisionId) -or
+                [string]::IsNullOrWhiteSpace($writer)) {
+                continue
+            }
+
+            $failure = @($indexed | Where-Object {
+                $_.Index -lt $duplicate.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'runtime_unlock_tuna_dial_attempt_failed')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'reason') -eq
+                    'runtime_unlock_tuna_dial_failed' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $sessionId -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq $payerDecisionId -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer
+            } | Select-Object -Last 1)
+            $answer = @($indexed | Where-Object {
+                $failure.Count -eq 1 -and
+                $_.Index -gt $failure[0].Index -and $_.Index -lt $duplicate.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('tuna_acceleration_answer_sent')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'accepted') -eq '0' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'generation') -eq '0' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'reason') -eq
+                    'runtime_unlock_tuna_dial_failed' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq $payerDecisionId -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer
+            } | Select-Object -First 1)
+            $target = @($indexed | Where-Object {
+                $failure.Count -eq 1 -and $answer.Count -eq 1 -and
+                $_.Index -gt $failure[0].Index -and $_.Index -le $answer[0].Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'runtime_unlock_acceleration_reply_target_decided')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'purpose') -eq 'answer' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'status') -eq 'accepted' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'target_mode') -eq
+                    'validated_inbound_source' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $sessionId -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq $payerDecisionId -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer
+            } | Select-Object -Last 1)
+            $replay = @($indexed | Where-Object {
+                $_.Index -gt $duplicate.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'runtime_unlock_failed_dial_answer_replay_sent')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer
+            } | Select-Object -First 1)
+            $peerReceipt = @($indexed | Where-Object {
+                $answer.Count -eq 1 -and
+                $_.Index -gt $answer[0].Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'tuna_acceleration_answer_received_raw')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -ne $writer
+            } | Select-Object -First 1)
+            if ($failure.Count -eq 1 -and
+                $answer.Count -eq 1 -and
+                $target.Count -eq 1 -and
+                $replay.Count -eq 0 -and
+                $peerReceipt.Count -eq 0) {
+                return $true
+            }
+        }
+
         return $false
     }
 
@@ -12364,6 +12436,14 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $initialActivationAnswerPeerDeliveryMissing =
         Test-TunaGuiInitialActivationAnswerPeerDeliveryMissing `
             -Lines $regularV4EvidenceLineText
+    $dialFailedRejectedAnswerNotRetained =
+        (Test-TunaGuiLogLinesContain -Lines $regularV4EvidenceLineText -Needles @(
+                'event=runtime_unlock_tuna_dial_offer_duplicate_ignored',
+                'reason=runtime_unlock_tuna_dial_failed')) -and
+        (Test-TunaGuiLogLinesContain -Lines $regularV4EvidenceLineText -Needles @(
+                'event=tuna_acceleration_answer_sent',
+                'accepted=0',
+                'reason=runtime_unlock_tuna_dial_failed'))
     $initialActivationAnswerPeerRecoveryReplayWindowMissing =
         Test-TunaGuiInitialActivationAnswerPeerRecoveryReplayWindowMissing `
             -Lines $regularV4EvidenceLineText
@@ -12579,7 +12659,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     }
     elseif ($initialActivationAnswerPeerDeliveryMissing) {
         $phase = 'runtime_unlock_initial_activation'
-        $reason = if ($initialActivationAnswerPeerRecoveryReplayWindowMissing) {
+        $reason = if ($dialFailedRejectedAnswerNotRetained) {
+            'exact_runtime_unlock_dial_failure_rejection_not_replayed_after_same_offer_refresh'
+        }
+        elseif ($initialActivationAnswerPeerRecoveryReplayWindowMissing) {
             'exact_source_answer_replay_exhausted_before_receive_stalled_peer_replacement_ready'
         }
         else {

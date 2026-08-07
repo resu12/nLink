@@ -1645,6 +1645,10 @@ function New-RouteAcceptanceRunResult {
         runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount = 0
         runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount = 0
         runtimeUnlockInitialActivationAnswerPeerDeliveryVerdict = 'none'
+        runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount = 0
+        runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount = 0
+        runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount = 0
+        runtimeUnlockDialFailedRejectedAnswerNotRetainedUnresolvedCount = 0
         runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount = 0
         runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount = 0
         runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount = 0
@@ -3335,6 +3339,10 @@ function Assert-Phase4OperatorVerdict {
     $Result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count' -DefaultValue '0')
     $Result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count' -DefaultValue '0')
     $Result.runtimeUnlockInitialActivationAnswerPeerDeliveryVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_activation_answer_peer_delivery_verdict' -DefaultValue ([string]$Result.runtimeUnlockInitialActivationAnswerPeerDeliveryVerdict)
+    $Result.runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_dial_failed_rejected_answer_not_retained_raw_count' -DefaultValue '0')
+    $Result.runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_dial_failed_rejected_answer_not_retained_distinct_count' -DefaultValue '0')
+    $Result.runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_dial_failed_rejected_answer_not_retained_recovered_count' -DefaultValue '0')
+    $Result.runtimeUnlockDialFailedRejectedAnswerNotRetainedUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_dial_failed_rejected_answer_not_retained_unresolved_count' -DefaultValue '0')
     $Result.runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_raw_count' -DefaultValue '0')
     $Result.runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_distinct_count' -DefaultValue '0')
     $Result.runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count' -DefaultValue '0')
@@ -7533,6 +7541,10 @@ function Write-Phase5PreflightFailureSummaryFiles {
         runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount = 0
         runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount = 0
         runtimeUnlockInitialActivationAnswerPeerDeliveryVerdict = 'none'
+        runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount = 0
+        runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount = 0
+        runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount = 0
+        runtimeUnlockDialFailedRejectedAnswerNotRetainedUnresolvedCount = 0
         runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount = 0
         runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount = 0
         runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount = 0
@@ -9306,6 +9318,10 @@ function New-RouteAcceptanceSummaryRunDto {
         runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount = [int]$Result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount
         runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount = [int]$Result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount
         runtimeUnlockInitialActivationAnswerPeerDeliveryVerdict = [string]$Result.runtimeUnlockInitialActivationAnswerPeerDeliveryVerdict
+        runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount = [int]$Result.runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount
+        runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount = [int]$Result.runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount
+        runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount = [int]$Result.runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount
+        runtimeUnlockDialFailedRejectedAnswerNotRetainedUnresolvedCount = [int]$Result.runtimeUnlockDialFailedRejectedAnswerNotRetainedUnresolvedCount
         runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount = [int]$Result.runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount
         runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount = [int]$Result.runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount
         runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount = [int]$Result.runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount
@@ -9710,6 +9726,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount = 0
     $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingUnresolvedCount = 0
     $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRawCount = 0
+    $runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount = 0
+    $runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount = 0
+    $runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount = 0
+    $runtimeUnlockDialFailedRejectedAnswerNotRetainedUnresolvedCount = 0
     $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount = 0
     $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount = 0
     $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount = 0
@@ -9924,6 +9944,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount += [int]$runDto.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount
         $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingUnresolvedCount += [int]$runDto.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingUnresolvedCount
         $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRawCount += [int]$runDto.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRawCount
+        $runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount += [int]$runDto.runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount
+        $runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount += [int]$runDto.runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount
+        $runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount += [int]$runDto.runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount
+        $runtimeUnlockDialFailedRejectedAnswerNotRetainedUnresolvedCount += [int]$runDto.runtimeUnlockDialFailedRejectedAnswerNotRetainedUnresolvedCount
         $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount += [int]$runDto.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount
         $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount += [int]$runDto.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount
         $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount += [int]$runDto.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount
@@ -10626,6 +10650,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount),
         ("runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount),
         ("runtime_unlock_initial_activation_answer_peer_delivery_verdict={0}" -f ($(if ($runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount -gt 0) { 'fail' } elseif ($runtimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount -gt 0) { 'pass' } else { 'none' }))),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_raw_count={0}" -f $runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_distinct_count={0}" -f $runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_recovered_count={0}" -f $runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount),
+        ("runtime_unlock_dial_failed_rejected_answer_not_retained_unresolved_count={0}" -f $runtimeUnlockDialFailedRejectedAnswerNotRetainedUnresolvedCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_raw_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_distinct_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount),
         ("runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count={0}" -f $runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount),
@@ -10723,6 +10751,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount)
         $textLines += ("{0}.runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count={1}" -f $prefix, $result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount)
         $textLines += ("{0}.runtime_unlock_initial_activation_answer_peer_delivery_verdict={1}" -f $prefix, $result.runtimeUnlockInitialActivationAnswerPeerDeliveryVerdict)
+        $textLines += ("{0}.runtime_unlock_dial_failed_rejected_answer_not_retained_raw_count={1}" -f $prefix, $result.runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount)
+        $textLines += ("{0}.runtime_unlock_dial_failed_rejected_answer_not_retained_distinct_count={1}" -f $prefix, $result.runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount)
+        $textLines += ("{0}.runtime_unlock_dial_failed_rejected_answer_not_retained_recovered_count={1}" -f $prefix, $result.runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount)
+        $textLines += ("{0}.runtime_unlock_dial_failed_rejected_answer_not_retained_unresolved_count={1}" -f $prefix, $result.runtimeUnlockDialFailedRejectedAnswerNotRetainedUnresolvedCount)
         $textLines += ("{0}.runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_raw_count={1}" -f $prefix, $result.runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount)
         $textLines += ("{0}.runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_distinct_count={1}" -f $prefix, $result.runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount)
         $textLines += ("{0}.runtime_unlock_initial_offer_receive_recovery_hold_not_preserved_recovered_count={1}" -f $prefix, $result.runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount)
@@ -11346,6 +11378,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         else {
             'none'
         }
+        runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount = $runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount
+        runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount = $runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount
+        runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount = $runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount
+        runtimeUnlockDialFailedRejectedAnswerNotRetainedUnresolvedCount = $runtimeUnlockDialFailedRejectedAnswerNotRetainedUnresolvedCount
         runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount = $runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRawCount
         runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount = $runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedDistinctCount
         runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount = $runtimeUnlockInitialOfferReceiveRecoveryHoldNotPreservedRecoveredCount
