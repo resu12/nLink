@@ -1634,6 +1634,47 @@ internal readonly record struct FileTransferReceiveRecoveryObservation(
         HealthEvaluationEvidence is { IsDefault: true };
 }
 
+internal readonly record struct
+    FileTransferReceiveRecoveryPostTunaEpochRestartObservation(
+        FileTransferReceiveRecoveryOperationAuthority RecoveryAuthority,
+        bool IsAvailable,
+        bool RequiresResumeRequest,
+        FileTransferTransportHandoffKind HandoffKind,
+        FileTransferTransportKind TargetTransport,
+        string Reason,
+        long ObservedUtcMs)
+{
+    public bool IsDefault =>
+        RecoveryAuthority.IsDefault ||
+        string.IsNullOrWhiteSpace(Reason) ||
+        ObservedUtcMs <= 0;
+}
+
+internal enum FileTransferReceiveRecoveryPostTunaEpochRestartDisposition
+{
+    NotApplicable = 0,
+    ActiveHold = 1,
+    CompletedAwaitingProofHold = 2,
+    CompletedProvenIgnore = 3,
+    Rejected = 4,
+}
+
+internal readonly record struct
+    FileTransferReceiveRecoveryPostTunaEpochRestartDecision(
+        FileTransferReceiveRecoveryPostTunaEpochRestartDisposition
+            Disposition,
+        string Reason,
+        FileTransferReceiveRecoveryOperation? Operation = null,
+        long ImmutableDeadlineUtcMs = 0)
+{
+    public bool SuppressesRestart => Disposition is
+        FileTransferReceiveRecoveryPostTunaEpochRestartDisposition.ActiveHold or
+        FileTransferReceiveRecoveryPostTunaEpochRestartDisposition
+            .CompletedAwaitingProofHold or
+        FileTransferReceiveRecoveryPostTunaEpochRestartDisposition
+            .CompletedProvenIgnore;
+}
+
 internal readonly record struct FileTransferReceiveRecoveryOperationAuthority(
     FileTransferReceiveRecoveryObservation Observation,
     BridgeRecoveryDecision BridgeRecoveryDecision,
@@ -17178,6 +17219,121 @@ internal static class FileTransferCoordinator
             FileTransferCoordinatorState state)
         => state.PersistentState.FileTransferReceiveRecovery
             .CurrentOperation?.Authority;
+
+    internal static
+        FileTransferReceiveRecoveryPostTunaEpochRestartDecision
+        ClassifyPostTunaReceiveRecoveryEpochRestart(
+            FileTransferCoordinatorState state,
+            FileTransferReceiveRecoveryPostTunaEpochRestartObservation
+                observation)
+    {
+        if (state.PersistentState.FileTransferReceiveRecovery
+                .CurrentOperation is not { } current)
+        {
+            return new(
+                FileTransferReceiveRecoveryPostTunaEpochRestartDisposition
+                    .NotApplicable,
+                "filetransfer_receive_recovery_post_tuna_epoch_restart_not_applicable");
+        }
+
+        if (observation.IsDefault ||
+            observation.RecoveryAuthority != current.Authority ||
+            observation.IsAvailable ||
+            !observation.RequiresResumeRequest ||
+            observation.HandoffKind !=
+                FileTransferTransportHandoffKind.RegularNknRecovery ||
+            observation.TargetTransport !=
+                FileTransferTransportKind.RegularNkn ||
+            !string.Equals(
+                observation.Reason,
+                "transport_recovered_unproven",
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                observation.Reason,
+                NormalizeReason(observation.Reason),
+                StringComparison.Ordinal) ||
+            current.Authority.Observation.Route !=
+                FileTransferRoute.PostTunaFallbackV6 ||
+            current.Authority.Observation.ProtocolVersion != 6 ||
+            state.IsTerminal ||
+            !IsReceiveRecoveryOperationCurrent(state, current.Authority))
+        {
+            return new(
+                FileTransferReceiveRecoveryPostTunaEpochRestartDisposition
+                    .Rejected,
+                "filetransfer_receive_recovery_post_tuna_epoch_restart_scope_mismatch",
+                current);
+        }
+
+        if (current.ExecutionState is
+                FileTransferReceiveRecoveryExecutionState.Issued or
+                FileTransferReceiveRecoveryExecutionState.Running)
+        {
+            if (TryGetReceiveRecoveryLivenessDeferral(
+                    state,
+                    out var deferredOperation,
+                    out _,
+                    out var maximumDeadlineUtc) &&
+                deferredOperation.Authority == current.Authority &&
+                maximumDeadlineUtc.ToUnixTimeMilliseconds() >
+                    observation.ObservedUtcMs)
+            {
+                return new(
+                    FileTransferReceiveRecoveryPostTunaEpochRestartDisposition
+                        .ActiveHold,
+                    "filetransfer_receive_recovery_post_tuna_epoch_restart_active_hold",
+                    current,
+                    maximumDeadlineUtc.ToUnixTimeMilliseconds());
+            }
+
+            return new(
+                FileTransferReceiveRecoveryPostTunaEpochRestartDisposition
+                    .Rejected,
+                "filetransfer_receive_recovery_post_tuna_epoch_restart_liveness_not_current",
+                current);
+        }
+
+        if (current.ExecutionState ==
+                FileTransferReceiveRecoveryExecutionState.Completed &&
+            current.ExecutionReceipt is
+            {
+                Outcome: FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            } &&
+            current.ClosureState == FileTransferReceiveRecoveryClosureState.None)
+        {
+            if (current.ReceiveProof is not null)
+            {
+                return new(
+                    FileTransferReceiveRecoveryPostTunaEpochRestartDisposition
+                        .CompletedProvenIgnore,
+                    "filetransfer_receive_recovery_post_tuna_epoch_restart_completed_proven_ignored",
+                    current,
+                    current.LivenessDeferralDeadlineUtcMs);
+            }
+
+            if (TryGetReceiveRecoveryLivenessDeferral(
+                    state,
+                    out var deferredOperation,
+                    out _,
+                    out var maximumDeadlineUtc) &&
+                deferredOperation.Authority == current.Authority &&
+                maximumDeadlineUtc.ToUnixTimeMilliseconds() >
+                    observation.ObservedUtcMs)
+            {
+                return new(
+                    FileTransferReceiveRecoveryPostTunaEpochRestartDisposition
+                        .CompletedAwaitingProofHold,
+                    "filetransfer_receive_recovery_post_tuna_epoch_restart_completed_awaiting_proof_hold",
+                    current,
+                    maximumDeadlineUtc.ToUnixTimeMilliseconds());
+            }
+        }
+
+        return new(
+            FileTransferReceiveRecoveryPostTunaEpochRestartDisposition.Rejected,
+            "filetransfer_receive_recovery_post_tuna_epoch_restart_operation_not_holdable",
+            current);
+    }
 
     internal static bool IsReceiveRecoveryOperationCurrent(
         FileTransferCoordinatorState state,

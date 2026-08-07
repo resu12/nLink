@@ -967,6 +967,15 @@ public sealed partial class SessionFileTransferService
         }
 
         targetTransport = NormalizeV6TargetTransport(handoffKind, targetTransport);
+        if (TryHoldOutboundPostTunaRecoveryEpochRestartLocked(
+                context,
+                reason,
+                requiresResumeRequest,
+                handoffKind,
+                targetTransport))
+        {
+            return false;
+        }
         if (targetTransport == FileTransferTransportKind.RegularNkn &&
             IsPrimaryRegularNknBulkV6ContextLocked(context))
         {
@@ -1055,6 +1064,15 @@ public sealed partial class SessionFileTransferService
         }
 
         targetTransport = NormalizeV6TargetTransport(handoffKind, targetTransport);
+        if (TryHoldInboundPostTunaRecoveryEpochRestartLocked(
+                context,
+                reason,
+                requiresResumeRequest,
+                handoffKind,
+                targetTransport))
+        {
+            return false;
+        }
         if (targetTransport == FileTransferTransportKind.RegularNkn &&
             IsPrimaryRegularNknBulkV6ContextLocked(context))
         {
@@ -1127,6 +1145,82 @@ public sealed partial class SessionFileTransferService
         }
 
         return IsV6TransportEpochUnresolved(context.V6TransportEpoch);
+    }
+
+    private bool TryHoldOutboundPostTunaRecoveryEpochRestartLocked(
+        OutboundTransferContext context,
+        string reason,
+        bool requiresResumeRequest,
+        FileTransferTransportHandoffKind handoffKind,
+        FileTransferTransportKind targetTransport)
+    {
+        var state = CreateCoordinatorStateLocked(context);
+        var authority = FileTransferCoordinator
+            .GetCurrentReceiveRecoveryOperationAuthority(state);
+        if (authority is null)
+        {
+            return false;
+        }
+
+        return DecidePostTunaRecoveryEpochRestartLocked(
+            state,
+            authority.Value,
+            reason,
+            requiresResumeRequest,
+            handoffKind,
+            targetTransport);
+    }
+
+    private bool TryHoldInboundPostTunaRecoveryEpochRestartLocked(
+        InboundTransferContext context,
+        string reason,
+        bool requiresResumeRequest,
+        FileTransferTransportHandoffKind handoffKind,
+        FileTransferTransportKind targetTransport)
+    {
+        var state = CreateCoordinatorStateLocked(context);
+        var authority = FileTransferCoordinator
+            .GetCurrentReceiveRecoveryOperationAuthority(state);
+        if (authority is null)
+        {
+            return false;
+        }
+
+        return DecidePostTunaRecoveryEpochRestartLocked(
+            state,
+            authority.Value,
+            reason,
+            requiresResumeRequest,
+            handoffKind,
+            targetTransport);
+    }
+
+    private static bool DecidePostTunaRecoveryEpochRestartLocked(
+        FileTransferCoordinatorState state,
+        FileTransferReceiveRecoveryOperationAuthority authority,
+        string reason,
+        bool requiresResumeRequest,
+        FileTransferTransportHandoffKind handoffKind,
+        FileTransferTransportKind targetTransport)
+    {
+        var observedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var decision = FileTransferCoordinator
+            .ClassifyPostTunaReceiveRecoveryEpochRestart(
+                state,
+                new FileTransferReceiveRecoveryPostTunaEpochRestartObservation(
+                    authority,
+                    IsAvailable: false,
+                    requiresResumeRequest,
+                    handoffKind,
+                    targetTransport,
+                    reason,
+                    observedUtcMs));
+        var operation = decision.Operation;
+        var observation = authority.Observation;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_receive_recovery_post_tuna_epoch_restart_decided; disposition={decision.Disposition}; receive_recovery_operation_authority_id={FormatProtocolLogValue(authority.AuthorityId.Value)}; receive_recovery_operation_generation={authority.OperationGeneration}; execution_state={operation?.ExecutionState.ToString() ?? "(none)"}; proof_identity={FormatProtocolLogValue(operation?.ReceiveProof?.ProofIdentity)}; immutable_deadline_utc_ms={decision.ImmutableDeadlineUtcMs}; is_available=0; requires_resume_request={(requiresResumeRequest ? 1 : 0)}; availability_reason={FormatProtocolLogValue(reason)}; handoff_kind={FormatProtocolLogValue(handoffKind.ToString())}; target_transport={FormatProtocolLogValue(targetTransport.ToString())}; session_id={FormatProtocolLogValue(observation.SessionId)}; transfer_id={FormatProtocolLogValue(observation.TransferId)}; direction={observation.Direction.ToString().ToLowerInvariant()}; route={FormatProtocolLogValue(observation.RouteToken)}; protocol_version={observation.ProtocolVersion}; live_route_epoch={observation.LiveRouteEpoch}; route_publication_generation={observation.RoutePublication.PublicationGeneration}; runtime_generation={observation.RuntimeOwner.RuntimeGeneration}; terminal_generation={observation.TerminalGeneration}; leg_generation={observation.LegGeneration}; transport_epoch={observation.TransportEpoch}; bridge_recovery_generation={observation.BridgeRecoveryGeneration}; checkpoint_request_id={FormatProtocolLogValue(observation.CheckpointRequestId)}; data_session_identity={FormatProtocolLogValue(observation.DataSessionIdentity)}; data_session_generation={observation.DataSessionGeneration}; proposed_runtime_generation={observation.RuntimeOwner.RuntimeGeneration + 1}; proposed_route_publication_generation={observation.RoutePublication.PublicationGeneration + 1}; proposed_leg_generation={observation.LegGeneration + 1}; outcome={(decision.SuppressesRestart ? "preserved" : "rejected")}; reason={FormatProtocolLogValue(decision.Reason)}");
+        return decision.SuppressesRestart;
     }
 
     private bool TrySuppressOutboundRecoveredV6RegularNknEpochRestartPauseLocked(
@@ -3982,6 +4076,22 @@ public sealed partial class SessionFileTransferService
 
         if (!forceNewGeneration &&
             capturedReauthorizationRequest is null &&
+            string.Equals(
+                reason,
+                "transport_recovered_unproven",
+                StringComparison.Ordinal) &&
+            TryHoldOutboundPostTunaRecoveryEpochRestartLocked(
+                context,
+                reason,
+                requiresResumeRequest: true,
+                FileTransferTransportHandoffKind.RegularNknRecovery,
+                FileTransferTransportKind.RegularNkn))
+        {
+            return;
+        }
+
+        if (!forceNewGeneration &&
+            capturedReauthorizationRequest is null &&
             IsPostTunaFallbackBridgeRecoveryEpochRefreshReason(reason) &&
             TrySuppressPostYieldFallbackRecoveryRestartLocked(
                 context,
@@ -4320,6 +4430,21 @@ public sealed partial class SessionFileTransferService
             capturedReauthorizationRequest)
     {
         if (context.ChunkCount <= 0)
+        {
+            return;
+        }
+
+        if (capturedReauthorizationRequest is null &&
+            string.Equals(
+                reason,
+                "transport_recovered_unproven",
+                StringComparison.Ordinal) &&
+            TryHoldInboundPostTunaRecoveryEpochRestartLocked(
+                context,
+                reason,
+                requiresResumeRequest: true,
+                FileTransferTransportHandoffKind.RegularNknRecovery,
+                FileTransferTransportKind.RegularNkn))
         {
             return;
         }

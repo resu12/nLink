@@ -9706,6 +9706,172 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void FileTransferReceiveRecoveryPostTunaEpochRestart_ActiveOperationIsHeldWithoutMutation()
+    {
+        var fixture = CreateNonRegularV4ReceiveRecoveryOperationFixture();
+        var authority = Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+            fixture.Decision.Authority);
+        var receipt = new FileTransferBridgeRecoveryExecutionReceipt(
+            authority.ExecutionCommand,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            "soft_then_hard",
+            "bridge_recovery_completed");
+        var started = FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(
+            fixture.Decision.State,
+            new FileTransferBridgeRecoveryExecutionStartResult(
+                authority.ExecutionCommand,
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                "bridge_recovery_execution_started",
+                Task.FromResult(receipt)),
+            observedUtcMs: 2);
+        Assert.True(started.Accepted, started.Reason);
+
+        var decision = FileTransferCoordinator
+            .ClassifyPostTunaReceiveRecoveryEpochRestart(
+                started.State,
+                new FileTransferReceiveRecoveryPostTunaEpochRestartObservation(
+                    authority,
+                    IsAvailable: false,
+                    RequiresResumeRequest: true,
+                    FileTransferTransportHandoffKind.RegularNknRecovery,
+                    FileTransferTransportKind.RegularNkn,
+                    "transport_recovered_unproven",
+                    ObservedUtcMs: 3));
+
+        Assert.Equal(
+            FileTransferReceiveRecoveryPostTunaEpochRestartDisposition.ActiveHold,
+            decision.Disposition);
+        Assert.True(decision.SuppressesRestart);
+        Assert.Equal(
+            authority,
+            Assert.IsType<FileTransferReceiveRecoveryOperation>(
+                started.State.PersistentState.FileTransferReceiveRecovery
+                    .CurrentOperation).Authority);
+    }
+
+    [Fact]
+    public void FileTransferReceiveRecoveryPostTunaEpochRestart_NoOperationRemainsNotApplicable()
+    {
+        var state = ActiveFallbackStateWithoutCheckpoint() with
+        {
+            CurrentDataSessionIdentity = "data-session-1",
+            CurrentDataSessionGeneration = 1,
+        };
+
+        var decision = FileTransferCoordinator
+            .ClassifyPostTunaReceiveRecoveryEpochRestart(
+                state,
+                default);
+
+        Assert.Equal(
+            FileTransferReceiveRecoveryPostTunaEpochRestartDisposition
+                .NotApplicable,
+            decision.Disposition);
+        Assert.False(decision.SuppressesRestart);
+    }
+
+    [Fact]
+    public void FileTransferReceiveRecoveryPostTunaEpochRestart_CompletedOperationUsesProofState()
+    {
+        var fixture = CreateNonRegularV4ReceiveRecoveryOperationFixture();
+        var authority = Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+            fixture.Decision.Authority);
+        var receipt = new FileTransferBridgeRecoveryExecutionReceipt(
+            authority.ExecutionCommand,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            "soft_then_hard",
+            "bridge_recovery_completed");
+        var started = FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(
+            fixture.Decision.State,
+            new FileTransferBridgeRecoveryExecutionStartResult(
+                authority.ExecutionCommand,
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                "bridge_recovery_execution_started",
+                Task.FromResult(receipt)),
+            observedUtcMs: 2);
+        var completed = FileTransferCoordinator
+            .ObserveReceiveRecoveryExecutionReceipt(
+                started.State,
+                receipt,
+                observedUtcMs: 3);
+        var observation =
+            new FileTransferReceiveRecoveryPostTunaEpochRestartObservation(
+                authority,
+                IsAvailable: false,
+                RequiresResumeRequest: true,
+                FileTransferTransportHandoffKind.RegularNknRecovery,
+                FileTransferTransportKind.RegularNkn,
+                "transport_recovered_unproven",
+                ObservedUtcMs: 4);
+
+        var awaitingProof = FileTransferCoordinator
+            .ClassifyPostTunaReceiveRecoveryEpochRestart(
+                completed.State,
+                observation);
+        Assert.Equal(
+            FileTransferReceiveRecoveryPostTunaEpochRestartDisposition
+                .CompletedAwaitingProofHold,
+            awaitingProof.Disposition);
+
+        var completedOperation = Assert.IsType<FileTransferReceiveRecoveryOperation>(
+            completed.State.PersistentState.FileTransferReceiveRecovery
+                .CurrentOperation);
+        var proof = new FileTransferReceiveRecoveryProof(
+            authority,
+            "post-fallback-proof",
+            "receive_proof_observed",
+            ObservedUtcMs: 5);
+        var provenState = completed.State with
+        {
+            PersistentState = completed.State.PersistentState with
+            {
+                FileTransferReceiveRecovery = completed.State.PersistentState
+                    .FileTransferReceiveRecovery with
+                    {
+                        CurrentOperation = completedOperation with
+                        {
+                            ReceiveProof = proof,
+                        },
+                    },
+            },
+        };
+        var proven = FileTransferCoordinator
+            .ClassifyPostTunaReceiveRecoveryEpochRestart(
+                provenState,
+                observation with { ObservedUtcMs = 6 });
+        Assert.Equal(
+            FileTransferReceiveRecoveryPostTunaEpochRestartDisposition
+                .CompletedProvenIgnore,
+            proven.Disposition);
+        Assert.True(proven.SuppressesRestart);
+    }
+
+    [Fact]
+    public void FileTransferReceiveRecoveryPostTunaEpochRestart_MutatedEvidenceIsRejected()
+    {
+        var fixture = CreateNonRegularV4ReceiveRecoveryOperationFixture();
+        var authority = Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+            fixture.Decision.Authority);
+
+        var decision = FileTransferCoordinator
+            .ClassifyPostTunaReceiveRecoveryEpochRestart(
+                fixture.Decision.State,
+                new FileTransferReceiveRecoveryPostTunaEpochRestartObservation(
+                    authority,
+                    IsAvailable: false,
+                    RequiresResumeRequest: true,
+                    FileTransferTransportHandoffKind.RegularNknRecovery,
+                    FileTransferTransportKind.RegularNkn,
+                    "different_reason",
+                    ObservedUtcMs: 2));
+
+        Assert.Equal(
+            FileTransferReceiveRecoveryPostTunaEpochRestartDisposition.Rejected,
+            decision.Disposition);
+        Assert.False(decision.SuppressesRestart);
+    }
+
+    [Fact]
     public void FileTransferReceiveRecoveryFallbackCheckpoint_ChildPreservesRunningOperationAndConvergesAfterProof()
     {
         var fixture = CreateNonRegularV4ReceiveRecoveryOperationFixture();
