@@ -8612,6 +8612,58 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_BridgeRecoveryExecutionPayloadHold_CurrentSubmissionHoldsAreNotFailures(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_post_tuna_current_submission_holds";
+        const string writerId = "writer-post-tuna-current-submission-holds";
+        const string operationId = "fta2-filetransfer_receive_recovery_operation-post-tuna-holds";
+        const string scope =
+            $"session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=outbound; " +
+            "route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; " +
+            "route_publication_generation=3; runtime_generation=3; terminal_generation=0; " +
+            "leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; " +
+            "data_session_generation=1";
+        const string operation =
+            $"receive_recovery_operation_authority_id={operationId}; receive_recovery_operation_generation=3";
+        var lines = new List<string>
+        {
+            LogLine($"event=filetransfer_route_selected; {scope}; runtime_profile=post_tuna_fallback_v6; frame_family=v6", secondsOffset: 0),
+            LogLine($"event=filetransfer_post_tuna_fallback_recovery_submission_failure_observed; {operation}; {scope}; physical_send_lease_generation=90; decision_status=Accepted; typed_rejection_reason=SubmissionEpochNotReady; rejection_stage=pre_wait; rejection_channel=bulk; log_writer_id={writerId}; log_writer_sequence=1", secondsOffset: 1),
+            LogLine($"event=filetransfer_post_tuna_fallback_recovery_submission_failure_finalized; {operation}; {scope}; physical_send_lease_generation=90; decision_status=Accepted; disposition=ActiveHold; log_writer_id={writerId}; log_writer_sequence=2", secondsOffset: 2),
+            LogLine($"event=filetransfer_post_tuna_fallback_recovery_submission_failure_observed; {operation}; {scope}; physical_send_lease_generation=91; decision_status=Accepted; typed_rejection_reason=SubmissionEpochNotReady; rejection_stage=pre_wait; rejection_channel=bulk; log_writer_id={writerId}; log_writer_sequence=3", secondsOffset: 3),
+            LogLine($"event=filetransfer_post_tuna_fallback_recovery_submission_failure_finalized; {operation}; {scope}; physical_send_lease_generation=91; decision_status=Accepted; disposition=CompletedAwaitingProofHold; log_writer_id={writerId}; log_writer_sequence=4", secondsOffset: 4),
+            LogLine($"event=filetransfer_post_tuna_fallback_recovery_submission_failure_observed; {operation}; {scope}; physical_send_lease_generation=92; decision_status=Accepted; typed_rejection_reason=SubmissionEpochNotReady; rejection_stage=pre_wait; rejection_channel=bulk; log_writer_id={writerId}; log_writer_sequence=5", secondsOffset: 5),
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("0", verdict["filetransfer_bridge_recovery_execution_payload_hold_missing_raw_count"]);
+        Assert.Equal("0", verdict["filetransfer_bridge_recovery_execution_payload_hold_missing_distinct_count"]);
+        Assert.Equal("0", verdict["filetransfer_bridge_recovery_execution_payload_hold_missing_recovered_count"]);
+        Assert.Equal("0", verdict["filetransfer_bridge_recovery_execution_payload_hold_missing_unresolved_count"]);
+        Assert.Equal("0", verdict["filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_raw_count"]);
+        Assert.Equal("0", verdict["filetransfer_bridge_recovery_execution_payload_hold_post_tuna_late_submission_observation_unresolved_count"]);
+    }
+
+    [Theory]
     [InlineData(false, "source_gate_timeout", "1", "0")]
     [InlineData(true, "source_gate_timeout", "1", "0")]
     [InlineData(false, "drain_completed", "0", "1")]

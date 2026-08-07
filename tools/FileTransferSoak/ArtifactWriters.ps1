@@ -18967,13 +18967,6 @@ function Get-FileTransferPostTunaFallbackSubmissionEpochFailureCorrelation {
             'filetransfer_post_tuna_fallback_recovery_submission_resumed',
             'filetransfer_outbound_payload_resumed_after_receive_recovery')
     })
-    [object[]]$failureObservations = @($orderedEvents | Where-Object {
-        $_.EventName -eq 'filetransfer_post_tuna_fallback_recovery_submission_failure_observed'
-    })
-    [object[]]$failureFinalizations = @($orderedEvents | Where-Object {
-        $_.EventName -eq 'filetransfer_post_tuna_fallback_recovery_submission_failure_finalized'
-    })
-
     $raw = New-Object System.Collections.Generic.List[object]
     $distinct = New-Object System.Collections.Generic.List[object]
     $recovered = New-Object System.Collections.Generic.List[object]
@@ -19127,56 +19120,6 @@ function Get-FileTransferPostTunaFallbackSubmissionEpochFailureCorrelation {
             else {
                 $notDeferredUnresolved.Add($failure) | Out-Null
             }
-        }
-    }
-
-    foreach ($observation in $failureObservations) {
-        $authority = Get-FileTransferEventField -Event $observation -Name 'receive_recovery_operation_authority_id' -Default ''
-        $generation = Get-FileTransferEventField -Event $observation -Name 'receive_recovery_operation_generation' -Default ''
-        $leaseGeneration = Get-FileTransferEventField -Event $observation -Name 'physical_send_lease_generation' -Default ''
-        if ([string]::IsNullOrWhiteSpace($authority) -or
-            [string]::IsNullOrWhiteSpace($generation) -or
-            [string]::IsNullOrWhiteSpace($leaseGeneration)) {
-            continue
-        }
-
-        $key = [string]::Join('|', @(
-            $authority,
-            $generation,
-            $leaseGeneration,
-            (Get-FileTransferEventField -Event $observation -Name 'session_id' -Default ''),
-            (Get-FileTransferEventField -Event $observation -Name 'transfer_id' -Default ''),
-            (Get-FileTransferEventField -Event $observation -Name 'direction' -Default ''),
-            (Get-FileTransferEventField -Event $observation -Name 'route_publication_generation' -Default ''),
-            (Get-FileTransferEventField -Event $observation -Name 'runtime_generation' -Default ''),
-            (Get-FileTransferEventField -Event $observation -Name 'terminal_generation' -Default ''),
-            (Get-FileTransferEventField -Event $observation -Name 'leg_generation' -Default ''),
-            (Get-FileTransferEventField -Event $observation -Name 'transport_epoch' -Default ''),
-            (Get-FileTransferEventField -Event $observation -Name 'bridge_recovery_generation' -Default ''),
-            (Get-FileTransferEventField -Event $observation -Name 'data_session_generation' -Default '')))
-        if ($seen.ContainsKey($key)) { continue }
-        $seen[$key] = $true
-
-        $raw.Add($observation) | Out-Null
-        $distinct.Add($observation) | Out-Null
-        $lateRaw.Add($observation) | Out-Null
-        $lateDistinct.Add($observation) | Out-Null
-        $finalization = @($failureFinalizations | Where-Object {
-            [int64]$_.Sequence -gt [int64]$observation.Sequence -and
-            (Get-FileTransferEventField -Event $_ -Name 'receive_recovery_operation_authority_id' -Default '') -eq $authority -and
-            (Get-FileTransferEventField -Event $_ -Name 'receive_recovery_operation_generation' -Default '') -eq $generation -and
-            (Get-FileTransferEventField -Event $_ -Name 'physical_send_lease_generation' -Default '') -eq $leaseGeneration -and
-            (Test-PostTunaRecoveryIdentity -Left $observation -Right $_ -RequireDirection)
-        } | Select-Object -First 1)
-        if ($finalization.Count -eq 1 -and
-            (Get-FileTransferEventField -Event $finalization[0] -Name 'disposition' -Default '').ToLowerInvariant() -eq
-                'completed_proven_late_child_retirement') {
-            $recovered.Add($observation) | Out-Null
-            $lateRecovered.Add($observation) | Out-Null
-        }
-        else {
-            $unresolved.Add($observation) | Out-Null
-            $lateUnresolved.Add($observation) | Out-Null
         }
     }
 
