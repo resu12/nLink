@@ -4597,6 +4597,10 @@ public sealed partial class SessionFileTransferService
                 context,
                 physicalSendLease,
                 physicalCompletionTask);
+            _ = ObserveOutboundPhysicalSendFailureAsync(
+                context,
+                physicalSendLease,
+                sendTask);
         }
 
         if (timeout <= TimeSpan.Zero || timeout == Timeout.InfiniteTimeSpan)

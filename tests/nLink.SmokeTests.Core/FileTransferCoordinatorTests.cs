@@ -9620,6 +9620,92 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void FileTransferReceiveRecoveryOperation_CompletedProvenPostFallbackClassifiesObservedPhysicalChildForRetirement()
+    {
+        var fixture = CreateNonRegularV4ReceiveRecoveryOperationFixture();
+        var authority = Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+            fixture.Decision.Authority);
+        var receipt = new FileTransferBridgeRecoveryExecutionReceipt(
+            authority.ExecutionCommand,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            "soft",
+            "bridge_recovery_completed");
+        var started = FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(
+            fixture.Decision.State,
+            new FileTransferBridgeRecoveryExecutionStartResult(
+                authority.ExecutionCommand,
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                "bridge_recovery_execution_started",
+                Task.FromResult(receipt)),
+            observedUtcMs: 10);
+        var scope = authority.Observation;
+        var observation = new FileTransferReceiveRecoverySubmissionFailureObservation(
+            authority,
+            PhysicalSendLeaseGeneration: 91,
+            scope.RuntimeOwner,
+            scope.RoutePublication,
+            scope.TerminalGeneration,
+            scope.LegGeneration,
+            scope.TransportEpoch,
+            scope.BridgeRecoveryGeneration,
+            scope.DataSessionIdentity,
+            scope.DataSessionGeneration,
+            SendKind: "PostTunaFallbackV6Payload",
+            RepairRequestKey: "(none)",
+            FileTransferDataSessionSubmissionUnavailableReason.SubmissionEpochChanged,
+            RejectionStage: "send_pre_submit",
+            RejectionChannel: "bulk",
+            ExpectedSubmissionEpoch: 3,
+            CurrentSubmissionEpoch: 4,
+            ExpectedProcessEpoch: 7,
+            CurrentProcessEpoch: 8,
+            RecoveryBarrierActive: true,
+            ObservedUtcMs: 11);
+        Assert.False(observation.IsDefault);
+
+        var completed = FileTransferCoordinator.ObserveReceiveRecoveryExecutionReceipt(
+            started.State,
+            receipt,
+            observedUtcMs: 12);
+        var proved = FileTransferCoordinator.ObserveReceiveRecoveryProof(
+            completed.State,
+            new FileTransferReceiveRecoveryProof(
+                authority,
+                "post-fallback-receive-proof",
+                "receive_proof_observed",
+                13));
+
+        var disposition = FileTransferCoordinator.ClassifyReceiveRecoverySubmissionFailure(
+            proved.State,
+            observation,
+            DateTimeOffset.FromUnixTimeMilliseconds(14),
+            out var operation,
+            out var deadline,
+            out var reason);
+
+        Assert.Equal(
+            FileTransferReceiveRecoverySubmissionFailureDisposition
+                .CompletedProvenLateChildRetirement,
+            disposition);
+        Assert.Equal(authority, operation.Authority);
+        Assert.Equal(default, deadline);
+        Assert.Equal("completed_proven_late_child_retirement", reason);
+        Assert.Equal(FileTransferReceiveRecoveryClosureState.None, operation.ClosureState);
+        Assert.NotNull(operation.ReceiveProof);
+
+        var terminalState = proved.State with { IsTerminal = true };
+        Assert.Equal(
+            FileTransferReceiveRecoverySubmissionFailureDisposition.Rejected,
+            FileTransferCoordinator.ClassifyReceiveRecoverySubmissionFailure(
+                terminalState,
+                observation,
+                DateTimeOffset.FromUnixTimeMilliseconds(15),
+                out _,
+                out _,
+                out _));
+    }
+
+    [Fact]
     public void FileTransferReceiveRecoveryFallbackCheckpoint_ChildPreservesRunningOperationAndConvergesAfterProof()
     {
         var fixture = CreateNonRegularV4ReceiveRecoveryOperationFixture();

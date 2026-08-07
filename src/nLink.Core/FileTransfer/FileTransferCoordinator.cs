@@ -1732,6 +1732,56 @@ internal readonly record struct FileTransferReceiveRecoveryProof(
         ObservedUtcMs <= 0;
 }
 
+internal enum FileTransferReceiveRecoverySubmissionFailureDisposition
+{
+    Rejected = 0,
+    ActiveHold = 1,
+    CompletedAwaitingProofHold = 2,
+    CompletedProvenLateChildRetirement = 3,
+}
+
+internal sealed record FileTransferReceiveRecoverySubmissionFailureObservation(
+    FileTransferReceiveRecoveryOperationAuthority Authority,
+    long PhysicalSendLeaseGeneration,
+    RuntimeOwnerToken RuntimeOwner,
+    RoutePublicationToken RoutePublication,
+    int TerminalGeneration,
+    long LegGeneration,
+    long TransportEpoch,
+    int BridgeRecoveryGeneration,
+    string DataSessionIdentity,
+    long DataSessionGeneration,
+    string SendKind,
+    string RepairRequestKey,
+    FileTransferDataSessionSubmissionUnavailableReason RejectionReason,
+    string RejectionStage,
+    string RejectionChannel,
+    long ExpectedSubmissionEpoch,
+    long CurrentSubmissionEpoch,
+    long ExpectedProcessEpoch,
+    long CurrentProcessEpoch,
+    bool RecoveryBarrierActive,
+    long ObservedUtcMs)
+{
+    public bool IsDefault =>
+        Authority.IsDefault ||
+        PhysicalSendLeaseGeneration <= 0 ||
+        RuntimeOwner.IsDefault ||
+        RoutePublication.IsDefault ||
+        TerminalGeneration < 0 ||
+        LegGeneration <= 0 ||
+        TransportEpoch <= 0 ||
+        BridgeRecoveryGeneration < 0 ||
+        string.IsNullOrWhiteSpace(DataSessionIdentity) ||
+        DataSessionGeneration <= 0 ||
+        string.IsNullOrWhiteSpace(SendKind) ||
+        string.IsNullOrWhiteSpace(RepairRequestKey) ||
+        string.IsNullOrWhiteSpace(RejectionStage) ||
+        string.IsNullOrWhiteSpace(RejectionChannel) ||
+        !RecoveryBarrierActive ||
+        ObservedUtcMs <= 0;
+}
+
 internal sealed record
     FileTransferReceiveRecoveryPeerReachabilityObservation(
         FileTransferBridgeRecoveryExecutionCommand ExecutionCommand,
@@ -17370,6 +17420,138 @@ internal static class FileTransferCoordinator
         maximumDeadlineUtc = DateTimeOffset.FromUnixTimeMilliseconds(
             current.LivenessDeferralDeadlineUtcMs);
         return true;
+    }
+
+    internal static FileTransferReceiveRecoverySubmissionFailureDisposition
+        ClassifyReceiveRecoverySubmissionFailure(
+            FileTransferCoordinatorState state,
+            FileTransferReceiveRecoverySubmissionFailureObservation observation,
+            DateTimeOffset now,
+            out FileTransferReceiveRecoveryOperation operation,
+            out DateTimeOffset immutableDeadlineUtc,
+            out string reason)
+    {
+        operation = default;
+        immutableDeadlineUtc = default;
+        reason = "submission_failure_observation_invalid";
+        if (observation.IsDefault || state.IsTerminal)
+        {
+            return FileTransferReceiveRecoverySubmissionFailureDisposition.Rejected;
+        }
+
+        var recovery = state.PersistentState.FileTransferReceiveRecovery;
+        if (recovery.CurrentOperation is { } current)
+        {
+            if (current.Authority != observation.Authority)
+            {
+                reason = "receive_recovery_operation_succeeded_by_other_authority";
+                return FileTransferReceiveRecoverySubmissionFailureDisposition.Rejected;
+            }
+
+            operation = current;
+        }
+        else if (recovery.LastTerminalOperation is { } terminal &&
+                 terminal.Authority == observation.Authority)
+        {
+            operation = terminal;
+        }
+        else
+        {
+            reason = "receive_recovery_operation_not_retained";
+            return FileTransferReceiveRecoverySubmissionFailureDisposition.Rejected;
+        }
+
+        var authorityObservation = operation.Authority.Observation;
+        if (authorityObservation.Direction != FileTransferDirection.Outbound ||
+            authorityObservation.Route != FileTransferRoute.PostTunaFallbackV6 ||
+            authorityObservation.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+            authorityObservation.RuntimeOwner != observation.RuntimeOwner ||
+            authorityObservation.RoutePublication != observation.RoutePublication ||
+            authorityObservation.TerminalGeneration != observation.TerminalGeneration ||
+            authorityObservation.LegGeneration != observation.LegGeneration ||
+            authorityObservation.TransportEpoch != observation.TransportEpoch ||
+            authorityObservation.BridgeRecoveryGeneration != observation.BridgeRecoveryGeneration ||
+            authorityObservation.DataSessionGeneration != observation.DataSessionGeneration ||
+            !string.Equals(
+                authorityObservation.DataSessionIdentity,
+                observation.DataSessionIdentity,
+                StringComparison.Ordinal) ||
+            !TryValidateReceiveRecoveryObservationCurrent(
+                state,
+                authorityObservation,
+                operation.Authority.ExecutionCommand.CheckpointRequestId,
+                out _))
+        {
+            reason = "receive_recovery_submission_failure_scope_not_current";
+            operation = default;
+            return FileTransferReceiveRecoverySubmissionFailureDisposition.Rejected;
+        }
+
+        if (operation.ExecutionState is
+                FileTransferReceiveRecoveryExecutionState.Issued or
+                FileTransferReceiveRecoveryExecutionState.Running)
+        {
+            if (!TryGetReceiveRecoveryLivenessDeferral(
+                    state,
+                    out var livenessOperation,
+                    out _,
+                    out immutableDeadlineUtc) ||
+                livenessOperation.Authority != operation.Authority ||
+                immutableDeadlineUtc <= now)
+            {
+                reason = "receive_recovery_active_hold_expired";
+                operation = default;
+                return FileTransferReceiveRecoverySubmissionFailureDisposition.Rejected;
+            }
+
+            reason = "receive_recovery_active_hold";
+            return FileTransferReceiveRecoverySubmissionFailureDisposition.ActiveHold;
+        }
+
+        if (operation.ExecutionState != FileTransferReceiveRecoveryExecutionState.Completed ||
+            operation.ExecutionReceipt is not
+            {
+                Outcome: FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            } ||
+            operation.InvalidationReason is not null)
+        {
+            reason = "receive_recovery_not_completed_current";
+            operation = default;
+            return FileTransferReceiveRecoverySubmissionFailureDisposition.Rejected;
+        }
+
+        if (operation.ReceiveProof is null)
+        {
+            if (!TryGetReceiveRecoveryLivenessDeferral(
+                    state,
+                    out var livenessOperation,
+                    out _,
+                    out immutableDeadlineUtc) ||
+                livenessOperation.Authority != operation.Authority ||
+                immutableDeadlineUtc <= now)
+            {
+                reason = "receive_recovery_completed_awaiting_proof_hold_expired";
+                operation = default;
+                return FileTransferReceiveRecoverySubmissionFailureDisposition.Rejected;
+            }
+
+            reason = "receive_recovery_completed_awaiting_proof_hold";
+            return FileTransferReceiveRecoverySubmissionFailureDisposition.CompletedAwaitingProofHold;
+        }
+
+        if (operation.ClosureState != FileTransferReceiveRecoveryClosureState.None ||
+            operation.ClosureGeneration != 0 ||
+            operation.Authority.RecoveryLivenessLease is not null ||
+            operation.RetiredRecoveryLivenessLease is not null)
+        {
+            reason = "completed_proven_recovery_not_closureless_post_tuna";
+            operation = default;
+            return FileTransferReceiveRecoverySubmissionFailureDisposition.Rejected;
+        }
+
+        reason = "completed_proven_late_child_retirement";
+        return FileTransferReceiveRecoverySubmissionFailureDisposition
+            .CompletedProvenLateChildRetirement;
     }
 
     internal static bool TryGetCurrentReceiveRecoveryClosure(

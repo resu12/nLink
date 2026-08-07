@@ -22536,6 +22536,9 @@ public sealed partial class SessionFileTransferService :
         public Dictionary<long, OutboundPhysicalSendLease>
             ActiveOutboundPhysicalSendLeases { get; } = [];
 
+        public Dictionary<long, FileTransferReceiveRecoverySubmissionFailureObservation>
+            ReceiveRecoverySubmissionFailureObservations { get; } = [];
+
         public RuntimeUnlockPreCommitProbeLaunchDisposition?
             LastRuntimeUnlockPreCommitProbeLaunchDisposition { get; set; }
 
@@ -24450,7 +24453,8 @@ public sealed partial class SessionFileTransferService :
         int SendAttempt,
         int SendAttemptCount,
         bool ScheduledRegularNknV4FastRuntime,
-        long PhysicalSendLeaseGeneration);
+        long PhysicalSendLeaseGeneration,
+        Task PhysicalSendObservationTask);
 
     private readonly record struct MissingRange(int StartChunkIndex, int EndChunkIndexExclusive);
 }

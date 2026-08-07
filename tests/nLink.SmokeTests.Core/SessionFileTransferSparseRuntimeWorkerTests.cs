@@ -1057,6 +1057,71 @@ public sealed partial class SessionFileTransferV4SenderTests
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "SparseWorkerHandoff")]
+    public async Task OutboundPhysicalSendLease_RetiresIndependentlyOfDeliveryObservation()
+    {
+        var transferId = $"transfer_physical_delivery_separation_{Guid.NewGuid():N}";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 0,
+            chunksAcceptedForTransport: 0,
+            remoteGrantedUntilExclusive: 64,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow);
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        var dataSession = new RecordingDataSession($"session_{transferId}", transferId);
+        ReplaceOutboundDataSession(service, context, dataSession);
+        var frame = new FileTransferChunkBatchFrameV4
+        {
+            SessionId = $"session_{transferId}",
+            TransferId = transferId,
+            StartChunkIndex = 0,
+            ChunkCount = 1,
+            DataSegments = [new byte[] { 1 }],
+            ForceRegularNknBulk = true,
+        };
+        var registration = RegisterRegularV4PhysicalSendLease(
+            service,
+            context,
+            dataSession,
+            frame);
+        Assert.True(registration.Accepted, registration.Reason);
+        Assert.NotNull(registration.Lease);
+
+        var physicalCompletion = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var deliveryCompletion = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var leaseObserver = ObserveRegularV4PhysicalSendLease(
+            service,
+            context,
+            registration.Lease!,
+            physicalCompletion.Task);
+        var deliveryObserver = ObserveRegularV4PhysicalSendFailure(
+            service,
+            context,
+            registration.Lease!,
+            deliveryCompletion.Task);
+
+        physicalCompletion.TrySetResult();
+        await leaseObserver;
+        Assert.Equal(
+            0,
+            Assert.IsAssignableFrom<System.Collections.IDictionary>(
+                    GetPrivatePropertyValue(context, "ActiveOutboundPhysicalSendLeases"))
+                .Count);
+        Assert.False(deliveryObserver.IsCompleted);
+
+        deliveryCompletion.TrySetResult();
+        await deliveryObserver;
+        Assert.Equal(1L, GetPrivateProperty<long>(context, "OutboundPhysicalSendRetiredCount"));
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "SparseWorkerHandoff")]
     public async Task OutboundRegularV4WriteHandoff_NormalAndRepairTasksDrainBeforeCommitAndLateCallbacksAreIdempotent()
     {
         var transferId = $"transfer_regular_v4_multi_send_drain_{Guid.NewGuid():N}";
@@ -5000,15 +5065,27 @@ public sealed partial class SessionFileTransferV4SenderTests
             currentProcessEpoch: 8,
             recoveryBarrierActive: true,
             "NKN bridge process changed during payload submission.");
+        var invokeArguments = new object?[]
+        {
+            context,
+            exception,
+            install,
+            dataSession,
+            91L,
+            "fallback-frontier:test",
+            null,
+        };
         var deferred = Assert.IsType<bool>(typeof(SessionFileTransferService)
             .GetMethod(
                 "TryDeferCurrentPostTunaFallbackRecoverySubmissionFailure",
                 BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(
-                service,
-                [context, exception, install, dataSession, 91L, "fallback-frontier:test"]));
+            .Invoke(service, invokeArguments));
 
         Assert.True(deferred);
+        Assert.Equal(
+            FileTransferReceiveRecoverySubmissionFailureDisposition.ActiveHold,
+            Assert.IsType<FileTransferReceiveRecoverySubmissionFailureDisposition>(
+                invokeArguments[6]));
         Assert.False(GetPrivateProperty<bool>(context, "IsTerminal"));
         Assert.True(GetPrivateProperty<bool>(context, "PullTransportPaused"));
         Assert.True(GetPrivateProperty<bool>(context, "PullTransportResumeRequestPending"));
@@ -6100,6 +6177,17 @@ public sealed partial class SessionFileTransferV4SenderTests
                 "ObserveOutboundPhysicalSendLeaseAsync",
                 BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, lease, sendTask]));
+
+    private static Task ObserveRegularV4PhysicalSendFailure(
+        SessionFileTransferService service,
+        object context,
+        object lease,
+        Task deliveryTask)
+        => Assert.IsAssignableFrom<Task>(typeof(SessionFileTransferService)
+            .GetMethod(
+                "ObserveOutboundPhysicalSendFailureAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, lease, deliveryTask]));
 
     private static Task RecheckRegularV4RouteCommitSendDrain(
         SessionFileTransferService service,
