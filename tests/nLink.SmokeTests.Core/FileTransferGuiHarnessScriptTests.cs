@@ -4985,6 +4985,48 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeWindows_LongLiveRouteWaitUsesRemainingScenarioBudget()
+    {
+        var repoRoot = FindRepoRoot();
+        var guiText = File.ReadAllText(Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1"));
+        var remainingTimeoutBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-GuiSmokeScenarioRemainingTimeoutMs",
+            "Wait-Until");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Assert-GuiSmokeScenarioDeadline { throw 'scenario-deadline' }
+            function Get-GuiSmokeScenarioRemainingTimeoutMs { {{remainingTimeoutBody}} }
+
+            $script:GuiSmokeScenarioDeadlineUtc = [DateTimeOffset]::MaxValue
+            if ((Get-GuiSmokeScenarioRemainingTimeoutMs -DefaultTimeoutMs 240000) -ne 240000) {
+                throw 'default timeout was not preserved without a scenario deadline'
+            }
+
+            $script:GuiSmokeScenarioDeadlineUtc = [DateTimeOffset]::UtcNow.AddMilliseconds(1200)
+            $remaining = Get-GuiSmokeScenarioRemainingTimeoutMs -DefaultTimeoutMs 240000
+            if ($remaining -lt 1 -or $remaining -gt 1200) {
+                throw "remaining scenario timeout was not bounded: $remaining"
+            }
+
+            $script:GuiSmokeScenarioDeadlineUtc = [DateTimeOffset]::UtcNow.AddMilliseconds(-1)
+            try {
+                [void](Get-GuiSmokeScenarioRemainingTimeoutMs -DefaultTimeoutMs 240000)
+                throw 'expired scenario deadline was accepted'
+            }
+            catch {
+                if ($_.Exception.Message -ne 'scenario-deadline') { throw }
+            }
+            Write-Output 'scenario-budget-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Scenario budget test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("scenario-budget-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void RunFileTransferTunaGuiSmoke_LiveRegularActivationCycleStartsRegularThenCyclesRoutes()
     {
         var repoRoot = FindRepoRoot();
@@ -5001,7 +5043,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("on,off,on,off", guiText, StringComparison.Ordinal);
         Assert.Contains("RegularActivationCycle", wrapperText, StringComparison.Ordinal);
         Assert.Contains("measured_live_regular_activation_cycle", guiText, StringComparison.Ordinal);
-        Assert.Contains("$activationProofTimeoutMs = if ($RouteMode -eq 'live-regular-activation-cycle' -or $RouteMode -eq 'live-reactivation-second-transfer') { 240000 } else { 90000 }", guiText, StringComparison.Ordinal);
+        Assert.Contains("function Get-GuiSmokeScenarioRemainingTimeoutMs", guiText, StringComparison.Ordinal);
+        Assert.Contains("Get-GuiSmokeScenarioRemainingTimeoutMs -DefaultTimeoutMs 240000", guiText, StringComparison.Ordinal);
+        Assert.DoesNotContain("$activationProofTimeoutMs = 240000", guiText, StringComparison.Ordinal);
         Assert.Contains("$regularActivationCycleCapBytes = [Math]::Max(1L, [long]($PayloadSizeBytes / 4))", guiText, StringComparison.Ordinal);
         Assert.Contains("AfterLiveRouteEpoch", guiText, StringComparison.Ordinal);
         Assert.Contains("[string]$AfterLine = ''", guiText, StringComparison.Ordinal);

@@ -64,6 +64,22 @@ function Assert-GuiSmokeScenarioDeadline {
         "gui_smoke_scenario_deadline_exceeded: scenario=$scenarioName")
 }
 
+function Get-GuiSmokeScenarioRemainingTimeoutMs {
+    param([Parameter(Mandatory = $true)][int]$DefaultTimeoutMs)
+
+    if ($script:GuiSmokeScenarioDeadlineUtc -eq [DateTimeOffset]::MaxValue) {
+        return $DefaultTimeoutMs
+    }
+
+    $remainingMs = [Math]::Ceiling(
+        ($script:GuiSmokeScenarioDeadlineUtc - [DateTimeOffset]::UtcNow).TotalMilliseconds)
+    if ($remainingMs -le 0) {
+        Assert-GuiSmokeScenarioDeadline
+    }
+
+    return [int][Math]::Min([int]::MaxValue, [Math]::Max(1, $remainingMs))
+}
+
 function Wait-Until {
     param(
         [Parameter(Mandatory = $true)][int]$TimeoutMs,
@@ -17710,7 +17726,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                     $prearmedSwitchOffToggle = if ([string]::Equals([string]$switchOffPrearmResult.Kind, 'toggle', [System.StringComparison]::OrdinalIgnoreCase)) { $switchOffPrearmResult.Toggle } else { $null }
                     $prearmedSwitchOffToggleWaitMs = [long]$switchOffPrearmResult.WaitMs
 
-                    $activationProofTimeoutMs = 240000
+                    $activationProofTimeoutMs = Get-GuiSmokeScenarioRemainingTimeoutMs -DefaultTimeoutMs 240000
                     Write-Host ("[GUI Smoke][filetransfer_tuna] event=filetransfer_gui_evidence_activity; activity=activation_route_wait; status=started; step={0}" -f $stepNumber) -ForegroundColor DarkGray
                     try {
                         $activationProjectionLine = Wait-TunaGuiAuthoritativeTunaFaultAdmission -Tracker $faultAdmissionTracker -AfterBookmark $stepBookmark -TimeoutMs $activationProofTimeoutMs
@@ -17804,7 +17820,12 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 $prearmedSwitchOffToggle = if ([string]::Equals([string]$switchOffPrearmResult.Kind, 'toggle', [System.StringComparison]::OrdinalIgnoreCase)) { $switchOffPrearmResult.Toggle } else { $null }
                 $prearmedSwitchOffToggleWaitMs = [long]$switchOffPrearmResult.WaitMs
 
-                $activationProofTimeoutMs = if ($RouteMode -eq 'live-regular-activation-cycle' -or $RouteMode -eq 'live-reactivation-second-transfer') { 240000 } else { 90000 }
+                $activationProofTimeoutMs = if ($RouteMode -eq 'live-regular-activation-cycle' -or $RouteMode -eq 'live-reactivation-second-transfer') {
+                    Get-GuiSmokeScenarioRemainingTimeoutMs -DefaultTimeoutMs 240000
+                }
+                else {
+                    90000
+                }
                 Write-Host ("[GUI Smoke][filetransfer_tuna] event=filetransfer_gui_evidence_activity; activity=activation_route_wait; status=started; step={0}" -f $stepNumber) -ForegroundColor DarkGray
                 try {
                     $activationProjectionLine = Wait-TunaGuiAuthoritativeTunaFaultAdmission -Tracker $faultAdmissionTracker -AfterBookmark $stepBookmark -TimeoutMs $activationProofTimeoutMs
