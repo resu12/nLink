@@ -576,6 +576,7 @@ function Test-RouteAcceptanceConclusiveRouteRuntimeCandidate {
     return $Candidate -in @(
             'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing',
             'regular_v4_frontier_tail_repair_state_publication_missing',
+            'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing',
             'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
             'runtime_unlock_retry_dispatch_current_listener_adoption_missing',
             'runtime_unlock_responder_acked_probe_route_transition_handoff_missing') -and
@@ -1578,6 +1579,24 @@ function New-RouteAcceptanceRunResult {
         runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount = 0
         runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount = 0
         runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount = 0
+        fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRawCount = 0
+        fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingDistinctCount = 0
+        fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRecoveredCount = 0
+        fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount = 0
+        fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingVerdict = 'none'
+        fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount = 0
+        fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount = 0
+        fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount = 0
+        fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceUnresolvedCount = 0
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRawCount = 0
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingDistinctCount = 0
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRecoveredCount = 0
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingUnresolvedCount = 0
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffVerdict = 'none'
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckRawCount = 0
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckDistinctCount = 0
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckRecoveredCount = 0
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckUnresolvedCount = 0
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount = 0
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount = 0
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount = 0
@@ -3565,6 +3584,24 @@ function Assert-Phase4OperatorVerdict {
     $Result.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_distinct_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_recovered_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_unresolved_count' -DefaultValue '0')
+    $Result.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_raw_count' -DefaultValue '0')
+    $Result.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_distinct_count' -DefaultValue '0')
+    $Result.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_recovered_count' -DefaultValue '0')
+    $Result.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_unresolved_count' -DefaultValue '0')
+    $Result.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_verdict' -DefaultValue 'none'
+    $Result.fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count' -DefaultValue '0')
+    $Result.fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count' -DefaultValue '0')
+    $Result.fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count' -DefaultValue '0')
+    $Result.fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_unresolved_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_raw_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_distinct_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_recovered_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_unresolved_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_verdict' -DefaultValue 'none'
+    $Result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_raw_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_distinct_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_recovered_count' -DefaultValue '0')
+    $Result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_unresolved_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected_raw_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected_distinct_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected_recovered_count' -DefaultValue '0')
@@ -5601,6 +5638,53 @@ function Write-RouteAcceptanceFakePhase4Run {
             $reportPath = Join-Path $ArtifactDir $reportName
             $reportText = Get-Content -LiteralPath $reportPath -Raw
             foreach ($fixtureLine in $currentListenerAdoptionFixtureLines) {
+                $separatorIndex = $fixtureLine.IndexOf('=')
+                $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
+                $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
+                if ([regex]::IsMatch($reportText, $fixturePattern)) {
+                    $reportText = [regex]::Replace($reportText, $fixturePattern, $fixtureLine)
+                }
+                else {
+                    $reportText = $reportText.TrimEnd("`r", "`n") + [Environment]::NewLine + $fixtureLine + [Environment]::NewLine
+                }
+            }
+            Set-Content -LiteralPath $reportPath -Value $reportText -Encoding UTF8
+        }
+    }
+
+    if (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'FALLBACK_FRONTIER_CHECKPOINT_ACCEPTANCE_RECHECK_SUMMARY_FIXTURE') {
+        $fallbackFrontierCheckpointAcceptanceRecheckFixtureLines = @(
+            'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_raw_count=7',
+            'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_distinct_count=1',
+            'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_recovered_count=0',
+            'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_unresolved_count=1',
+            'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_verdict=fail',
+            'filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count=7',
+            'filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count=1',
+            'filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count=0',
+            'filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_unresolved_count=1',
+            'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_raw_count=1',
+            'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_distinct_count=1',
+            'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_recovered_count=1',
+            'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_unresolved_count=0',
+            'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_raw_count=1',
+            'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_distinct_count=1',
+            'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_recovered_count=1',
+            'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_unresolved_count=0',
+            'runtime_failure_candidate=filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing',
+            'first_proof_chain_failure_class=filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing',
+            'first_proof_chain_failure_event=filetransfer_fallback_tail_yield_blocked_by_frontier_obligation',
+            'first_proof_chain_failure_reason=checkpoint_pending_peer_frontier_request_not_rechecked_after_exact_checkpoint_acceptance',
+            'first_proof_chain_failure_sequence=34698',
+            'first_proof_chain_failure_source_path=filetransfer-retained-log-slice.log',
+            'first_proof_chain_failure_line_number=34698',
+            'first_proof_chain_failure_writer_sequence=22992',
+            'semantic_failure_domain=route_runtime'
+        )
+        foreach ($reportName in @('filetransfer-route-consistency-summary.txt', 'filetransfer-operator-verdict.txt')) {
+            $reportPath = Join-Path $ArtifactDir $reportName
+            $reportText = Get-Content -LiteralPath $reportPath -Raw
+            foreach ($fixtureLine in $fallbackFrontierCheckpointAcceptanceRecheckFixtureLines) {
                 $separatorIndex = $fixtureLine.IndexOf('=')
                 $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
                 $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
@@ -8794,6 +8878,7 @@ function Get-RouteAcceptanceResultFailureClass {
         if ([string]$Result.runtimeFailureCandidate -in @(
             'active_file_tuna_v6_evidence',
             'diagnostic_regular_nkn_v6_evidence',
+            'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing',
             'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing',
             'runtime_unlock_retry_dispatch_current_listener_adoption_missing',
             'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing',
@@ -9663,6 +9748,24 @@ function New-RouteAcceptanceSummaryRunDto {
         runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount = [int]$Result.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount
         runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount = [int]$Result.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount
         runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount = [int]$Result.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount
+        fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRawCount = [int]$Result.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRawCount
+        fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingDistinctCount = [int]$Result.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingDistinctCount
+        fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRecoveredCount = [int]$Result.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRecoveredCount
+        fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount = [int]$Result.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount
+        fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingVerdict = [string]$Result.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingVerdict
+        fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount = [int]$Result.fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount
+        fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount = [int]$Result.fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount
+        fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount = [int]$Result.fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount
+        fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceUnresolvedCount = [int]$Result.fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceUnresolvedCount
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRawCount = [int]$Result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRawCount
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingDistinctCount = [int]$Result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingDistinctCount
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRecoveredCount = [int]$Result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRecoveredCount
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingUnresolvedCount = [int]$Result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingUnresolvedCount
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffVerdict = [string]$Result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffVerdict
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckRawCount = [int]$Result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckRawCount
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckDistinctCount = [int]$Result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckDistinctCount
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckRecoveredCount = [int]$Result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckRecoveredCount
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckUnresolvedCount = [int]$Result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckUnresolvedCount
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount = [int]$Result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount = [int]$Result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount = [int]$Result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount
@@ -9821,6 +9924,12 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     } | Sort-Object @{ Expression = { if ([long]$_.firstProofChainFailureSequence -gt 0) { [long]$_.firstProofChainFailureSequence } else { [long]::MaxValue } } })
     $runtimeFailureCandidate = if ($runtimeCandidateDtos.Count -gt 0) {
         [string]$runtimeCandidateDtos[0].runtimeFailureCandidate
+    }
+    else {
+        '(none)'
+    }
+    $acceptanceFailureClass = if ($runtimeCandidateDtos.Count -gt 0) {
+        [string]$runtimeCandidateDtos[0].acceptanceFailureClass
     }
     else {
         '(none)'
@@ -10030,6 +10139,22 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount = 0
     $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount = 0
     $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount = 0
+    $fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRawCount = 0
+    $fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingDistinctCount = 0
+    $fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRecoveredCount = 0
+    $fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount = 0
+    $fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount = 0
+    $fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount = 0
+    $fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount = 0
+    $fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceUnresolvedCount = 0
+    $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRawCount = 0
+    $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingDistinctCount = 0
+    $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRecoveredCount = 0
+    $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingUnresolvedCount = 0
+    $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckRawCount = 0
+    $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckDistinctCount = 0
+    $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckRecoveredCount = 0
+    $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckUnresolvedCount = 0
     $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount = 0
     $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount = 0
     $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount = 0
@@ -10241,6 +10366,22 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount
         $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount
         $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount
+        $fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRawCount += [int]$runDto.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRawCount
+        $fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingDistinctCount += [int]$runDto.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingDistinctCount
+        $fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRecoveredCount += [int]$runDto.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRecoveredCount
+        $fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount += [int]$runDto.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount
+        $fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount += [int]$runDto.fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount
+        $fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount += [int]$runDto.fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount
+        $fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount += [int]$runDto.fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount
+        $fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceUnresolvedCount += [int]$runDto.fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceUnresolvedCount
+        $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRawCount += [int]$runDto.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRawCount
+        $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingDistinctCount += [int]$runDto.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingDistinctCount
+        $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRecoveredCount += [int]$runDto.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRecoveredCount
+        $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingUnresolvedCount += [int]$runDto.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingUnresolvedCount
+        $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckRawCount += [int]$runDto.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckRawCount
+        $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckDistinctCount += [int]$runDto.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckDistinctCount
+        $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckRecoveredCount += [int]$runDto.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckRecoveredCount
+        $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckUnresolvedCount += [int]$runDto.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckUnresolvedCount
         $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount += [int]$runDto.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount
         $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount += [int]$runDto.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount
         $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount += [int]$runDto.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount
@@ -10487,6 +10628,30 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     else {
         'none'
     }
+    $fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingVerdict = if (
+        $fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingVerdict -eq 'fail' }).Count -gt 0) {
+        'fail'
+    }
+    elseif ($fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingDistinctCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingVerdict -eq 'pass' }).Count -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
+    }
+    $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffVerdict = if (
+        $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingUnresolvedCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffVerdict -eq 'fail' }).Count -gt 0) {
+        'fail'
+    }
+    elseif ($fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingDistinctCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffVerdict -eq 'pass' }).Count -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
+    }
     $runtimeUnlockRetryDispatchZeroOfferSuccessorVerdict = if (
         $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedUnresolvedCount -gt 0 -or
         @($runDtos | Where-Object { [string]$_.runtimeUnlockRetryDispatchZeroOfferSuccessorVerdict -eq 'fail' }).Count -gt 0) {
@@ -10633,6 +10798,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("transfer_evidence_status={0}" -f $transferEvidenceStatus),
         ("runtime_correctness_verdict={0}" -f $runtimeCorrectnessVerdict),
         ("runtime_failure_candidate={0}" -f $runtimeFailureCandidate),
+        ("acceptance_failure_class={0}" -f $acceptanceFailureClass),
         ("terminal_completed_before_fault={0}" -f ($(if ($terminalCompletedBeforeFault) { 1 } else { 0 }))),
         ("fault_injected={0}" -f ($(if ($faultInjectedBeforeTerminal) { 1 } else { 0 }))),
         ("fault_action_claimed={0}" -f ($(if ($faultActionClaimed) { 1 } else { 0 }))),
@@ -10813,6 +10979,24 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_distinct_count={0}" -f $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount),
         ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_recovered_count={0}" -f $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount),
         ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_unresolved_count={0}" -f $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_raw_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRawCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_distinct_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingDistinctCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_recovered_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRecoveredCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_unresolved_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_verdict={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingVerdict),
+        ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count={0}" -f $fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount),
+        ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count={0}" -f $fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount),
+        ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count={0}" -f $fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount),
+        ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_unresolved_count={0}" -f $fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceUnresolvedCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_raw_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRawCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingDistinctCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRecoveredCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_unresolved_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingUnresolvedCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_verdict={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffVerdict),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_raw_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckRawCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_distinct_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckDistinctCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_recovered_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckRecoveredCount),
+        ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_unresolved_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckUnresolvedCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_rejected_raw_count={0}" -f $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_rejected_distinct_count={0}" -f $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_rejected_recovered_count={0}" -f $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount),
@@ -11205,6 +11389,24 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_distinct_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_recovered_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_unresolved_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount)
+        $textLines += ("{0}.filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_raw_count={1}" -f $prefix, $result.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRawCount)
+        $textLines += ("{0}.filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_distinct_count={1}" -f $prefix, $result.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingDistinctCount)
+        $textLines += ("{0}.filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_recovered_count={1}" -f $prefix, $result.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRecoveredCount)
+        $textLines += ("{0}.filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_unresolved_count={1}" -f $prefix, $result.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount)
+        $textLines += ("{0}.filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_verdict={1}" -f $prefix, $result.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingVerdict)
+        $textLines += ("{0}.filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count={1}" -f $prefix, $result.fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount)
+        $textLines += ("{0}.filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count={1}" -f $prefix, $result.fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount)
+        $textLines += ("{0}.filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count={1}" -f $prefix, $result.fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount)
+        $textLines += ("{0}.filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_unresolved_count={1}" -f $prefix, $result.fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceUnresolvedCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_raw_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRawCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_distinct_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingDistinctCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_recovered_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRecoveredCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_unresolved_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingUnresolvedCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_verdict={1}" -f $prefix, $result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffVerdict)
+        $textLines += ("{0}.filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_raw_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckRawCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_distinct_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckDistinctCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_recovered_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckRecoveredCount)
+        $textLines += ("{0}.filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_unresolved_count={1}" -f $prefix, $result.fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckUnresolvedCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_zero_offer_successor_rejected_raw_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_zero_offer_successor_rejected_distinct_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_zero_offer_successor_rejected_recovered_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount)
@@ -11372,6 +11574,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         transferEvidenceStatus = $transferEvidenceStatus
         runtimeCorrectnessVerdict = $runtimeCorrectnessVerdict
         runtimeFailureCandidate = $runtimeFailureCandidate
+        acceptanceFailureClass = $acceptanceFailureClass
         terminalCompletedBeforeFault = $terminalCompletedBeforeFault
         faultInjected = $faultInjectedBeforeTerminal
         faultActionClaimed = $faultActionClaimed
@@ -11551,6 +11754,24 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount = $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount
         runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount = $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount
         runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount = $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount
+        fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRawCount = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRawCount
+        fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingDistinctCount = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingDistinctCount
+        fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRecoveredCount = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRecoveredCount
+        fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount
+        fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingVerdict = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingVerdict
+        fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount = $fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount
+        fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount = $fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount
+        fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount = $fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount
+        fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceUnresolvedCount = $fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceUnresolvedCount
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRawCount = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRawCount
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingDistinctCount = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingDistinctCount
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRecoveredCount = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRecoveredCount
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingUnresolvedCount = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingUnresolvedCount
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffVerdict = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffVerdict
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckRawCount = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckRawCount
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckDistinctCount = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckDistinctCount
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckRecoveredCount = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckRecoveredCount
+        fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckUnresolvedCount = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckUnresolvedCount
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount = $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount = $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount = $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount

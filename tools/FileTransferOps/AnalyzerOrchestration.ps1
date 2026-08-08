@@ -1402,6 +1402,33 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_outbound_sparse_worker_handoff_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_fallback_checkpoint_lifecycle_advanced') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_fallback_checkpoint_invalidated') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_leg_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_data_session_recreated') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_transport_epoch_adopted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_leg_transport_epoch_adopted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_terminal') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_epoch_terminal') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_terminalized_by_peer_down') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_terminalized_by_session_end') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_committed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_frontier_request_receive_dispatch_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_frontier_request_ignored_obsolete') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_frontier_request_advanced_remote_frontier') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_frontier_request_receive_dispatch_staged') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_frontier_request_receive_dispatch_coalesced') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_fallback_checkpoint_frontier_request_hold_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_fallback_checkpoint_frontier_request_recheck_issued') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_fallback_checkpoint_frontier_request_recheck_applied') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_frontier_repair_authority_granted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_frontier_repair_dispatched') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_frontier_repair_progress_observed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_frontier_repair_contract_settled') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_frontier_repair_cleared') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_pairing_committed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_paired_release_reserved') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_paired_release_consumed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_yield_blocked_by_frontier_obligation') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_zero_credit_breaker') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_checkpoint_requested') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_clean_fallback_checkpoint_requested') +
@@ -1631,6 +1658,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
             -Action {
                 Get-FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffCorrelation `
+                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents
+            }
+    $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof =
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'fallback_frontier_checkpoint_acceptance_recheck' `
+            -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
+            -Action {
+                Get-FileTransferFallbackFrontierCheckpointAcceptanceRecheckCorrelation `
                     -Events $runtimeUnlockRegularV4RecoveryOrderedEvents
             }
     [object[]]$legacyRuntimeUnlockRegularV4RecoveryLeaseEvents = @(
@@ -3109,6 +3144,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Reason = $candidateRecord.Reason
         }) | Out-Null
     }
+    foreach ($candidateRecord in @($fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.UnresolvedCandidateRecords)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing'
+            Event = $candidateRecord.Event
+            Reason = $candidateRecord.Reason
+        }) | Out-Null
+    }
     foreach ($candidateRecord in @($fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCandidateRecords)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'paired_fallback_tail_yield_missing'
@@ -3187,6 +3229,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.UnresolvedCount -gt 0 -or
         $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.UnresolvedCount -gt 0 -or
         $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.UnresolvedCount -gt 0 -or
+        $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.UnresolvedCount -gt 0 -or
         $fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedUnresolvedCount -gt 0 -or
@@ -3261,6 +3304,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'filetransfer_receive_recovery_completed_proven_successor_missing',
                 'filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing',
                 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing',
+                'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing',
                 'runtime_unlock_regular_v4_recovery_lease_not_issued',
                 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted',
                 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved',
@@ -3362,6 +3406,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'filetransfer_receive_recovery_completed_proven_successor_missing',
             'filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing',
             'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing',
+            'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing',
             'filetransfer_route_transition_draining_transport_grace_terminalization',
             'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing',
             'filetransfer_route_transition_incomplete',
@@ -3639,6 +3684,15 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_distinct_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.DeliveredPeerResponseRecheckDistinctCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_recovered_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.DeliveredPeerResponseRecheckRecoveredCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_unresolved_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.DeliveredPeerResponseRecheckUnresolvedCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_raw_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.RawCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_distinct_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.DistinctCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_recovered_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.RecoveredCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_unresolved_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.UnresolvedCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_verdict={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.Verdict),
+        ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRawCount),
+        ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestDistinctCount),
+        ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRecoveredCount),
+        ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_unresolved_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestUnresolvedCount),
         ("paired_fallback_tail_yield_missing_raw_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.RawCount),
         ("paired_fallback_tail_yield_missing_distinct_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.DistinctCount),
         ("paired_fallback_tail_yield_missing_recovered_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.RecoveredCount),
@@ -4069,6 +4123,15 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_distinct_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.DeliveredPeerResponseRecheckDistinctCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_recovered_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.DeliveredPeerResponseRecheckRecoveredCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_unresolved_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.DeliveredPeerResponseRecheckUnresolvedCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_raw_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.RawCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_distinct_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.DistinctCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_recovered_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.RecoveredCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_unresolved_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.UnresolvedCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_verdict={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.Verdict),
+        ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRawCount),
+        ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestDistinctCount),
+        ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRecoveredCount),
+        ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_unresolved_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestUnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RecoveredCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_unresolved_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.UnresolvedCount),
@@ -4478,6 +4541,15 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_distinct_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.DeliveredPeerResponseRecheckDistinctCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_recovered_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.DeliveredPeerResponseRecheckRecoveredCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_unresolved_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.DeliveredPeerResponseRecheckUnresolvedCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_raw_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.RawCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_distinct_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.DistinctCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_recovered_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.RecoveredCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_unresolved_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.UnresolvedCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_verdict={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.Verdict),
+        ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRawCount),
+        ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestDistinctCount),
+        ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRecoveredCount),
+        ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_unresolved_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestUnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RecoveredCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_unresolved_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.UnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_issuance_verdict={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.Verdict),
@@ -4871,6 +4943,15 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_distinct_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.DeliveredPeerResponseRecheckDistinctCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_recovered_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.DeliveredPeerResponseRecheckRecoveredCount),
         ("filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_unresolved_count={0}" -f $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.DeliveredPeerResponseRecheckUnresolvedCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_raw_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.RawCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_distinct_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.DistinctCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_recovered_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.RecoveredCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_unresolved_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.UnresolvedCount),
+        ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_verdict={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.Verdict),
+        ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRawCount),
+        ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestDistinctCount),
+        ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRecoveredCount),
+        ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_unresolved_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestUnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RecoveredCount),
@@ -5294,6 +5375,15 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_distinct_count = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.DeliveredPeerResponseRecheckDistinctCount
         filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_recovered_count = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.DeliveredPeerResponseRecheckRecoveredCount
         filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_unresolved_count = $fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.DeliveredPeerResponseRecheckUnresolvedCount
+        filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_raw_count = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.RawCount
+        filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_distinct_count = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.DistinctCount
+        filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_recovered_count = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.RecoveredCount
+        filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_unresolved_count = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.UnresolvedCount
+        filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_verdict = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.Verdict
+        filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRawCount
+        filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestDistinctCount
+        filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRecoveredCount
+        filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_unresolved_count = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestUnresolvedCount
         paired_fallback_tail_yield_missing_raw_count = $fallbackTailFailedYieldQuiescentSuccessorProof.RawCount
         paired_fallback_tail_yield_missing_distinct_count = $fallbackTailFailedYieldQuiescentSuccessorProof.DistinctCount
         paired_fallback_tail_yield_missing_recovered_count = $fallbackTailFailedYieldQuiescentSuccessorProof.RecoveredCount

@@ -663,6 +663,111 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
     }
 
     [Fact]
+    public async Task RunFileTransferRouteAcceptance_FallbackFrontierCheckpointAcceptanceRecheckCountsReachScenarioAndRootSummaries()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string scenario = "regular-v4-live-activation-off-on-off-256mb";
+        const string candidate = "filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing";
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-fallback-frontier-checkpoint-acceptance-recheck-summary-propagation");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment(
+                "phase5-fallback-frontier-checkpoint-acceptance-recheck-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_FALLBACK_FRONTIER_CHECKPOINT_ACCEPTANCE_RECHECK_SUMMARY_FIXTURE"] = "1";
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ScenarioName", scenario,
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Expected fake checkpoint-acceptance recheck propagation run to pass.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+
+            var evidence = ReadArtifactReport(Path.Combine(runRoot, scenario), "filetransfer-operator-verdict.txt");
+            Assert.Equal("7", evidence["filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_raw_count"]);
+            Assert.Equal("1", evidence["filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_distinct_count"]);
+            Assert.Equal("0", evidence["filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_recovered_count"]);
+            Assert.Equal("1", evidence["filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_unresolved_count"]);
+            Assert.Equal("fail", evidence["filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_verdict"]);
+            Assert.Equal("7", evidence["filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count"]);
+            Assert.Equal("1", evidence["filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count"]);
+            Assert.Equal("0", evidence["filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count"]);
+            Assert.Equal("1", evidence["filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_unresolved_count"]);
+            Assert.Equal("1", evidence["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_recovered_count"]);
+            Assert.Equal("0", evidence["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_unresolved_count"]);
+            Assert.Equal("1", evidence["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_recovered_count"]);
+            Assert.Equal("0", evidence["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_unresolved_count"]);
+
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal(candidate, summary["runtime_failure_candidate"]);
+            Assert.Equal("route_runtime", summary["acceptance_failure_class"]);
+            Assert.Equal("fail", summary["runtime_correctness_verdict"]);
+            Assert.Equal("route_runtime", summary["semantic_failure_domain"]);
+            Assert.Equal("7", summary["filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_raw_count"]);
+            Assert.Equal("1", summary["filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_unresolved_count"]);
+            Assert.Equal("fail", summary["filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_verdict"]);
+            Assert.Equal("7", summary["filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count"]);
+            Assert.Equal("1", summary["filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_unresolved_count"]);
+            Assert.Equal("1", summary["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_recovered_count"]);
+            Assert.Equal("0", summary["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_unresolved_count"]);
+            Assert.Equal("pass", summary["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_verdict"]);
+            Assert.Equal("1", summary["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_recovered_count"]);
+            Assert.Equal("0", summary["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_unresolved_count"]);
+            Assert.Equal(candidate, summary[$"{scenario}.runtime_failure_candidate"]);
+            Assert.Equal("route_runtime", summary[$"{scenario}.acceptance_failure_class"]);
+            Assert.Equal("fail", summary[$"{scenario}.runtime_correctness_verdict"]);
+            Assert.Equal("route_runtime", summary[$"{scenario}.semantic_failure_domain"]);
+            Assert.Equal("1", summary[$"{scenario}.filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_unresolved_count"]);
+            Assert.Equal("1", summary[$"{scenario}.filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_unresolved_count"]);
+
+            using var summaryJson = JsonDocument.Parse(
+                await File.ReadAllTextAsync(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.json")));
+            var root = summaryJson.RootElement;
+            Assert.Equal(candidate, root.GetProperty("runtimeFailureCandidate").GetString());
+            Assert.Equal("route_runtime", root.GetProperty("acceptanceFailureClass").GetString());
+            Assert.Equal("fail", root.GetProperty("runtimeCorrectnessVerdict").GetString());
+            Assert.Equal("route_runtime", root.GetProperty("semanticFailureDomain").GetString());
+            Assert.Equal(7, root.GetProperty("fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRawCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount").GetInt32());
+            Assert.Equal("fail", root.GetProperty("fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingVerdict").GetString());
+            Assert.Equal(7, root.GetProperty("fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceUnresolvedCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRecoveredCount").GetInt32());
+            Assert.Equal(0, root.GetProperty("fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingUnresolvedCount").GetInt32());
+            Assert.Equal("pass", root.GetProperty("fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffVerdict").GetString());
+            Assert.Equal(1, root.GetProperty("fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckRecoveredCount").GetInt32());
+            Assert.Equal(0, root.GetProperty("fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffDeliveredPeerResponseRecheckUnresolvedCount").GetInt32());
+
+            var run = Assert.Single(root.GetProperty("runs").EnumerateArray());
+            Assert.Equal(candidate, run.GetProperty("runtimeFailureCandidate").GetString());
+            Assert.Equal("route_runtime", run.GetProperty("acceptanceFailureClass").GetString());
+            Assert.Equal("fail", run.GetProperty("runtimeCorrectnessVerdict").GetString());
+            Assert.Equal("route_runtime", run.GetProperty("semanticFailureDomain").GetString());
+            Assert.Equal(7, run.GetProperty("fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRawCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceUnresolvedCount").GetInt32());
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
     [Trait("Category", "Smoke")]
     public async Task RunFileTransferRouteAcceptance_Phase5RegularActivationFailsTerminalBeforeFallbackSwitchOff()
     {

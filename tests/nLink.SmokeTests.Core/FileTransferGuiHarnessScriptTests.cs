@@ -3294,6 +3294,253 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Theory]
+    [InlineData("unresolved", true)]
+    [InlineData("recovered", false)]
+    [InlineData("mutated_duplicate", false)]
+    [InlineData("correlation_alias", false)]
+    [InlineData("cross_checkpoint", false)]
+    [InlineData("scope_mutation", true)]
+    [InlineData("settlement_mutation", true)]
+    [InlineData("pair_mutation", true)]
+    [InlineData("idempotent_recheck", false)]
+    [InlineData("incoherent_recheck", true)]
+    [InlineData("reservation_only", true)]
+    [InlineData("wrong_recheck_order", true)]
+    [InlineData("production_repair_scope", false)]
+    [InlineData("stale_scope_callback", true)]
+    [InlineData("settled_before_acceptance", false)]
+    [InlineData("advanced_before_acceptance", false)]
+    [InlineData("settled_before_rejection", false)]
+    [InlineData("wrong_settlement_progress_order", true)]
+    public async Task GuiSmokeFailureClassification_CheckpointAcceptanceFrontierRecheckUsesExactIndexedFastPath(
+        string scenario,
+        bool expectMissing)
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFileTransferFailureClassificationResult", "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            function Test-TunaGuiBridgeBootstrapNotReadyEvidence { return $false }
+            function Test-TunaGuiLatestFallbackFrontierRequestDispatchMissing { return $false }
+            function Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing { return $false }
+            function Test-TunaGuiLogLinesContain { return $false }
+            function Get-TunaGuiReadinessStateAfterBookmark {
+                return [pscustomobject]@{ ListenerUnavailable = $false; ListenerReady = $false; TunaActive = $false }
+            }
+            function Resolve-TunaGuiFailureClassification {
+                param($ErrorMessage, $HistoricalPhase, $HistoricalReason)
+                return [pscustomobject]@{ Phase = $HistoricalPhase; Reason = $HistoricalReason }
+            }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-checkpoint-frontier-recheck-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                $scope = 'session_id=sess; transfer_id=transfer; direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; route_publication_generation=3; route_commit_generation=0; data_session_identity=data:1; data_session_generation=1'
+                $peerScope = 'session_id=sess; transfer_id=transfer; direction=inbound; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; route_publication_generation=3; route_commit_generation=0'
+                $lines = @(
+                    "event=filetransfer_receive_recovery_operation_issued; $scope; receive_recovery_operation_authority_id=recovery; receive_recovery_operation_generation=3; checkpoint_request_id=(none); log_writer_id=writer",
+                    'event=filetransfer_receive_recovery_fallback_checkpoint_bound; session_id=sess; transfer_id=transfer; direction=outbound; recovery_operation_authority_id=recovery; recovery_operation_generation=3; effective_checkpoint_request_id=checkpoint; checkpoint_binding_generation=1; checkpoint_binding_state=pending; frame_fingerprint=checkpoint-frame; transport_epoch=1; log_writer_id=writer',
+                    "event=filetransfer_fallback_frontier_repair_authority_granted; $peerScope; authority_id=peer-78; predecessor_authority_id=peer-77; repair_generation=87; frontier_chunk_index=2151; range_count=2; source_kind=ReceiverRequest; primary_protocol_repair_request_id=request-78; primary_request_correlation_id=correlation-78; log_writer_id=peer-writer",
+                    "event=filetransfer_v6_frontier_request_receive_dispatch_rejected; $scope; checkpoint_request_id=checkpoint; repair_request_id=request-78; request_correlation_id=correlation-78; first_start_chunk_index=2151; first_chunk_count=3; range_count=2; received_transport=regular_nkn; decision_reason=checkpoint_pending_frontier_request; log_writer_id=writer",
+                    "event=filetransfer_fallback_frontier_repair_authority_granted; $peerScope; authority_id=peer-79; predecessor_authority_id=peer-78; repair_generation=88; frontier_chunk_index=2151; range_count=2; source_kind=ReceiverRequest; primary_protocol_repair_request_id=request-79; primary_request_correlation_id=correlation-79; log_writer_id=peer-writer",
+                    "event=filetransfer_v6_frontier_request_receive_dispatch_rejected; $scope; checkpoint_request_id=checkpoint; repair_request_id=request-79; request_correlation_id=correlation-79; first_start_chunk_index=2151; first_chunk_count=3; range_count=2; received_transport=regular_nkn; decision_reason=checkpoint_pending_frontier_request; log_writer_id=writer",
+                    "event=filetransfer_v6_frontier_request_receive_dispatch_rejected; $scope; checkpoint_request_id=checkpoint; repair_request_id=request-79; request_correlation_id=correlation-79; first_start_chunk_index=2151; first_chunk_count=3; range_count=2; received_transport=regular_nkn; decision_reason=checkpoint_pending_frontier_request; log_writer_id=writer",
+                    "event=filetransfer_fallback_frontier_repair_authority_granted; $peerScope; authority_id=peer-80; predecessor_authority_id=peer-79; repair_generation=89; frontier_chunk_index=2151; range_count=2; source_kind=ReceiverRequest; primary_protocol_repair_request_id=request-80; primary_request_correlation_id=correlation-80; log_writer_id=peer-writer",
+                    "event=filetransfer_v6_frontier_request_receive_dispatch_rejected; $scope; checkpoint_request_id=checkpoint; repair_request_id=request-80; request_correlation_id=correlation-80; first_start_chunk_index=2151; first_chunk_count=3; range_count=2; received_transport=regular_nkn; decision_reason=checkpoint_pending_frontier_request; log_writer_id=writer",
+                    "event=filetransfer_v6_frontier_request_receive_dispatch_rejected; $scope; checkpoint_request_id=checkpoint; repair_request_id=request-80; request_correlation_id=correlation-80; first_start_chunk_index=2151; first_chunk_count=3; range_count=2; received_transport=regular_nkn; decision_reason=checkpoint_pending_frontier_request; log_writer_id=writer",
+                    "event=filetransfer_fallback_frontier_repair_authority_granted; $peerScope; authority_id=peer-81; predecessor_authority_id=peer-80; repair_generation=90; frontier_chunk_index=2151; range_count=2; source_kind=ReceiverRequest; primary_protocol_repair_request_id=request-81; primary_request_correlation_id=correlation-81; log_writer_id=peer-writer",
+                    "event=filetransfer_receive_recovery_fallback_checkpoint_frontier_request_hold_decided; $scope; recovery_operation_authority_id=recovery; recovery_operation_generation=3; effective_checkpoint_request_id=checkpoint; checkpoint_binding_generation=1; checkpoint_binding_state=pending; checkpoint_frame_fingerprint=checkpoint-frame; repair_request_id=request-81; request_correlation_id=correlation-81; range_fingerprint=range-81; frontier_frame_fingerprint=frontier-frame-81; hold_generation=4; dispatch_path=NativeV6; received_transport=regular_nkn; status=accepted; outcome=held; log_writer_id=writer",
+                    "event=filetransfer_v6_frontier_request_receive_dispatch_rejected; $scope; checkpoint_request_id=checkpoint; repair_request_id=request-81; request_correlation_id=correlation-81; first_start_chunk_index=2151; first_chunk_count=3; range_count=2; received_transport=regular_nkn; decision_reason=checkpoint_pending_frontier_request; log_writer_id=writer",
+                    "event=filetransfer_v6_frontier_request_receive_dispatch_rejected; $scope; checkpoint_request_id=checkpoint; repair_request_id=request-81; request_correlation_id=correlation-81; first_start_chunk_index=2151; first_chunk_count=3; range_count=2; received_transport=regular_nkn; decision_reason=checkpoint_pending_frontier_request; log_writer_id=writer",
+                    'event=filetransfer_receive_recovery_fallback_checkpoint_lifecycle_advanced; session_id=sess; transfer_id=transfer; direction=outbound; recovery_operation_authority_id=recovery; recovery_operation_generation=3; effective_checkpoint_request_id=checkpoint; checkpoint_binding_generation=1; checkpoint_binding_state=accepted; frame_fingerprint=checkpoint-frame; transport_epoch=1; log_writer_id=writer',
+                    "event=filetransfer_fallback_tail_yield_blocked_by_frontier_obligation; $scope; checkpoint_request_id=(none); fallback_start_chunk_index=1878; committed_chunk_index=2151; highest_observed_chunk_index=2561; log_writer_id=writer"
+                )
+                $recoveryLines = @(
+                    "event=filetransfer_receive_recovery_fallback_checkpoint_frontier_request_recheck_issued; $scope; recovery_operation_authority_id=recovery; recovery_operation_generation=3; effective_checkpoint_request_id=checkpoint; checkpoint_binding_generation=1; checkpoint_binding_state=accepted; checkpoint_frame_fingerprint=checkpoint-frame; repair_request_id=request-81; request_correlation_id=correlation-81; range_fingerprint=range-81; frontier_frame_fingerprint=frontier-frame-81; hold_generation=4; recheck_generation=1; dispatch_path=NativeV6; received_transport=regular_nkn; status=issued; log_writer_id=writer",
+                    "event=filetransfer_fallback_frontier_repair_authority_granted; $scope; authority_id=repair; source_kind=PeerRequest; primary_protocol_repair_request_id=request-81; primary_request_correlation_id=correlation-81; range_fingerprint=range-81; frontier_chunk_index=2151; log_writer_id=writer",
+                    "event=filetransfer_receive_recovery_fallback_checkpoint_frontier_request_recheck_applied; $scope; recovery_operation_authority_id=recovery; recovery_operation_generation=3; effective_checkpoint_request_id=checkpoint; checkpoint_binding_generation=1; checkpoint_binding_state=accepted; checkpoint_frame_fingerprint=checkpoint-frame; repair_request_id=request-81; request_correlation_id=correlation-81; range_fingerprint=range-81; frontier_frame_fingerprint=frontier-frame-81; hold_generation=4; recheck_generation=1; dispatch_path=NativeV6; received_transport=regular_nkn; receipt_status=applied; decision_status=accepted; outcome=applied; log_writer_id=writer",
+                    "event=filetransfer_fallback_frontier_repair_dispatched; $scope; authority_id=repair; dispatch_observed=1; log_writer_id=writer",
+                    "event=filetransfer_fallback_frontier_repair_contract_settled; $scope; authority_id=repair; successor_authority_id=(none); settlement_outcome=ProgressObserved; dispatch_observed=1; log_writer_id=writer",
+                    "event=filetransfer_fallback_frontier_repair_progress_observed; $scope; authority_id=repair; previous_frontier_chunk_index=2151; current_frontier_chunk_index=2154; log_writer_id=writer",
+                    "event=filetransfer_fallback_tail_frontier_repair_cleared; $scope; previous_frontier_only_start_chunk_index=2151; committed_chunk=2154; highest_observed_chunk=2561; log_writer_id=writer",
+                    "event=filetransfer_fallback_tail_pairing_committed; $scope; authority_id=pair; yield_generation=1; pairing_generation=1; pair_key=pair-key; decision_status=Accepted; log_writer_id=writer",
+                    "event=filetransfer_fallback_tail_paired_release_reserved; $scope; authority_id=pair; yield_generation=1; pairing_generation=1; pair_key=pair-key; reservation_generation=1; retry_authority_id=retry; decision_status=Accepted; log_writer_id=writer",
+                    "event=filetransfer_fallback_tail_paired_release_consumed; $scope; authority_id=pair; yield_generation=1; pairing_generation=1; pair_key=pair-key; reservation_generation=1; retry_authority_id=retry; install_generation=1; decision_status=Accepted; log_writer_id=writer"
+                )
+                switch ('{{scenario}}') {
+                    'recovered' {
+                        $lines += $recoveryLines
+                    }
+                    'mutated_duplicate' {
+                        $mutated = $false
+                        $lines = @($lines | ForEach-Object {
+                            if (-not $mutated -and
+                                $_ -like '*event=filetransfer_v6_frontier_request_receive_dispatch_rejected*' -and
+                                $_ -like '*repair_request_id=request-79*') {
+                                $mutated = $true
+                                $_.Replace('first_chunk_count=3', 'first_chunk_count=4')
+                            }
+                            else { $_ }
+                        })
+                    }
+                    'correlation_alias' {
+                        $acceptedIndex = 0
+                        for (; $acceptedIndex -lt $lines.Count; $acceptedIndex++) {
+                            if ($lines[$acceptedIndex] -like '*checkpoint_binding_state=accepted*') { break }
+                        }
+                        $alias = @(
+                            "event=filetransfer_fallback_frontier_repair_authority_granted; $peerScope; authority_id=peer-alias; predecessor_authority_id=peer-81; repair_generation=91; frontier_chunk_index=2151; range_count=2; source_kind=ReceiverRequest; primary_protocol_repair_request_id=request-alias; primary_request_correlation_id=correlation-81; log_writer_id=peer-writer",
+                            "event=filetransfer_v6_frontier_request_receive_dispatch_rejected; $scope; checkpoint_request_id=checkpoint; repair_request_id=request-alias; request_correlation_id=correlation-81; first_start_chunk_index=2151; first_chunk_count=3; range_count=2; received_transport=regular_nkn; decision_reason=checkpoint_pending_frontier_request; log_writer_id=writer"
+                        )
+                        $lines = @($lines[0..($acceptedIndex - 1)] + $alias + $lines[$acceptedIndex..($lines.Count - 1)])
+                    }
+                    'cross_checkpoint' {
+                        $lines = @($lines | ForEach-Object {
+                            if ($_ -like '*checkpoint_binding_state=accepted*') {
+                                $_.Replace('effective_checkpoint_request_id=checkpoint', 'effective_checkpoint_request_id=other-checkpoint')
+                            }
+                            else { $_ }
+                        })
+                    }
+                    'scope_mutation' {
+                        $lines += @($recoveryLines | ForEach-Object {
+                            if ($_ -like '*source_kind=PeerRequest*') { $_.Replace('runtime_generation=3', 'runtime_generation=4') }
+                            else { $_ }
+                        })
+                    }
+                    'settlement_mutation' {
+                        $lines += @($recoveryLines | ForEach-Object {
+                            if ($_ -like '*repair_contract_settled*') {
+                                $_.Replace('settlement_outcome=ProgressObserved', 'settlement_outcome=Superseded').Replace('successor_authority_id=(none)', 'successor_authority_id=successor')
+                            }
+                            else { $_ }
+                        })
+                    }
+                    'pair_mutation' {
+                        $lines += @($recoveryLines | ForEach-Object {
+                            if ($_ -like '*paired_release_reserved*') { $_.Replace('pair_key=pair-key', 'pair_key=other-pair') }
+                            else { $_ }
+                        })
+                    }
+                    'idempotent_recheck' {
+                        $lines += @($recoveryLines | ForEach-Object {
+                            if ($_ -like '*frontier_request_recheck_applied*') {
+                                $_.Replace('receipt_status=applied', 'receipt_status=idempotent').Replace('decision_status=accepted', 'decision_status=idempotent').Replace('outcome=applied', 'outcome=idempotent')
+                            }
+                            else { $_ }
+                        })
+                    }
+                    'incoherent_recheck' {
+                        $lines += @($recoveryLines | ForEach-Object {
+                            if ($_ -like '*frontier_request_recheck_applied*') {
+                                $_.Replace('receipt_status=applied', 'receipt_status=idempotent')
+                            }
+                            else { $_ }
+                        })
+                    }
+                    'reservation_only' {
+                        $lines += @($recoveryLines | Where-Object { $_ -notlike '*paired_release_consumed*' })
+                    }
+                    'wrong_recheck_order' {
+                        $lines += @(
+                            $recoveryLines[0]
+                            $recoveryLines[2]
+                            $recoveryLines[1]
+                        ) + @($recoveryLines[3..($recoveryLines.Count - 1)])
+                    }
+                    'production_repair_scope' {
+                        $lines += @($recoveryLines | ForEach-Object {
+                            if ($_ -like '*filetransfer_fallback_frontier_repair_authority_granted*' -or
+                                $_ -like '*filetransfer_fallback_frontier_repair_dispatched*' -or
+                                $_ -like '*filetransfer_fallback_frontier_repair_progress_observed*' -or
+                                $_ -like '*filetransfer_fallback_frontier_repair_contract_settled*') {
+                                $_.Replace('; data_session_identity=data:1; data_session_generation=1', '')
+                            }
+                            else { $_ }
+                        })
+                    }
+                    'stale_scope_callback' {
+                        $mutatedScope = $scope.Replace('runtime_generation=3', 'runtime_generation=4')
+                        $lines += "event=filetransfer_runtime_started; $mutatedScope; log_writer_id=writer"
+                        $lines += $recoveryLines
+                    }
+                    'settled_before_acceptance' {
+                        $acceptedIndex = 0
+                        for (; $acceptedIndex -lt $lines.Count; $acceptedIndex++) {
+                            if ($lines[$acceptedIndex] -like '*checkpoint_binding_state=accepted*') { break }
+                        }
+                        $settled = "event=filetransfer_fallback_frontier_repair_contract_settled; $peerScope; authority_id=peer-81; successor_authority_id=peer-82; settlement_outcome=Superseded; log_writer_id=peer-writer"
+                        $lines = @($lines[0..($acceptedIndex - 1)] + $settled + $lines[$acceptedIndex..($lines.Count - 1)])
+                    }
+                    'advanced_before_acceptance' {
+                        $acceptedIndex = 0
+                        for (; $acceptedIndex -lt $lines.Count; $acceptedIndex++) {
+                            if ($lines[$acceptedIndex] -like '*checkpoint_binding_state=accepted*') { break }
+                        }
+                        $advanced = "event=filetransfer_v6_frontier_request_advanced_remote_frontier; $scope; repair_request_id=request-81; request_correlation_id=correlation-81; log_writer_id=writer"
+                        $lines = @($lines[0..($acceptedIndex - 1)] + $advanced + $lines[$acceptedIndex..($lines.Count - 1)])
+                    }
+                    'settled_before_rejection' {
+                        $peerGrantIndex = 0
+                        for (; $peerGrantIndex -lt $lines.Count; $peerGrantIndex++) {
+                            if ($lines[$peerGrantIndex] -like '*authority_id=peer-81*' -and
+                                $lines[$peerGrantIndex] -like '*source_kind=ReceiverRequest*') { break }
+                        }
+                        $settled = "event=filetransfer_fallback_frontier_repair_contract_settled; $peerScope; authority_id=peer-81; successor_authority_id=(none); settlement_outcome=ProgressObserved; log_writer_id=peer-writer"
+                        $lines = @($lines[0..$peerGrantIndex] + $settled + $lines[($peerGrantIndex + 1)..($lines.Count - 1)])
+                    }
+                    'wrong_settlement_progress_order' {
+                        $settlementIndex = 0
+                        for (; $settlementIndex -lt $recoveryLines.Count; $settlementIndex++) {
+                            if ($recoveryLines[$settlementIndex] -like '*repair_contract_settled*') { break }
+                        }
+                        $wrongOrder = @($recoveryLines)
+                        $wrongOrder[$settlementIndex] = $recoveryLines[$settlementIndex + 1]
+                        $wrongOrder[$settlementIndex + 1] = $recoveryLines[$settlementIndex]
+                        $lines += $wrongOrder
+                    }
+                }
+                $lines | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'evidence_enrichment_timeout; child_exit_code_unavailable' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ([bool]$result.FallbackFrontierCheckpointAcceptanceRecheckMissing -ne ${{expectMissing.ToString().ToLowerInvariant()}} -or
+                    [bool]$result.CheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptance -ne ${{expectMissing.ToString().ToLowerInvariant()}}) {
+                    throw "checkpoint frontier recheck scenario '{{scenario}}' mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+                if (${{expectMissing.ToString().ToLowerInvariant()}} -and
+                    ($result.Phase -ne 'route_runtime' -or
+                        $result.Reason -ne 'checkpoint_pending_peer_frontier_request_not_rechecked_after_exact_checkpoint_acceptance' -or
+                        $result.ClassificationSource -ne 'immutable_evidence_fallback_frontier_checkpoint_acceptance_recheck_index' -or
+                        [long]$result.EvidenceLineVisitCount -ne $lines.Count)) {
+                    throw "checkpoint frontier recheck precedence mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+                $explicit = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'failure_class=filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing' -RouteMode 'live-regular-activation-cycle'
+                if (-not $explicit.FallbackFrontierCheckpointAcceptanceRecheckMissing -or
+                    $explicit.Phase -ne 'route_runtime' -or
+                    $explicit.Reason -ne 'checkpoint_pending_peer_frontier_request_not_rechecked_after_exact_checkpoint_acceptance') {
+                    throw "checkpoint frontier explicit classification mismatch: $($explicit | ConvertTo-Json -Compress)"
+                }
+                Write-Output 'gui-checkpoint-frontier-recheck-fast-path-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"Checkpoint frontier-recheck GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-checkpoint-frontier-recheck-fast-path-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]
     [InlineData(true, true)]

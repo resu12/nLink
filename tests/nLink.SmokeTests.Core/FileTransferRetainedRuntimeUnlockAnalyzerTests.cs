@@ -274,16 +274,26 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             LogLine($"event=filetransfer_receive_recovery_operation_issued; {operationScope}"),
             LogLine($"event=filetransfer_receive_recovery_operation_execution_start_decided; {operationScope}; execution_state=Running"),
             LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_bound; {checkpointScope}; checkpoint_binding_state=pending"),
+            LogLine($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {operationScope}; decision_status=Held"),
             LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied; {checkpointScope}; checkpoint_delivery_generation=1; delivery_state=held; decision_status=accepted"),
             LogLine($"event=filetransfer_receive_recovery_operation_execution_receipt_applied; {operationScope}; execution_outcome=Completed"),
-            LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_delivery_resume_decided; {checkpointScope}; checkpoint_delivery_generation=1; outcome=accepted"),
-            LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied; {checkpointScope}; checkpoint_delivery_generation=1; delivery_state=delivered; decision_status=accepted"),
-            LogLine($"event=filetransfer_v6_regular_nkn_state_refresh_sent; session_id=sess_checkpoint_timeout; transfer_id=transfer_checkpoint_timeout; request_id=v6-regular-nkn-state-refresh:1; transport_epoch=1; log_writer_id=writer_checkpoint_timeout"),
-            LogLine("event=filetransfer_receive_recovery_operation_proof_decision_observed; " +
-                "session_id=sess_checkpoint_timeout; transfer_id=transfer_checkpoint_timeout; " +
-                "direction=outbound; recovery_operation_generation=3; " +
-                "decision_status=Accepted; log_writer_id=writer_checkpoint_timeout")
+            LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_delivery_resume_decided; {checkpointScope}; checkpoint_delivery_generation=1; outcome=accepted")
         };
+        var initialPhysicalSend = LogLine(
+            "event=filetransfer_v6_regular_nkn_state_refresh_sent; session_id=sess_checkpoint_timeout; " +
+            "transfer_id=transfer_checkpoint_timeout; request_id=v6-regular-nkn-state-refresh:1; " +
+            "transport_epoch=1; log_writer_id=writer_checkpoint_timeout");
+        var initialDelivered = LogLine(
+            $"event=filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied; {checkpointScope}; " +
+            "checkpoint_delivery_generation=1; delivery_state=delivered; decision_status=accepted");
+        messages.Add(initialDelivered);
+        messages.Add(initialPhysicalSend);
+        messages.Add(LogLine("event=filetransfer_receive_recovery_operation_proof_decision_observed; " +
+            "session_id=sess_checkpoint_timeout; transfer_id=transfer_checkpoint_timeout; " +
+            "direction=outbound; recovery_operation_generation=3; " +
+            "decision_status=Accepted; log_writer_id=writer_checkpoint_timeout"));
+        messages.Add(LogLine(
+            $"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {operationScope}; decision_status=Released"));
         for (var index = 0; index < 14; index++)
         {
             messages.Add(LogLine(
@@ -300,12 +310,11 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
                 "request_id=v6-regular-nkn-state-refresh:1; transport_epoch=1; " +
                 "log_writer_id=writer_checkpoint_timeout"));
             messages.Add(LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied; {checkpointScope}; checkpoint_delivery_generation=2; delivery_state=delivered; decision_status=accepted"));
-            messages.Add(LogLine("event=filetransfer_v6_receiver_state_received; " +
+            messages.Add(LogLine("event=filetransfer_v6_regular_nkn_state_refresh_received; " +
                 "session_id=sess_checkpoint_timeout; transfer_id=transfer_checkpoint_timeout; " +
-                "repair_request_id=v6-regular-nkn-state-refresh:1; " +
-                "log_writer_id=writer_checkpoint_timeout"));
+                "request_id=v6-regular-nkn-state-refresh:1; " +
+                "log_writer_id=writer_checkpoint_timeout_peer"));
             messages.Add(LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_lifecycle_advanced; {checkpointScope}; checkpoint_binding_state=accepted"));
-            messages.Add(LogLine($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {operationScope}; decision_status=Released"));
         }
 
         var result = await RunAnalyzeFixtureAsync(
@@ -462,6 +471,339 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             Assert.Equal("tuna_acceleration_answer_ack_timeout", verdict["first_proof_chain_failure_event"]);
             Assert.Equal(
                 "exact_source_answer_ack_not_delivered_to_responder_before_wire_deadline",
+                verdict["first_proof_chain_failure_reason"]);
+        }
+    }
+
+    [Theory]
+    [InlineData(false, false, false, false, false, "none")]
+    [InlineData(true, false, false, false, false, "none")]
+    [InlineData(false, true, false, false, false, "none")]
+    [InlineData(true, true, false, false, false, "none")]
+    [InlineData(false, true, true, false, false, "none")]
+    [InlineData(true, true, true, false, false, "none")]
+    [InlineData(false, true, false, true, false, "none")]
+    [InlineData(true, true, false, true, false, "none")]
+    [InlineData(false, false, false, false, true, "none")]
+    [InlineData(true, false, false, false, true, "none")]
+    [InlineData(false, false, false, false, false, "obsolete_before_acceptance")]
+    [InlineData(true, false, false, false, false, "obsolete_before_acceptance")]
+    [InlineData(false, false, false, false, false, "advanced_before_acceptance")]
+    [InlineData(true, false, false, false, false, "advanced_before_acceptance")]
+    [InlineData(false, false, false, false, false, "wrong_received_transport")]
+    [InlineData(true, false, false, false, false, "wrong_received_transport")]
+    [InlineData(false, true, false, false, false, "incoherent_receipt")]
+    [InlineData(true, true, false, false, false, "incoherent_receipt")]
+    [InlineData(false, true, false, false, false, "dispatch_not_observed")]
+    [InlineData(true, true, false, false, false, "dispatch_not_observed")]
+    [InlineData(false, true, false, false, false, "progress_before_dispatch")]
+    [InlineData(true, true, false, false, false, "progress_before_dispatch")]
+    [InlineData(false, true, false, false, false, "progress_before_settlement")]
+    [InlineData(true, true, false, false, false, "progress_before_settlement")]
+    [InlineData(false, true, false, false, false, "grant_after_applied")]
+    [InlineData(true, true, false, false, false, "grant_after_applied")]
+    [InlineData(false, true, false, false, false, "frontier_clear_mutated")]
+    [InlineData(true, true, false, false, false, "frontier_clear_mutated")]
+    [InlineData(false, true, false, false, false, "stale_consumption")]
+    [InlineData(true, true, false, false, false, "stale_consumption")]
+    [InlineData(false, true, false, false, false, "prepared_recovery")]
+    [InlineData(true, true, false, false, false, "prepared_recovery")]
+    [InlineData(false, true, false, false, false, "prepared_scope_mutated")]
+    [InlineData(true, true, false, false, false, "prepared_scope_mutated")]
+    [InlineData(false, true, false, false, false, "prepared_non_tuna")]
+    [InlineData(true, true, false, false, false, "prepared_non_tuna")]
+    public async Task AnalyzeRetained_FallbackFrontierCheckpointAcceptanceRecheck(
+        bool compact,
+        bool recovered,
+        bool scopeMutation,
+        bool successorSettlement,
+        bool settledBeforeAcceptance,
+        string invalidRecoveryProof)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string operationScope =
+            "session_id=sess_frontier_checkpoint; transfer_id=transfer_frontier_checkpoint; " +
+            "direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; " +
+            "live_route_epoch=2; route_publication_generation=3; route_commit_generation=0; " +
+            "runtime_generation=3; terminal_generation=0; leg_generation=3; " +
+            "transport_epoch=1; bridge_recovery_generation=1; checkpoint_request_id=(none); " +
+            "data_session_identity=data-session-1; data_session_generation=1; " +
+            "receive_recovery_operation_generation=3; " +
+            "receive_recovery_operation_authority_id=recovery-authority-3; " +
+            "log_writer_id=writer_frontier_checkpoint";
+        const string checkpointScope =
+            "session_id=sess_frontier_checkpoint; transfer_id=transfer_frontier_checkpoint; " +
+            "direction=outbound; recovery_operation_generation=3; " +
+            "recovery_operation_authority_id=recovery-authority-3; " +
+            "root_checkpoint_request_id=(none); root_checkpoint_generation=0; " +
+            "effective_checkpoint_request_id=v6-regular-nkn-state-refresh:1; " +
+            "effective_checkpoint_generation=1; " +
+            "checkpoint_binding_generation=1; frame_fingerprint=checkpoint-frame-1; " +
+            "transport_epoch=1; log_writer_id=writer_frontier_checkpoint";
+        var frontierScope =
+            "direction=outbound; session_id=sess_frontier_checkpoint; " +
+            "transfer_id=transfer_frontier_checkpoint; route=post_tuna_fallback_v6; " +
+            "protocol_version=6; live_route_epoch=2; runtime_generation=3; " +
+            "terminal_generation=0; leg_generation=3; transport_epoch=1; " +
+            "current_transport_epoch=1; bridge_recovery_generation=1; " +
+            "checkpoint_request_id=v6-regular-nkn-state-refresh:1; " +
+            "first_start_chunk_index=2151; first_chunk_count=3; range_count=2; " +
+            $"received_transport={(invalidRecoveryProof == "wrong_received_transport" ? "tuna" : "regular_nkn")}; " +
+            "log_writer_id=writer_frontier_checkpoint";
+        const string peerRepairScope =
+            "direction=inbound; session_id=sess_frontier_checkpoint; " +
+            "transfer_id=transfer_frontier_checkpoint; route=post_tuna_fallback_v6; " +
+            "protocol_version=6; live_route_epoch=2; runtime_generation=3; " +
+            "terminal_generation=0; leg_generation=3; transport_epoch=1; " +
+            "bridge_recovery_generation=1; route_publication_generation=3; " +
+            "route_commit_generation=0; checkpoint_request_id=(none); " +
+            "source_kind=ReceiverRequest; log_writer_id=writer_frontier_checkpoint_peer";
+        var messages = new List<string>
+        {
+            LogLine($"event=filetransfer_receive_recovery_operation_issued; {operationScope}"),
+            LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_bound; {checkpointScope}; checkpoint_binding_state=pending")
+        };
+        const string retainedRequestScope =
+            "session_id=sess_frontier_checkpoint; transfer_id=transfer_frontier_checkpoint; " +
+            "direction=outbound; recovery_operation_authority_id=recovery-authority-3; " +
+            "recovery_operation_generation=3; " +
+            "root_checkpoint_request_id=(none); root_checkpoint_generation=0; " +
+            "effective_checkpoint_request_id=v6-regular-nkn-state-refresh:1; " +
+            "effective_checkpoint_generation=1; " +
+            "checkpoint_binding_generation=1; checkpoint_frame_fingerprint=checkpoint-frame-1; " +
+            "repair_request_id=v6-frontier:2151:81; request_correlation_id=frontier-correlation-81; " +
+            "range_fingerprint=frontier-range-81; frontier_frame_fingerprint=frontier-frame-81; " +
+            "frontier_frame_type=filetransfer.frontier_request.v6; frontier_frame_transport_epoch=1; " +
+            "hold_generation=4; dispatch_path=NativeV6; received_transport=regular_nkn; " +
+            "receiving_data_session_identity=data-session-1; receiving_data_session_generation=1; " +
+            "route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; " +
+            "runtime_generation=3; route_publication_generation=3; route_commit_generation=0; terminal_generation=0; " +
+            "leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; " +
+            "data_session_identity=data-session-1; data_session_generation=1; " +
+            "log_writer_id=writer_frontier_checkpoint";
+        var requestCopies = new[]
+        {
+            (Request: 78, Copy: 1),
+            (Request: 79, Copy: 1),
+            (Request: 79, Copy: 2),
+            (Request: 80, Copy: 1),
+            (Request: 80, Copy: 2),
+            (Request: 81, Copy: 1),
+            (Request: 81, Copy: 2)
+        };
+        var installedPeerRequests = new HashSet<int>();
+        var previousPeerRepairAuthority = "peer-repair-root";
+        foreach (var request in requestCopies)
+        {
+            var requestId = $"v6-frontier:2151:{request.Request}";
+            var correlationId = $"frontier-correlation-{request.Request}";
+            if (installedPeerRequests.Add(request.Request))
+            {
+                var peerRepairAuthority = $"peer-repair-{request.Request}";
+                messages.Add(LogLine(
+                    $"event=filetransfer_fallback_frontier_repair_authority_granted; {peerRepairScope}; " +
+                    $"authority_id={peerRepairAuthority}; predecessor_authority_id={previousPeerRepairAuthority}; " +
+                    $"primary_protocol_repair_request_id={requestId}; primary_request_correlation_id={correlationId}; " +
+                    $"frontier_chunk_index=2151; range_count=2; range_fingerprint=frontier-range-{request.Request}"));
+                previousPeerRepairAuthority = peerRepairAuthority;
+            }
+            messages.Add(LogLine(
+                $"event=filetransfer_v6_frontier_request_receive_dispatch_rejected; {frontierScope}; " +
+                $"repair_request_id={requestId}; request_correlation_id={correlationId}; " +
+                "decision_reason=checkpoint_pending_frontier_request"));
+            if (recovered && request is { Request: 81, Copy: 1 })
+            {
+                messages.Add(LogLine(
+                    $"event=filetransfer_receive_recovery_fallback_checkpoint_frontier_request_hold_decided; {retainedRequestScope}; " +
+                    "checkpoint_binding_state=pending; status=accepted; outcome=held"));
+            }
+        }
+        if (invalidRecoveryProof is "obsolete_before_acceptance" or "advanced_before_acceptance")
+        {
+            var obsoleteEvent = invalidRecoveryProof == "obsolete_before_acceptance"
+                ? "filetransfer_v6_frontier_request_ignored_obsolete"
+                : "filetransfer_v6_frontier_request_advanced_remote_frontier";
+            messages.Add(LogLine(
+                $"event={obsoleteEvent}; session_id=sess_frontier_checkpoint; " +
+                "transfer_id=transfer_frontier_checkpoint; direction=outbound; " +
+                "repair_request_id=v6-frontier:2151:81; request_correlation_id=frontier-correlation-81; " +
+                "log_writer_id=writer_frontier_checkpoint"));
+        }
+        if (settledBeforeAcceptance)
+        {
+            messages.Add(LogLine(
+                "event=filetransfer_fallback_frontier_repair_contract_settled; " +
+                "session_id=sess_frontier_checkpoint; transfer_id=transfer_frontier_checkpoint; " +
+                "direction=inbound; authority_id=peer-repair-81; settlement_outcome=StaleRejected; " +
+                "successor_authority_id=(none); log_writer_id=writer_frontier_checkpoint_peer"));
+        }
+        messages.Add(LogLine(
+            $"event=filetransfer_receive_recovery_fallback_checkpoint_lifecycle_advanced; {checkpointScope}; " +
+            "checkpoint_binding_state=accepted"));
+        messages.Add(LogLine(
+            "event=filetransfer_fallback_tail_yield_blocked_by_frontier_obligation; " +
+            "session_id=sess_frontier_checkpoint; transfer_id=transfer_frontier_checkpoint; " +
+            "direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; " +
+            "live_route_epoch=2; leg_generation=3; transport_epoch=1; " +
+            "bridge_recovery_generation=1; checkpoint_request_id=(none); " +
+            "fallback_start_chunk_index=1878; committed_chunk_index=2151; " +
+            "highest_observed_chunk_index=2561; log_writer_id=writer_frontier_checkpoint"));
+        if (recovered)
+        {
+            messages.Add(LogLine(
+                $"event=filetransfer_receive_recovery_fallback_checkpoint_frontier_request_recheck_issued; {retainedRequestScope}; " +
+                "checkpoint_binding_state=accepted; recheck_generation=1; status=issued"));
+            var appliedReceipt = LogLine(
+                $"event=filetransfer_receive_recovery_fallback_checkpoint_frontier_request_recheck_applied; {retainedRequestScope}; " +
+                "checkpoint_binding_state=accepted; recheck_generation=1; " +
+                "receipt_status=applied; decision_status=accepted; " +
+                $"outcome={(invalidRecoveryProof == "incoherent_receipt" ? "idempotent" : "applied")}");
+            if (scopeMutation)
+            {
+                messages.Add(LogLine(
+                    "event=filetransfer_leg_started; session_id=sess_frontier_checkpoint; " +
+                    "transfer_id=transfer_frontier_checkpoint; direction=outbound; " +
+                    "route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; " +
+                    "runtime_generation=3; terminal_generation=0; leg_generation=4; " +
+                    "transport_epoch=1; bridge_recovery_generation=1; " +
+                    "log_writer_id=writer_frontier_checkpoint"));
+            }
+            const string repairScope =
+                "session_id=sess_frontier_checkpoint; transfer_id=transfer_frontier_checkpoint; " +
+                "direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; " +
+                "live_route_epoch=2; runtime_generation=3; terminal_generation=0; " +
+                "leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; " +
+                "route_publication_generation=3; route_commit_generation=0; checkpoint_request_id=(none); " +
+                "authority_id=rechecked-repair-1; frontier_chunk_index=2151; range_count=2; " +
+                "range_fingerprint=frontier-range-81; " +
+                "source_kind=PeerRequest; primary_protocol_repair_request_id=v6-frontier:2151:81; " +
+                "primary_request_correlation_id=frontier-correlation-81; " +
+                "log_writer_id=writer_frontier_checkpoint";
+            if (invalidRecoveryProof == "grant_after_applied")
+            {
+                messages.Add(appliedReceipt);
+            }
+            messages.Add(LogLine($"event=filetransfer_fallback_frontier_repair_authority_granted; {repairScope}"));
+            if (invalidRecoveryProof != "grant_after_applied")
+            {
+                messages.Add(appliedReceipt);
+            }
+            if (invalidRecoveryProof == "progress_before_dispatch")
+            {
+                messages.Add(LogLine(
+                    $"event=filetransfer_fallback_frontier_repair_progress_observed; {repairScope}; " +
+                    "previous_frontier_chunk_index=2151; current_frontier_chunk_index=2200"));
+            }
+            messages.Add(LogLine(
+                $"event=filetransfer_fallback_frontier_repair_dispatched; {repairScope}; " +
+                $"dispatch_observed={(invalidRecoveryProof == "dispatch_not_observed" ? 0 : 1)}"));
+            if (invalidRecoveryProof == "progress_before_settlement")
+            {
+                messages.Add(LogLine(
+                    $"event=filetransfer_fallback_frontier_repair_progress_observed; {repairScope}; " +
+                    "previous_frontier_chunk_index=2151; current_frontier_chunk_index=2200"));
+            }
+            messages.Add(LogLine(
+                $"event=filetransfer_fallback_frontier_repair_contract_settled; {repairScope}; " +
+                (successorSettlement
+                    ? "settlement_outcome=Superseded; successor_authority_id=rechecked-repair-2; dispatch_observed=1"
+                    : "settlement_outcome=ProgressObserved; successor_authority_id=(none); dispatch_observed=1")));
+            if (invalidRecoveryProof is not ("progress_before_dispatch" or "progress_before_settlement"))
+            {
+                messages.Add(LogLine(
+                    $"event=filetransfer_fallback_frontier_repair_progress_observed; {repairScope}; " +
+                    "previous_frontier_chunk_index=2151; current_frontier_chunk_index=2200"));
+            }
+            messages.Add(LogLine(
+                "event=filetransfer_fallback_tail_frontier_repair_cleared; " +
+                "session_id=sess_frontier_checkpoint; transfer_id=transfer_frontier_checkpoint; " +
+                "direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; " +
+                "live_route_epoch=2; leg_generation=3; transport_epoch=1; " +
+                $"previous_frontier_only_start_chunk_index={(invalidRecoveryProof == "frontier_clear_mutated" ? 2152 : 2151)}; " +
+                "committed_chunk=2200; " +
+                "log_writer_id=writer_frontier_checkpoint"));
+            const string releaseScope =
+                "session_id=sess_frontier_checkpoint; transfer_id=transfer_frontier_checkpoint; " +
+                "direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; " +
+                "live_route_epoch=2; runtime_generation=3; route_publication_generation=3; " +
+                "route_commit_generation=0; terminal_generation=0; leg_generation=3; " +
+                "transport_epoch=1; bridge_recovery_generation=1; checkpoint_request_id=(none); " +
+                "data_session_identity=data-session-1; data_session_generation=1; " +
+                "authority_id=paired-release-1; yield_generation=1; pairing_generation=1; " +
+                "pair_key=pair-key-1; " +
+                "decision_status=accepted; log_writer_id=writer_frontier_checkpoint";
+            if (invalidRecoveryProof.StartsWith("prepared_", StringComparison.Ordinal))
+            {
+                var preparedDataSessionIdentity = invalidRecoveryProof == "prepared_scope_mutated"
+                    ? "source_data_session_identity=data-session-2; "
+                    : string.Empty;
+                messages.Add(LogLine(
+                    "event=filetransfer_route_transition_prepared; " +
+                    "session_id=sess_frontier_checkpoint; transfer_id=transfer_frontier_checkpoint; direction=outbound; " +
+                    "source_route=post_tuna_fallback_v6; source_protocol_version=6; " +
+                    "source_live_route_epoch=2; source_runtime_generation=3; " +
+                    "source_route_publication_generation=3; source_route_commit_generation=0; " +
+                    "source_terminal_generation=0; source_leg_generation=3; source_transport_epoch=1; " +
+                    "source_bridge_recovery_generation=1; " +
+                    preparedDataSessionIdentity +
+                    "source_data_session_generation=1; target_route=file_tuna_v4; target_protocol_version=4; " +
+                    $"target_transport={(invalidRecoveryProof == "prepared_non_tuna" ? "regular_nkn" : "tuna")}; " +
+                    "decision_status=Idempotent; log_writer_id=writer_frontier_checkpoint"));
+            }
+            else
+            {
+                messages.Add(LogLine(
+                    $"event=filetransfer_fallback_tail_pairing_committed; {releaseScope}"));
+                messages.Add(LogLine(
+                    $"event=filetransfer_fallback_tail_paired_release_reserved; {releaseScope}; " +
+                    "reservation_generation=1; retry_authority_id=retry-authority-1"));
+                messages.Add(LogLine(
+                    $"event=filetransfer_fallback_tail_paired_release_consumed; {releaseScope}; " +
+                    $"reservation_generation={(invalidRecoveryProof == "stale_consumption" ? 2 : 1)}; " +
+                    "retry_authority_id=retry-authority-1; install_generation=1"));
+            }
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            messages,
+            [],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        var expectedIncident = !settledBeforeAcceptance &&
+            invalidRecoveryProof is not (
+                "obsolete_before_acceptance" or
+                "advanced_before_acceptance" or
+                "wrong_received_transport");
+        var expectedRecovered = expectedIncident && recovered && !scopeMutation && !successorSettlement &&
+            invalidRecoveryProof is "none" or "prepared_recovery";
+        Assert.Equal(expectedIncident ? "7" : "0", verdict["filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_raw_count"]);
+        Assert.Equal(expectedIncident ? "1" : "0", verdict["filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_distinct_count"]);
+        Assert.Equal(expectedRecovered ? "1" : "0", verdict["filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_recovered_count"]);
+        Assert.Equal(expectedIncident && !expectedRecovered ? "1" : "0", verdict["filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_unresolved_count"]);
+        Assert.Equal(expectedIncident ? "7" : "0", verdict["filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count"]);
+        if (expectedIncident && !expectedRecovered)
+        {
+            Assert.Equal(
+                "filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing",
+                verdict["first_proof_chain_failure_class"]);
+            Assert.Equal(
+                "filetransfer_fallback_tail_yield_blocked_by_frontier_obligation",
+                verdict["first_proof_chain_failure_event"]);
+            Assert.Equal(
+                "checkpoint_pending_peer_frontier_request_not_rechecked_after_exact_checkpoint_acceptance",
                 verdict["first_proof_chain_failure_reason"]);
         }
     }

@@ -4720,6 +4720,8 @@ function New-TunaGuiFileTransferFailureClassificationResult {
         RuntimeUnlockRetryCurrentListenerAdoptionMissing = $false
         RuntimeUnlockRetryCurrentListenerAdoptionLiveProjectionMissing = $false
         RuntimeUnlockRetryCurrentListenerAdoptionRestartExpired = $false
+        FallbackFrontierCheckpointAcceptanceRecheckMissing = $false
+        CheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptance = $false
         FallbackTailFailedYieldQuiescentSuccessorMissing = $false
         FallbackTailPeerProofBeforeLocalYieldNotRetained = $false
         FallbackTailPeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetained = $false
@@ -4816,6 +4818,12 @@ function Get-TunaGuiExplicitFailureClassification {
                     else {
                         'installed_fallback_retry_did_not_adopt_current_coordinator_scoped_listener'
                     }
+                }
+            }
+            'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing' {
+                return [pscustomobject]@{
+                    Phase = 'route_runtime'
+                    Reason = 'checkpoint_pending_peer_frontier_request_not_rechecked_after_exact_checkpoint_acceptance'
                 }
             }
             'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved' {
@@ -4991,6 +4999,12 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             else {
                 $explicitResult.RuntimeUnlockRetryCurrentListenerAdoptionRestartExpired = $true
             }
+        }
+        if ($ErrorMessage.IndexOf(
+                'failure_class=filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing',
+                [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $explicitResult.FallbackFrontierCheckpointAcceptanceRecheckMissing = $true
+            $explicitResult.CheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptance = $true
         }
         return $explicitResult
     }
@@ -7858,6 +7872,822 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         return [pscustomobject]@{ Unresolved = $false; LineVisits = $visits }
     }
 
+    function Get-TunaGuiFallbackFrontierCheckpointAcceptanceRecheckFailure {
+        param(
+            [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+        )
+
+        $states = @{}
+        $operations = @{}
+        $peerRepairs = @{}
+        $visits = 0L
+        $scopeFields = @(
+            'route', 'protocol_version', 'live_route_epoch', 'runtime_generation',
+            'route_publication_generation', 'route_commit_generation',
+            'terminal_generation', 'leg_generation', 'transport_epoch',
+            'bridge_recovery_generation', 'data_session_identity', 'data_session_generation')
+
+        function Get-TunaGuiCheckpointFrontierOperationKey {
+            param(
+                [AllowEmptyString()][string]$Writer,
+                [AllowEmptyString()][string]$SessionId,
+                [AllowEmptyString()][string]$TransferId,
+                [AllowEmptyString()][string]$Generation
+            )
+
+            if ([string]::IsNullOrWhiteSpace($Writer) -or
+                [string]::IsNullOrWhiteSpace($SessionId) -or
+                [string]::IsNullOrWhiteSpace($TransferId) -or
+                $Generation -notmatch '^[1-9][0-9]*$') {
+                return ''
+            }
+            return "$Writer|$SessionId|$TransferId|$Generation".ToLowerInvariant()
+        }
+
+        function Get-TunaGuiCheckpointFrontierScope {
+            param([Parameter(Mandatory = $true)][string]$Line)
+
+            $scope = @{}
+            foreach ($field in $scopeFields) {
+                $value = Get-TunaGuiLogLineFieldValue -Line $Line -Name $field
+                if ([string]::IsNullOrWhiteSpace($value)) { return $null }
+                $scope[$field] = $value
+            }
+            if ($scope.route -ne 'post_tuna_fallback_v6' -or $scope.protocol_version -ne '6' -or
+                $scope.live_route_epoch -notmatch '^[1-9][0-9]*$' -or
+                $scope.runtime_generation -notmatch '^[1-9][0-9]*$' -or
+                $scope.route_publication_generation -notmatch '^[1-9][0-9]*$' -or
+                $scope.route_commit_generation -notmatch '^[0-9]+$' -or
+                $scope.terminal_generation -notmatch '^[0-9]+$' -or
+                $scope.leg_generation -notmatch '^[1-9][0-9]*$' -or
+                $scope.transport_epoch -notmatch '^[1-9][0-9]*$' -or
+                $scope.bridge_recovery_generation -notmatch '^[1-9][0-9]*$' -or
+                $scope.data_session_identity -in @('(none)', 'none') -or
+                $scope.data_session_generation -notmatch '^[1-9][0-9]*$') {
+                return $null
+            }
+            return $scope
+        }
+
+        function Get-TunaGuiCheckpointFrontierStateKey {
+            param(
+                [AllowEmptyString()][string]$Writer,
+                [AllowEmptyString()][string]$SessionId,
+                [AllowEmptyString()][string]$TransferId,
+                [AllowEmptyString()][string]$CheckpointId
+            )
+
+            if ([string]::IsNullOrWhiteSpace($Writer) -or
+                [string]::IsNullOrWhiteSpace($SessionId) -or
+                [string]::IsNullOrWhiteSpace($TransferId) -or
+                [string]::IsNullOrWhiteSpace($CheckpointId) -or
+                $CheckpointId -in @('(none)', 'none')) {
+                return ''
+            }
+            return "$Writer|$SessionId|$TransferId|$CheckpointId".ToLowerInvariant()
+        }
+
+        function Test-TunaGuiCheckpointFrontierScope {
+            param(
+                [Parameter(Mandatory = $true)]$State,
+                [Parameter(Mandatory = $true)][string]$Line,
+                [switch]$RequireComplete
+            )
+
+            foreach ($field in $scopeFields) {
+                $expected = [string]$State.Scope[$field]
+                $actual = Get-TunaGuiLogLineFieldValue -Line $Line -Name $field
+                if ([string]::IsNullOrWhiteSpace($expected)) { return $false }
+                if ([string]::IsNullOrWhiteSpace($actual)) {
+                    if (-not $RequireComplete) { continue }
+                    return $false
+                }
+                if (-not [string]::Equals($expected, $actual, [System.StringComparison]::Ordinal)) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        function Test-TunaGuiCheckpointFrontierPreparedScope {
+            param(
+                [Parameter(Mandatory = $true)]$State,
+                [Parameter(Mandatory = $true)][string]$Line
+            )
+
+            $aliases = @{
+                route = 'source_route'; protocol_version = 'source_protocol_version'
+                live_route_epoch = 'source_live_route_epoch'; runtime_generation = 'source_runtime_generation'
+                route_publication_generation = 'source_route_publication_generation'
+                route_commit_generation = 'source_route_commit_generation'
+                terminal_generation = 'source_terminal_generation'; leg_generation = 'source_leg_generation'
+                transport_epoch = 'source_transport_epoch'
+                bridge_recovery_generation = 'source_bridge_recovery_generation'
+                data_session_identity = 'source_data_session_identity'
+                data_session_generation = 'source_data_session_generation'
+            }
+            foreach ($field in $scopeFields) {
+                $actual = Get-TunaGuiLogLineFieldValue -Line $Line -Name $aliases[$field]
+                if ($field -eq 'data_session_identity' -and [string]::IsNullOrWhiteSpace($actual)) {
+                    continue
+                }
+                if ($actual -ne [string]$State.Scope[$field]) {
+                    return $false
+                }
+            }
+            return (Get-TunaGuiLogLineFieldValue -Line $Line -Name 'target_route') -eq 'file_tuna_v4' -and
+                (Get-TunaGuiLogLineFieldValue -Line $Line -Name 'target_protocol_version') -eq '4' -and
+                (Get-TunaGuiLogLineFieldValue -Line $Line -Name 'target_transport') -eq 'tuna' -and
+                (Get-TunaGuiLogLineFieldValue -Line $Line -Name 'decision_status') -in @(
+                    'Prepared', 'Idempotent', 'prepared', 'idempotent')
+        }
+
+        foreach ($line in $Lines) {
+            $visits++
+            $eventName = Get-TunaGuiLogLineFieldValue -Line $line -Name 'event'
+            if ([string]::IsNullOrWhiteSpace($eventName)) { continue }
+
+            $writer = Get-TunaGuiLogLineFieldValue -Line $line -Name 'log_writer_id'
+            $sessionId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'session_id'
+            $transferId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'transfer_id'
+            $checkpointId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'effective_checkpoint_request_id'
+            if ([string]::IsNullOrWhiteSpace($checkpointId)) {
+                $checkpointId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'checkpoint_request_id'
+            }
+
+            if ($eventName -eq 'filetransfer_receive_recovery_operation_issued' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'direction') -eq 'outbound' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'route') -eq 'post_tuna_fallback_v6' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'protocol_version') -eq '6') {
+                $operationGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'receive_recovery_operation_generation'
+                $operationAuthority = Get-TunaGuiLogLineFieldValue -Line $line -Name 'receive_recovery_operation_authority_id'
+                $operationKey = Get-TunaGuiCheckpointFrontierOperationKey -Writer $writer -SessionId $sessionId `
+                    -TransferId $transferId -Generation $operationGeneration
+                $operationScope = Get-TunaGuiCheckpointFrontierScope -Line $line
+                if ([string]::IsNullOrWhiteSpace($operationKey) -or
+                    $operationAuthority -in @('', '(none)', 'none', '[redacted]', '(redacted)') -or
+                    $null -eq $operationScope) {
+                    continue
+                }
+                if ($operations.ContainsKey($operationKey)) {
+                    $existingOperation = $operations[$operationKey]
+                    if ($existingOperation.Authority -ne $operationAuthority) {
+                        $existingOperation.Ambiguous = $true
+                    }
+                    foreach ($field in $scopeFields) {
+                        if ([string]$existingOperation.Scope[$field] -ne [string]$operationScope[$field]) {
+                            $existingOperation.Ambiguous = $true
+                        }
+                    }
+                }
+                else {
+                    $operations[$operationKey] = [pscustomobject]@{
+                        Authority = $operationAuthority
+                        Generation = $operationGeneration
+                        Scope = $operationScope
+                        Ambiguous = $false
+                    }
+                }
+                continue
+            }
+
+            if ($eventName -eq 'filetransfer_fallback_frontier_repair_authority_granted' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'direction') -eq 'inbound' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_kind') -eq 'ReceiverRequest') {
+                $repairRequestId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'primary_protocol_repair_request_id'
+                $correlationId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'primary_request_correlation_id'
+                $peerAuthority = Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id'
+                $peerPredecessor = Get-TunaGuiLogLineFieldValue -Line $line -Name 'predecessor_authority_id'
+                $peerGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'repair_generation'
+                $peerFrontier = Get-TunaGuiLogLineFieldValue -Line $line -Name 'frontier_chunk_index'
+                $peerRangeCount = Get-TunaGuiLogLineFieldValue -Line $line -Name 'range_count'
+                $peerKey = "$sessionId|$transferId|$repairRequestId|$correlationId".ToLowerInvariant()
+                $peerValid = $repairRequestId -notin @('', '(none)', 'none') -and
+                    $correlationId -notin @('', '(none)', 'none') -and
+                    $peerAuthority -notin @('', '(none)', 'none') -and
+                    $peerGeneration -match '^[1-9][0-9]*$' -and
+                    $peerFrontier -match '^[0-9]+$' -and $peerRangeCount -match '^[1-9][0-9]*$'
+                foreach ($field in @(
+                        'route', 'protocol_version', 'live_route_epoch', 'runtime_generation',
+                        'route_publication_generation', 'route_commit_generation',
+                        'terminal_generation', 'leg_generation', 'transport_epoch',
+                        'bridge_recovery_generation')) {
+                    if ([string]::IsNullOrWhiteSpace((Get-TunaGuiLogLineFieldValue -Line $line -Name $field))) {
+                        $peerValid = $false
+                    }
+                }
+                if (-not $peerValid) { continue }
+                if ($peerRepairs.ContainsKey($peerKey)) {
+                    $existingPeer = $peerRepairs[$peerKey]
+                    if ($existingPeer.Writer -ne $writer -or $existingPeer.Authority -ne $peerAuthority -or
+                        $existingPeer.Predecessor -ne $peerPredecessor -or
+                        $existingPeer.Generation -ne $peerGeneration -or
+                        $existingPeer.Frontier -ne $peerFrontier -or
+                        $existingPeer.RangeCount -ne $peerRangeCount) {
+                        $existingPeer.Ambiguous = $true
+                    }
+                }
+                else {
+                    $peerScope = @{}
+                    foreach ($field in $scopeFields) {
+                        $peerScope[$field] = Get-TunaGuiLogLineFieldValue -Line $line -Name $field
+                    }
+                    $peerRepairs[$peerKey] = [pscustomobject]@{
+                        Writer = $writer; SessionId = $sessionId; TransferId = $transferId
+                        Authority = $peerAuthority; Predecessor = $peerPredecessor
+                        Generation = $peerGeneration; Frontier = $peerFrontier; RangeCount = $peerRangeCount
+                        Scope = $peerScope; Ambiguous = $false; Settled = $false
+                    }
+                }
+                continue
+            }
+
+            if ($eventName -eq 'filetransfer_receive_recovery_fallback_checkpoint_bound' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'direction') -eq 'outbound' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'checkpoint_binding_state') -eq 'pending') {
+                $key = Get-TunaGuiCheckpointFrontierStateKey -Writer $writer -SessionId $sessionId `
+                    -TransferId $transferId -CheckpointId $checkpointId
+                if ([string]::IsNullOrWhiteSpace($key)) { continue }
+                foreach ($existingState in @($states.Values | Where-Object {
+                            $_.Writer -eq $writer -and $_.SessionId -eq $sessionId -and
+                            $_.TransferId -eq $transferId -and -not $_.Recovered -and
+                            $_.CheckpointId -ne $checkpointId
+                        })) {
+                    if ($existingState.TailBlocked) { $existingState.RecoveryInvalid = $true }
+                    else { $existingState.Invalid = $true }
+                }
+                $bindingGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'checkpoint_binding_generation'
+                $checkpointFingerprint = Get-TunaGuiLogLineFieldValue -Line $line -Name 'frame_fingerprint'
+                $operationGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'recovery_operation_generation'
+                $bindingAuthority = Get-TunaGuiLogLineFieldValue -Line $line -Name 'recovery_operation_authority_id'
+                $operationKey = Get-TunaGuiCheckpointFrontierOperationKey -Writer $writer -SessionId $sessionId `
+                    -TransferId $transferId -Generation $operationGeneration
+                $operation = if (-not [string]::IsNullOrWhiteSpace($operationKey) -and
+                    $operations.ContainsKey($operationKey)) { $operations[$operationKey] } else { $null }
+                if ($bindingGeneration -notmatch '^[1-9][0-9]*$' -or
+                    $operationGeneration -notmatch '^[1-9][0-9]*$' -or
+                    $checkpointFingerprint -in @('', '(none)', 'none') -or
+                    [string]::IsNullOrWhiteSpace($bindingAuthority) -or
+                    $null -eq $operation -or $operation.Ambiguous -or
+                    ((-not [string]::IsNullOrWhiteSpace($bindingAuthority)) -and
+                        $bindingAuthority -notin @('[redacted]', '(redacted)', 'redacted') -and
+                        $bindingAuthority -ne $operation.Authority) -or
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'transport_epoch') -ne
+                        [string]$operation.Scope.transport_epoch) {
+                    continue
+                }
+                if ($states.ContainsKey($key)) {
+                    $existing = $states[$key]
+                    if ($existing.BindingGeneration -ne $bindingGeneration -or
+                        $existing.CheckpointFingerprint -ne $checkpointFingerprint -or
+                        $existing.OperationGeneration -ne $operationGeneration -or
+                        $existing.OperationAuthority -ne $operation.Authority) {
+                        $existing.Ambiguous = $true
+                    }
+                    continue
+                }
+                $states[$key] = [pscustomobject]@{
+                    Writer = $writer; SessionId = $sessionId; TransferId = $transferId
+                    CheckpointId = $checkpointId; BindingGeneration = $bindingGeneration
+                    CheckpointFingerprint = $checkpointFingerprint
+                    OperationAuthority = $operation.Authority; BindingAuthority = $bindingAuthority
+                    OperationGeneration = $operationGeneration
+                    TransportEpoch = Get-TunaGuiLogLineFieldValue -Line $line -Name 'transport_epoch'
+                    Scope = $operation.Scope; Requests = @{}; Correlations = @{}; HeldRequests = @{}
+                    LatestRequestId = ''; LatestCorrelationId = ''; LatestRequestFingerprint = ''
+                    LatestRangeFingerprint = ''; LatestFrontier = ''; LatestRangeCount = ''
+                    LatestPeerAuthority = ''; LatestPeerGeneration = '0'
+                    LatestRequestObsolete = $false
+                    Accepted = $false; Ambiguous = $false; Invalid = $false
+                    RecoveryInvalid = $false; RawCount = 0
+                    RecheckGeneration = ''; RecheckApplied = $false; RepairAuthority = ''
+                    Dispatched = $false; Progress = $false; Settled = $false; FrontierClear = $false
+                    PairAuthority = ''; PairYieldGeneration = ''; PairingGeneration = ''; PairKey = ''
+                    Pairing = $false; Release = $false; ReleaseRetryAuthority = ''
+                    ReleaseReservationGeneration = ''; Prepared = $false; TailBlocked = $false
+                    Recovered = $false
+                }
+                continue
+            }
+
+            if ($eventName -in @(
+                    'filetransfer_v6_frontier_request_ignored_obsolete',
+                    'filetransfer_v6_frontier_request_advanced_remote_frontier') -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'direction') -eq 'outbound') {
+                $obsoleteRequestId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'repair_request_id'
+                $obsoleteCorrelationId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'request_correlation_id'
+                foreach ($pendingState in @($states.Values | Where-Object {
+                            $_.Writer -eq $writer -and $_.SessionId -eq $sessionId -and
+                            $_.TransferId -eq $transferId -and -not $_.Accepted -and
+                            $_.LatestRequestId -eq $obsoleteRequestId -and
+                            $_.LatestCorrelationId -eq $obsoleteCorrelationId -and
+                            (Test-TunaGuiCheckpointFrontierScope -State $_ -Line $line)
+                        })) {
+                    $pendingState.LatestRequestObsolete = $true
+                }
+                continue
+            }
+
+            if ($eventName -in @(
+                    'filetransfer_fallback_frontier_repair_progress_observed',
+                    'filetransfer_fallback_frontier_repair_contract_settled')) {
+                $peerAuthority = Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id'
+                if ($eventName -eq 'filetransfer_fallback_frontier_repair_contract_settled') {
+                    foreach ($settledPeerRepair in @($peerRepairs.Values | Where-Object {
+                                $_.Writer -eq $writer -and $_.SessionId -eq $sessionId -and
+                                $_.TransferId -eq $transferId -and $_.Authority -eq $peerAuthority
+                            })) {
+                        $settledPeerRepair.Settled = $true
+                    }
+                }
+                foreach ($pendingState in @($states.Values | Where-Object {
+                            $_.Writer -ne $writer -and $_.SessionId -eq $sessionId -and
+                            $_.TransferId -eq $transferId -and -not $_.Accepted -and
+                            $_.LatestPeerAuthority -eq $peerAuthority
+                        })) {
+                    if ($eventName -eq 'filetransfer_fallback_frontier_repair_progress_observed') {
+                        $currentFrontier = Get-TunaGuiLogLineFieldValue -Line $line -Name 'current_frontier_chunk_index'
+                        if ($currentFrontier -match '^[0-9]+$' -and
+                            [int64]$currentFrontier -gt [int64]$pendingState.LatestFrontier) {
+                            $pendingState.LatestRequestObsolete = $true
+                        }
+                    }
+                    elseif ($eventName -eq 'filetransfer_fallback_frontier_repair_contract_settled') {
+                        $pendingState.LatestRequestObsolete = $true
+                    }
+                }
+            }
+
+            $key = Get-TunaGuiCheckpointFrontierStateKey -Writer $writer -SessionId $sessionId `
+                -TransferId $transferId -CheckpointId $checkpointId
+            $state = if (-not [string]::IsNullOrWhiteSpace($key) -and $states.ContainsKey($key)) {
+                $states[$key]
+            }
+            else { $null }
+
+            if ($eventName -eq 'filetransfer_receive_recovery_fallback_checkpoint_invalidated' -and
+                $null -ne $state -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'checkpoint_binding_generation') -eq $state.BindingGeneration) {
+                if ($state.TailBlocked) { $state.RecoveryInvalid = $true }
+                else { $state.Invalid = $true }
+                continue
+            }
+
+            if ($eventName -eq 'filetransfer_receive_recovery_operation_invalidated') {
+                $invalidatedGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'receive_recovery_operation_generation'
+                $invalidatedAuthority = Get-TunaGuiLogLineFieldValue -Line $line -Name 'receive_recovery_operation_authority_id'
+                foreach ($invalidatedState in @($states.Values | Where-Object {
+                            $_.Writer -eq $writer -and $_.SessionId -eq $sessionId -and
+                            $_.TransferId -eq $transferId -and -not $_.Recovered -and
+                            $_.OperationGeneration -eq $invalidatedGeneration -and
+                            ($invalidatedAuthority -in @('', '[redacted]', '(redacted)', 'redacted') -or
+                                $_.OperationAuthority -eq $invalidatedAuthority)
+                        })) {
+                    if ($invalidatedState.TailBlocked) { $invalidatedState.RecoveryInvalid = $true }
+                    else { $invalidatedState.Invalid = $true }
+                }
+                continue
+            }
+
+            if ($eventName -in @(
+                    'filetransfer_live_route_epoch_terminal',
+                    'filetransfer_v6_epoch_terminal',
+                    'filetransfer_terminalized_by_peer_down',
+                    'filetransfer_terminalized_by_session_end',
+                    'transfer_terminal',
+                    'file_transfer_inbound_terminal',
+                    'file_transfer_outbound_terminal',
+                    'filetransfer_runtime_terminalized')) {
+                $terminalDirection = Get-TunaGuiLogLineFieldValue -Line $line -Name 'direction'
+                if (-not [string]::IsNullOrWhiteSpace($terminalDirection) -and
+                    $terminalDirection -ne 'outbound') {
+                    continue
+                }
+                foreach ($terminalState in @($states.Values | Where-Object {
+                            $_.Writer -eq $writer -and $_.SessionId -eq $sessionId -and
+                            $_.TransferId -eq $transferId -and -not $_.Recovered
+                        })) {
+                    if ($terminalState.TailBlocked) { $terminalState.RecoveryInvalid = $true }
+                    else { $terminalState.Invalid = $true }
+                }
+                continue
+            }
+
+            if ($eventName -in @(
+                    'filetransfer_runtime_started',
+                    'filetransfer_leg_started',
+                    'filetransfer_data_session_recreated',
+                    'filetransfer_fallback_transport_epoch_adopted',
+                    'filetransfer_fallback_leg_transport_epoch_adopted',
+                    'filetransfer_route_transition_committed')) {
+                $mutationDirection = Get-TunaGuiLogLineFieldValue -Line $line -Name 'direction'
+                if (-not [string]::IsNullOrWhiteSpace($mutationDirection) -and
+                    $mutationDirection -ne 'outbound') {
+                    continue
+                }
+                foreach ($mutationState in @($states.Values | Where-Object {
+                            $_.Writer -eq $writer -and $_.SessionId -eq $sessionId -and
+                            $_.TransferId -eq $transferId -and -not $_.Recovered
+                        })) {
+                    $scopeReplaced = $eventName -eq 'filetransfer_route_transition_committed'
+                    if (-not $scopeReplaced) {
+                        foreach ($field in $scopeFields) {
+                            $actual = Get-TunaGuiLogLineFieldValue -Line $line -Name $field
+                            if (-not [string]::IsNullOrWhiteSpace($actual) -and
+                                $actual -ne [string]$mutationState.Scope[$field]) {
+                                $scopeReplaced = $true
+                                break
+                            }
+                        }
+                    }
+                    if ($scopeReplaced) {
+                        if ($mutationState.TailBlocked) { $mutationState.RecoveryInvalid = $true }
+                        else { $mutationState.Invalid = $true }
+                    }
+                }
+                continue
+            }
+
+            if ($eventName -eq 'filetransfer_receive_recovery_fallback_checkpoint_frontier_request_hold_decided' -and
+                $null -ne $state -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'recovery_operation_authority_id') -eq $state.OperationAuthority -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'recovery_operation_generation') -eq $state.OperationGeneration -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'checkpoint_binding_generation') -eq $state.BindingGeneration -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'checkpoint_binding_state') -eq 'pending' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'checkpoint_frame_fingerprint') -eq $state.CheckpointFingerprint -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'status') -in @('accepted', 'idempotent') -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'outcome') -eq 'held') {
+                $repairRequestId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'repair_request_id'
+                $correlationId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'request_correlation_id'
+                $rangeFingerprint = Get-TunaGuiLogLineFieldValue -Line $line -Name 'range_fingerprint'
+                $frontierFingerprint = Get-TunaGuiLogLineFieldValue -Line $line -Name 'frontier_frame_fingerprint'
+                $holdGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'hold_generation'
+                $dispatchPath = Get-TunaGuiLogLineFieldValue -Line $line -Name 'dispatch_path'
+                $receivedTransport = Get-TunaGuiLogLineFieldValue -Line $line -Name 'received_transport'
+                if ($repairRequestId -notin @('', '(none)', 'none') -and
+                    $correlationId -notin @('', '(none)', 'none') -and
+                    $rangeFingerprint -notin @('', '(none)', 'none') -and
+                    $frontierFingerprint -notin @('', '(none)', 'none') -and
+                    $holdGeneration -match '^[1-9][0-9]*$' -and
+                    $dispatchPath -in @('NativeV6', 'RetainedSparseV4') -and
+                    $receivedTransport -eq 'regular_nkn' -and
+                    (Test-TunaGuiCheckpointFrontierScope -State $state -Line $line -RequireComplete)) {
+                    $state.HeldRequests[$repairRequestId.ToLowerInvariant()] = [pscustomobject]@{
+                        CorrelationId = $correlationId
+                        RangeFingerprint = $rangeFingerprint
+                        FrontierFingerprint = $frontierFingerprint
+                        HoldGeneration = $holdGeneration
+                        DispatchPath = $dispatchPath
+                        ReceivedTransport = $receivedTransport
+                    }
+                }
+                continue
+            }
+
+            if ($eventName -eq 'filetransfer_v6_frontier_request_receive_dispatch_rejected' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'direction') -eq 'outbound' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'route') -eq 'post_tuna_fallback_v6' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'protocol_version') -eq '6' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_reason') -eq 'checkpoint_pending_frontier_request' -and
+                $null -ne $state -and -not $state.Accepted -and -not $state.Invalid) {
+                $repairRequestId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'repair_request_id'
+                $correlationId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'request_correlation_id'
+                $firstStart = Get-TunaGuiLogLineFieldValue -Line $line -Name 'first_start_chunk_index'
+                $firstCount = Get-TunaGuiLogLineFieldValue -Line $line -Name 'first_chunk_count'
+                $rangeCount = Get-TunaGuiLogLineFieldValue -Line $line -Name 'range_count'
+                $receivedTransport = Get-TunaGuiLogLineFieldValue -Line $line -Name 'received_transport'
+                if ($repairRequestId -in @('', '(none)', 'none') -or
+                    $correlationId -in @('', '(none)', 'none') -or $firstStart -notmatch '^[0-9]+$' -or
+                    $firstCount -notmatch '^[1-9][0-9]*$' -or $rangeCount -notmatch '^[1-9][0-9]*$' -or
+                    $receivedTransport -ne 'regular_nkn' -or
+                    -not (Test-TunaGuiCheckpointFrontierScope -State $state -Line $line)) {
+                    continue
+                }
+
+                $peerKey = "$sessionId|$transferId|$repairRequestId|$correlationId".ToLowerInvariant()
+                $peerRepair = if ($peerRepairs.ContainsKey($peerKey)) { $peerRepairs[$peerKey] } else { $null }
+                if ($null -eq $peerRepair -or $peerRepair.Ambiguous -or
+                    $peerRepair.Writer -eq $state.Writer -or $peerRepair.Frontier -ne $firstStart -or
+                    $peerRepair.RangeCount -ne $rangeCount) {
+                    continue
+                }
+                $peerScopeMatches = $true
+                foreach ($field in @(
+                        'route', 'protocol_version', 'live_route_epoch', 'runtime_generation',
+                        'route_publication_generation', 'route_commit_generation',
+                        'terminal_generation', 'leg_generation', 'transport_epoch',
+                        'bridge_recovery_generation')) {
+                    if ([string]$peerRepair.Scope[$field] -ne [string]$state.Scope[$field]) {
+                        $peerScopeMatches = $false
+                        break
+                    }
+                }
+                if (-not $peerScopeMatches) { continue }
+
+                $requestFingerprint = "$correlationId|$firstStart|$firstCount|$rangeCount|$receivedTransport|$($peerRepair.Authority)|$($peerRepair.Predecessor)|$($peerRepair.Generation)"
+                $requestKey = $repairRequestId.ToLowerInvariant()
+                $correlationKey = $correlationId.ToLowerInvariant()
+                if ($state.Requests.ContainsKey($requestKey) -and
+                    $state.Requests[$requestKey].Fingerprint -ne $requestFingerprint) {
+                    $state.Ambiguous = $true
+                    continue
+                }
+                if ($state.Correlations.ContainsKey($correlationKey) -and
+                    $state.Correlations[$correlationKey] -ne "$requestKey|$requestFingerprint") {
+                    $state.Ambiguous = $true
+                    continue
+                }
+                if (-not $state.Requests.ContainsKey($requestKey)) {
+                    if ($state.LatestPeerAuthority -notin @('', '(none)', 'none') -and
+                        ($peerRepair.Predecessor -ne $state.LatestPeerAuthority -or
+                            [int64]$peerRepair.Generation -le [int64]$state.LatestPeerGeneration)) {
+                        $state.Ambiguous = $true
+                        continue
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace($state.LatestFrontier) -and
+                        $state.LatestFrontier -ne $firstStart) {
+                        $state.Ambiguous = $true
+                        continue
+                    }
+                    $state.Requests[$requestKey] = [pscustomobject]@{
+                        Fingerprint = $requestFingerprint
+                        CorrelationId = $correlationId
+                        PeerAuthority = $peerRepair.Authority
+                        PeerPredecessor = $peerRepair.Predecessor
+                        PeerGeneration = $peerRepair.Generation
+                    }
+                    $state.Correlations[$correlationKey] = "$requestKey|$requestFingerprint"
+                    $state.LatestRequestId = $repairRequestId
+                    $state.LatestCorrelationId = $correlationId
+                    $state.LatestRequestFingerprint = $requestFingerprint
+                    $state.LatestFrontier = $firstStart
+                    $state.LatestRangeCount = $rangeCount
+                    $state.LatestPeerAuthority = $peerRepair.Authority
+                    $state.LatestPeerGeneration = $peerRepair.Generation
+                    $state.LatestRequestObsolete = [bool]$peerRepair.Settled
+                }
+                $state.RawCount++
+                continue
+            }
+
+            if ($eventName -eq 'filetransfer_receive_recovery_fallback_checkpoint_lifecycle_advanced' -and
+                $null -ne $state -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'recovery_operation_generation') -eq $state.OperationGeneration -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'checkpoint_binding_generation') -eq $state.BindingGeneration -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'frame_fingerprint') -eq $state.CheckpointFingerprint -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'transport_epoch') -eq $state.TransportEpoch) {
+                $bindingState = Get-TunaGuiLogLineFieldValue -Line $line -Name 'checkpoint_binding_state'
+                if ($bindingState -eq 'accepted' -and $state.Requests.Count -gt 0 -and
+                    -not $state.LatestRequestObsolete) {
+                    $state.Accepted = $true
+                }
+                elseif (-not $state.Accepted) { $state.Invalid = $true }
+                continue
+            }
+
+            if ($eventName -eq 'filetransfer_receive_recovery_fallback_checkpoint_frontier_request_recheck_issued' -and
+                $null -ne $state -and $state.Accepted -and -not $state.Invalid -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'status') -eq 'issued' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'recovery_operation_authority_id') -eq $state.OperationAuthority -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'recovery_operation_generation') -eq $state.OperationGeneration -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'checkpoint_binding_generation') -eq $state.BindingGeneration -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'checkpoint_binding_state') -eq 'accepted' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'checkpoint_frame_fingerprint') -eq $state.CheckpointFingerprint -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'repair_request_id') -eq $state.LatestRequestId -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'request_correlation_id') -eq $state.LatestCorrelationId -and
+                (Test-TunaGuiCheckpointFrontierScope -State $state -Line $line -RequireComplete)) {
+                $recheckGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'recheck_generation'
+                $latestRequestKey = $state.LatestRequestId.ToLowerInvariant()
+                $heldRequest = if ($state.HeldRequests.ContainsKey($latestRequestKey)) {
+                    $state.HeldRequests[$latestRequestKey]
+                }
+                else { $null }
+                if ($recheckGeneration -match '^[1-9][0-9]*$' -and $null -ne $heldRequest -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'hold_generation') -eq $heldRequest.HoldGeneration -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'range_fingerprint') -eq $heldRequest.RangeFingerprint -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'frontier_frame_fingerprint') -eq $heldRequest.FrontierFingerprint -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'dispatch_path') -eq $heldRequest.DispatchPath -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'received_transport') -eq $heldRequest.ReceivedTransport) {
+                    $state.RecheckGeneration = $recheckGeneration
+                }
+                continue
+            }
+
+            if ($eventName -eq 'filetransfer_receive_recovery_fallback_checkpoint_frontier_request_recheck_applied' -and
+                $null -ne $state -and $state.Accepted -and
+                $state.RepairAuthority -notin @('', '(none)', 'none') -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'recovery_operation_authority_id') -eq $state.OperationAuthority -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'recovery_operation_generation') -eq $state.OperationGeneration -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'checkpoint_binding_generation') -eq $state.BindingGeneration -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'checkpoint_binding_state') -eq 'accepted' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'checkpoint_frame_fingerprint') -eq $state.CheckpointFingerprint -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'repair_request_id') -eq $state.LatestRequestId -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'request_correlation_id') -eq $state.LatestCorrelationId -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'recheck_generation') -eq $state.RecheckGeneration -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'receipt_status') -in @('applied', 'idempotent') -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -in @('accepted', 'idempotent') -and
+                ((Get-TunaGuiLogLineFieldValue -Line $line -Name 'outcome') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'receipt_status')) -and
+                (Test-TunaGuiCheckpointFrontierScope -State $state -Line $line -RequireComplete)) {
+                $latestRequestKey = $state.LatestRequestId.ToLowerInvariant()
+                $heldRequest = if ($state.HeldRequests.ContainsKey($latestRequestKey)) {
+                    $state.HeldRequests[$latestRequestKey]
+                }
+                else { $null }
+                if ($null -ne $heldRequest -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'hold_generation') -eq $heldRequest.HoldGeneration -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'range_fingerprint') -eq $heldRequest.RangeFingerprint -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'frontier_frame_fingerprint') -eq $heldRequest.FrontierFingerprint -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'dispatch_path') -eq $heldRequest.DispatchPath -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'received_transport') -eq $heldRequest.ReceivedTransport) {
+                    $state.RecheckApplied = $true
+                }
+                continue
+            }
+
+            foreach ($candidate in @($states.Values | Where-Object {
+                        $_.Writer -eq $writer -and $_.SessionId -eq $sessionId -and
+                        $_.TransferId -eq $transferId -and $_.Accepted -and -not $_.Invalid -and
+                        -not [string]::IsNullOrWhiteSpace($_.LatestRequestId)
+                    })) {
+                if ($eventName -eq 'filetransfer_fallback_frontier_repair_authority_granted' -and
+                    $candidate.RecheckGeneration -match '^[1-9][0-9]*$' -and
+                    -not $candidate.RecheckApplied -and -not $candidate.RecoveryInvalid -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_kind') -eq 'PeerRequest' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'primary_protocol_repair_request_id') -eq $candidate.LatestRequestId -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'primary_request_correlation_id') -eq $candidate.LatestCorrelationId -and
+                    (Test-TunaGuiCheckpointFrontierScope -State $candidate -Line $line)) {
+                    $latestRequestKey = $candidate.LatestRequestId.ToLowerInvariant()
+                    $heldRequest = if ($candidate.HeldRequests.ContainsKey($latestRequestKey)) {
+                        $candidate.HeldRequests[$latestRequestKey]
+                    }
+                    else { $null }
+                    $repairAuthority = Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id'
+                    if ($null -ne $heldRequest -and $repairAuthority -notin @('', '(none)', 'none') -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'range_fingerprint') -eq
+                            $heldRequest.RangeFingerprint -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'frontier_chunk_index') -eq
+                            $candidate.LatestFrontier) {
+                        $candidate.RepairAuthority = $repairAuthority
+                    }
+                    continue
+                }
+                if ($eventName -eq 'filetransfer_fallback_frontier_repair_dispatched' -and
+                    $candidate.RecheckApplied -and -not $candidate.RecoveryInvalid -and
+                    $candidate.RepairAuthority -notin @('', '(none)', 'none') -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id') -eq $candidate.RepairAuthority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'dispatch_observed') -eq '1' -and
+                    (Test-TunaGuiCheckpointFrontierScope -State $candidate -Line $line)) {
+                    $candidate.Dispatched = $true
+                    continue
+                }
+                if ($eventName -eq 'filetransfer_fallback_frontier_repair_progress_observed' -and
+                    $candidate.Settled -and -not $candidate.RecoveryInvalid -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id') -eq $candidate.RepairAuthority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'previous_frontier_chunk_index') -eq
+                        $candidate.LatestFrontier -and
+                    (Test-TunaGuiCheckpointFrontierScope -State $candidate -Line $line)) {
+                    $currentFrontier = Get-TunaGuiLogLineFieldValue -Line $line -Name 'current_frontier_chunk_index'
+                    if ($currentFrontier -match '^[0-9]+$' -and
+                        [int64]$currentFrontier -gt [int64]$candidate.LatestFrontier) {
+                        $candidate.Progress = $true
+                    }
+                    continue
+                }
+                if ($eventName -eq 'filetransfer_fallback_frontier_repair_contract_settled' -and
+                    $candidate.Dispatched -and -not $candidate.RecoveryInvalid -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id') -eq $candidate.RepairAuthority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'dispatch_observed') -eq '1' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'settlement_outcome') -eq 'ProgressObserved' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'successor_authority_id') -in @('', '(none)', 'none') -and
+                    (Test-TunaGuiCheckpointFrontierScope -State $candidate -Line $line)) {
+                    $candidate.Settled = $true
+                    continue
+                }
+                if ($eventName -eq 'filetransfer_fallback_tail_frontier_repair_cleared' -and
+                    $candidate.Progress -and -not $candidate.RecoveryInvalid -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'previous_frontier_only_start_chunk_index') -eq
+                        $candidate.LatestFrontier -and
+                    (Test-TunaGuiCheckpointFrontierScope -State $candidate -Line $line)) {
+                    $committedChunk = Get-TunaGuiLogLineFieldValue -Line $line -Name 'committed_chunk'
+                    if ($committedChunk -match '^[0-9]+$' -and
+                        [int64]$committedChunk -gt [int64]$candidate.LatestFrontier) {
+                        $candidate.FrontierClear = $true
+                    }
+                    continue
+                }
+                if ($eventName -eq 'filetransfer_fallback_tail_pairing_committed' -and
+                    $candidate.FrontierClear -and -not $candidate.RecoveryInvalid -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'direction') -eq 'outbound' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -in @(
+                        'Accepted', 'Idempotent', 'accepted', 'idempotent') -and
+                    (Test-TunaGuiCheckpointFrontierScope -State $candidate -Line $line -RequireComplete)) {
+                    $pairAuthority = Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id'
+                    $yieldGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'yield_generation'
+                    $pairingGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'pairing_generation'
+                    $pairKey = Get-TunaGuiLogLineFieldValue -Line $line -Name 'pair_key'
+                    if ($pairAuthority -notin @('', '(none)', 'none') -and
+                        $yieldGeneration -match '^[1-9][0-9]*$' -and
+                        $pairingGeneration -match '^[1-9][0-9]*$' -and
+                        $pairKey -notin @('', '(none)', 'none')) {
+                        $candidate.PairAuthority = $pairAuthority
+                        $candidate.PairYieldGeneration = $yieldGeneration
+                        $candidate.PairingGeneration = $pairingGeneration
+                        $candidate.PairKey = $pairKey
+                        $candidate.Pairing = $true
+                    }
+                    continue
+                }
+                if ($eventName -eq 'filetransfer_fallback_tail_paired_release_reserved' -and
+                    $candidate.Pairing -and -not $candidate.RecoveryInvalid -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id') -eq $candidate.PairAuthority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'yield_generation') -eq
+                        $candidate.PairYieldGeneration -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'pairing_generation') -eq
+                        $candidate.PairingGeneration -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'pair_key') -eq $candidate.PairKey -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -in @(
+                        'Accepted', 'Idempotent', 'accepted', 'idempotent') -and
+                    (Test-TunaGuiCheckpointFrontierScope -State $candidate -Line $line -RequireComplete)) {
+                    $retryAuthority = Get-TunaGuiLogLineFieldValue -Line $line -Name 'retry_authority_id'
+                    $reservationGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'reservation_generation'
+                    if ($retryAuthority -notin @('', '(none)', 'none') -and
+                        $reservationGeneration -match '^[1-9][0-9]*$') {
+                        $candidate.Release = $true
+                        $candidate.ReleaseRetryAuthority = $retryAuthority
+                        $candidate.ReleaseReservationGeneration = $reservationGeneration
+                    }
+                    continue
+                }
+                if ($eventName -eq 'filetransfer_fallback_tail_paired_release_consumed' -and
+                    $candidate.Release -and -not $candidate.RecoveryInvalid -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id') -eq $candidate.PairAuthority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'yield_generation') -eq
+                        $candidate.PairYieldGeneration -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'pairing_generation') -eq
+                        $candidate.PairingGeneration -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'pair_key') -eq $candidate.PairKey -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'retry_authority_id') -eq
+                        $candidate.ReleaseRetryAuthority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'reservation_generation') -eq
+                        $candidate.ReleaseReservationGeneration -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'install_generation') -match '^[1-9][0-9]*$' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -in @(
+                        'Accepted', 'Idempotent', 'accepted', 'idempotent') -and
+                    (Test-TunaGuiCheckpointFrontierScope -State $candidate -Line $line -RequireComplete)) {
+                    $candidate.Recovered = $true
+                    continue
+                }
+                if ($eventName -eq 'filetransfer_route_transition_prepared' -and
+                    $candidate.FrontierClear -and -not $candidate.RecoveryInvalid -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'direction') -eq 'outbound' -and
+                    (Test-TunaGuiCheckpointFrontierPreparedScope -State $candidate -Line $line)) {
+                    $candidate.Prepared = $true
+                    $candidate.Recovered = $true
+                    continue
+                }
+                if ($eventName -eq 'filetransfer_fallback_tail_yield_blocked_by_frontier_obligation' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'direction') -eq 'outbound' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'committed_chunk_index') -eq $candidate.LatestFrontier -and
+                    (Test-TunaGuiCheckpointFrontierScope -State $candidate -Line $line)) {
+                    $candidate.TailBlocked = $true
+                }
+            }
+        }
+
+        $unresolved = @($states.Values | Where-Object {
+                -not $_.Ambiguous -and -not $_.Invalid -and $_.Accepted -and
+                $_.RawCount -gt 0 -and $_.Requests.Count -gt 0 -and $_.TailBlocked -and
+                -not $_.Recovered
+            })
+        return [pscustomobject]@{
+            Unresolved = $unresolved.Count -eq 1
+            LineVisits = $visits
+        }
+    }
+
+    $fallbackFrontierCheckpointAcceptanceRecheckFastPath =
+        Get-TunaGuiFallbackFrontierCheckpointAcceptanceRecheckFailure -Lines ([string[]]$evidenceLines)
+    if ($fallbackFrontierCheckpointAcceptanceRecheckFastPath.Unresolved) {
+        if ($null -ne $TestMetrics) {
+            $TestMetrics.evidenceLineVisitCount = [long]$fallbackFrontierCheckpointAcceptanceRecheckFastPath.LineVisits
+            $TestMetrics.evidenceLookupCount = 0L
+            $TestMetrics.classificationSource = "${classificationSource}_fallback_frontier_checkpoint_acceptance_recheck_index"
+        }
+        $result = New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'route_runtime' `
+            -Reason 'checkpoint_pending_peer_frontier_request_not_rechecked_after_exact_checkpoint_acceptance' `
+            -RouteMode $RouteMode `
+            -ClassificationSource "${classificationSource}_fallback_frontier_checkpoint_acceptance_recheck_index" `
+            -EvidenceLineVisitCount ([long]$fallbackFrontierCheckpointAcceptanceRecheckFastPath.LineVisits) `
+            -EvidenceParsedRecordCount 0L `
+            -EvidenceLookupCount 0L `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
+        $result.FallbackFrontierCheckpointAcceptanceRecheckMissing = $true
+        $result.CheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptance = $true
+        return $result
+    }
+
     $currentListenerAdoptionFastPath =
         Get-TunaGuiCurrentListenerAdoptionFailure -Lines ([string[]]$evidenceLines)
     if ($currentListenerAdoptionFastPath.Unresolved) {
@@ -9655,24 +10485,33 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'effective_checkpoint_request_id') -eq $checkpointId -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'checkpoint_binding_state') -in @('accepted', 'retired')
                 } | Select-Object -First 1)
-            $peerResponse = @($indexed | Where-Object {
-                    $_.Index -gt $recheck[0].Index -and (& $sameScope $_) -and
+            if ($resend.Count -ne 1 -or $redelivered.Count -ne 1 -or
+                $advanced.Count -ne 1) {
+                return $true
+            }
+            $peerResponses = @($indexed | Where-Object {
+                    $_.Index -gt $redelivered[0].Index -and
                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
-                        'filetransfer_v6_regular_nkn_state_refresh_received',
-                        'filetransfer_v6_receiver_state_received',
-                        'filetransfer_receive_recovery_fallback_checkpoint_peer_frame_received')) -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'repair_request_id') -eq $checkpointId
-                } | Select-Object -First 1)
+                        'filetransfer_v6_regular_nkn_state_refresh_received')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -ne $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'request_id') -eq $checkpointId -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transport_epoch') -eq $transportEpoch
+                })
+            $peerWriters = @($peerResponses | ForEach-Object {
+                    Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id'
+                } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
             $released = @($indexed | Where-Object {
-                    $_.Index -gt $recheck[0].Index -and (& $sameScope $_) -and
+                    $_.Index -gt $completion[0].Index -and
+                    $_.Index -le $advanced[0].Index -and (& $sameScope $_) -and
                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                         'runtime_unlock_initial_activation_receive_recovery_hold_decided')) -and
                     ((Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'receive_recovery_operation_generation') -eq $generation -or
                      (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'recovery_operation_generation') -eq $generation) -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq 'Released'
                 } | Select-Object -First 1)
-            if ($resend.Count -ne 1 -or $redelivered.Count -ne 1 -or
-                $peerResponse.Count -ne 1 -or $advanced.Count -ne 1 -or
+            if ($peerResponses.Count -eq 0 -or $peerWriters.Count -ne 1 -or
                 $released.Count -ne 1) {
                 return $true
             }
