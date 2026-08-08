@@ -11748,22 +11748,26 @@ public sealed class FileTransferCoordinatorTests
             0,
             "pending");
         Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Held, held.Status);
-        var currentOwner = held.State.CurrentRuntimeOwner!.Value;
-        var currentLeg = held.State.CurrentLeg!;
-        var currentPublication = held.State.CurrentRoutePublicationToken!.Value;
-        var currentAuthority = authority!.Value with
-        {
-            RuntimeOwner = currentOwner,
-            LiveRouteEpoch = held.State.CurrentLiveRouteEpoch!.EpochId,
-            RuntimeGeneration = currentOwner.RuntimeGeneration,
-            TerminalGeneration = held.State.TerminalGeneration,
-            LegGeneration = currentLeg.Generation,
-            TransportEpoch = currentLeg.TransportEpochId,
-            BridgeRecoveryGeneration = currentLeg.BridgeRecoveryGeneration,
-            RoutePublicationGeneration = currentPublication.PublicationGeneration,
-            RouteCommitGeneration = currentPublication.RouteCommitGeneration,
-            CheckpointRequestId = currentLeg.CheckpointRequestId!,
-        };
+        var currentAuthority = authority!.Value;
+        Assert.Equal("(none)", currentAuthority.CheckpointRequestId);
+        Assert.Null(held.State.CurrentLeg!.CheckpointRequestId);
+        var checkpointMismatch =
+            FileTransferCoordinator.BindFallbackTailYieldRetryDispatchHold(
+                held.State,
+                request,
+                currentAuthority with
+                {
+                    CheckpointRequestId = "checkpoint-not-current",
+                });
+        Assert.Equal(
+            FileTransferFallbackTailYieldTransitionStatus.Rejected,
+            checkpointMismatch.Status);
+        Assert.Equal(
+            "fallback_tail_retry_dispatch_hold_scope_mismatch",
+            checkpointMismatch.Reason);
+        Assert.Null(
+            checkpointMismatch.State.PersistentState.FallbackTailYield
+                .CurrentRetryDispatchHold);
         var bound = FileTransferCoordinator.BindFallbackTailYieldRetryDispatchHold(
             held.State,
             request,
@@ -11815,6 +11819,256 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(
             FileTransferFallbackTailYieldTransitionStatus.Idempotent,
             queuedDuplicate.Status);
+    }
+
+    [Theory]
+    [InlineData(null, "(none)")]
+    [InlineData("", "(none)")]
+    [InlineData("   ", "(none)")]
+    [InlineData("(none)", "(none)")]
+    [InlineData("checkpoint-7", "checkpoint-7")]
+    [InlineData(" checkpoint-7 ", "checkpoint-7")]
+    public void FallbackTailUnblockRecheck_CheckpointNormalizationOnlyCanonicalizesMissing(
+        string? checkpointRequestId,
+        string expected)
+    {
+        Assert.Equal(
+            expected,
+            FileTransferCoordinator
+                .NormalizeFallbackFrontierRepairCheckpointRequestId(
+                    checkpointRequestId));
+    }
+
+    [Fact]
+    public void FallbackTailUnblockRecheck_ExactRepairSuccessorCarriesHeldRequestOnce()
+    {
+        var (pairedState, request, _) =
+            AuthorizeFallbackRuntimeUnlockRetryDispatchSource();
+        var predecessorDecision = FileTransferCoordinator.AuthorizeAction(
+            pairedState,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RepairReplay,
+                pairedState.CurrentRuntimeOwner!.Value,
+                pairedState.CurrentLeg!,
+                repairReplayKind: RepairReplayKind.FrontierStallRepair));
+        Assert.True(predecessorDecision.Accepted);
+        Assert.True(
+            FileTransferCoordinator.TryIssueFallbackFrontierRepairAuthority(
+                predecessorDecision.RepairReplayDecision!.Value,
+                new FallbackFrontierRepairAuthorityRequest(
+                    "fallback-frontier:12:1:frng-recheck-predecessor",
+                    "frng-recheck-predecessor",
+                    FrontierChunkIndex: 12,
+                    DurableReceivedHighestChunkIndex: 12,
+                    RangeCount: 1,
+                    RequestedChunkCount: 1,
+                    FallbackFrontierRepairSourceKind.PeerRequest,
+                    ProtocolRepairRequestId: "v6-frontier:12:1",
+                    RequestCorrelationId: "frq-recheck-predecessor",
+                    CheckpointRequestId: "(none)",
+                    Priority: "frontier",
+                    RecoveryMode: "regular_nkn_frontier_stall_control_bulk",
+                    DecisionReason: "fallback_frontier_request_received"),
+                out var predecessor,
+                out var predecessorReason),
+            predecessorReason);
+
+        var held = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            predecessorDecision.State,
+            request,
+            RuntimeUnlockRetryReleaseKind.Unknown,
+            null,
+            0,
+            "pending");
+        var bound = FileTransferCoordinator.BindFallbackTailYieldRetryDispatchHold(
+            held.State,
+            request,
+            predecessor!.Value);
+        Assert.True(bound.Accepted, bound.Reason);
+        var original = Assert.IsType<FileTransferFallbackTailYieldRetryDispatchHold>(
+            bound.State.PersistentState.FallbackTailYield
+                .CurrentRetryDispatchHold);
+        Assert.Null(
+            bound.State.PersistentState.FallbackTailYield.CurrentReservation);
+
+        var successorDecision = FileTransferCoordinator.AuthorizeAction(
+            bound.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RepairReplay,
+                bound.State.CurrentRuntimeOwner!.Value,
+                bound.State.CurrentLeg!,
+                repairReplayKind: RepairReplayKind.FrontierStallRepair,
+                predecessorAuthorityId: predecessor.Value.AuthorityId));
+        Assert.True(successorDecision.Accepted);
+        Assert.True(
+            FileTransferCoordinator.TryIssueFallbackFrontierRepairAuthority(
+                successorDecision.RepairReplayDecision!.Value,
+                new FallbackFrontierRepairAuthorityRequest(
+                    "fallback-frontier:13:1:frng-recheck-successor",
+                    "frng-recheck-successor",
+                    FrontierChunkIndex: 13,
+                    DurableReceivedHighestChunkIndex: 13,
+                    RangeCount: 1,
+                    RequestedChunkCount: 1,
+                    FallbackFrontierRepairSourceKind.PeerRequest,
+                    ProtocolRepairRequestId: "v6-frontier:13:2",
+                    RequestCorrelationId: "frq-recheck-successor",
+                    CheckpointRequestId: "(none)",
+                    Priority: "frontier",
+                    RecoveryMode: "regular_nkn_frontier_stall_control_bulk",
+                    DecisionReason: "fallback_frontier_request_received"),
+                out var successor,
+                out var successorReason),
+            successorReason);
+
+        var rebound = FileTransferCoordinator
+            .RebindFallbackTailYieldRetryDispatchHoldToRepairSuccessor(
+                successorDecision.State,
+                predecessor.Value,
+                successor!.Value);
+        Assert.True(rebound.Accepted, rebound.Reason);
+        var carried = Assert.IsType<FileTransferFallbackTailYieldRetryDispatchHold>(
+            rebound.State.PersistentState.FallbackTailYield
+                .CurrentRetryDispatchHold);
+        Assert.Equal(request, carried.Request);
+        Assert.Equal(original.Release, carried.Release);
+        Assert.Equal(original.DataSessionIdentity, carried.DataSessionIdentity);
+        Assert.Equal(original.DataSessionGeneration, carried.DataSessionGeneration);
+        Assert.Equal(successor.Value, carried.BlockingRepair);
+        Assert.Equal(2, carried.HoldGeneration);
+        Assert.Null(
+            rebound.State.PersistentState.FallbackTailYield.CurrentReservation);
+
+        var duplicate = FileTransferCoordinator
+            .RebindFallbackTailYieldRetryDispatchHoldToRepairSuccessor(
+                rebound.State,
+                predecessor.Value,
+                successor.Value);
+        Assert.Equal(
+            FileTransferFallbackTailYieldTransitionStatus.Idempotent,
+            duplicate.Status);
+        Assert.Equal(
+            carried,
+            duplicate.State.PersistentState.FallbackTailYield
+                .CurrentRetryDispatchHold);
+
+        var observation =
+            new FileTransferFallbackTailYieldRetryDispatchRecheckObservation(
+                carried,
+                successor.Value,
+                "ProgressObserved",
+                SuccessorAuthorityId: null,
+                ObservedUtcMs: 25_001);
+        var issued = FileTransferCoordinator
+            .IssueFallbackTailYieldRetryDispatchRecheck(
+                duplicate.State,
+                observation);
+        Assert.True(issued.Accepted, issued.Reason);
+
+        var mutatedSuccessor = successor.Value with
+        {
+            CheckpointRequestId = "checkpoint-mutated",
+        };
+        var rejected = FileTransferCoordinator
+            .RebindFallbackTailYieldRetryDispatchHoldToRepairSuccessor(
+                bound.State,
+                predecessor.Value,
+                mutatedSuccessor);
+        Assert.Equal(
+            FileTransferFallbackTailYieldTransitionStatus.Rejected,
+            rejected.Status);
+        Assert.Equal(
+            "fallback_tail_retry_dispatch_hold_successor_invalid",
+            rejected.Reason);
+        Assert.Equal(
+            original,
+            rejected.State.PersistentState.FallbackTailYield
+                .CurrentRetryDispatchHold);
+        Assert.Null(
+            rejected.State.PersistentState.FallbackTailYield.CurrentReservation);
+
+        var transportEpochSuccessor = successor.Value with
+        {
+            TransportEpoch = successor.Value.TransportEpoch + 1,
+        };
+        var transportEpochRejected = FileTransferCoordinator
+            .RebindFallbackTailYieldRetryDispatchHoldToRepairSuccessor(
+                bound.State,
+                predecessor.Value,
+                transportEpochSuccessor);
+        Assert.Equal(
+            FileTransferFallbackTailYieldTransitionStatus.Rejected,
+            transportEpochRejected.Status);
+        Assert.Equal(
+            "fallback_tail_retry_dispatch_hold_successor_invalid",
+            transportEpochRejected.Reason);
+        Assert.Equal(
+            original,
+            transportEpochRejected.State.PersistentState.FallbackTailYield
+                .CurrentRetryDispatchHold);
+        Assert.Null(
+            transportEpochRejected.State.PersistentState.FallbackTailYield
+                .CurrentReservation);
+
+        var dataSessionReplacedState = bound.State with
+        {
+            CurrentDataSessionGeneration =
+                bound.State.CurrentDataSessionGeneration + 1,
+        };
+        var dataSessionRejected = FileTransferCoordinator
+            .RebindFallbackTailYieldRetryDispatchHoldToRepairSuccessor(
+                dataSessionReplacedState,
+                predecessor.Value,
+                successor.Value);
+        Assert.Equal(
+            FileTransferFallbackTailYieldTransitionStatus.Rejected,
+            dataSessionRejected.Status);
+        Assert.Equal(
+            "fallback_tail_retry_dispatch_hold_successor_scope_replaced",
+            dataSessionRejected.Reason);
+        Assert.Equal(
+            original,
+            dataSessionRejected.State.PersistentState.FallbackTailYield
+                .CurrentRetryDispatchHold);
+
+        var operation = Assert.IsType<FileTransferFallbackTailYieldOperation>(
+            bound.State.PersistentState.FallbackTailYield.CurrentOperation);
+        var mutatedRelease = original.Release with
+        {
+            PairingGeneration = original.Release.PairingGeneration + 1,
+        };
+        var releaseReplacedState = bound.State with
+        {
+            PersistentState = bound.State.PersistentState with
+            {
+                FallbackTailYield =
+                    bound.State.PersistentState.FallbackTailYield with
+                    {
+                        CurrentOperation = operation with
+                        {
+                            PairedRelease = mutatedRelease,
+                        },
+                    },
+            },
+        };
+        var releaseRejected = FileTransferCoordinator
+            .RebindFallbackTailYieldRetryDispatchHoldToRepairSuccessor(
+                releaseReplacedState,
+                predecessor.Value,
+                successor.Value);
+        Assert.Equal(
+            FileTransferFallbackTailYieldTransitionStatus.Rejected,
+            releaseRejected.Status);
+        Assert.Equal(
+            "fallback_tail_retry_dispatch_hold_successor_scope_replaced",
+            releaseRejected.Reason);
+        Assert.Equal(
+            original,
+            releaseRejected.State.PersistentState.FallbackTailYield
+                .CurrentRetryDispatchHold);
+        Assert.Null(
+            releaseRejected.State.PersistentState.FallbackTailYield
+                .CurrentReservation);
     }
 
     [Fact]

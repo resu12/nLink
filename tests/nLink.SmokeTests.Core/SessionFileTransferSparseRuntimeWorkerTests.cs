@@ -11,6 +11,228 @@ namespace NLink.SmokeTests;
 public sealed partial class SessionFileTransferV4SenderTests
 {
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackTailUnblockRecheck")]
+    public void FallbackTailUnblockRecheck_V6PeerRepairSuccessorCarriesHeldRequestAndRechecksOnce()
+    {
+        const string transferId =
+            "transfer_fallback_tail_v6_peer_successor_recheck";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport(
+            $"session_{transferId}");
+        service.AttachTransport(transport);
+        var serviceType = typeof(SessionFileTransferService);
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 128,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            chunkCount: 256);
+        var contextType = context.GetType();
+        serviceType
+            .GetField(
+                "outboundTransfer",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        var leg = Assert.IsType<FileTransferLeg>(
+            GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        leg.State = FileTransferLegState.Active;
+        leg.CanSendData = true;
+        leg.CheckpointRequestId = null;
+        SeedPairedFallbackTailYieldForTest(context, leg);
+        var retryRequest = Assert.IsType<RuntimeUnlockRetryDispatchAuthorityRequest>(
+            GetCoordinatorFallbackTailYieldSubstate(context)
+                .PendingRetryRecheckRequest);
+
+        var applyPeerRequest = serviceType.GetMethod(
+            "ApplyOutboundV6FrontierRequest",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var firstRequest = CreateRequest(
+            "v6-frontier:3:128:17",
+            "frq-v6-peer-successor-17",
+            chunkCount: 1);
+        applyPeerRequest.Invoke(
+            service,
+            [context, firstRequest, FileTransferTransportKind.RegularNkn]);
+        var predecessor = GetPrivatePropertyValue(
+            context,
+            "CurrentFallbackFrontierRepairContract");
+        Assert.NotNull(predecessor);
+        var predecessorAuthority = GetPrivateProperty<
+            FallbackFrontierRepairAuthority>(predecessor!, "Authority");
+
+        var authorizeRetry = serviceType
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(method =>
+            {
+                if (!string.Equals(
+                        method.Name,
+                        "AuthorizeRuntimeUnlockRetryDispatchLocked",
+                        StringComparison.Ordinal))
+                {
+                    return false;
+                }
+
+                var parameters = method.GetParameters();
+                return parameters.Length == 2 &&
+                       parameters[0].ParameterType == contextType &&
+                       parameters[1].ParameterType ==
+                           typeof(RuntimeUnlockRetryDispatchAuthorityRequest);
+            });
+        var heldDecision = Assert.IsType<RuntimeUnlockRetryDispatchDecision>(
+            authorizeRetry.Invoke(null, [context, retryRequest]));
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchDecisionStatus.Held,
+            heldDecision.Status);
+        var initialHold = Assert.IsType<
+            FileTransferFallbackTailYieldRetryDispatchHold>(
+                GetCoordinatorFallbackTailYieldSubstate(context)
+                    .CurrentRetryDispatchHold);
+        Assert.Equal(predecessorAuthority, initialHold.BlockingRepair);
+        Assert.Equal(1, initialHold.HoldGeneration);
+
+        var logStart = GetOperationalLogLength();
+        var successorRequest = CreateRequest(
+            "v6-frontier:3:128:18",
+            "frq-v6-peer-successor-18",
+            chunkCount: 2);
+        applyPeerRequest.Invoke(
+            service,
+            [context, successorRequest, FileTransferTransportKind.RegularNkn]);
+        var successor = GetPrivatePropertyValue(
+            context,
+            "CurrentFallbackFrontierRepairContract");
+        Assert.NotNull(successor);
+        Assert.NotSame(predecessor, successor);
+        var successorAuthority = GetPrivateProperty<
+            FallbackFrontierRepairAuthority>(successor!, "Authority");
+        Assert.Equal(
+            predecessorAuthority.AuthorityId,
+            successorAuthority.PredecessorAuthorityId);
+        var carriedHold = Assert.IsType<
+            FileTransferFallbackTailYieldRetryDispatchHold>(
+                GetCoordinatorFallbackTailYieldSubstate(context)
+                    .CurrentRetryDispatchHold);
+        Assert.Equal(initialHold.Request, carriedHold.Request);
+        Assert.Equal(initialHold.Release, carriedHold.Release);
+        Assert.Equal(
+            initialHold.DataSessionIdentity,
+            carriedHold.DataSessionIdentity);
+        Assert.Equal(
+            initialHold.DataSessionGeneration,
+            carriedHold.DataSessionGeneration);
+        Assert.Equal(successorAuthority, carriedHold.BlockingRepair);
+        Assert.Equal(2, carriedHold.HoldGeneration);
+        Assert.Null(
+            GetCoordinatorFallbackTailYieldSubstate(context)
+                .CurrentReservation);
+
+        var settleProgress = serviceType.GetMethod(
+            "TrySettleOutboundFallbackFrontierProgressLocked",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        settleProgress.Invoke(
+            service,
+            [context, 128, 129, "unit_test_successor_progress"]);
+        var settled = GetCoordinatorFallbackTailYieldSubstate(context);
+        Assert.Equal(1, settled.LastRetryDispatchRecheckGeneration);
+        var receipt = Assert.IsType<
+            FileTransferFallbackTailYieldRetryDispatchRecheckReceipt>(
+                settled.LastRetryDispatchRecheckReceipt);
+        Assert.Equal(
+            FileTransferFallbackTailYieldRetryDispatchRecheckReceiptStatus
+                .Rejected,
+            receipt.Status);
+        Assert.Equal(carriedHold, receipt.Command.Hold);
+        Assert.Equal(
+            successorAuthority,
+            receipt.Command.Observation.SettledRepair);
+
+        var queuePairedRetry = serviceType
+            .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Single(method =>
+            {
+                if (!string.Equals(
+                        method.Name,
+                        "TryQueueFallbackPairedTailYieldRuntimeUnlockRetryDispatchLocked",
+                        StringComparison.Ordinal))
+                {
+                    return false;
+                }
+
+                var parameters = method.GetParameters();
+                return parameters.Length == 3 &&
+                       parameters[0].ParameterType == contextType;
+            });
+        queuePairedRetry.Invoke(
+            service,
+            [context, carriedHold.Release, "unit_test_ordinary_queue_after_rejected_recheck"]);
+        var afterOrdinaryQueue = GetCoordinatorFallbackTailYieldSubstate(context);
+        Assert.Equal(1, afterOrdinaryQueue.LastRetryDispatchRecheckGeneration);
+        Assert.Equal(receipt, afterOrdinaryQueue.LastRetryDispatchRecheckReceipt);
+        Assert.Null(afterOrdinaryQueue.PendingRetryDispatchRecheckCommand);
+
+        settleProgress.Invoke(
+            service,
+            [context, 129, 130, "unit_test_successor_progress_duplicate"]);
+        Assert.Equal(
+            1,
+            GetCoordinatorFallbackTailYieldSubstate(context)
+                .LastRetryDispatchRecheckGeneration);
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Equal(
+            1,
+            CountOccurrences(
+                log,
+                "event=runtime_unlock_retry_dispatch_fallback_tail_hold_binding_decided;"));
+        Assert.Contains("binding_mode=repair_successor;", log, StringComparison.Ordinal);
+        Assert.Contains("decision_status=Accepted;", log, StringComparison.Ordinal);
+        Assert.Equal(
+            2,
+            CountOccurrences(
+                log,
+                "event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided;"));
+        Assert.Contains(
+            "decision_reason=fallback_tail_retry_dispatch_recheck_terminal_receipt_idempotent;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains("retired_offer_generation=", log, StringComparison.Ordinal);
+        Assert.Contains("listener_rearm_requirement=", log, StringComparison.Ordinal);
+        Assert.Contains("listener_execution_mode=", log, StringComparison.Ordinal);
+        Assert.Contains("regular_v4_liveness_generation=", log, StringComparison.Ordinal);
+        Assert.Contains(
+            "source_publication_route_commit_generation=",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"source_publication_route_commit_generation_present={(retryRequest.SourcePublicationAuthority.RouteCommitGeneration.HasValue ? 1 : 0)};",
+            log,
+            StringComparison.Ordinal);
+
+        FileTransferFrontierRequestFrameV6 CreateRequest(
+            string repairRequestId,
+            string correlationId,
+            int chunkCount)
+            => new()
+            {
+                SessionId = $"session_{transferId}",
+                TransferId = transferId,
+                TransportEpoch = 3,
+                RepairRequestId = repairRequestId,
+                RequestCorrelationId = correlationId,
+                MissingRanges =
+                [
+                    new FileTransferRangeV4
+                    {
+                        StartChunkIndex = 128,
+                        ChunkCount = chunkCount,
+                    },
+                ],
+                Priority = "frontier",
+                RecoveryMode =
+                    "regular_nkn_frontier_stall_control_bulk",
+            };
+    }
+
+    [Fact]
     [Trait("FileTransferRuntimeSuite", "SparseWorkerHandoff")]
     public void OutboundRegularV4WriteHandoff_DrainWithoutAdmissionOrPendingPreCommitFailsClosed()
     {

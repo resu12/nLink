@@ -6682,15 +6682,54 @@ public sealed partial class SessionFileTransferService :
                 decision.State ?? CreateCoordinatorStateLocked(context),
                 request,
                 blockingRepair.Authority);
+        LogFallbackTailYieldRetryDispatchHoldBindingDecision(
+            context,
+            request,
+            blockingRepair.Authority,
+            binding,
+            "initial_hold",
+            predecessorAuthorityId: null);
         if (!binding.Accepted)
         {
             return decision;
         }
 
+        if (binding.Status ==
+            FileTransferFallbackTailYieldTransitionStatus.Accepted)
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=runtime_unlock_retry_dispatch_fallback_tail_hold_bound; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(blockingRepair.Authority.AuthorityId.ToString())}; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; repair_generation={blockingRepair.Authority.DecisionGeneration}; hold_generation={binding.State.PersistentState.FallbackTailYield.CurrentRetryDispatchHold?.HoldGeneration ?? 0}; decision_status={FormatProtocolLogValue(binding.Status.ToString())}; decision_reason={FormatProtocolLogValue(binding.Reason)}");
+        }
+
+        return decision with { State = binding.State };
+    }
+
+    private static void LogFallbackTailYieldRetryDispatchHoldBindingDecision(
+        OutboundTransferContext context,
+        RuntimeUnlockRetryDispatchAuthorityRequest request,
+        FallbackFrontierRepairAuthority blockingRepair,
+        FileTransferFallbackTailYieldTransitionDecision binding,
+        string bindingMode,
+        FileTransferAuthorityId? predecessorAuthorityId)
+    {
+        var fallbackTail = binding.State.PersistentState.FallbackTailYield;
+        var hold = fallbackTail.CurrentRetryDispatchHold;
+        var release = hold?.Release ??
+                      fallbackTail.CurrentOperation?.PairedRelease;
+        var legCheckpointRequestId =
+            context.CurrentTransferLeg?.CheckpointRequestId;
+        var dataSessionIdentity = CreateReceiveRecoveryDataSessionIdentity(
+            context.TransferId,
+            context.DataSession,
+            context.DataSessionGeneration);
+        var holdGeneration = hold?.HoldGeneration ?? 0;
+        var sourcePublication = request.SourcePublicationAuthority;
+        var transitionIdentity =
+            $"{bindingMode}:{blockingRepair.AuthorityId}:{holdGeneration}:{binding.Status}";
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=runtime_unlock_retry_dispatch_fallback_tail_hold_bound; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(blockingRepair.Authority.AuthorityId.ToString())}; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; repair_generation={blockingRepair.Authority.DecisionGeneration}; hold_generation={binding.State.PersistentState.FallbackTailYield.CurrentRetryDispatchHold?.HoldGeneration ?? 0}; decision_status={FormatProtocolLogValue(binding.Status.ToString())}; decision_reason={FormatProtocolLogValue(binding.Reason)}");
-        return decision with { State = binding.State };
+            $"event=runtime_unlock_retry_dispatch_fallback_tail_hold_binding_decided; authority_schema={FileTransferAuthoritySchema.Current}; binding_transition_identity={FormatProtocolLogValue(transitionIdentity)}; binding_mode={FormatProtocolLogValue(bindingMode)}; authority_id={FormatProtocolLogValue(blockingRepair.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(predecessorAuthorityId?.ToString() ?? "(none)")}; release_authority_id={FormatProtocolLogValue(release?.ReleaseAuthorityId.ToString() ?? "(none)")}; release_generation={release?.ReleaseGeneration ?? 0}; release_outcome={FormatProtocolLogValue(release?.ReleaseOutcome ?? "(none)")}; pairing_generation={release?.PairingGeneration ?? 0}; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; route={FormatProtocolLogValue(blockingRepair.RouteToken)}; protocol_version={blockingRepair.ProtocolVersion}; live_route_epoch={blockingRepair.LiveRouteEpoch}; runtime_generation={blockingRepair.RuntimeGeneration}; terminal_generation={blockingRepair.TerminalGeneration}; leg_generation={blockingRepair.LegGeneration}; transport_epoch={blockingRepair.TransportEpoch}; bridge_recovery_generation={blockingRepair.BridgeRecoveryGeneration}; bridge_decision_generation={blockingRepair.BridgeDecisionGeneration}; route_publication_generation={blockingRepair.RoutePublicationGeneration}; route_commit_generation={blockingRepair.RouteCommitGeneration ?? 0}; data_session_identity={FormatProtocolLogValue(dataSessionIdentity)}; data_session_generation={context.DataSessionGeneration}; hold_data_session_identity={FormatProtocolLogValue(hold?.DataSessionIdentity ?? "(none)")}; hold_data_session_generation={hold?.DataSessionGeneration ?? 0}; repair_generation={blockingRepair.DecisionGeneration}; contract_generation={request.RecoveryContractGeneration}; retired_offer_generation={request.RetiredOfferGeneration}; dispatch_attempt_generation={request.DispatchAttemptGeneration}; missing_dispatch_successor_generation={request.MissingDispatchSuccessorGeneration}; request_predecessor_authority_id={FormatProtocolLogValue(request.PredecessorAuthorityId?.ToString() ?? "(none)")}; request_active_predecessor_supersession={(request.RequestActivePredecessorSupersession ? 1 : 0)}; listener_rearm_requirement={FormatProtocolLogValue(request.ListenerRearmRequirement.ToString())}; listener_execution_mode={FormatProtocolLogValue(request.ListenerExecutionMode.ToString())}; retry_reason={FormatProtocolLogValue(request.RetryReason)}; recovery_reason={FormatProtocolLogValue(request.RecoveryReason)}; regular_v4_liveness_generation={request.RegularV4LivenessGeneration}; request_bridge_decision_generation={request.BridgeDecisionGeneration}; request_session_id={FormatProtocolLogValue(request.SessionId)}; request_transfer_id={FormatProtocolLogValue(request.TransferId)}; request_direction={request.Direction.ToString().ToLowerInvariant()}; source_publication_session_id={FormatProtocolLogValue(sourcePublication.SessionId)}; source_publication_transfer_id={FormatProtocolLogValue(sourcePublication.TransferId)}; source_publication_direction={sourcePublication.Direction.ToString().ToLowerInvariant()}; source_publication_route={FormatProtocolLogValue(sourcePublication.RouteToken)}; source_publication_protocol_version={sourcePublication.ProtocolVersion}; source_publication_live_route_epoch={sourcePublication.LiveRouteEpoch}; source_publication_runtime_generation={sourcePublication.RuntimeGeneration}; source_publication_terminal_generation={sourcePublication.TerminalGeneration}; source_publication_leg_generation={sourcePublication.LegGeneration}; source_publication_generation={sourcePublication.RoutePublicationGeneration}; source_publication_route_commit_generation={sourcePublication.RouteCommitGeneration ?? 0}; source_publication_route_commit_generation_present={(sourcePublication.RouteCommitGeneration.HasValue ? 1 : 0)}; source_publication_target_route={FormatProtocolLogValue(sourcePublication.TargetRouteToken)}; source_publication_target_protocol_version={sourcePublication.TargetProtocolVersion}; source_publication_target_transport={FormatFileTransferTransportKind(sourcePublication.TargetTransport)}; source_publication_action_kind={FormatProtocolLogValue(sourcePublication.RoutePublicationActionKind)}; source_publication_reason={FormatProtocolLogValue(sourcePublication.CoordinatorDecisionReason)}; hold_generation={holdGeneration}; authority_checkpoint_request_id={FormatProtocolLogValue(blockingRepair.CheckpointRequestId)}; leg_checkpoint_request_id={FormatProtocolLogValue(legCheckpointRequestId ?? "(none)")}; canonical_authority_checkpoint_request_id={FormatProtocolLogValue(FileTransferCoordinator.NormalizeFallbackFrontierRepairCheckpointRequestId(blockingRepair.CheckpointRequestId))}; canonical_leg_checkpoint_request_id={FormatProtocolLogValue(FileTransferCoordinator.NormalizeFallbackFrontierRepairCheckpointRequestId(legCheckpointRequestId))}; decision_status={FormatProtocolLogValue(binding.Status.ToString())}; decision_reason={FormatProtocolLogValue(binding.Reason)}");
     }
 
     private static RuntimeUnlockRetryDispatchDecision AuthorizeRuntimeUnlockRetryDispatchLocked(

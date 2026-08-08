@@ -14651,9 +14651,8 @@ internal static class FileTransferCoordinator
             repairDecision.BridgeDecisionGeneration,
             publication.PublicationGeneration,
             publication.RouteCommitGeneration,
-            string.IsNullOrWhiteSpace(request.CheckpointRequestId)
-                ? "(none)"
-                : request.CheckpointRequestId.Trim(),
+            NormalizeFallbackFrontierRepairCheckpointRequestId(
+                request.CheckpointRequestId),
             request.CanonicalRepairKey.Trim(),
             normalizedRangeFingerprint,
             request.FrontierChunkIndex,
@@ -20699,7 +20698,6 @@ internal static class FileTransferCoordinator
             FallbackFrontierRepairAuthority blockingRepair)
     {
         var substate = state.PersistentState.FallbackTailYield;
-        var rejectionReason = "accepted";
         if (state.IsTerminal ||
             state.Direction != FileTransferDirection.Outbound ||
             request.IsDefault ||
@@ -20710,12 +20708,24 @@ internal static class FileTransferCoordinator
             {
                 PairingState: FileTransferFallbackTailYieldPairingState.Paired,
                 PairedRelease: { IsDefault: false } release,
-            } operation ||
-            !IsFallbackTailYieldScopeCurrent(
+            } operation)
+        {
+            return FallbackTailYieldTransitionRejected(
+                state,
+                "fallback_tail_retry_dispatch_hold_scope_mismatch");
+        }
+
+        if (!IsFallbackTailYieldScopeCurrent(
                 state,
                 GetEffectiveFallbackTailYieldScope(operation),
-                out rejectionReason) ||
-            !IsFallbackFrontierRepairAuthorityCurrentForRetryRecheck(
+                out var rejectionReason))
+        {
+            return FallbackTailYieldTransitionRejected(
+                state,
+                rejectionReason);
+        }
+
+        if (!IsFallbackFrontierRepairAuthorityCurrentForRetryRecheck(
                 state,
                 blockingRepair,
                 state.CurrentDataSessionIdentity,
@@ -20723,9 +20733,7 @@ internal static class FileTransferCoordinator
         {
             return FallbackTailYieldTransitionRejected(
                 state,
-                string.Equals(rejectionReason, "accepted", StringComparison.Ordinal)
-                    ? "fallback_tail_retry_dispatch_hold_scope_mismatch"
-                    : rejectionReason);
+                "fallback_tail_retry_dispatch_hold_scope_mismatch");
         }
 
         var holdGeneration = Math.Max(
@@ -20767,6 +20775,65 @@ internal static class FileTransferCoordinator
     }
 
     internal static FileTransferFallbackTailYieldTransitionDecision
+        RebindFallbackTailYieldRetryDispatchHoldToRepairSuccessor(
+            FileTransferCoordinatorState state,
+            FallbackFrontierRepairAuthority predecessor,
+            FallbackFrontierRepairAuthority successor)
+    {
+        var substate = state.PersistentState.FallbackTailYield;
+        if (predecessor.IsDefault ||
+            successor.IsDefault ||
+            successor.AuthorityId == predecessor.AuthorityId ||
+            successor.PredecessorAuthorityId != predecessor.AuthorityId ||
+            predecessor.DecisionGeneration == int.MaxValue ||
+            successor.DecisionGeneration != predecessor.DecisionGeneration + 1 ||
+            !FallbackFrontierRepairSuccessorScopeMatches(
+                predecessor,
+                successor))
+        {
+            return FallbackTailYieldTransitionRejected(
+                state,
+                "fallback_tail_retry_dispatch_hold_successor_invalid");
+        }
+
+        if (substate.CurrentRetryDispatchHold is not { } hold)
+        {
+            return FallbackTailYieldTransitionRejected(
+                state,
+                "fallback_tail_retry_dispatch_hold_missing");
+        }
+
+        if (hold.BlockingRepair != predecessor &&
+            hold.BlockingRepair != successor)
+        {
+            return FallbackTailYieldTransitionRejected(
+                state,
+                "fallback_tail_retry_dispatch_hold_predecessor_mismatch");
+        }
+
+        if (substate.CurrentOperation is not
+            {
+                PairedRelease: { } currentRelease,
+            } ||
+            currentRelease != hold.Release ||
+            !string.Equals(
+                state.CurrentDataSessionIdentity,
+                hold.DataSessionIdentity,
+                StringComparison.Ordinal) ||
+            state.CurrentDataSessionGeneration != hold.DataSessionGeneration)
+        {
+            return FallbackTailYieldTransitionRejected(
+                state,
+                "fallback_tail_retry_dispatch_hold_successor_scope_replaced");
+        }
+
+        return BindFallbackTailYieldRetryDispatchHold(
+            state,
+            hold.Request,
+            successor);
+    }
+
+    internal static FileTransferFallbackTailYieldTransitionDecision
         IssueFallbackTailYieldRetryDispatchRecheck(
             FileTransferCoordinatorState state,
             FileTransferFallbackTailYieldRetryDispatchRecheckObservation observation)
@@ -20803,6 +20870,28 @@ internal static class FileTransferCoordinator
                 : FallbackTailYieldTransitionRejected(
                     state,
                     "fallback_tail_retry_dispatch_recheck_conflict");
+        }
+
+        if (substate.LastRetryDispatchRecheckReceipt is
+            {
+                Status:
+                    FileTransferFallbackTailYieldRetryDispatchRecheckReceiptStatus
+                        .Rejected,
+            } terminalReceipt &&
+            terminalReceipt.Command.Hold == observation.Hold &&
+            terminalReceipt.Command.Observation.SettledRepair ==
+                observation.SettledRepair &&
+            string.Equals(
+                terminalReceipt.Command.Observation.SettlementOutcome,
+                observation.SettlementOutcome,
+                StringComparison.Ordinal) &&
+            terminalReceipt.Command.Observation.SuccessorAuthorityId ==
+                observation.SuccessorAuthorityId)
+        {
+            return FallbackTailYieldTransition(
+                state,
+                FileTransferFallbackTailYieldTransitionStatus.Idempotent,
+                "fallback_tail_retry_dispatch_recheck_terminal_receipt_idempotent");
         }
 
         if (!IsFallbackTailYieldRetryDispatchHoldCurrent(
@@ -20952,8 +21041,10 @@ internal static class FileTransferCoordinator
                authority.RoutePublicationGeneration == currentPublication.PublicationGeneration &&
                authority.RouteCommitGeneration == currentPublication.RouteCommitGeneration &&
                string.Equals(
-                   authority.CheckpointRequestId,
-                   leg.CheckpointRequestId,
+                   NormalizeFallbackFrontierRepairCheckpointRequestId(
+                       authority.CheckpointRequestId),
+                   NormalizeFallbackFrontierRepairCheckpointRequestId(
+                       leg.CheckpointRequestId),
                    StringComparison.Ordinal) &&
                string.Equals(
                    dataSessionIdentity,
@@ -20961,6 +21052,52 @@ internal static class FileTransferCoordinator
                    StringComparison.Ordinal) &&
                dataSessionGeneration == state.CurrentDataSessionGeneration;
     }
+
+    internal static string NormalizeFallbackFrontierRepairCheckpointRequestId(
+        string? checkpointRequestId)
+        => string.IsNullOrWhiteSpace(checkpointRequestId)
+            ? "(none)"
+            : checkpointRequestId.Trim();
+
+    private static bool FallbackFrontierRepairSuccessorScopeMatches(
+        FallbackFrontierRepairAuthority predecessor,
+        FallbackFrontierRepairAuthority successor)
+        => string.Equals(
+               predecessor.SessionId,
+               successor.SessionId,
+               StringComparison.Ordinal) &&
+           string.Equals(
+               predecessor.TransferId,
+               successor.TransferId,
+               StringComparison.Ordinal) &&
+           predecessor.Direction == successor.Direction &&
+           predecessor.RuntimeOwner == successor.RuntimeOwner &&
+           predecessor.Route == successor.Route &&
+           string.Equals(
+               predecessor.RouteToken,
+               successor.RouteToken,
+               StringComparison.Ordinal) &&
+           predecessor.ProtocolVersion == successor.ProtocolVersion &&
+           predecessor.LiveRouteEpoch == successor.LiveRouteEpoch &&
+           predecessor.RuntimeGeneration == successor.RuntimeGeneration &&
+           predecessor.TerminalGeneration == successor.TerminalGeneration &&
+           predecessor.LegGeneration == successor.LegGeneration &&
+           predecessor.TransportEpoch == successor.TransportEpoch &&
+           predecessor.BridgeRecoveryGeneration ==
+               successor.BridgeRecoveryGeneration &&
+           predecessor.BridgeDecisionGeneration ==
+               successor.BridgeDecisionGeneration &&
+           predecessor.RoutePublicationGeneration ==
+               successor.RoutePublicationGeneration &&
+           predecessor.RouteCommitGeneration ==
+               successor.RouteCommitGeneration &&
+           string.Equals(
+               NormalizeFallbackFrontierRepairCheckpointRequestId(
+                   predecessor.CheckpointRequestId),
+               NormalizeFallbackFrontierRepairCheckpointRequestId(
+                   successor.CheckpointRequestId),
+               StringComparison.Ordinal) &&
+           predecessor.TargetTransport == successor.TargetTransport;
 
     internal static bool
         TryCreateFallbackPairedTailYieldRuntimeUnlockRetryDispatchRequest(

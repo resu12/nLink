@@ -734,6 +734,63 @@ public sealed partial class SessionFileTransferService
         return queued;
     }
 
+    private static void CarryFallbackTailYieldRetryDispatchHoldToRepairSuccessorLocked(
+        OutboundTransferContext context,
+        FallbackFrontierRepairContract? predecessor,
+        FallbackFrontierRepairContract successor)
+    {
+        if (context.CoordinatorPersistentState.FallbackTailYield
+                .CurrentRetryDispatchHold is not { } hold)
+        {
+            return;
+        }
+
+        FileTransferFallbackTailYieldTransitionDecision binding;
+        var successorAuthority = successor.Authority;
+        if (predecessor is null ||
+            !ReferenceEquals(
+                context.CurrentFallbackFrontierRepairContract,
+                successor) ||
+            predecessor.Lifecycle.SettlementOutcome !=
+                FallbackFrontierRepairSettlementOutcome.Superseded ||
+            predecessor.Lifecycle.SuccessorAuthorityId !=
+                successorAuthority.AuthorityId ||
+            successorAuthority.PredecessorAuthorityId !=
+                predecessor.Authority.AuthorityId)
+        {
+            binding = new FileTransferFallbackTailYieldTransitionDecision(
+                FileTransferFallbackTailYieldTransitionStatus.Rejected,
+                "fallback_tail_retry_dispatch_hold_successor_lifecycle_mismatch",
+                CreateCoordinatorStateLocked(context));
+        }
+        else
+        {
+            binding = FileTransferCoordinator
+                .RebindFallbackTailYieldRetryDispatchHoldToRepairSuccessor(
+                    CreateCoordinatorStateLocked(context),
+                    predecessor.Authority,
+                    successorAuthority);
+            ApplyRuntimeUnlockRetryLifecycleStateLocked(context, binding.State);
+        }
+
+        LogFallbackTailYieldRetryDispatchHoldBindingDecision(
+            context,
+            hold.Request,
+            successorAuthority,
+            binding,
+            "repair_successor",
+            predecessor?.Authority.AuthorityId);
+        if (binding.Status !=
+            FileTransferFallbackTailYieldTransitionStatus.Accepted)
+        {
+            return;
+        }
+
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=runtime_unlock_retry_dispatch_fallback_tail_hold_bound; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(successorAuthority.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(predecessor?.Authority.AuthorityId.ToString() ?? "(none)")}; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; repair_generation={successorAuthority.DecisionGeneration}; hold_generation={binding.State.PersistentState.FallbackTailYield.CurrentRetryDispatchHold?.HoldGeneration ?? 0}; binding_mode=repair_successor; decision_status={FormatProtocolLogValue(binding.Status.ToString())}; decision_reason={FormatProtocolLogValue(binding.Reason)}");
+    }
+
     private static void LogFallbackTailYieldRetryDispatchUnblockRecheck(
         OutboundTransferContext context,
         FileTransferFallbackTailYieldRetryDispatchHold hold,
@@ -1413,7 +1470,8 @@ public sealed partial class SessionFileTransferService
             }
             else
             {
-                var predecessorId = currentContract?.Authority.AuthorityId;
+                var predecessorContract = currentContract;
+                var predecessorId = predecessorContract?.Authority.AuthorityId;
                 if (!TryIssueFallbackFrontierRepairContractLocked(
                         context,
                         identity,
@@ -1436,10 +1494,11 @@ public sealed partial class SessionFileTransferService
                     return;
                 }
 
-                if (currentContract is not null && !currentContract.Lifecycle.IsSettled)
+                if (predecessorContract is not null &&
+                    !predecessorContract.Lifecycle.IsSettled)
                 {
                     TrySettleFallbackFrontierRepairContract(
-                        currentContract,
+                        predecessorContract,
                         FallbackFrontierRepairSettlementOutcome.Superseded,
                         "fallback_frontier_successor_authorized",
                         issuedContract.Authority.AuthorityId);
@@ -1447,6 +1506,10 @@ public sealed partial class SessionFileTransferService
 
                 currentContract = issuedContract;
                 context.CurrentFallbackFrontierRepairContract = issuedContract;
+                CarryFallbackTailYieldRetryDispatchHoldToRepairSuccessorLocked(
+                    context,
+                    predecessorContract,
+                    issuedContract);
                 issuedNewContract = true;
             }
 
@@ -1490,12 +1553,17 @@ public sealed partial class SessionFileTransferService
                     return;
                 }
 
+                var handoffPredecessor = contract;
                 TrySettleFallbackFrontierRepairContract(
-                    contract,
+                    handoffPredecessor,
                     FallbackFrontierRepairSettlementOutcome.Superseded,
                     "fallback_frontier_transport_epoch_handoff",
                     handoffContract.Authority.AuthorityId);
                 context.CurrentFallbackFrontierRepairContract = handoffContract;
+                CarryFallbackTailYieldRetryDispatchHoldToRepairSuccessorLocked(
+                    context,
+                    handoffPredecessor,
+                    handoffContract);
                 contract = handoffContract;
                 issuedNewContract = true;
                 activeAliasCoalesced = false;
@@ -1857,7 +1925,8 @@ public sealed partial class SessionFileTransferService
             return true;
         }
 
-        var predecessorId = currentContract?.Authority.AuthorityId;
+        var predecessorContract = currentContract;
+        var predecessorId = predecessorContract?.Authority.AuthorityId;
         if (!TryIssueFallbackFrontierRepairContractLocked(
                 context,
                 identity,
@@ -1875,16 +1944,21 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        if (currentContract is not null && !currentContract.Lifecycle.IsSettled)
+        if (predecessorContract is not null &&
+            !predecessorContract.Lifecycle.IsSettled)
         {
             TrySettleFallbackFrontierRepairContract(
-                currentContract,
+                predecessorContract,
                 FallbackFrontierRepairSettlementOutcome.Superseded,
                 "fallback_frontier_successor_authorized",
                 issuedContract.Authority.AuthorityId);
         }
 
         context.CurrentFallbackFrontierRepairContract = issuedContract;
+        CarryFallbackTailYieldRetryDispatchHoldToRepairSuccessorLocked(
+            context,
+            predecessorContract,
+            issuedContract);
         contract = issuedContract;
         acceptance = FallbackFrontierRepairAcceptance.NewContract;
         rejectionReason = "accepted";
@@ -1959,7 +2033,9 @@ public sealed partial class SessionFileTransferService
             return true;
         }
 
-        var predecessorAuthorityId = currentContract?.Authority.AuthorityId;
+        var predecessorContract = currentContract;
+        var predecessorAuthorityId =
+            predecessorContract?.Authority.AuthorityId;
         if (!TryIssueFallbackFrontierRepairContractLocked(
                 context,
                 identity,
@@ -1977,16 +2053,21 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        if (currentContract is not null && !currentContract.Lifecycle.IsSettled)
+        if (predecessorContract is not null &&
+            !predecessorContract.Lifecycle.IsSettled)
         {
             TrySettleFallbackFrontierRepairContract(
-                currentContract,
+                predecessorContract,
                 FallbackFrontierRepairSettlementOutcome.Superseded,
                 decisionReason,
                 issuedContract.Authority.AuthorityId);
         }
 
         context.CurrentFallbackFrontierRepairContract = issuedContract;
+        CarryFallbackTailYieldRetryDispatchHoldToRepairSuccessorLocked(
+            context,
+            predecessorContract,
+            issuedContract);
         contract = issuedContract;
         rejectionReason = "accepted";
         return true;
@@ -2092,20 +2173,10 @@ public sealed partial class SessionFileTransferService
             decisionReason,
             successor.Authority.AuthorityId);
         context.CurrentFallbackFrontierRepairContract = successor;
-        if (context.CoordinatorPersistentState.FallbackTailYield
-                .CurrentRetryDispatchHold is { } hold &&
-            hold.BlockingRepair != successor.Authority)
-        {
-            var rebound =
-                FileTransferCoordinator.BindFallbackTailYieldRetryDispatchHold(
-                    CreateCoordinatorStateLocked(context),
-                    hold.Request,
-                    successor.Authority);
-            ApplyRuntimeUnlockRetryLifecycleStateLocked(context, rebound.State);
-            LocalOperationalLog.Info(
-                "FileTransferService",
-                $"event=runtime_unlock_retry_dispatch_fallback_tail_hold_bound; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(successor.Authority.AuthorityId.ToString())}; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; repair_generation={successor.Authority.DecisionGeneration}; hold_generation={rebound.State.PersistentState.FallbackTailYield.CurrentRetryDispatchHold?.HoldGeneration ?? 0}; decision_status={FormatProtocolLogValue(rebound.Status.ToString())}; decision_reason={FormatProtocolLogValue(rebound.Reason)}");
-        }
+        CarryFallbackTailYieldRetryDispatchHoldToRepairSuccessorLocked(
+            context,
+            predecessor,
+            successor);
         return true;
     }
 
