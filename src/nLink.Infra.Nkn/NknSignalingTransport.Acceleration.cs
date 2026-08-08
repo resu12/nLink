@@ -240,6 +240,7 @@ public sealed partial class NknSignalingTransport
     private RuntimeUnlockRouteCommitSnapshot? runtimeUnlockPreCommitProbeLaunchSnapshot;
     private RuntimeUnlockRouteCommitSnapshot? runtimeUnlockPreCommitProbeStartedSnapshot;
     private RuntimeUnlockRouteCommitSnapshot? runtimeUnlockAcceptedPreCommitSnapshot;
+    private RuntimeUnlockResponderAnswerAcceptanceReceipt? runtimeUnlockResponderAnswerAcceptanceReceipt;
     private bool runtimeUnlockPreCommitProbeLaunchTimeoutScheduled;
     private bool runtimeUnlockPreCommitProbeLaunchHeldByCoordinatorDenial;
     private string? runtimeUnlockPreCommitProbeLaunchHeldReason;
@@ -267,6 +268,10 @@ public sealed partial class NknSignalingTransport
     private PendingAccelerationReplyShadow? pendingAccelerationAnswerReplyShadow;
     private PendingAccelerationReplyShadow? pendingAccelerationAnswerAckReplyShadow;
     private long pendingAccelerationReplyWorkerGeneration;
+    private string? runtimeUnlockAnswerAckTimeoutSessionId;
+    private long runtimeUnlockAnswerAckTimeoutTransactionGeneration;
+    private long runtimeUnlockAnswerAckTimeoutOfferGeneration;
+    private long runtimeUnlockAnswerAckTimeoutPendingGeneration;
     private string? inboundRuntimeUnlockDialSessionId;
     private string? inboundRuntimeUnlockDialNonce;
     private long inboundRuntimeUnlockDialPayerDecisionId;
@@ -328,6 +333,31 @@ public sealed partial class NknSignalingTransport
         ResponderAdoptingAckedPeerProbe = 3,
     }
 
+    private enum RuntimeUnlockResponderAnswerAcceptanceSource
+    {
+        SemanticAnswerAck = 0,
+        PeerPreCommitProbe = 1,
+    }
+
+    private sealed record RuntimeUnlockResponderAnswerAcceptanceReceipt(
+        RuntimeUnlockResponderAnswerAcceptanceSource Source,
+        string SessionId,
+        string? TransferId,
+        long TransactionGeneration,
+        long OfferGeneration,
+        long PendingAnswerAckGeneration,
+        RuntimeUnlockOfferAuthorityMode AuthorityMode,
+        long PayerDecisionId,
+        string AnswerMessageId,
+        long AnswerDeadlineUtcMs,
+        long TunaPathLeaseGeneration,
+        string? TunaPathLeaseListenerRunId,
+        string ProbeId,
+        string? EvidenceMessageId,
+        string EvidenceFingerprint,
+        long ObservedUtcMs,
+        long LaunchGeneration);
+
     private sealed record RuntimeUnlockResponderPeerProbeHandoffEvidence(
         string SessionId,
         string? TransferId,
@@ -336,8 +366,10 @@ public sealed partial class NknSignalingTransport
         long PendingAnswerAckGeneration,
         RuntimeUnlockOfferAuthorityMode AuthorityMode,
         long PayerDecisionId,
-        string AckMessageId,
-        string AckSourceFingerprint,
+        RuntimeUnlockResponderAnswerAcceptanceSource AcceptanceSource,
+        string? AckMessageId,
+        string? AckSourceFingerprint,
+        string? PeerProbeFrameFingerprint,
         long TunaPathLeaseGeneration,
         string? TunaPathLeaseListenerRunId,
         string ProbeId,
@@ -3145,8 +3177,7 @@ public sealed partial class NknSignalingTransport
             snapshot.PathProbeTransport != FileTransferTransportKind.Tuna ||
             responderEvidence.ProbeTransport != FileTransferTransportKind.Tuna ||
             snapshot.PathProbeAckedUtcMs != responderEvidence.ProbeAckedUtcMs ||
-            string.IsNullOrWhiteSpace(responderEvidence.AckMessageId) ||
-            string.IsNullOrWhiteSpace(responderEvidence.AckSourceFingerprint) ||
+            !IsRuntimeUnlockResponderAnswerAcceptanceEvidenceComplete(responderEvidence) ||
             responderEvidence.PendingAnswerAckGeneration <= 0 ||
             responderEvidence.PayerDecisionId <= 0)
         {
@@ -3311,7 +3342,7 @@ public sealed partial class NknSignalingTransport
         {
             LocalOperationalLog.Info(
                 "NKN.Tuna",
-                $"event=runtime_unlock_precommit_responder_peer_probe_handoff_bound; status={(duplicate ? "Idempotent" : "Accepted")}; session_id={SanitizeLogToken(sessionId)}; transfer_id={SanitizeLogToken(launchTransferId ?? "none")}; transaction_generation={snapshot.TransactionGeneration}; offer_generation={snapshot.OfferGeneration}; launch_generation={launchGeneration}; tuna_path_lease_generation={snapshot.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={SanitizeLogToken(snapshot.TunaPathLeaseListenerRunId ?? "none")}; probe_id={SanitizeLogToken(snapshot.PathProbeId ?? "none")}; probe_state={snapshot.PathProbeState}; probe_transport={snapshot.PathProbeTransport.ToString().ToLowerInvariant()}; probe_acked_utc_ms={snapshot.PathProbeAckedUtcMs}; launch_role={launchRole}; normalized_reason=exact_responder_peer_probe_adopted");
+                $"event=runtime_unlock_precommit_responder_peer_probe_handoff_bound; status={(duplicate ? "Idempotent" : "Accepted")}; session_id={SanitizeLogToken(sessionId)}; transfer_id={SanitizeLogToken(launchTransferId ?? "none")}; transaction_generation={snapshot.TransactionGeneration}; offer_generation={snapshot.OfferGeneration}; launch_generation={launchGeneration}; tuna_path_lease_generation={snapshot.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={SanitizeLogToken(snapshot.TunaPathLeaseListenerRunId ?? "none")}; probe_id={SanitizeLogToken(snapshot.PathProbeId ?? "none")}; probe_state={snapshot.PathProbeState}; probe_transport={snapshot.PathProbeTransport.ToString().ToLowerInvariant()}; probe_acked_utc_ms={snapshot.PathProbeAckedUtcMs}; launch_role={launchRole}; answer_acceptance_source={responderPeerProbeEvidence?.AcceptanceSource.ToString() ?? "none"}; normalized_reason=exact_responder_peer_probe_adopted");
         }
 
         if (!duplicate)
@@ -5182,6 +5213,379 @@ public sealed partial class NknSignalingTransport
             RuntimeUnlockTunaPathLeaseListenerRunId: runtimeUnlockTunaPathLeaseState.ListenerRunId,
             RuntimeUnlockTunaPathLeaseCurrent: runtimeUnlockTunaPathLeaseState.IsCurrent,
             RuntimeUnlockTunaPathLeaseFailureReason: runtimeUnlockTunaPathLeaseState.FailureReason);
+
+    RuntimeUnlockPeerPreCommitAnswerAcceptanceDecision
+        IRuntimeUnlockPeerPreCommitAnswerAcceptanceObserver.ObserveRuntimeUnlockPeerPreCommitAnswerAcceptance(
+            RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt receipt)
+    {
+        var decision = ObserveRuntimeUnlockPeerPreCommitAnswerAcceptance(receipt);
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_peer_precommit_answer_acceptance_decided; status={decision.Status}; session_id={SanitizeLogToken(receipt.SessionId)}; transfer_id={SanitizeLogToken(receipt.TransferId)}; direction={receipt.Direction.ToString().ToLowerInvariant()}; peer_transaction_generation={receipt.PeerTransactionGeneration}; peer_offer_generation={receipt.PeerOfferGeneration}; peer_tuna_path_lease_generation={receipt.PeerTunaPathLeaseGeneration}; local_transaction_generation={decision.LocalTransactionGeneration}; local_offer_generation={decision.LocalOfferGeneration}; local_tuna_path_lease_generation={decision.LocalTunaPathLeaseGeneration}; pending_answer_ack_generation={decision.PendingAnswerAckGeneration}; launch_generation={decision.LaunchGeneration}; probe_id={SanitizeLogToken(receipt.ProbeId)}; probe_frame_fingerprint={SanitizeLogToken(receipt.ProbeFrameFingerprint)}; received_utc_ms={receipt.ReceivedUtcMs}; probe_ack_sent_utc_ms={receipt.ProbeAckSentUtcMs}; data_session_generation={receipt.DataSessionGeneration}; decision_reason={SanitizeLogToken(decision.Reason)}");
+        return decision;
+    }
+
+    private RuntimeUnlockPeerPreCommitAnswerAcceptanceDecision
+        ObserveRuntimeUnlockPeerPreCommitAnswerAcceptance(
+            RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt receipt)
+    {
+        RuntimeUnlockTransactionDecision? transactionDecision = null;
+        RuntimeUnlockResponderPeerProbeHandoffEvidence? handoffEvidence = null;
+        RuntimeUnlockRouteCommitSnapshot? launchSnapshot = null;
+        bool launchDuplicate = false;
+        NknAccelerationLaneKind lanes = NknAccelerationLaneKind.None;
+        RuntimeUnlockPeerPreCommitAnswerAcceptanceDecision result;
+        lock (accelerationGate)
+        {
+            var current = runtimeUnlockTransactionState;
+            if (current.IsTerminal &&
+                (runtimeUnlockResponderAnswerAcceptanceReceipt is not null ||
+                 !string.IsNullOrWhiteSpace(pendingAccelerationAnswerAckNonce)))
+            {
+                return new RuntimeUnlockPeerPreCommitAnswerAcceptanceDecision(
+                    receipt,
+                    RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Rejected,
+                    "runtime_unlock_peer_precommit_answer_acceptance_transaction_terminal",
+                    current.TransactionGeneration,
+                    current.OfferGeneration,
+                    current.TunaPathLeaseGeneration,
+                    pendingAccelerationAnswerAckGeneration);
+            }
+
+            if (runtimeUnlockResponderAnswerAcceptanceReceipt is { } existing &&
+                string.Equals(existing.SessionId, receipt.SessionId, StringComparison.Ordinal) &&
+                string.Equals(existing.TransferId, receipt.TransferId, StringComparison.Ordinal) &&
+                string.Equals(existing.ProbeId, receipt.ProbeId, StringComparison.Ordinal) &&
+                string.Equals(existing.EvidenceFingerprint, receipt.ProbeFrameFingerprint, StringComparison.Ordinal) &&
+                !current.IsTerminal &&
+                current.AnswerReceived &&
+                string.Equals(current.SessionId, existing.SessionId, StringComparison.Ordinal) &&
+                string.Equals(current.TransferId, existing.TransferId, StringComparison.Ordinal) &&
+                string.Equals(current.PathProbeId, existing.ProbeId, StringComparison.Ordinal) &&
+                current.TunaPathLeaseCurrent &&
+                current.TunaPathLeaseGeneration == existing.TunaPathLeaseGeneration &&
+                string.Equals(
+                    current.TunaPathLeaseListenerRunId,
+                    existing.TunaPathLeaseListenerRunId,
+                    StringComparison.Ordinal) &&
+                current.TransactionGeneration == existing.TransactionGeneration &&
+                current.OfferGeneration == existing.OfferGeneration)
+            {
+                return new RuntimeUnlockPeerPreCommitAnswerAcceptanceDecision(
+                    receipt,
+                    RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Idempotent,
+                    "runtime_unlock_peer_precommit_answer_acceptance_already_bound",
+                    existing.TransactionGeneration,
+                    existing.OfferGeneration,
+                    existing.TunaPathLeaseGeneration,
+                    existing.PendingAnswerAckGeneration,
+                    existing.LaunchGeneration);
+            }
+
+            if (string.IsNullOrWhiteSpace(pendingAccelerationAnswerAckNonce))
+            {
+                var existingLaunch = runtimeUnlockPreCommitProbeStartedSnapshot ??
+                                     runtimeUnlockPreCommitProbeLaunchSnapshot;
+                if (existingLaunch is { LaunchGeneration: > 0 } &&
+                    !current.IsTerminal &&
+                    string.Equals(existingLaunch.SessionId, receipt.SessionId, StringComparison.Ordinal) &&
+                    string.Equals(existingLaunch.TransferId, receipt.TransferId, StringComparison.Ordinal) &&
+                    string.Equals(existingLaunch.PathProbeId, receipt.ProbeId, StringComparison.Ordinal))
+                {
+                    return new RuntimeUnlockPeerPreCommitAnswerAcceptanceDecision(
+                        receipt,
+                        RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Idempotent,
+                        "runtime_unlock_peer_precommit_answer_acceptance_launch_already_current",
+                        existingLaunch.TransactionGeneration,
+                        existingLaunch.OfferGeneration,
+                        existingLaunch.TunaPathLeaseGeneration,
+                        0,
+                        existingLaunch.LaunchGeneration);
+                }
+
+                if (!string.IsNullOrWhiteSpace(runtimeUnlockAnswerAckTimeoutSessionId) &&
+                    string.Equals(runtimeUnlockAnswerAckTimeoutSessionId, receipt.SessionId, StringComparison.Ordinal) &&
+                    runtimeUnlockAnswerAckTimeoutTransactionGeneration == current.TransactionGeneration &&
+                    runtimeUnlockAnswerAckTimeoutOfferGeneration == current.OfferGeneration)
+                {
+                    return new RuntimeUnlockPeerPreCommitAnswerAcceptanceDecision(
+                        receipt,
+                        RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Rejected,
+                        "runtime_unlock_peer_precommit_answer_ack_timeout_won",
+                        current.TransactionGeneration,
+                        current.OfferGeneration,
+                        current.TunaPathLeaseGeneration,
+                        runtimeUnlockAnswerAckTimeoutPendingGeneration);
+                }
+
+                return new RuntimeUnlockPeerPreCommitAnswerAcceptanceDecision(
+                    receipt,
+                    RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.NotApplicable,
+                    "runtime_unlock_peer_precommit_answer_ack_not_pending");
+            }
+
+            var shadow = pendingAccelerationAnswerReplyShadow;
+            var authorityMode = pendingAccelerationAnswerAckAuthorityMode;
+            var lease = runtimeUnlockTunaPathLeaseState;
+            var nowUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var admission = receipt.AdmissionToken;
+            var scopeMatches =
+                receipt.ReceivedTransport == FileTransferTransportKind.Tuna &&
+                receipt.PeerTransactionGeneration > 0 &&
+                receipt.PeerOfferGeneration > 0 &&
+                receipt.PeerTunaPathLeaseGeneration > 0 &&
+                receipt.DataSessionGeneration > 0 &&
+                receipt.ReceivedUtcMs > 0 &&
+                receipt.ProbeAckSentUtcMs >= receipt.ReceivedUtcMs &&
+                receipt.ProbeFrameFingerprint.Length == 64 &&
+                !admission.IsDefault &&
+                string.Equals(admission.SessionId, receipt.SessionId, StringComparison.Ordinal) &&
+                string.Equals(admission.TransferId, receipt.TransferId, StringComparison.Ordinal) &&
+                admission.Direction == receipt.Direction &&
+                admission.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+                current is { IsTerminal: false, AnswerReceived: true } &&
+                string.Equals(current.SessionId, receipt.SessionId, StringComparison.Ordinal) &&
+                (string.IsNullOrWhiteSpace(current.TransferId) ||
+                 string.Equals(current.TransferId, receipt.TransferId, StringComparison.Ordinal)) &&
+                current.TransactionGeneration > 0 &&
+                current.OfferGeneration > 0 &&
+                current.TunaPathLeaseGeneration > 0 &&
+                current.TunaPathLeaseCurrent &&
+                !string.IsNullOrWhiteSpace(current.TunaPathLeaseListenerRunId) &&
+                current.TunaPathLeaseListenerRunId.StartsWith(
+                    "peer-offer-dialer-",
+                    StringComparison.OrdinalIgnoreCase) &&
+                lease.IsCurrent &&
+                lease.LeaseGeneration == current.TunaPathLeaseGeneration &&
+                string.Equals(lease.ListenerRunId, current.TunaPathLeaseListenerRunId, StringComparison.Ordinal) &&
+                authorityMode == RuntimeUnlockOfferAuthorityMode.InitialActivation &&
+                pendingAccelerationAnswerAckLanes != NknAccelerationLaneKind.None &&
+                pendingAccelerationAnswerAckPayerDecisionId > 0 &&
+                pendingAccelerationAnswerAckGeneration > 0 &&
+                shadow is not null &&
+                shadow.PendingGeneration == pendingAccelerationAnswerAckGeneration &&
+                shadow.AuthorityMode == authorityMode &&
+                string.Equals(shadow.SessionId, receipt.SessionId, StringComparison.Ordinal) &&
+                string.Equals(shadow.Nonce, pendingAccelerationAnswerAckNonce, StringComparison.Ordinal) &&
+                shadow.PayerDecisionId == pendingAccelerationAnswerAckPayerDecisionId &&
+                shadow.DeadlineUtcMs > nowUtcMs;
+            if (!scopeMatches)
+            {
+                return new RuntimeUnlockPeerPreCommitAnswerAcceptanceDecision(
+                    receipt,
+                    RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Rejected,
+                    "runtime_unlock_peer_precommit_answer_acceptance_scope_mismatch",
+                    current.TransactionGeneration,
+                    current.OfferGeneration,
+                    current.TunaPathLeaseGeneration,
+                    pendingAccelerationAnswerAckGeneration);
+            }
+
+            if (current.PathProbeState is not (
+                    RuntimeUnlockPathProbeState.None or
+                    RuntimeUnlockPathProbeState.Started) ||
+                (!string.IsNullOrWhiteSpace(current.PathProbeId) &&
+                 !string.Equals(current.PathProbeId, receipt.ProbeId, StringComparison.Ordinal)))
+            {
+                return new RuntimeUnlockPeerPreCommitAnswerAcceptanceDecision(
+                    receipt,
+                    RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Rejected,
+                    "runtime_unlock_peer_precommit_answer_acceptance_probe_mismatch",
+                    current.TransactionGeneration,
+                    current.OfferGeneration,
+                    current.TunaPathLeaseGeneration,
+                    pendingAccelerationAnswerAckGeneration);
+            }
+
+            var pendingGeneration = pendingAccelerationAnswerAckGeneration;
+            var payerDecisionId = pendingAccelerationAnswerAckPayerDecisionId;
+            var acceptedAuthorityMode = authorityMode!.Value;
+            var acceptedShadow = shadow!;
+            lanes = pendingAccelerationAnswerAckLanes;
+            transactionDecision = ApplyRuntimeUnlockTransactionUnsafe(
+                RuntimeUnlockTransactionEventKind.PathProbeStarted,
+                receipt.SessionId,
+                current.OfferGeneration,
+                "peer_precommit_answer_acceptance",
+                transactionGeneration: current.TransactionGeneration,
+                pathProbeId: receipt.ProbeId,
+                pathProbeTransport: FileTransferTransportKind.Tuna);
+            var started = transactionDecision.State;
+            handoffEvidence = new RuntimeUnlockResponderPeerProbeHandoffEvidence(
+                started.SessionId,
+                string.IsNullOrWhiteSpace(started.TransferId) ? receipt.TransferId : started.TransferId,
+                started.TransactionGeneration,
+                started.OfferGeneration,
+                pendingGeneration,
+                acceptedAuthorityMode,
+                payerDecisionId,
+                RuntimeUnlockResponderAnswerAcceptanceSource.PeerPreCommitProbe,
+                null,
+                null,
+                receipt.ProbeFrameFingerprint,
+                started.TunaPathLeaseGeneration,
+                started.TunaPathLeaseListenerRunId,
+                receipt.ProbeId,
+                started.PathProbeState,
+                started.PathProbeTransport,
+                started.PathProbeAckedUtcMs);
+            if (!TryReserveRuntimeUnlockResponderPeerProbeLaunchUnsafe(
+                    receipt.SessionId,
+                    receipt.TransferId,
+                    lanes,
+                    "runtime_unlock_peer_precommit_answer_acceptance_ready",
+                    started,
+                    handoffEvidence,
+                    out launchSnapshot,
+                    out launchDuplicate,
+                    out var launchRejectionReason))
+            {
+                return new RuntimeUnlockPeerPreCommitAnswerAcceptanceDecision(
+                    receipt,
+                    RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Rejected,
+                    launchRejectionReason,
+                    started.TransactionGeneration,
+                    started.OfferGeneration,
+                    started.TunaPathLeaseGeneration,
+                    pendingGeneration);
+            }
+
+            accelerationSessionId = receipt.SessionId;
+            accelerationNegotiatedLanes = lanes;
+            runtimeUnlockResponderAnswerAcceptanceReceipt =
+                new RuntimeUnlockResponderAnswerAcceptanceReceipt(
+                    RuntimeUnlockResponderAnswerAcceptanceSource.PeerPreCommitProbe,
+                    receipt.SessionId,
+                    receipt.TransferId,
+                    started.TransactionGeneration,
+                    started.OfferGeneration,
+                    pendingGeneration,
+                    acceptedAuthorityMode,
+                    payerDecisionId,
+                    acceptedShadow.Envelope.MessageId,
+                    acceptedShadow.DeadlineUtcMs,
+                    started.TunaPathLeaseGeneration,
+                    started.TunaPathLeaseListenerRunId,
+                    receipt.ProbeId,
+                    null,
+                    receipt.ProbeFrameFingerprint,
+                    receipt.ProbeAckSentUtcMs,
+                    launchSnapshot.LaunchGeneration);
+            ClearPendingAccelerationAnswerAckLocked();
+            result = new RuntimeUnlockPeerPreCommitAnswerAcceptanceDecision(
+                receipt,
+                RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Accepted,
+                "runtime_unlock_peer_precommit_answer_acceptance_bound",
+                started.TransactionGeneration,
+                started.OfferGeneration,
+                started.TunaPathLeaseGeneration,
+                pendingGeneration,
+                launchSnapshot.LaunchGeneration);
+        }
+
+        LogRuntimeUnlockTransactionDecision(
+            RuntimeUnlockTransactionEventKind.PathProbeStarted,
+            transactionDecision);
+        var responderLaunchRole = launchSnapshot.PathProbeState.Equals(
+            RuntimeUnlockPathProbeState.Acked.ToString(),
+            StringComparison.OrdinalIgnoreCase)
+            ? RuntimeUnlockPreCommitProbeLaunchRole.ResponderAdoptingAckedPeerProbe
+            : RuntimeUnlockPreCommitProbeLaunchRole.ResponderAdoptingStartedPeerProbe;
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=filetransfer_runtime_unlock_handoff_pending_route_commit; session_id={SanitizeLogToken(receipt.SessionId)}; reason=runtime_unlock_peer_precommit_answer_acceptance_ready; lanes={FormatAccelerationLanesForLog(lanes)}; transaction_generation={launchSnapshot.TransactionGeneration}; offer_generation={launchSnapshot.OfferGeneration}; state={launchSnapshot.TransactionState.ToLowerInvariant()}; path_probe_state={launchSnapshot.PathProbeState.ToLowerInvariant()}; route_commit_pending=1; route_committed=0; source=typed_peer_precommit_answer_acceptance");
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_precommit_probe_launch_requested; session_id={SanitizeLogToken(receipt.SessionId)}; transfer_id={SanitizeLogToken(receipt.TransferId)}; reason=runtime_unlock_peer_precommit_answer_acceptance_ready; lanes={FormatAccelerationLanesForLog(lanes)}; transaction_generation={launchSnapshot.TransactionGeneration}; offer_generation={launchSnapshot.OfferGeneration}; launch_generation={launchSnapshot.LaunchGeneration}; tuna_path_lease_generation={launchSnapshot.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={SanitizeLogToken(launchSnapshot.TunaPathLeaseListenerRunId ?? "none")}; path_probe_id={SanitizeLogToken(launchSnapshot.PathProbeId ?? "none")}; path_probe_state={launchSnapshot.PathProbeState.ToString().ToLowerInvariant()}; duplicate={(launchDuplicate ? 1 : 0)}; tuple_mutation=0; responder_waiting_for_peer_probe=0; launch_role={responderLaunchRole}; peer_probe_adoption=1");
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_precommit_responder_peer_probe_handoff_bound; status={(launchDuplicate ? "Idempotent" : "Accepted")}; session_id={SanitizeLogToken(receipt.SessionId)}; transfer_id={SanitizeLogToken(receipt.TransferId)}; transaction_generation={launchSnapshot.TransactionGeneration}; offer_generation={launchSnapshot.OfferGeneration}; launch_generation={launchSnapshot.LaunchGeneration}; tuna_path_lease_generation={launchSnapshot.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={SanitizeLogToken(launchSnapshot.TunaPathLeaseListenerRunId ?? "none")}; probe_id={SanitizeLogToken(launchSnapshot.PathProbeId ?? "none")}; probe_state={launchSnapshot.PathProbeState}; probe_transport={launchSnapshot.PathProbeTransport.ToString().ToLowerInvariant()}; probe_acked_utc_ms={launchSnapshot.PathProbeAckedUtcMs}; launch_role={responderLaunchRole}; answer_acceptance_source={RuntimeUnlockResponderAnswerAcceptanceSource.PeerPreCommitProbe}; normalized_reason=exact_responder_peer_probe_adopted");
+        if (!launchDuplicate)
+        {
+            RequestFileTransferDataSessionsHandoff(
+                "runtime_unlock_peer_precommit_answer_acceptance_ready",
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                receipt.SessionId,
+                launchSnapshot);
+        }
+
+        NotifyTransportAccelerationStateChanged("runtime_unlock_peer_precommit_answer_acceptance_bound");
+        return result;
+    }
+
+    private bool TryReserveRuntimeUnlockResponderPeerProbeLaunchUnsafe(
+        string sessionId,
+        string transferId,
+        NknAccelerationLaneKind lanes,
+        string reason,
+        RuntimeUnlockTransactionSnapshot snapshot,
+        RuntimeUnlockResponderPeerProbeHandoffEvidence evidence,
+        out RuntimeUnlockRouteCommitSnapshot launchSnapshot,
+        out bool duplicate,
+        out string rejectionReason)
+    {
+        launchSnapshot = null!;
+        duplicate = false;
+        rejectionReason = "runtime_unlock_peer_precommit_answer_acceptance_launch_rejected";
+        if ((lanes & NknAccelerationLaneKind.File) != NknAccelerationLaneKind.File ||
+            string.IsNullOrWhiteSpace(transferId) ||
+            !TryResolveRuntimeUnlockPreCommitProbeLaunchRole(
+                snapshot,
+                evidence,
+                out var launchRole) ||
+            launchRole is not (
+                RuntimeUnlockPreCommitProbeLaunchRole.ResponderAdoptingStartedPeerProbe or
+                RuntimeUnlockPreCommitProbeLaunchRole.ResponderAdoptingAckedPeerProbe))
+        {
+            return false;
+        }
+
+        var sameLogicalLaunch =
+            string.Equals(runtimeUnlockPreCommitProbeLaunchSessionId, sessionId, StringComparison.Ordinal) &&
+            string.Equals(runtimeUnlockPreCommitProbeLaunchTransferId, transferId, StringComparison.Ordinal) &&
+            runtimeUnlockPreCommitProbeLaunchTransactionGeneration == snapshot.TransactionGeneration &&
+            runtimeUnlockPreCommitProbeLaunchOfferGeneration == snapshot.OfferGeneration;
+        var launchGeneration = sameLogicalLaunch
+            ? runtimeUnlockPreCommitProbeLaunchGeneration
+            : runtimeUnlockPreCommitProbeLaunchGeneration + 1;
+        var candidate = CreateRuntimeUnlockPreCommitProbeLaunchSnapshot(
+            snapshot,
+            transferId,
+            reason,
+            launchGeneration);
+        duplicate = sameLogicalLaunch &&
+            runtimeUnlockPreCommitProbeLaunchSnapshot is { } existing &&
+            HasSameRuntimeUnlockPreCommitProbeLaunchTuple(existing, candidate);
+        if (sameLogicalLaunch && !duplicate)
+        {
+            rejectionReason = "runtime_unlock_peer_precommit_answer_acceptance_launch_tuple_mismatch";
+            return false;
+        }
+
+        if (!sameLogicalLaunch)
+        {
+            runtimeUnlockPreCommitProbeLaunchSessionId = sessionId;
+            runtimeUnlockPreCommitProbeLaunchTransferId = transferId;
+            runtimeUnlockPreCommitProbeLaunchTransactionGeneration = snapshot.TransactionGeneration;
+            runtimeUnlockPreCommitProbeLaunchOfferGeneration = snapshot.OfferGeneration;
+            runtimeUnlockPreCommitProbeLaunchGeneration = launchGeneration;
+            runtimeUnlockPreCommitProbeLaunchTimeoutScheduled = false;
+            runtimeUnlockPreCommitProbeStartedSnapshot = null;
+            ClearRuntimeUnlockPreCommitProbeLaunchHoldUnsafe();
+            runtimeUnlockPreCommitProbeLaunchSnapshot = candidate;
+            launchSnapshot = candidate;
+        }
+        else
+        {
+            launchSnapshot = runtimeUnlockPreCommitProbeLaunchSnapshot!;
+        }
+
+        rejectionReason = duplicate
+            ? "runtime_unlock_peer_precommit_answer_acceptance_launch_already_current"
+            : "runtime_unlock_peer_precommit_answer_acceptance_launch_reserved";
+        return true;
+    }
 
     void IRuntimeUnlockRouteCommitProofProvider.NotifyRuntimeUnlockPathProbeStarted(
         string sessionId,
@@ -14043,6 +14447,21 @@ public sealed partial class NknSignalingTransport
             $"event=runtime_unlock_initial_activation_offer_envelope_refresh_committed; {FormatRuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(command.HoldRequest)}; refresh_generation={command.RefreshGeneration}; refresh_release_profile={command.ReleaseProfile}; successor_envelope_generation={command.SuccessorEnvelopeGeneration}; successor_envelope_fingerprint={SanitizeLogToken(refreshedFingerprint)}; successor_sent_at_unix_ms={command.SuccessorSentAtUnixMs}; successor_expires_at_unix_ms={command.SuccessorExpiresAtUnixMs}; secure_sequence={receipt.SecureSequence}; message_id={SanitizeLogToken(receipt.MessageId)}; decision_status={decision.Status}; decision_reason={SanitizeLogToken(decision.Reason)}");
         return true;
     }
+
+    private static bool IsRuntimeUnlockResponderAnswerAcceptanceEvidenceComplete(
+        RuntimeUnlockResponderPeerProbeHandoffEvidence evidence)
+        => evidence.AcceptanceSource switch
+        {
+            RuntimeUnlockResponderAnswerAcceptanceSource.SemanticAnswerAck =>
+                !string.IsNullOrWhiteSpace(evidence.AckMessageId) &&
+                !string.IsNullOrWhiteSpace(evidence.AckSourceFingerprint) &&
+                string.IsNullOrWhiteSpace(evidence.PeerProbeFrameFingerprint),
+            RuntimeUnlockResponderAnswerAcceptanceSource.PeerPreCommitProbe =>
+                string.IsNullOrWhiteSpace(evidence.AckMessageId) &&
+                string.IsNullOrWhiteSpace(evidence.AckSourceFingerprint) &&
+                !string.IsNullOrWhiteSpace(evidence.PeerProbeFrameFingerprint),
+            _ => false,
+        };
 
     private bool
         RuntimeUnlockInitialActivationEnvelopeRefreshProfileMatchesCurrentScope(
@@ -24523,6 +24942,11 @@ public sealed partial class NknSignalingTransport
                     ? RuntimeUnlockOfferAuthorityMode.InitialActivation
                     : null;
             var generation = ++pendingAccelerationAnswerAckGeneration;
+            runtimeUnlockResponderAnswerAcceptanceReceipt = null;
+            runtimeUnlockAnswerAckTimeoutSessionId = null;
+            runtimeUnlockAnswerAckTimeoutTransactionGeneration = 0;
+            runtimeUnlockAnswerAckTimeoutOfferGeneration = 0;
+            runtimeUnlockAnswerAckTimeoutPendingGeneration = 0;
             pendingAccelerationAnswerAckReplyTarget =
                 replyTarget with { LineageGeneration = generation };
             pendingAccelerationAnswerReplyShadow = null;
@@ -25494,6 +25918,15 @@ public sealed partial class NknSignalingTransport
                             return;
                         }
 
+                        if (pendingAuthorityMode is not null)
+                        {
+                            runtimeUnlockAnswerAckTimeoutSessionId = sessionId;
+                            runtimeUnlockAnswerAckTimeoutTransactionGeneration =
+                                runtimeUnlockTransactionState.TransactionGeneration;
+                            runtimeUnlockAnswerAckTimeoutOfferGeneration =
+                                runtimeUnlockTransactionState.OfferGeneration;
+                            runtimeUnlockAnswerAckTimeoutPendingGeneration = generation;
+                        }
                         ClearPendingAccelerationAnswerAckLocked();
                     }
 
@@ -28699,6 +29132,16 @@ public sealed partial class NknSignalingTransport
                 string.Equals(accelerationSessionId, ack.SessionId.Trim(), StringComparison.Ordinal);
             if (string.IsNullOrWhiteSpace(pendingAccelerationAnswerAckNonce))
             {
+                if (runtimeUnlockResponderAnswerAcceptanceReceipt is { } terminalReceipt &&
+                    string.Equals(terminalReceipt.SessionId, ack.SessionId.Trim(), StringComparison.Ordinal) &&
+                    terminalReceipt.PayerDecisionId == ack.PayerDecisionId)
+                {
+                    LocalOperationalLog.Info(
+                        "NKN.Tuna",
+                        $"event=tuna_acceleration_answer_ack_duplicate_ignored; session_id={SanitizeLogToken(ack.SessionId)}; payer_decision_id={ack.PayerDecisionId}; answer_acceptance_source={terminalReceipt.Source}; reason=runtime_unlock_answer_acceptance_already_terminal");
+                    return;
+                }
+
                 if (alreadyNegotiated)
                 {
                     LocalOperationalLog.Info(
@@ -28768,14 +29211,40 @@ public sealed partial class NknSignalingTransport
                                 pendingAnswerAckGeneration,
                                 authorityMode,
                                 ack.PayerDecisionId,
+                                RuntimeUnlockResponderAnswerAcceptanceSource.SemanticAnswerAck,
                                 env.MessageId.Trim(),
                                 sourceFingerprint,
+                                null,
                                 transaction.TunaPathLeaseGeneration,
                                 transaction.TunaPathLeaseListenerRunId,
                                 transaction.PathProbeId,
                                 transaction.PathProbeState,
                                 transaction.PathProbeTransport,
                                 transaction.PathProbeAckedUtcMs);
+                            if (pendingAccelerationAnswerReplyShadow is { } answerShadow &&
+                                answerShadow.PendingGeneration == pendingAnswerAckGeneration &&
+                                answerShadow.DeadlineUtcMs > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
+                            {
+                                runtimeUnlockResponderAnswerAcceptanceReceipt =
+                                    new RuntimeUnlockResponderAnswerAcceptanceReceipt(
+                                        RuntimeUnlockResponderAnswerAcceptanceSource.SemanticAnswerAck,
+                                        transaction.SessionId,
+                                        transaction.TransferId,
+                                        transaction.TransactionGeneration,
+                                        transaction.OfferGeneration,
+                                        pendingAnswerAckGeneration,
+                                        authorityMode,
+                                        ack.PayerDecisionId,
+                                        answerShadow.Envelope.MessageId,
+                                        answerShadow.DeadlineUtcMs,
+                                        transaction.TunaPathLeaseGeneration,
+                                        transaction.TunaPathLeaseListenerRunId,
+                                        transaction.PathProbeId,
+                                        env.MessageId.Trim(),
+                                        sourceFingerprint,
+                                        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                                        0);
+                            }
                         }
                         ClearPendingAccelerationAnswerAckLocked();
                     }

@@ -18328,10 +18328,14 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         var authorityModeType = transportType.GetNestedType(
             "RuntimeUnlockOfferAuthorityMode",
             BindingFlags.NonPublic)!;
+        var acceptanceSourceType = transportType.GetNestedType(
+            "RuntimeUnlockResponderAnswerAcceptanceSource",
+            BindingFlags.NonPublic)!;
         var resolver = transportType.GetMethod(
             "TryResolveRuntimeUnlockPreCommitProbeLaunchRole",
             BindingFlags.Static | BindingFlags.NonPublic)!;
         var authorityMode = Enum.Parse(authorityModeType, "InitialActivation");
+        var acceptanceSource = Enum.Parse(acceptanceSourceType, "SemanticAnswerAck");
 
         static RuntimeUnlockTransactionSnapshot CreateSnapshot(RuntimeUnlockPathProbeState state, long ackedUtcMs) => new(
             SessionId: "session_responder_adoption",
@@ -18373,8 +18377,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 9L,
                 authorityMode,
                 4L,
+                acceptanceSource,
                 "answer-ack-message",
                 "peer-fingerprint",
+                null,
                 5L,
                 "peer-offer-dialer-5",
                 probeId,
@@ -20493,6 +20499,80 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             Assert.Contains("event=tuna_acceleration_answer_sent; accepted=0; reason=runtime_unlock_tuna_dial_failed", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_timeline; status=runtime_unlock_tuna_dial_failed; active=0", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_sidecar_unavailable", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void RuntimeUnlockResponderPeerProbe_AnswerAckTimeoutWinsBeforeTypedPeerReceipt()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var client = new FakeNknClient("host.runtime-unlock-peer-receipt-timeout.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                NknTransportOptions.Load(),
+                new NknIdentity("host-runtime-unlock-peer-receipt-timeout-id", client.Address));
+            var transaction = new RuntimeUnlockTransactionSnapshot(
+                SessionId: "session-peer-receipt-timeout",
+                TransferId: "transfer-peer-receipt-timeout",
+                TransactionGeneration: 3,
+                OfferGeneration: 7,
+                State: RuntimeUnlockTransactionState.RouteCommitPending,
+                CreatedUtcMs: 1,
+                UpdatedUtcMs: 2,
+                DeadlineUtcMs: 1000,
+                ListenerReady: true,
+                ListenerUnavailable: false,
+                ObservedSend: true,
+                ObservedLane: "peer_answer",
+                PeerReceived: true,
+                AnswerReceived: true,
+                PathProbeId: "probe-peer-receipt-timeout",
+                PathProbeState: RuntimeUnlockPathProbeState.Started,
+                PathProbeTransport: FileTransferTransportKind.Tuna,
+                PathProbeAckedUtcMs: 0,
+                PathProbeFailureReason: null,
+                RouteCommitPending: true,
+                RouteCommitted: false,
+                FailureReason: null,
+                RetiredReason: null,
+                TunaPathLeaseGeneration: 5,
+                TunaPathLeaseState: RuntimeUnlockTunaPathLeaseState.ListenerReady,
+                TunaPathLeaseListenerRunId: "peer-offer-dialer-5",
+                TunaPathLeaseCurrent: true,
+                TunaPathLeaseFailureReason: null);
+            SetPrivateField(transport, "runtimeUnlockTransactionState", transaction);
+            SetPrivateField(transport, "runtimeUnlockAnswerAckTimeoutSessionId", transaction.SessionId);
+            SetPrivateField(transport, "runtimeUnlockAnswerAckTimeoutTransactionGeneration", transaction.TransactionGeneration);
+            SetPrivateField(transport, "runtimeUnlockAnswerAckTimeoutOfferGeneration", transaction.OfferGeneration);
+            SetPrivateField(transport, "runtimeUnlockAnswerAckTimeoutPendingGeneration", 9L);
+
+            var receipt = new RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt(
+                transaction.SessionId,
+                transaction.TransferId!,
+                FileTransferDirection.Inbound,
+                default,
+                11,
+                13,
+                17,
+                transaction.PathProbeId!,
+                new string('a', 64),
+                FileTransferTransportKind.Tuna,
+                100,
+                101,
+                19);
+            var decision = ((IRuntimeUnlockPeerPreCommitAnswerAcceptanceObserver)transport)
+                .ObserveRuntimeUnlockPeerPreCommitAnswerAcceptance(receipt);
+
+            Assert.Equal(RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Rejected, decision.Status);
+            Assert.Equal("runtime_unlock_peer_precommit_answer_ack_timeout_won", decision.Reason);
+            Assert.Equal(0, decision.LaunchGeneration);
         }
         finally
         {
