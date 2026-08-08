@@ -572,6 +572,97 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
     }
 
     [Fact]
+    public async Task RunFileTransferRouteAcceptance_CurrentListenerAdoptionCountsReachScenarioAndRootSummaries()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string scenario = "regular-v4-live-activation-off-on-off-256mb";
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-current-listener-adoption-summary-propagation");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-current-listener-adoption-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_CURRENT_LISTENER_ADOPTION_SUMMARY_FIXTURE"] = "1";
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ScenarioName", scenario,
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Expected fake current-listener-adoption propagation run to pass.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+
+            var evidence = ReadArtifactReport(Path.Combine(runRoot, scenario), "filetransfer-operator-verdict.txt");
+            Assert.Equal("2", evidence["runtime_unlock_retry_dispatch_current_listener_adoption_missing_raw_count"]);
+            Assert.Equal("1", evidence["runtime_unlock_retry_dispatch_current_listener_adoption_missing_distinct_count"]);
+            Assert.Equal("0", evidence["runtime_unlock_retry_dispatch_current_listener_adoption_missing_recovered_count"]);
+            Assert.Equal("1", evidence["runtime_unlock_retry_dispatch_current_listener_adoption_missing_unresolved_count"]);
+            Assert.Equal("2", evidence["runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_raw_count"]);
+            Assert.Equal("1", evidence["runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_unresolved_count"]);
+            Assert.Equal("3", evidence["runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_raw_count"]);
+            Assert.Equal("2", evidence["runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_distinct_count"]);
+            Assert.Equal("1", evidence["runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_recovered_count"]);
+            Assert.Equal("1", evidence["runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_unresolved_count"]);
+            Assert.Equal("fail", evidence["runtime_unlock_retry_dispatch_current_listener_adoption_verdict"]);
+
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal("2", summary["runtime_unlock_retry_dispatch_current_listener_adoption_missing_raw_count"]);
+            Assert.Equal("1", summary["runtime_unlock_retry_dispatch_current_listener_adoption_missing_distinct_count"]);
+            Assert.Equal("1", summary["runtime_unlock_retry_dispatch_current_listener_adoption_missing_unresolved_count"]);
+            Assert.Equal("2", summary["runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_raw_count"]);
+            Assert.Equal("1", summary["runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_unresolved_count"]);
+            Assert.Equal("3", summary["runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_raw_count"]);
+            Assert.Equal("2", summary["runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_distinct_count"]);
+            Assert.Equal("1", summary["runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_recovered_count"]);
+            Assert.Equal("1", summary["runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_unresolved_count"]);
+            Assert.Equal("fail", summary["runtime_unlock_retry_dispatch_current_listener_adoption_verdict"]);
+            Assert.Equal("1", summary[$"{scenario}.runtime_unlock_retry_dispatch_current_listener_adoption_missing_unresolved_count"]);
+            Assert.Equal("1", summary[$"{scenario}.runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_unresolved_count"]);
+            Assert.Equal("1", summary[$"{scenario}.runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_unresolved_count"]);
+            Assert.Equal("fail", summary[$"{scenario}.runtime_unlock_retry_dispatch_current_listener_adoption_verdict"]);
+            Assert.Equal("route_runtime", summary[$"{scenario}.acceptance_failure_class"]);
+            Assert.Equal("route_runtime", summary[$"{scenario}.semantic_failure_domain"]);
+
+            using var summaryJson = JsonDocument.Parse(
+                await File.ReadAllTextAsync(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.json")));
+            var root = summaryJson.RootElement;
+            Assert.Equal(2, root.GetProperty("runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRawCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingUnresolvedCount").GetInt32());
+            Assert.Equal(2, root.GetProperty("runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingRawCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingUnresolvedCount").GetInt32());
+            Assert.Equal(3, root.GetProperty("runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRawCount").GetInt32());
+            Assert.Equal(2, root.GetProperty("runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredDistinctCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRecoveredCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredUnresolvedCount").GetInt32());
+            Assert.Equal("fail", root.GetProperty("runtimeUnlockRetryDispatchCurrentListenerAdoptionVerdict").GetString());
+            var run = Assert.Single(root.GetProperty("runs").EnumerateArray());
+            Assert.Equal("runtime_unlock_retry_dispatch_current_listener_adoption_missing", run.GetProperty("runtimeFailureCandidate").GetString());
+            Assert.Equal("route_runtime", run.GetProperty("semanticFailureDomain").GetString());
+            Assert.Equal(2, run.GetProperty("runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRawCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingUnresolvedCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingUnresolvedCount").GetInt32());
+            Assert.Equal(3, run.GetProperty("runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRawCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredUnresolvedCount").GetInt32());
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
     [Trait("Category", "Smoke")]
     public async Task RunFileTransferRouteAcceptance_Phase5RegularActivationFailsTerminalBeforeFallbackSwitchOff()
     {

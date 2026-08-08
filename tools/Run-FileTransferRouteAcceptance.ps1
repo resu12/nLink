@@ -577,6 +577,7 @@ function Test-RouteAcceptanceConclusiveRouteRuntimeCandidate {
             'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing',
             'regular_v4_frontier_tail_repair_state_publication_missing',
             'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
+            'runtime_unlock_retry_dispatch_current_listener_adoption_missing',
             'runtime_unlock_responder_acked_probe_route_transition_handoff_missing') -and
         [string]::Equals(
             $SemanticFailureDomain,
@@ -1556,6 +1557,19 @@ function New-RouteAcceptanceRunResult {
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount = 0
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount = 0
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict = 'none'
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRawCount = 0
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingDistinctCount = 0
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRecoveredCount = 0
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingUnresolvedCount = 0
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingRawCount = 0
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingDistinctCount = 0
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingRecoveredCount = 0
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingUnresolvedCount = 0
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRawCount = 0
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredDistinctCount = 0
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRecoveredCount = 0
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredUnresolvedCount = 0
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionVerdict = 'none'
         runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount = 0
         runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingDistinctCount = 0
         runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRecoveredCount = 0
@@ -3530,6 +3544,19 @@ function Assert-Phase4OperatorVerdict {
     $Result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict' -DefaultValue 'none'
+    $Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_current_listener_adoption_missing_raw_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_current_listener_adoption_missing_distinct_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_current_listener_adoption_missing_recovered_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_current_listener_adoption_missing_unresolved_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_raw_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_distinct_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_recovered_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_unresolved_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_raw_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_distinct_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_recovered_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_unresolved_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_current_listener_adoption_verdict' -DefaultValue 'none'
     $Result.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_raw_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_distinct_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_recovered_count' -DefaultValue '0')
@@ -5531,6 +5558,49 @@ function Write-RouteAcceptanceFakePhase4Run {
             $reportPath = Join-Path $ArtifactDir $reportName
             $reportText = Get-Content -LiteralPath $reportPath -Raw
             foreach ($fixtureLine in $fallbackTailUnblockRecheckFixtureLines) {
+                $separatorIndex = $fixtureLine.IndexOf('=')
+                $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
+                $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
+                if ([regex]::IsMatch($reportText, $fixturePattern)) {
+                    $reportText = [regex]::Replace($reportText, $fixturePattern, $fixtureLine)
+                }
+                else {
+                    $reportText = $reportText.TrimEnd("`r", "`n") + [Environment]::NewLine + $fixtureLine + [Environment]::NewLine
+                }
+            }
+            Set-Content -LiteralPath $reportPath -Value $reportText -Encoding UTF8
+        }
+    }
+
+    if (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'CURRENT_LISTENER_ADOPTION_SUMMARY_FIXTURE') {
+        $currentListenerAdoptionFixtureLines = @(
+            'runtime_unlock_retry_dispatch_current_listener_adoption_missing_raw_count=2',
+            'runtime_unlock_retry_dispatch_current_listener_adoption_missing_distinct_count=1',
+            'runtime_unlock_retry_dispatch_current_listener_adoption_missing_recovered_count=0',
+            'runtime_unlock_retry_dispatch_current_listener_adoption_missing_unresolved_count=1',
+            'runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_raw_count=2',
+            'runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_distinct_count=1',
+            'runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_recovered_count=0',
+            'runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_unresolved_count=1',
+            'runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_raw_count=3',
+            'runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_distinct_count=2',
+            'runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_recovered_count=1',
+            'runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_unresolved_count=1',
+            'runtime_unlock_retry_dispatch_current_listener_adoption_verdict=fail',
+            'runtime_failure_candidate=runtime_unlock_retry_dispatch_current_listener_adoption_missing',
+            'first_proof_chain_failure_class=runtime_unlock_retry_dispatch_current_listener_adoption_missing',
+            'first_proof_chain_failure_event=runtime_unlock_retry_dispatch_listener_adoption_decided',
+            'first_proof_chain_failure_reason=live_coordinator_scoped_initial_activation_listener_reported_missing_for_fallback_paired_retry',
+            'first_proof_chain_failure_sequence=68688',
+            'first_proof_chain_failure_source_path=filetransfer-retained-log-slice.log',
+            'first_proof_chain_failure_line_number=68688',
+            'first_proof_chain_failure_writer_sequence=42389',
+            'semantic_failure_domain=route_runtime'
+        )
+        foreach ($reportName in @('filetransfer-route-consistency-summary.txt', 'filetransfer-operator-verdict.txt')) {
+            $reportPath = Join-Path $ArtifactDir $reportName
+            $reportText = Get-Content -LiteralPath $reportPath -Raw
+            foreach ($fixtureLine in $currentListenerAdoptionFixtureLines) {
                 $separatorIndex = $fixtureLine.IndexOf('=')
                 $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
                 $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
@@ -8725,6 +8795,7 @@ function Get-RouteAcceptanceResultFailureClass {
             'active_file_tuna_v6_evidence',
             'diagnostic_regular_nkn_v6_evidence',
             'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing',
+            'runtime_unlock_retry_dispatch_current_listener_adoption_missing',
             'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing',
             'runtime_unlock_regular_v4_route_commit_send_drain_missing')) {
             return 'route_runtime'
@@ -9571,6 +9642,19 @@ function New-RouteAcceptanceSummaryRunDto {
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount = [int]$Result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount = [int]$Result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict = [string]$Result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRawCount = [int]$Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRawCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingDistinctCount = [int]$Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingDistinctCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRecoveredCount = [int]$Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRecoveredCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingUnresolvedCount = [int]$Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingUnresolvedCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingRawCount = [int]$Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingRawCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingDistinctCount = [int]$Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingDistinctCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingRecoveredCount = [int]$Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingRecoveredCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingUnresolvedCount = [int]$Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingUnresolvedCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRawCount = [int]$Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRawCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredDistinctCount = [int]$Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredDistinctCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRecoveredCount = [int]$Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRecoveredCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredUnresolvedCount = [int]$Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredUnresolvedCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionVerdict = [string]$Result.runtimeUnlockRetryDispatchCurrentListenerAdoptionVerdict
         runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount = [int]$Result.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount
         runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingDistinctCount = [int]$Result.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingDistinctCount
         runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRecoveredCount = [int]$Result.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRecoveredCount
@@ -9926,6 +10010,18 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingDistinctCount = 0
     $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount = 0
     $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount = 0
+    $runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRawCount = 0
+    $runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingDistinctCount = 0
+    $runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRecoveredCount = 0
+    $runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingUnresolvedCount = 0
+    $runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingRawCount = 0
+    $runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingDistinctCount = 0
+    $runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingRecoveredCount = 0
+    $runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingUnresolvedCount = 0
+    $runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRawCount = 0
+    $runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredDistinctCount = 0
+    $runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRecoveredCount = 0
+    $runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredUnresolvedCount = 0
     $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount = 0
     $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingDistinctCount = 0
     $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRecoveredCount = 0
@@ -10125,6 +10221,18 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingDistinctCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingDistinctCount
         $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount
         $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount
+        $runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRawCount += [int]$runDto.runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRawCount
+        $runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingDistinctCount += [int]$runDto.runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingDistinctCount
+        $runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRecoveredCount += [int]$runDto.runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRecoveredCount
+        $runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingUnresolvedCount += [int]$runDto.runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingUnresolvedCount
+        $runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingRawCount += [int]$runDto.runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingRawCount
+        $runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingDistinctCount += [int]$runDto.runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingDistinctCount
+        $runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingRecoveredCount += [int]$runDto.runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingRecoveredCount
+        $runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingUnresolvedCount += [int]$runDto.runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingUnresolvedCount
+        $runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRawCount += [int]$runDto.runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRawCount
+        $runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredDistinctCount += [int]$runDto.runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredDistinctCount
+        $runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRecoveredCount += [int]$runDto.runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRecoveredCount
+        $runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredUnresolvedCount += [int]$runDto.runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredUnresolvedCount
         $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount
         $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingDistinctCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingDistinctCount
         $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRecoveredCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRecoveredCount
@@ -10290,6 +10398,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     else {
         'none'
     }
+
     $runtimeUnlockResponderPeerProbeHandoffVerdict = if (
         $runtimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount -gt 0 -or
         @($runDtos | Where-Object { [string]$_.runtimeUnlockResponderPeerProbeHandoffVerdict -eq 'fail' }).Count -gt 0) {
@@ -10361,6 +10470,18 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     }
     elseif ($runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingDistinctCount -gt 0 -or
         @($runDtos | Where-Object { [string]$_.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict -eq 'pass' }).Count -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
+    }
+    $runtimeUnlockRetryDispatchCurrentListenerAdoptionVerdict = if (
+        $runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingUnresolvedCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.runtimeUnlockRetryDispatchCurrentListenerAdoptionVerdict -eq 'fail' }).Count -gt 0) {
+        'fail'
+    }
+    elseif ($runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingDistinctCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.runtimeUnlockRetryDispatchCurrentListenerAdoptionVerdict -eq 'pass' }).Count -gt 0) {
         'pass'
     }
     else {
@@ -10671,6 +10792,19 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count={0}" -f $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count={0}" -f $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict={0}" -f $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_missing_raw_count={0}" -f $runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRawCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_missing_distinct_count={0}" -f $runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingDistinctCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_missing_recovered_count={0}" -f $runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRecoveredCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_missing_unresolved_count={0}" -f $runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_raw_count={0}" -f $runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingRawCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_distinct_count={0}" -f $runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingDistinctCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_recovered_count={0}" -f $runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingRecoveredCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_unresolved_count={0}" -f $runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_raw_count={0}" -f $runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRawCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_distinct_count={0}" -f $runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredDistinctCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_recovered_count={0}" -f $runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRecoveredCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_unresolved_count={0}" -f $runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_current_listener_adoption_verdict={0}" -f $runtimeUnlockRetryDispatchCurrentListenerAdoptionVerdict),
         ("runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_raw_count={0}" -f $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount),
         ("runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_distinct_count={0}" -f $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingDistinctCount),
         ("runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_recovered_count={0}" -f $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRecoveredCount),
@@ -11050,6 +11184,19 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_current_listener_adoption_missing_raw_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRawCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_current_listener_adoption_missing_distinct_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingDistinctCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_current_listener_adoption_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRecoveredCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_current_listener_adoption_missing_unresolved_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingUnresolvedCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_raw_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingRawCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_distinct_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingDistinctCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingRecoveredCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_unresolved_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingUnresolvedCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_raw_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRawCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_distinct_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredDistinctCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_recovered_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRecoveredCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_unresolved_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredUnresolvedCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_current_listener_adoption_verdict={1}" -f $prefix, $result.runtimeUnlockRetryDispatchCurrentListenerAdoptionVerdict)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_raw_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_distinct_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingDistinctCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRecoveredCount)
@@ -11383,6 +11530,19 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount = $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount = $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict = $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRawCount = $runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRawCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingDistinctCount = $runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingDistinctCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRecoveredCount = $runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingRecoveredCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingUnresolvedCount = $runtimeUnlockRetryDispatchCurrentListenerAdoptionMissingUnresolvedCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingRawCount = $runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingRawCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingDistinctCount = $runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingDistinctCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingRecoveredCount = $runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingRecoveredCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingUnresolvedCount = $runtimeUnlockRetryDispatchCurrentListenerAdoptionLiveProjectionMissingUnresolvedCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRawCount = $runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRawCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredDistinctCount = $runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredDistinctCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRecoveredCount = $runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredRecoveredCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredUnresolvedCount = $runtimeUnlockRetryDispatchCurrentListenerAdoptionRestartExpiredUnresolvedCount
+        runtimeUnlockRetryDispatchCurrentListenerAdoptionVerdict = $runtimeUnlockRetryDispatchCurrentListenerAdoptionVerdict
         runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount = $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount
         runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingDistinctCount = $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingDistinctCount
         runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRecoveredCount = $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRecoveredCount

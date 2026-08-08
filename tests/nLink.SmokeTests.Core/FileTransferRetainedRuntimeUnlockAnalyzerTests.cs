@@ -5673,6 +5673,207 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_missing_distinct_count"]);
         Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_missing_recovered_count"]);
         Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_missing_unresolved_count"]);
+        Assert.Equal("2", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_unresolved_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_raw_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_unresolved_count"]);
+    }
+
+    [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, true, false)]
+    [InlineData(false, false, true)]
+    [InlineData(true, false, true)]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryCurrentListenerAdoption_LiveProjectionMissing_HasFullCompactParity(
+        bool compact,
+        bool addAmbiguousLiveListener,
+        bool nonzeroMissingDecisionPid)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_listener_live_projection_missing";
+        const string writerId = "writer-listener-live";
+        const string releaseId = "fta2-fallback-tail-listener-live-1";
+        const string scope =
+            "session_id=sess_listener_live; transfer_id=" + transferId +
+            "; direction=outbound; route=post_tuna_fallback_v6; protocol_version=6" +
+            "; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3" +
+            "; transport_epoch=1; bridge_recovery_generation=1; bridge_decision_generation=0" +
+            "; route_publication_generation=3; route_commit_generation=0; data_session_generation=0" +
+            "; contract_generation=1; release_kind=FallbackPairedTailYield" +
+            "; release_authority_id=" + releaseId + "; release_generation=1" +
+            "; log_writer_id=" + writerId;
+        static string RetryAuthority(
+            string eventName,
+            string authorityId,
+            string predecessorAuthorityId,
+            int authorityGeneration,
+            int installGeneration,
+            string scope,
+            string suffix = "")
+            => $"event={eventName}; authority_id={authorityId}; predecessor_authority_id={predecessorAuthorityId}" +
+               $"; authority_generation={authorityGeneration}; install_generation={installGeneration}" +
+               "; listener_rearm_requirement=None; listener_execution_mode=AdoptCurrentCoordinatorScoped" +
+               $"; {scope}{suffix}";
+
+        const string firstAuthority = "fta2-runtime-unlock-listener-live-1";
+        const string secondAuthority = "fta2-runtime-unlock-listener-live-2";
+        var lines = new List<string>
+        {
+            LogLine($"event=tuna_path_lease_started; session_id=sess_listener_live; transfer_id={transferId}; transaction_generation=0; offer_generation=0; lease_generation=2; listener_run_id=listener-start-2; payer_decision_id=6; state=listenerstarting; reason=runtime_unlock; log_writer_id={writerId}; log_writer_sequence=1"),
+            LogLine($"event=tuna_sidecar_process_started; role=listener; pid=21084; run_id=physical-run-2; log_writer_id={writerId}; log_writer_sequence=2; log_writer_attempt_utc_ticks=639217902814974878", 1),
+            LogLine($"event=tuna_path_lease_listener_ready; session_id=sess_listener_live; transfer_id={transferId}; transaction_generation=0; offer_generation=0; lease_generation=2; listener_run_id=listener-start-2; payer_decision_id=6; state=listenerready; current=1; reason=runtime_unlock; log_writer_id={writerId}; log_writer_sequence=3", 2),
+            LogLine($"event=filetransfer_fallback_tail_paired_release_reserved; session_id=sess_listener_live; transfer_id={transferId}; direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; route_publication_generation=3; route_commit_generation=0; checkpoint_generation=1; checkpoint_request_id=(none); data_session_identity=data-session:1; data_session_generation=1; authority_id={releaseId}; yield_generation=1; retry_authority_id={firstAuthority}; decision_status=Accepted; log_writer_id={writerId}; log_writer_sequence=4", 3),
+            LogLine(RetryAuthority("runtime_unlock_retry_dispatch_install_committed", firstAuthority, "(none)", 1, 1, scope) + "; log_writer_sequence=5", 4),
+            LogLine($"event=filetransfer_fallback_tail_paired_release_consumed; session_id=sess_listener_live; transfer_id={transferId}; direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; route_publication_generation=3; route_commit_generation=0; checkpoint_generation=1; checkpoint_request_id=(none); data_session_identity=data-session:1; data_session_generation=1; authority_id={releaseId}; yield_generation=1; retry_authority_id={firstAuthority}; decision_status=Accepted; log_writer_id={writerId}; log_writer_sequence=6", 5),
+            LogLine(RetryAuthority("runtime_unlock_retry_dispatch_authority_granted", firstAuthority, "(none)", 1, 1, scope) + "; log_writer_sequence=7", 6),
+            LogLine(RetryAuthority("runtime_unlock_retry_dispatch_listener_adoption_decided", firstAuthority, "(none)", 1, 1, scope, $"; status=Held; physical_process_id={(nonzeroMissingDecisionPid ? "21084" : "0")}; decision_reason=current_coordinator_scoped_listener_missing") + "; log_writer_sequence=8", 7),
+            LogLine(RetryAuthority("runtime_unlock_retry_dispatch_install_committed", secondAuthority, firstAuthority, 2, 2, scope) + "; log_writer_sequence=9", 8),
+            LogLine(RetryAuthority("runtime_unlock_retry_dispatch_authority_granted", secondAuthority, firstAuthority, 2, 2, scope) + "; log_writer_sequence=10", 9),
+            LogLine(RetryAuthority("runtime_unlock_retry_dispatch_listener_adoption_decided", secondAuthority, firstAuthority, 2, 2, scope, $"; status=Held; physical_process_id={(nonzeroMissingDecisionPid ? "21084" : "0")}; decision_reason=current_coordinator_scoped_listener_missing") + "; log_writer_sequence=11", 10)
+        };
+        if (addAmbiguousLiveListener)
+        {
+            lines.InsertRange(
+                3,
+                [
+                    LogLine($"event=tuna_path_lease_started; session_id=sess_listener_live; transfer_id={transferId}; transaction_generation=0; offer_generation=0; lease_generation=4; listener_run_id=listener-start-4; payer_decision_id=7; state=listenerstarting; reason=runtime_unlock; log_writer_id={writerId}; log_writer_sequence=12", 3),
+                    LogLine($"event=tuna_sidecar_process_started; role=listener; pid=21085; run_id=physical-run-4; log_writer_id={writerId}; log_writer_sequence=13; log_writer_attempt_utc_ticks=639217902815974878", 4),
+                    LogLine($"event=tuna_path_lease_listener_ready; session_id=sess_listener_live; transfer_id={transferId}; transaction_generation=0; offer_generation=0; lease_generation=4; listener_run_id=listener-start-4; payer_decision_id=7; state=listenerready; current=1; reason=runtime_unlock; log_writer_id={writerId}; log_writer_sequence=14", 5)
+                ]);
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        var excluded = addAmbiguousLiveListener || nonzeroMissingDecisionPid;
+        Assert.Equal(excluded ? "0" : "2", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_missing_raw_count"]);
+        Assert.Equal(excluded ? "0" : "1", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_missing_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_missing_recovered_count"]);
+        Assert.Equal(excluded ? "0" : "1", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_missing_unresolved_count"]);
+        Assert.Equal(excluded ? "0" : "2", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_raw_count"]);
+        Assert.Equal(excluded ? "0" : "1", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_recovered_count"]);
+        Assert.Equal(excluded ? "0" : "1", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_unresolved_count"]);
+    }
+
+    [Theory]
+    [InlineData(false, "none")]
+    [InlineData(true, "none")]
+    [InlineData(false, "answer_ack")]
+    [InlineData(true, "answer_ack")]
+    [InlineData(false, "data_session")]
+    [InlineData(true, "data_session")]
+    [InlineData(false, "physical_start")]
+    [InlineData(true, "physical_start")]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryCurrentListenerAdoption_LiveProjectionMissing_RecoversThroughExactSuccessor(
+        bool compact,
+        string mutation)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_listener_live_projection_recovered";
+        const string localWriter = "writer-listener-local";
+        const string peerWriter = "writer-listener-peer";
+        const string releaseId = "fta2-fallback-tail-listener-live-recovered";
+        const string firstAuthority = "fta2-runtime-unlock-listener-live-recovered-1";
+        const string secondAuthority = "fta2-runtime-unlock-listener-live-recovered-2";
+        const string scope =
+            "session_id=sess_listener_live_recovered; transfer_id=" + transferId +
+            "; direction=outbound; route=post_tuna_fallback_v6; protocol_version=6" +
+            "; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3" +
+            "; transport_epoch=1; bridge_recovery_generation=1; bridge_decision_generation=0" +
+            "; route_publication_generation=3; route_commit_generation=0; data_session_generation=0" +
+            "; contract_generation=1; release_kind=FallbackPairedTailYield" +
+            "; release_authority_id=" + releaseId + "; release_generation=1" +
+            "; log_writer_id=" + localWriter;
+        static string Authority(
+            string eventName,
+            string authorityId,
+            string predecessorAuthorityId,
+            int generation,
+            int installGeneration,
+            string scope,
+            string suffix = "")
+            => $"event={eventName}; authority_id={authorityId}; predecessor_authority_id={predecessorAuthorityId}" +
+               $"; authority_generation={generation}; install_generation={installGeneration}" +
+               "; listener_rearm_requirement=None; listener_execution_mode=AdoptCurrentCoordinatorScoped" +
+               $"; {scope}{suffix}";
+
+        var lines = new List<string>
+        {
+            LogLine($"event=tuna_path_lease_started; session_id=sess_listener_live_recovered; transfer_id={transferId}; transaction_generation=0; offer_generation=0; lease_generation=2; listener_run_id=listener-start-2; payer_decision_id=6; state=listenerstarting; reason=runtime_unlock; log_writer_id={localWriter}"),
+            LogLine($"event=tuna_sidecar_process_started; role=listener; pid=21084; run_id=physical-run-2; log_writer_id={localWriter}; log_writer_attempt_utc_ticks=639217902814974878", 1),
+            LogLine($"event=tuna_path_lease_listener_ready; session_id=sess_listener_live_recovered; transfer_id={transferId}; transaction_generation=0; offer_generation=0; lease_generation=2; listener_run_id=listener-start-2; payer_decision_id=6; state=listenerready; current=1; reason=runtime_unlock; log_writer_id={localWriter}", 2),
+            LogLine($"event=filetransfer_fallback_tail_paired_release_reserved; session_id=sess_listener_live_recovered; transfer_id={transferId}; direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; route_publication_generation=3; route_commit_generation=0; checkpoint_generation=1; checkpoint_request_id=(none); data_session_identity=data-session:1; data_session_generation=1; authority_id={releaseId}; yield_generation=1; retry_authority_id={firstAuthority}; decision_status=Accepted; log_writer_id={localWriter}", 3),
+            LogLine(Authority("runtime_unlock_retry_dispatch_install_committed", firstAuthority, "(none)", 1, 1, scope), 4),
+            LogLine($"event=filetransfer_fallback_tail_paired_release_consumed; session_id=sess_listener_live_recovered; transfer_id={transferId}; direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; route_publication_generation=3; route_commit_generation=0; checkpoint_generation=1; checkpoint_request_id=(none); data_session_identity=data-session:1; data_session_generation=1; authority_id={releaseId}; yield_generation=1; retry_authority_id={firstAuthority}; decision_status=Accepted; log_writer_id={localWriter}", 5),
+            LogLine(Authority("runtime_unlock_retry_dispatch_authority_granted", firstAuthority, "(none)", 1, 1, scope), 6),
+            LogLine(Authority("runtime_unlock_retry_dispatch_listener_adoption_decided", firstAuthority, "(none)", 1, 1, scope, "; status=Held; physical_process_id=0; decision_reason=current_coordinator_scoped_listener_missing"), 7),
+            LogLine(Authority("runtime_unlock_retry_dispatch_install_committed", secondAuthority, firstAuthority, 2, 2, scope), 8),
+            LogLine(Authority("runtime_unlock_retry_dispatch_authority_granted", secondAuthority, firstAuthority, 2, 2, scope), 9),
+            LogLine(Authority("runtime_unlock_retry_dispatch_listener_adoption_decided", secondAuthority, firstAuthority, 2, 2, scope, "; status=Accepted; physical_process_id=21084; physical_process_run_id=physical-run-2; physical_process_started_utc_ms=1000; previous_request_identity=request-initial; successor_request_identity=request-retry; decision_reason=current_coordinator_scoped_listener_exact"), 10),
+            LogLine(Authority("runtime_unlock_retry_dispatch_listener_adoption_applied", secondAuthority, firstAuthority, 2, 2, scope, $"; status=Accepted; physical_process_id=21084; physical_process_run_id=physical-run-2; physical_process_started_utc_ms={(mutation == "physical_start" ? "1001" : "1000")}; tuna_address=tuna-address-1; previous_request_identity=request-initial; successor_request_identity=request-retry; decision_reason=current_coordinator_scoped_listener_adopted"), 11),
+            LogLine($"event=tuna_path_lease_started; session_id=sess_listener_live_recovered; transfer_id={transferId}; transaction_generation=0; offer_generation=0; lease_generation=3; listener_run_id=listener-start-3; payer_decision_id=17; state=listenerstarting; reason=runtime_unlock; log_writer_id={localWriter}", 12),
+            LogLine($"event=tuna_path_lease_listener_ready; session_id=sess_listener_live_recovered; transfer_id={transferId}; transaction_generation=0; offer_generation=0; lease_generation=3; listener_run_id=listener-start-3; payer_decision_id=17; state=listenerready; current=1; reason=runtime_unlock; log_writer_id={localWriter}", 13),
+            LogLine($"event=tuna_acceleration_offer_queued; session_id=sess_listener_live_recovered; payer_decision_id=17; generation=1; log_writer_id={localWriter}", 14),
+            LogLine(Authority("runtime_unlock_retry_dispatch_observed", secondAuthority, firstAuthority, 2, 2, scope, "; offer_generation=1; offer_nonce=nonce-1; dispatch_observed=1"), 15),
+            LogLine($"event=tuna_acceleration_offer_received_raw; msg_id=offer-message-1; log_writer_id={peerWriter}", 16),
+            LogLine($"event=runtime_unlock_tuna_dial_attempt_started; session_id=sess_listener_live_recovered; payer_decision_id=17; dial_attempt_generation=1; log_writer_id={peerWriter}", 17),
+            LogLine($"event=tuna_acceleration_answer_sent; accepted=1; payer_decision_id=17; generation=7; target_mode=validated_inbound_source; inbound_msg_id=offer-message-1; msg_id=answer-message-1; log_writer_id={peerWriter}", 18),
+            LogLine($"event=tuna_acceleration_answer_received_raw; msg_id=answer-message-1; log_writer_id={localWriter}", 19),
+            LogLine($"event=runtime_unlock_transaction_answer_received; session_id=sess_listener_live_recovered; transaction_generation=1; offer_generation=1; parent_runtime_unlock_retry_authority_id={secondAuthority}; answer_received=1; log_writer_id={localWriter}", 20),
+            LogLine($"event=tuna_acceleration_answer_ack_sent; session_id=sess_listener_live_recovered; payer_decision_id=17; generation=1; target_mode=validated_inbound_source; inbound_msg_id=answer-message-1; msg_id=ack-message-1; log_writer_id={localWriter}", 21),
+            LogLine($"event=tuna_acceleration_answer_ack_received_raw; msg_id={(mutation == "answer_ack" ? "ack-message-mutated" : "ack-message-1")}; log_writer_id={peerWriter}", 22),
+            LogLine($"event=tuna_acceleration_answer_ack_received; session_id=sess_listener_live_recovered; payer_decision_id=17; log_writer_id={peerWriter}", 23),
+            LogLine($"event=runtime_unlock_precommit_probe_launch_requested; session_id=sess_listener_live_recovered; transfer_id={transferId}; transaction_generation=1; offer_generation=1; tuna_path_lease_generation=3; launch_role=Initiator; log_writer_id={localWriter}", 24),
+            LogLine($"event=filetransfer_route_transition_prepared; session_id=sess_listener_live_recovered; transfer_id={transferId}; direction=outbound; transition_kind=PostTunaFallbackV6ToTunaV4; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; source_transport_epoch=1; source_bridge_recovery_generation=1; source_route_publication_generation=3; source_route_commit_generation=0; source_data_session_generation=1; transaction_generation=1; offer_generation=1; tuna_path_lease_generation=3; retry_install_generation=2; fallback_yield_authority_id={releaseId}; fallback_yield_generation=1; decision_status=Prepared; log_writer_id={localWriter}", 25)
+        };
+        if (mutation == "data_session")
+        {
+            lines.Insert(
+                8,
+                LogLine($"event=filetransfer_data_session_recreated; session_id=sess_listener_live_recovered; transfer_id={transferId}; direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; bridge_decision_generation=0; route_publication_generation=3; route_commit_generation=0; previous_data_session_generation=1; data_session_generation=2; decision_reason=data_session_replaced; log_writer_id={localWriter}", 8));
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_missing_distinct_count"]);
+        var expectedRecovered = mutation == "none";
+        Assert.Equal(expectedRecovered ? "1" : "0", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_missing_recovered_count"]);
+        Assert.Equal(expectedRecovered ? "0" : "1", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_missing_unresolved_count"]);
+        Assert.Equal(expectedRecovered ? "1" : "0", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_recovered_count"]);
+        Assert.Equal(expectedRecovered ? "0" : "1", verdict["runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_unresolved_count"]);
     }
 
     [Theory]

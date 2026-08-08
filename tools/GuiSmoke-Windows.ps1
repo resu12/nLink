@@ -4717,6 +4717,9 @@ function New-TunaGuiFileTransferFailureClassificationResult {
         RuntimeUnlockRetryFallbackTailUnblockRecheckMissing = $false
         RuntimeUnlockRetryFallbackFrontierRepairHoldBindingMissing = $false
         RuntimeUnlockRetryFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissing = $false
+        RuntimeUnlockRetryCurrentListenerAdoptionMissing = $false
+        RuntimeUnlockRetryCurrentListenerAdoptionLiveProjectionMissing = $false
+        RuntimeUnlockRetryCurrentListenerAdoptionRestartExpired = $false
         FallbackTailFailedYieldQuiescentSuccessorMissing = $false
         FallbackTailPeerProofBeforeLocalYieldNotRetained = $false
         FallbackTailPeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetained = $false
@@ -4796,6 +4799,22 @@ function Get-TunaGuiExplicitFailureClassification {
                     }
                     else {
                         'settled_fallback_frontier_repair_did_not_republish_held_paired_tail_retry_request'
+                    }
+                }
+            }
+            'runtime_unlock_retry_dispatch_current_listener_adoption_missing' {
+                return [pscustomobject]@{
+                    Phase = 'route_runtime'
+                    Reason = if ($ErrorMessage.IndexOf(
+                            'live_coordinator_scoped_initial_activation_listener_not_projected_for_fallback_paired_adoption',
+                            [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                        $ErrorMessage.IndexOf(
+                            'live_coordinator_scoped_initial_activation_listener_reported_missing_for_fallback_paired_retry',
+                            [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                        'live_coordinator_scoped_initial_activation_listener_reported_missing_for_fallback_paired_retry'
+                    }
+                    else {
+                        'installed_fallback_retry_did_not_adopt_current_coordinator_scoped_listener'
                     }
                 }
             }
@@ -4955,12 +4974,25 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             $TestMetrics.evidenceLookupCount = 0L
             $TestMetrics.classificationSource = 'explicit_error'
         }
-        return New-TunaGuiFileTransferFailureClassificationResult `
+        $explicitResult = New-TunaGuiFileTransferFailureClassificationResult `
             -Phase ([string]$explicitClassification.Phase) `
             -Reason ([string]$explicitClassification.Reason) `
             -RouteMode $RouteMode `
             -ClassificationSource 'explicit_error' `
             -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
+        if ($ErrorMessage.IndexOf(
+                'failure_class=runtime_unlock_retry_dispatch_current_listener_adoption_missing',
+                [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $explicitResult.RuntimeUnlockRetryCurrentListenerAdoptionMissing = $true
+            if ($explicitResult.Reason -eq
+                'live_coordinator_scoped_initial_activation_listener_reported_missing_for_fallback_paired_retry') {
+                $explicitResult.RuntimeUnlockRetryCurrentListenerAdoptionLiveProjectionMissing = $true
+            }
+            else {
+                $explicitResult.RuntimeUnlockRetryCurrentListenerAdoptionRestartExpired = $true
+            }
+        }
+        return $explicitResult
     }
 
     $lines = @()
@@ -7031,6 +7063,821 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             }
             LineVisits = $visits
         }
+    }
+
+    function Get-TunaGuiCurrentListenerAdoptionFailure {
+        param(
+            [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+        )
+
+        $scopeFields = @(
+            'session_id', 'transfer_id', 'direction', 'route', 'protocol_version',
+            'live_route_epoch', 'runtime_generation', 'terminal_generation', 'leg_generation',
+            'transport_epoch', 'bridge_recovery_generation', 'route_publication_generation',
+            'route_commit_generation', 'data_session_generation')
+        $extendedScopeFields = @(
+            'bridge_decision_generation', 'contract_generation',
+            'receive_recovery_operation_generation')
+        $events = [System.Collections.Generic.HashSet[string]]::new(
+            [System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($name in @(
+                'tuna_path_lease_started', 'tuna_sidecar_process_started',
+                'tuna_path_lease_listener_ready', 'tuna_path_lease_stopped',
+                'tuna_path_lease_retired', 'tuna_path_lease_failed',
+                'tuna_sidecar_stop_requested', 'tuna_sidecar_stop_completed',
+                'tuna_sidecar_process_exited',
+                'filetransfer_fallback_tail_paired_release_reserved',
+                'filetransfer_fallback_tail_paired_release_consumed',
+                'runtime_unlock_retry_dispatch_install_committed',
+                'runtime_unlock_retry_dispatch_install_confirmed',
+                'runtime_unlock_retry_dispatch_authority_granted',
+                'runtime_unlock_retry_dispatch_listener_adoption_decided',
+                'runtime_unlock_retry_dispatch_listener_adoption_applied',
+                'runtime_unlock_retry_dispatch_observed',
+                'tuna_acceleration_offer_received_raw',
+                'runtime_unlock_tuna_dial_attempt_started',
+                'tuna_acceleration_answer_sent',
+                'tuna_acceleration_answer_received_raw',
+                'runtime_unlock_offer_authority_boundary_decided',
+                'runtime_unlock_transaction_answer_received',
+                'tuna_acceleration_answer_ack_sent',
+                'tuna_acceleration_answer_ack_replay_sent',
+                'tuna_acceleration_answer_ack_received_raw',
+                'tuna_acceleration_answer_ack_received',
+                'runtime_unlock_precommit_probe_launch_requested',
+                'filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided',
+                'runtime_unlock_precommit_probe_launch_started',
+                'runtime_unlock_precommit_probe_started',
+                'filetransfer_route_transition_prepared',
+                'filetransfer_runtime_started', 'filetransfer_route_selected',
+                'filetransfer_route_hint_authorized_publication_accepted',
+                'filetransfer_data_session_recreated',
+                'filetransfer_live_route_epoch_terminal', 'filetransfer_v6_epoch_terminal',
+                'file_transfer_outbound_terminal', 'file_transfer_inbound_terminal')) {
+            [void]$events.Add($name)
+        }
+
+        $index = @{}
+        $visits = 0L
+        for ($ordinal = 0; $ordinal -lt $Lines.Count; $ordinal++) {
+            $visits++
+            $line = [string]$Lines[$ordinal]
+            $eventName = Get-TunaGuiLogLineFieldValue -Line $line -Name 'event'
+            if (-not $events.Contains($eventName)) {
+                continue
+            }
+            if (-not $index.ContainsKey($eventName)) {
+                $index[$eventName] = [System.Collections.Generic.List[object]]::new()
+            }
+            $index[$eventName].Add([pscustomobject]@{
+                    Index = $ordinal
+                    Event = $eventName
+                    Line = $line
+                    Writer = Get-TunaGuiLogLineFieldValue -Line $line -Name 'log_writer_id'
+                }) | Out-Null
+        }
+
+        function Get-TunaGuiAdoptionRecords {
+            param(
+                [Parameter(Mandatory = $true)][string]$Event,
+                [long]$After = -1,
+                [long]$Before = [long]::MaxValue,
+                [AllowNull()][scriptblock]$Match = $null,
+                [switch]$Last,
+                [switch]$All
+            )
+            $found = @()
+            if ($index.ContainsKey($Event)) {
+                foreach ($record in $index[$Event]) {
+                    if ($record.Index -le $After -or $record.Index -ge $Before) {
+                        continue
+                    }
+                    if ($null -ne $Match -and -not (& $Match $record)) {
+                        continue
+                    }
+                    $found += $record
+                }
+            }
+            if ($All) {
+                return $found
+            }
+            if ($Last) {
+                return @($found | Select-Object -Last 1)
+            }
+            return @($found | Select-Object -First 1)
+        }
+
+        function Test-TunaGuiAdoptionScope {
+            param(
+                [Parameter(Mandatory = $true)][string]$Anchor,
+                [Parameter(Mandatory = $true)][string]$Candidate
+            )
+            foreach ($field in $scopeFields) {
+                $left = Get-TunaGuiLogLineFieldValue -Line $Anchor -Name $field
+                $right = Get-TunaGuiLogLineFieldValue -Line $Candidate -Name $field
+                if ([string]::IsNullOrWhiteSpace($left) -or
+                    [string]::IsNullOrWhiteSpace($right) -or
+                    -not [string]::Equals($left, $right, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $false
+                }
+            }
+            foreach ($field in @($extendedScopeFields + @('checkpoint_request_id', 'data_session_identity'))) {
+                $left = Get-TunaGuiLogLineFieldValue -Line $Anchor -Name $field
+                $right = Get-TunaGuiLogLineFieldValue -Line $Candidate -Name $field
+                if (-not [string]::IsNullOrWhiteSpace($right) -and
+                    -not [string]::Equals(
+                        $(if ([string]::IsNullOrWhiteSpace($left)) { '(none)' } else { $left }),
+                        $right,
+                        [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        function Test-TunaGuiAdoptionOwner {
+            param(
+                [Parameter(Mandatory = $true)][string]$Anchor,
+                [Parameter(Mandatory = $true)][string]$Candidate
+            )
+            foreach ($field in @('session_id', 'transfer_id', 'direction')) {
+                if ((Get-TunaGuiLogLineFieldValue -Line $Anchor -Name $field) -ne
+                    (Get-TunaGuiLogLineFieldValue -Line $Candidate -Name $field)) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        function Test-TunaGuiAdoptionAuthorityTuple {
+            param(
+                [Parameter(Mandatory = $true)]$Record,
+                [Parameter(Mandatory = $true)][string]$Anchor,
+                [Parameter(Mandatory = $true)][string]$Writer,
+                [Parameter(Mandatory = $true)][string]$Authority,
+                [Parameter(Mandatory = $true)][string]$InstallGeneration,
+                [Parameter(Mandatory = $true)][string]$ReleaseAuthority,
+                [Parameter(Mandatory = $true)][string]$ReleaseGeneration,
+                [AllowEmptyString()][string]$Predecessor = ''
+            )
+            return $Record.Writer -eq $Writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $Record.Line -Name 'authority_id') -eq $Authority -and
+                (Get-TunaGuiLogLineFieldValue -Line $Record.Line -Name 'install_generation') -eq $InstallGeneration -and
+                (Get-TunaGuiLogLineFieldValue -Line $Record.Line -Name 'release_authority_id') -eq $ReleaseAuthority -and
+                (Get-TunaGuiLogLineFieldValue -Line $Record.Line -Name 'release_generation') -eq $ReleaseGeneration -and
+                ([string]::IsNullOrWhiteSpace($Predecessor) -or
+                    (Get-TunaGuiLogLineFieldValue -Line $Record.Line -Name 'predecessor_authority_id') -eq $Predecessor) -and
+                (Test-TunaGuiAdoptionScope -Anchor $Anchor -Candidate $Record.Line)
+        }
+
+        function Test-TunaGuiAdoptionInstallProof {
+            param(
+                [Parameter(Mandatory = $true)][string]$Anchor,
+                [Parameter(Mandatory = $true)][string]$Writer,
+                [Parameter(Mandatory = $true)][string]$Authority,
+                [Parameter(Mandatory = $true)][string]$InstallGeneration,
+                [Parameter(Mandatory = $true)][string]$ReleaseAuthority,
+                [Parameter(Mandatory = $true)][string]$ReleaseGeneration,
+                [AllowEmptyString()][string]$Predecessor,
+                [long]$After,
+                [long]$Before
+            )
+            $committed = @(Get-TunaGuiAdoptionRecords `
+                -Event 'runtime_unlock_retry_dispatch_install_committed' `
+                -After $After -Before $Before -Last `
+                -Match {
+                    param($record)
+                    (Test-TunaGuiAdoptionAuthorityTuple -Record $record -Anchor $Anchor -Writer $Writer `
+                        -Authority $Authority -InstallGeneration $InstallGeneration `
+                        -ReleaseAuthority $ReleaseAuthority -ReleaseGeneration $ReleaseGeneration `
+                        -Predecessor $Predecessor) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'install_status') -eq 'Installed'
+                })
+            if ($committed.Count -ne 1) {
+                return $false
+            }
+            $confirmed = @(Get-TunaGuiAdoptionRecords `
+                -Event 'runtime_unlock_retry_dispatch_install_confirmed' `
+                -After $committed[0].Index -Before $Before -Last `
+                -Match {
+                    param($record)
+                    (Test-TunaGuiAdoptionAuthorityTuple -Record $record -Anchor $Anchor -Writer $Writer `
+                        -Authority $Authority -InstallGeneration $InstallGeneration `
+                        -ReleaseAuthority $ReleaseAuthority -ReleaseGeneration $ReleaseGeneration `
+                        -Predecessor $Predecessor) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'decision_reason') -eq
+                        'coordinator_install_committed'
+                })
+            return $confirmed.Count -eq 1
+        }
+
+        function Test-TunaGuiAdoptionPreparedScope {
+            param(
+                [Parameter(Mandatory = $true)][string]$Anchor,
+                [Parameter(Mandatory = $true)][string]$Prepared,
+                [Parameter(Mandatory = $true)][string]$InstallGeneration,
+                [Parameter(Mandatory = $true)][string]$ReleaseAuthority,
+                [Parameter(Mandatory = $true)][string]$ReleaseGeneration,
+                [Parameter(Mandatory = $true)][string]$ReleaseScope
+            )
+            $aliases = @{
+                route = 'source_route'
+                protocol_version = 'source_protocol_version'
+                live_route_epoch = 'source_live_route_epoch'
+                runtime_generation = 'source_runtime_generation'
+                terminal_generation = 'source_terminal_generation'
+                leg_generation = 'source_leg_generation'
+                transport_epoch = 'source_transport_epoch'
+                bridge_recovery_generation = 'source_bridge_recovery_generation'
+                route_publication_generation = 'source_route_publication_generation'
+                route_commit_generation = 'source_route_commit_generation'
+            }
+            foreach ($field in @('session_id', 'transfer_id', 'direction')) {
+                if ((Get-TunaGuiLogLineFieldValue -Line $Anchor -Name $field) -ne
+                    (Get-TunaGuiLogLineFieldValue -Line $Prepared -Name $field)) {
+                    return $false
+                }
+            }
+            foreach ($field in $aliases.Keys) {
+                if ((Get-TunaGuiLogLineFieldValue -Line $Anchor -Name $field) -ne
+                    (Get-TunaGuiLogLineFieldValue -Line $Prepared -Name $aliases[$field])) {
+                    return $false
+                }
+            }
+            if ((Get-TunaGuiLogLineFieldValue -Line $ReleaseScope -Name 'data_session_generation') -ne
+                (Get-TunaGuiLogLineFieldValue -Line $Prepared -Name 'source_data_session_generation')) {
+                return $false
+            }
+            return (Get-TunaGuiLogLineFieldValue -Line $Prepared -Name 'target_route') -eq 'file_tuna_v4' -and
+                (Get-TunaGuiLogLineFieldValue -Line $Prepared -Name 'target_protocol_version') -eq '4' -and
+                (Get-TunaGuiLogLineFieldValue -Line $Prepared -Name 'target_transport') -eq 'tuna' -and
+                (Get-TunaGuiLogLineFieldValue -Line $Prepared -Name 'retry_install_generation') -eq $InstallGeneration -and
+                (Get-TunaGuiLogLineFieldValue -Line $Prepared -Name 'fallback_yield_authority_id') -eq $ReleaseAuthority -and
+                (Get-TunaGuiLogLineFieldValue -Line $Prepared -Name 'fallback_yield_generation') -eq $ReleaseGeneration -and
+                (Get-TunaGuiLogLineFieldValue -Line $Prepared -Name 'decision_status') -in @('Prepared', 'Idempotent')
+        }
+
+        function Test-TunaGuiAdoptionScopeReplaced {
+            param(
+                [Parameter(Mandatory = $true)][string]$Anchor,
+                [Parameter(Mandatory = $true)]$Record
+            )
+            foreach ($field in @('session_id', 'transfer_id', 'direction')) {
+                if ((Get-TunaGuiLogLineFieldValue -Line $Anchor -Name $field) -ne
+                    (Get-TunaGuiLogLineFieldValue -Line $Record.Line -Name $field)) {
+                    return $false
+                }
+            }
+            if ($Record.Event -in @(
+                    'filetransfer_data_session_recreated', 'filetransfer_live_route_epoch_terminal',
+                    'filetransfer_v6_epoch_terminal', 'file_transfer_outbound_terminal',
+                    'file_transfer_inbound_terminal')) {
+                return $true
+            }
+            foreach ($field in $scopeFields) {
+                $candidate = Get-TunaGuiLogLineFieldValue -Line $Record.Line -Name $field
+                if (-not [string]::IsNullOrWhiteSpace($candidate) -and
+                    $candidate -ne (Get-TunaGuiLogLineFieldValue -Line $Anchor -Name $field)) {
+                    return $true
+                }
+            }
+            return $false
+        }
+
+        function Test-TunaGuiAdoptionRecovered {
+            param([Parameter(Mandatory = $true)]$Candidate)
+
+            $acceptedDecisions = @(Get-TunaGuiAdoptionRecords `
+                -Event 'runtime_unlock_retry_dispatch_listener_adoption_decided' `
+                -After $Candidate.Held.Index -All `
+                -Match {
+                    param($record)
+                    $record.Writer -eq $Candidate.Writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'release_authority_id') -eq
+                        $Candidate.ReleaseAuthority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'release_generation') -eq
+                        $Candidate.ReleaseGeneration -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'physical_process_id') -eq
+                        $Candidate.ListenerPid -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'physical_process_run_id') -eq
+                        $Candidate.ProcessRunId -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'status') -eq 'Accepted' -and
+                    (Test-TunaGuiAdoptionScope -Anchor $Candidate.Held.Line -Candidate $record.Line)
+                })
+            foreach ($accepted in $acceptedDecisions) {
+                $authority = Get-TunaGuiLogLineFieldValue -Line $accepted.Line -Name 'authority_id'
+                $install = Get-TunaGuiLogLineFieldValue -Line $accepted.Line -Name 'install_generation'
+                $predecessor = Get-TunaGuiLogLineFieldValue -Line $accepted.Line -Name 'predecessor_authority_id'
+                $previousRequest = Get-TunaGuiLogLineFieldValue -Line $accepted.Line -Name 'previous_request_identity'
+                $successorRequest = Get-TunaGuiLogLineFieldValue -Line $accepted.Line -Name 'successor_request_identity'
+                $processStartedUtcMs = Get-TunaGuiLogLineFieldValue -Line $accepted.Line -Name 'physical_process_started_utc_ms'
+                if ($authority -in @('', '(none)', 'none') -or $install -notmatch '^[1-9][0-9]*$' -or
+                    $processStartedUtcMs -notmatch '^[1-9][0-9]*$' -or
+                    ($authority -ne $Candidate.Authority -and $predecessor -ne $Candidate.Authority) -or
+                    ($authority -eq $Candidate.Authority -and
+                        $predecessor -notin @('', '(none)', 'none', $Candidate.Authority)) -or
+                    $previousRequest -in @('', '(none)', 'none') -or
+                    $successorRequest -in @('', '(none)', 'none') -or
+                    $previousRequest -eq $successorRequest) {
+                    continue
+                }
+
+                $grant = @(Get-TunaGuiAdoptionRecords `
+                    -Event 'runtime_unlock_retry_dispatch_authority_granted' `
+                    -After $Candidate.Held.Index -Before $accepted.Index -Last `
+                    -Match {
+                        param($record)
+                        Test-TunaGuiAdoptionAuthorityTuple -Record $record `
+                            -Anchor $Candidate.Held.Line -Writer $Candidate.Writer `
+                            -Authority $authority -InstallGeneration $install `
+                            -ReleaseAuthority $Candidate.ReleaseAuthority `
+                            -ReleaseGeneration $Candidate.ReleaseGeneration -Predecessor $predecessor
+                    })
+                if ($grant.Count -ne 1 -or
+                    -not (Test-TunaGuiAdoptionInstallProof -Anchor $Candidate.Held.Line `
+                        -Writer $Candidate.Writer -Authority $authority -InstallGeneration $install `
+                        -ReleaseAuthority $Candidate.ReleaseAuthority `
+                        -ReleaseGeneration $Candidate.ReleaseGeneration -Predecessor $predecessor `
+                        -After $Candidate.Held.Index -Before $grant[0].Index)) {
+                    continue
+                }
+
+                $applied = @(Get-TunaGuiAdoptionRecords `
+                    -Event 'runtime_unlock_retry_dispatch_listener_adoption_applied' `
+                    -After $accepted.Index `
+                    -Match {
+                        param($record)
+                        (Test-TunaGuiAdoptionAuthorityTuple -Record $record `
+                            -Anchor $Candidate.Held.Line -Writer $Candidate.Writer `
+                            -Authority $authority -InstallGeneration $install `
+                            -ReleaseAuthority $Candidate.ReleaseAuthority `
+                            -ReleaseGeneration $Candidate.ReleaseGeneration -Predecessor $predecessor) -and
+                        (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'status') -eq 'Accepted' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'physical_process_id') -eq
+                            $Candidate.ListenerPid -and
+                        (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'physical_process_run_id') -eq
+                            $Candidate.ProcessRunId -and
+                        (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'physical_process_started_utc_ms') -eq
+                            $processStartedUtcMs -and
+                        (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'tuna_address') -notin @('', '(none)', 'none') -and
+                        (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'previous_request_identity') -eq
+                            $previousRequest -and
+                        (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'successor_request_identity') -eq
+                            $successorRequest
+                    })
+                if ($applied.Count -ne 1) {
+                    continue
+                }
+
+                $freshStarts = @(Get-TunaGuiAdoptionRecords -Event 'tuna_path_lease_started' `
+                    -After $applied[0].Index -All -Match {
+                        param($record)
+                        $record.Writer -eq $Candidate.Writer -and
+                        (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'session_id') -eq $Candidate.SessionId -and
+                        (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'transfer_id') -eq $Candidate.TransferId -and
+                        (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'lease_generation') -match '^[1-9][0-9]*$' -and
+                        [long](Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'lease_generation') -gt
+                            [long]$Candidate.LeaseGeneration
+                    })
+                foreach ($freshStart in $freshStarts) {
+                    $lease = Get-TunaGuiLogLineFieldValue -Line $freshStart.Line -Name 'lease_generation'
+                    $listenerRun = Get-TunaGuiLogLineFieldValue -Line $freshStart.Line -Name 'listener_run_id'
+                    if ($listenerRun -in @('', '(none)', 'none', $Candidate.ListenerRunId)) {
+                        continue
+                    }
+                    $freshReady = @(Get-TunaGuiAdoptionRecords -Event 'tuna_path_lease_listener_ready' `
+                        -After $freshStart.Index -Match {
+                            param($record)
+                            $record.Writer -eq $Candidate.Writer -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'session_id') -eq $Candidate.SessionId -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'transfer_id') -eq $Candidate.TransferId -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'lease_generation') -eq $lease -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'listener_run_id') -eq $listenerRun -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'state') -eq 'listenerready' -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'current') -eq '1'
+                        })
+                    if ($freshReady.Count -ne 1) {
+                        continue
+                    }
+
+                    $offer = @(Get-TunaGuiAdoptionRecords -Event 'runtime_unlock_retry_dispatch_observed' `
+                        -After $freshReady[0].Index -Match {
+                            param($record)
+                            (Test-TunaGuiAdoptionAuthorityTuple -Record $record `
+                                -Anchor $Candidate.Held.Line -Writer $Candidate.Writer `
+                                -Authority $authority -InstallGeneration $install `
+                                -ReleaseAuthority $Candidate.ReleaseAuthority `
+                                -ReleaseGeneration $Candidate.ReleaseGeneration) -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'offer_generation') -match '^[1-9][0-9]*$' -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'offer_nonce') -notin @('', '(none)', 'none')
+                        })
+                    if ($offer.Count -ne 1) {
+                        continue
+                    }
+                    $offerGeneration = Get-TunaGuiLogLineFieldValue -Line $offer[0].Line -Name 'offer_generation'
+                    $offerNonce = Get-TunaGuiLogLineFieldValue -Line $offer[0].Line -Name 'offer_nonce'
+                    $boundary = @(Get-TunaGuiAdoptionRecords `
+                        -Event 'runtime_unlock_offer_authority_boundary_decided' `
+                        -After $offer[0].Index -Match {
+                            param($record)
+                            $record.Writer -eq $Candidate.Writer -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'session_id') -eq $Candidate.SessionId -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'transfer_id') -eq $Candidate.TransferId -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'boundary') -eq 'answer_received' -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'authority_mode') -eq 'InstalledRetry' -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'decision_status') -eq 'accepted' -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'retry_authority_id') -eq $authority -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'install_generation') -eq $install -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'offer_generation') -eq $offerGeneration -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'transaction_generation') -match '^[1-9][0-9]*$' -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'payer_decision_id') -match '^[1-9][0-9]*$' -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'tuna_path_lease_generation') -eq $lease -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'tuna_path_lease_listener_run_id') -eq $listenerRun
+                        })
+                    if ($boundary.Count -ne 1) {
+                        continue
+                    }
+                    $transaction = Get-TunaGuiLogLineFieldValue -Line $boundary[0].Line -Name 'transaction_generation'
+                    $payer = Get-TunaGuiLogLineFieldValue -Line $boundary[0].Line -Name 'payer_decision_id'
+
+                    $semanticReceipts = @()
+                    foreach ($raw in @(Get-TunaGuiAdoptionRecords -Event 'tuna_acceleration_offer_received_raw' `
+                            -After $offer[0].Index -Before $boundary[0].Index -All `
+                            -Match { param($record) $record.Writer -notin @('', $Candidate.Writer) })) {
+                        $rawId = Get-TunaGuiLogLineFieldValue -Line $raw.Line -Name 'msg_id'
+                        if ($rawId -in @('', '(none)', 'none')) {
+                            continue
+                        }
+                        $dial = @(Get-TunaGuiAdoptionRecords -Event 'runtime_unlock_tuna_dial_attempt_started' `
+                            -After $raw.Index -Before $boundary[0].Index -Match {
+                                param($record)
+                                $record.Writer -eq $raw.Writer -and
+                                (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'session_id') -eq $Candidate.SessionId -and
+                                (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'payer_decision_id') -eq $payer -and
+                                (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'nonce_len') -eq ([string]$offerNonce.Length) -and
+                                (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'dial_attempt_generation') -match '^[1-9][0-9]*$'
+                            })
+                        if ($dial.Count -ne 1) {
+                            continue
+                        }
+                        $peerAnswer = @(Get-TunaGuiAdoptionRecords -Event 'tuna_acceleration_answer_sent' `
+                            -After $dial[0].Index -Before $boundary[0].Index -Match {
+                                param($record)
+                                $record.Writer -eq $raw.Writer -and
+                                (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'accepted') -eq '1' -and
+                                (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'payer_decision_id') -eq $payer -and
+                                (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'generation') -match '^[1-9][0-9]*$' -and
+                                (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'inbound_msg_id') -eq $rawId
+                            })
+                        if ($peerAnswer.Count -eq 1) {
+                            $answerMessageId = Get-TunaGuiLogLineFieldValue -Line $peerAnswer[0].Line -Name 'msg_id'
+                            $rawAnswer = @(Get-TunaGuiAdoptionRecords -Event 'tuna_acceleration_answer_received_raw' `
+                                -After $peerAnswer[0].Index -Before $boundary[0].Index -Match {
+                                    param($record)
+                                    $record.Writer -eq $Candidate.Writer -and
+                                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'msg_id') -eq $answerMessageId
+                                })
+                            if ($answerMessageId -notin @('', '(none)', 'none') -and $rawAnswer.Count -eq 1) {
+                                $semanticReceipts += [pscustomobject]@{
+                                    PeerWriter = $raw.Writer
+                                    PeerAnswer = $peerAnswer[0]
+                                    RawAnswer = $rawAnswer[0]
+                                }
+                            }
+                        }
+                    }
+                    if ($semanticReceipts.Count -ne 1) {
+                        continue
+                    }
+
+                    $answer = @(Get-TunaGuiAdoptionRecords -Event 'runtime_unlock_transaction_answer_received' `
+                        -After $boundary[0].Index -Match {
+                            param($record)
+                            $record.Writer -eq $Candidate.Writer -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'session_id') -eq $Candidate.SessionId -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'offer_generation') -eq $offerGeneration -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'transaction_generation') -eq $transaction -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'tuna_path_lease_generation') -eq $lease -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'tuna_path_lease_listener_run_id') -eq $listenerRun -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'answer_received') -eq '1' -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'tuna_path_lease_current') -eq '1'
+                        })
+                    if ($answer.Count -ne 1) {
+                        continue
+                    }
+                    $ackEvents = @(
+                        @(Get-TunaGuiAdoptionRecords -Event 'tuna_acceleration_answer_ack_sent' `
+                            -After $answer[0].Index -All) +
+                        @(Get-TunaGuiAdoptionRecords -Event 'tuna_acceleration_answer_ack_replay_sent' `
+                            -After $answer[0].Index -All))
+                    $ack = @($ackEvents | Where-Object {
+                            $_.Writer -eq $Candidate.Writer -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $Candidate.SessionId -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq $payer -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'generation') -match '^[1-9][0-9]*$' -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'msg_id') -notin @('', '(none)', 'none') -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'target_peer_fingerprint') -notin @('', '(none)', 'none')
+                        } | Sort-Object Index | Select-Object -First 1)
+                    if ($ack.Count -ne 1) {
+                        continue
+                    }
+                    $ackMessageId = Get-TunaGuiLogLineFieldValue -Line $ack[0].Line -Name 'msg_id'
+                    $peerWriter = $semanticReceipts[0].PeerWriter
+                    $rawAck = @(Get-TunaGuiAdoptionRecords -Event 'tuna_acceleration_answer_ack_received_raw' `
+                        -After $ack[0].Index -All -Match {
+                            param($record)
+                            $record.Writer -eq $peerWriter -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'msg_id') -eq $ackMessageId
+                        })
+                    if ($rawAck.Count -ne 1) {
+                        continue
+                    }
+                    $semanticAck = @(Get-TunaGuiAdoptionRecords -Event 'tuna_acceleration_answer_ack_received' `
+                        -After $rawAck[0].Index -Match {
+                            param($record)
+                            $record.Writer -eq $peerWriter -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'session_id') -eq $Candidate.SessionId -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'payer_decision_id') -eq $payer
+                        })
+                    if ($semanticAck.Count -ne 1) {
+                        continue
+                    }
+
+                    $precommitEvents = @(
+                        'runtime_unlock_precommit_probe_launch_requested',
+                        'filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided',
+                        'runtime_unlock_precommit_probe_launch_started',
+                        'runtime_unlock_precommit_probe_started')
+                    $precommitCandidates = @(
+                        foreach ($eventName in $precommitEvents) {
+                            Get-TunaGuiAdoptionRecords -Event $eventName -After $semanticAck[0].Index -All
+                        }
+                    )
+                    $precommit = @($precommitCandidates | Where-Object {
+                            $_.Writer -eq $Candidate.Writer -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $Candidate.SessionId -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $Candidate.TransferId -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -eq 'outbound' -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'offer_generation') -eq $offerGeneration -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transaction_generation') -eq $transaction -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'tuna_path_lease_generation') -eq $lease -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'tuna_path_lease_listener_run_id') -eq $listenerRun
+                        } | Sort-Object Index | Select-Object -First 1)
+                    if ($precommit.Count -ne 1) {
+                        continue
+                    }
+
+                    $prepared = @(Get-TunaGuiAdoptionRecords -Event 'filetransfer_route_transition_prepared' `
+                        -After $precommit[0].Index -Match {
+                            param($record)
+                            $record.Writer -eq $Candidate.Writer -and
+                            (Test-TunaGuiAdoptionPreparedScope -Anchor $Candidate.Held.Line `
+                                -Prepared $record.Line -InstallGeneration $install `
+                                -ReleaseAuthority $Candidate.ReleaseAuthority `
+                                -ReleaseGeneration $Candidate.ReleaseGeneration `
+                                -ReleaseScope $Candidate.ReleaseScope)
+                        })
+                    if ($prepared.Count -ne 1) {
+                        continue
+                    }
+
+                    $replacementEvents = @(
+                        'filetransfer_runtime_started', 'filetransfer_route_selected',
+                        'filetransfer_route_hint_authorized_publication_accepted',
+                        'filetransfer_data_session_recreated',
+                        'filetransfer_live_route_epoch_terminal', 'filetransfer_v6_epoch_terminal',
+                        'file_transfer_outbound_terminal', 'file_transfer_inbound_terminal')
+                    $replacementCandidates = @(
+                        foreach ($eventName in $replacementEvents) {
+                            Get-TunaGuiAdoptionRecords -Event $eventName `
+                                -After $Candidate.Held.Index -Before $prepared[0].Index -All
+                        }
+                    )
+                    $replacement = @($replacementCandidates | Where-Object {
+                            $_.Writer -eq $Candidate.Writer -and
+                            (Test-TunaGuiAdoptionScopeReplaced $Candidate.Held.Line $_)
+                        } | Select-Object -First 1)
+                    $restart = @(Get-TunaGuiAdoptionRecords -Event 'tuna_sidecar_process_started' `
+                        -After $Candidate.Process.Index -Before $prepared[0].Index -All `
+                        -Match {
+                            param($record)
+                            $record.Writer -eq $Candidate.Writer -and
+                            (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'role') -eq 'listener'
+                        })
+                    if ($replacement.Count -eq 0 -and $restart.Count -eq 0) {
+                        return $true
+                    }
+                }
+            }
+            return $false
+        }
+
+        $heldCandidates = @(Get-TunaGuiAdoptionRecords `
+            -Event 'runtime_unlock_retry_dispatch_listener_adoption_decided' -All `
+            -Match {
+                param($record)
+                (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'status') -eq 'Held' -and
+                (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'decision_reason') -eq
+                    'current_coordinator_scoped_listener_missing' -and
+                (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'physical_process_id') -eq '0' -and
+                (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'listener_rearm_requirement') -eq 'None' -and
+                (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'listener_execution_mode') -eq
+                    'AdoptCurrentCoordinatorScoped' -and
+                (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'release_kind') -eq
+                    'FallbackPairedTailYield' -and
+                (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'direction') -eq 'outbound' -and
+                (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'route') -eq 'post_tuna_fallback_v6' -and
+                (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'protocol_version') -eq '6'
+            })
+
+        foreach ($held in $heldCandidates) {
+            $writer = $held.Writer
+            $authority = Get-TunaGuiLogLineFieldValue -Line $held.Line -Name 'authority_id'
+            $install = Get-TunaGuiLogLineFieldValue -Line $held.Line -Name 'install_generation'
+            $releaseAuthority = Get-TunaGuiLogLineFieldValue -Line $held.Line -Name 'release_authority_id'
+            $releaseGeneration = Get-TunaGuiLogLineFieldValue -Line $held.Line -Name 'release_generation'
+            $sessionId = Get-TunaGuiLogLineFieldValue -Line $held.Line -Name 'session_id'
+            $transferId = Get-TunaGuiLogLineFieldValue -Line $held.Line -Name 'transfer_id'
+            if ($writer -eq '' -or $authority -eq '' -or $install -notmatch '^[1-9][0-9]*$' -or
+                $releaseAuthority -eq '' -or $releaseGeneration -notmatch '^[1-9][0-9]*$') {
+                continue
+            }
+
+            $grant = @(Get-TunaGuiAdoptionRecords -Event 'runtime_unlock_retry_dispatch_authority_granted' `
+                -Before $held.Index -Last -Match {
+                    param($record)
+                    Test-TunaGuiAdoptionAuthorityTuple -Record $record -Anchor $held.Line `
+                        -Writer $writer -Authority $authority -InstallGeneration $install `
+                        -ReleaseAuthority $releaseAuthority -ReleaseGeneration $releaseGeneration
+                })
+            if ($grant.Count -ne 1 -or
+                -not (Test-TunaGuiAdoptionInstallProof -Anchor $held.Line -Writer $writer `
+                    -Authority $authority -InstallGeneration $install `
+                    -ReleaseAuthority $releaseAuthority -ReleaseGeneration $releaseGeneration `
+                    -Predecessor '' -After -1 -Before $grant[0].Index)) {
+                continue
+            }
+
+            $reserved = @(Get-TunaGuiAdoptionRecords `
+                -Event 'filetransfer_fallback_tail_paired_release_reserved' `
+                -Before $grant[0].Index -Last -Match {
+                    param($record)
+                    $record.Writer -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'authority_id') -eq $releaseAuthority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'pairing_generation') -eq $releaseGeneration -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'retry_authority_id') -eq $authority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'decision_status') -in @('Accepted', 'Applied', 'Idempotent') -and
+                    (Test-TunaGuiAdoptionOwner -Anchor $held.Line -Candidate $record.Line)
+                })
+            if ($reserved.Count -ne 1) {
+                continue
+            }
+            $consumed = @(Get-TunaGuiAdoptionRecords `
+                -Event 'filetransfer_fallback_tail_paired_release_consumed' `
+                -After $reserved[0].Index -Before $held.Index -Last -Match {
+                    param($record)
+                    $record.Writer -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'authority_id') -eq $releaseAuthority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'pairing_generation') -eq $releaseGeneration -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'retry_authority_id') -eq $authority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'install_generation') -eq $install -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'decision_status') -in @('Accepted', 'Applied', 'Idempotent') -and
+                    (Test-TunaGuiAdoptionScope -Anchor $reserved[0].Line -Candidate $record.Line)
+                })
+            if ($consumed.Count -ne 1) {
+                continue
+            }
+
+            $liveListeners = @()
+            $readyEvents = @(Get-TunaGuiAdoptionRecords -Event 'tuna_path_lease_listener_ready' `
+                -Before $held.Index -All -Match {
+                    param($record)
+                    $record.Writer -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'session_id') -eq $sessionId -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'transfer_id') -eq $transferId -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'transaction_generation') -eq '0' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'offer_generation') -eq '0' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'payer_decision_id') -match '^[1-9][0-9]*$' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'reason') -eq 'runtime_unlock' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'state') -eq 'listenerready' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'current') -eq '1'
+                })
+            foreach ($ready in $readyEvents) {
+                $lease = Get-TunaGuiLogLineFieldValue -Line $ready.Line -Name 'lease_generation'
+                $listenerRun = Get-TunaGuiLogLineFieldValue -Line $ready.Line -Name 'listener_run_id'
+                $payer = Get-TunaGuiLogLineFieldValue -Line $ready.Line -Name 'payer_decision_id'
+                if ($lease -notmatch '^[1-9][0-9]*$' -or $listenerRun -in @('', '(none)', 'none')) {
+                    continue
+                }
+                $started = @(Get-TunaGuiAdoptionRecords -Event 'tuna_path_lease_started' `
+                    -Before $ready.Index -Last -Match {
+                        param($record)
+                        $record.Writer -eq $writer -and
+                        (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'session_id') -eq $sessionId -and
+                        (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'transfer_id') -eq $transferId -and
+                        (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'transaction_generation') -eq '0' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'offer_generation') -eq '0' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'payer_decision_id') -eq $payer -and
+                        (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'reason') -eq 'runtime_unlock' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'lease_generation') -eq $lease -and
+                        (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'listener_run_id') -eq $listenerRun
+                    })
+                if ($started.Count -ne 1) {
+                    continue
+                }
+                $processes = @(Get-TunaGuiAdoptionRecords -Event 'tuna_sidecar_process_started' `
+                    -After $started[0].Index -Before $ready.Index -All -Match {
+                        param($record)
+                        $record.Writer -eq $writer -and
+                        (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'role') -eq 'listener' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'pid') -match '^[1-9][0-9]*$' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'run_id') -notin @('', '(none)', 'none')
+                    })
+                if ($processes.Count -ne 1) {
+                    continue
+                }
+                $listenerPid = Get-TunaGuiLogLineFieldValue -Line $processes[0].Line -Name 'pid'
+                $processRun = Get-TunaGuiLogLineFieldValue -Line $processes[0].Line -Name 'run_id'
+                $stops = @()
+                foreach ($eventName in @(
+                        'tuna_path_lease_stopped', 'tuna_path_lease_retired', 'tuna_path_lease_failed',
+                        'tuna_sidecar_stop_requested', 'tuna_sidecar_stop_completed',
+                        'tuna_sidecar_process_exited')) {
+                    $stops += @(Get-TunaGuiAdoptionRecords -Event $eventName `
+                        -After $started[0].Index -Before $held.Index -All -Match {
+                            param($record)
+                            $record.Writer -eq $writer -and
+                            (((Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'listener_run_id') -eq $listenerRun -and
+                              (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'lease_generation') -eq $lease) -or
+                             ((Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'pid') -eq $listenerPid -and
+                              (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'run_id') -eq $processRun))
+                        })
+                }
+                if ($stops.Count -eq 0) {
+                    $liveListeners += [pscustomobject]@{
+                        Ready = $ready
+                        Started = $started[0]
+                        Process = $processes[0]
+                        Lease = $lease
+                        ListenerRun = $listenerRun
+                        Pid = $listenerPid
+                        ProcessRun = $processRun
+                    }
+                }
+            }
+            if ($liveListeners.Count -ne 1) {
+                continue
+            }
+            $listener = $liveListeners[0]
+            $lease = $listener.Lease
+            $listenerRun = $listener.ListenerRun
+            $listenerPid = $listener.Pid
+            $processRun = $listener.ProcessRun
+
+            $candidate = [pscustomobject]@{
+                Held = $held
+                Writer = $writer
+                Authority = $authority
+                InstallGeneration = $install
+                ReleaseAuthority = $releaseAuthority
+                ReleaseGeneration = $releaseGeneration
+                ReleaseScope = $reserved[0].Line
+                SessionId = $sessionId
+                TransferId = $transferId
+                LeaseGeneration = $lease
+                ListenerRunId = $listenerRun
+                ListenerPid = $listenerPid
+                ProcessRunId = $processRun
+                Process = $listener.Process
+            }
+            if (-not (Test-TunaGuiAdoptionRecovered -Candidate $candidate)) {
+                return [pscustomobject]@{ Unresolved = $true; LineVisits = $visits }
+            }
+        }
+
+        return [pscustomobject]@{ Unresolved = $false; LineVisits = $visits }
+    }
+
+    $currentListenerAdoptionFastPath =
+        Get-TunaGuiCurrentListenerAdoptionFailure -Lines ([string[]]$evidenceLines)
+    if ($currentListenerAdoptionFastPath.Unresolved) {
+        if ($null -ne $TestMetrics) {
+            $TestMetrics.evidenceLineVisitCount = [long]$currentListenerAdoptionFastPath.LineVisits
+            $TestMetrics.evidenceLookupCount = 0L
+            $TestMetrics.classificationSource = "${classificationSource}_current_listener_adoption_index"
+        }
+        $result = New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'route_runtime' `
+            -Reason 'live_coordinator_scoped_initial_activation_listener_reported_missing_for_fallback_paired_retry' `
+            -RouteMode $RouteMode `
+            -ClassificationSource "${classificationSource}_current_listener_adoption_index" `
+            -EvidenceLineVisitCount ([long]$currentListenerAdoptionFastPath.LineVisits) `
+            -EvidenceParsedRecordCount 0L `
+            -EvidenceLookupCount 0L `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
+        $result.RuntimeUnlockRetryCurrentListenerAdoptionMissing = $true
+        $result.RuntimeUnlockRetryCurrentListenerAdoptionLiveProjectionMissing = $true
+        return $result
     }
 
     $fallbackTailRepairUnblockFastPath =
@@ -13052,6 +13899,43 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
         )
 
+        function Test-TunaGuiRegularV4FutureTailScopeMatch {
+            param(
+                [Parameter(Mandatory = $true)][string]$StallLine,
+                [Parameter(Mandatory = $true)][string]$CandidateLine
+            )
+
+            foreach ($field in @('session_id', 'transfer_id', 'log_writer_id')) {
+                $stallValue = Get-TunaGuiLogLineFieldValue -Line $StallLine -Name $field
+                $candidateValue = Get-TunaGuiLogLineFieldValue -Line $CandidateLine -Name $field
+                if ([string]::IsNullOrWhiteSpace($stallValue) -or
+                    [string]::IsNullOrWhiteSpace($candidateValue) -or
+                    -not [string]::Equals(
+                        $stallValue,
+                        $candidateValue,
+                        [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $false
+                }
+            }
+            foreach ($field in @(
+                    'direction', 'route', 'protocol_version', 'live_route_epoch',
+                    'runtime_generation', 'terminal_generation', 'leg_generation',
+                    'transport_epoch', 'bridge_recovery_generation',
+                    'route_publication_generation', 'route_commit_generation')) {
+                $stallValue = Get-TunaGuiLogLineFieldValue -Line $StallLine -Name $field
+                $candidateValue = Get-TunaGuiLogLineFieldValue -Line $CandidateLine -Name $field
+                if (-not [string]::IsNullOrWhiteSpace($stallValue) -and
+                    -not [string]::IsNullOrWhiteSpace($candidateValue) -and
+                    -not [string]::Equals(
+                        $stallValue,
+                        $candidateValue,
+                        [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
         $indexedLines = @(
             for ($index = 0; $index -lt $Lines.Count; $index++) {
                 [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
@@ -13180,7 +14064,80 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 $outcome = (Get-TunaGuiLogLineFieldValue `
                     -Line $matchingSettlement.Line `
                     -Name 'outcome').Replace('_', '').ToLowerInvariant()
-                $settlementResolved = if ($outcome -eq 'stalerejected') {
+                $startupFutureUnsent = $false
+                [long]$frontier = -1
+                [long]$requested = 0
+                $frontierText = Get-TunaGuiLogLineFieldValue `
+                    -Line $stall.Line `
+                    -Name 'frontier_chunk_index'
+                $requestedText = Get-TunaGuiLogLineFieldValue `
+                    -Line $stall.Line `
+                    -Name 'requested_chunk_count'
+                if ((Get-TunaGuiLogLineFieldValue -Line $stall.Line -Name 'reason') -eq
+                        'no_schedulable_repair_chunks' -and
+                    [long]::TryParse($frontierText, [ref]$frontier) -and
+                    [long]::TryParse($requestedText, [ref]$requested) -and
+                    $frontier -ge 0 -and $requested -gt 0 -and
+                    $frontier -le ([long]::MaxValue - $requested)) {
+                    $grant = @($indexedLines | Where-Object {
+                            $_.Index -lt $stall.Index -and
+                            (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                                'filetransfer_regular_v4_frontier_repair_authority_granted')) -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'repair_request_key') -eq
+                                $repairKey -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'frontier_chunk_index') -eq
+                                $frontierText -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'requested_chunk_count') -eq
+                                $requestedText -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'scheduled_chunk_count') -eq '0' -and
+                            (Test-TunaGuiRegularV4FutureTailScopeMatch `
+                                -StallLine $stall.Line `
+                                -CandidateLine $_.Line)
+                        } | Select-Object -Last 1)
+                    $scheduled = @($indexedLines | Where-Object {
+                            $_.Index -gt $stall.Index -and $_.Index -lt $matchingSettlement.Index -and
+                            (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                                'filetransfer_v4_repair_scheduled')) -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'repair_request_key') -eq
+                                $repairKey -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'first_start_chunk_index') -eq
+                                $frontierText -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'last_end_chunk_exclusive') -eq
+                                ([string]($frontier + $requested)) -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'requested_chunk_count') -eq
+                                $requestedText -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'scheduled_chunk_count') -eq '0' -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'skipped_future_count') -eq
+                                $requestedText -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'skipped_obsolete_count') -eq '0' -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'skipped_out_of_bounds_count') -eq '0' -and
+                            (Test-TunaGuiRegularV4FutureTailScopeMatch `
+                                -StallLine $stall.Line `
+                                -CandidateLine $_.Line)
+                        })
+                    if ($grant.Count -eq 1 -and $scheduled.Count -eq 1) {
+                        $grantAuthority = Get-TunaGuiLogLineFieldValue `
+                            -Line $grant[0].Line `
+                            -Name 'authority_id'
+                        $grantInstallGeneration = Get-TunaGuiLogLineFieldValue `
+                            -Line $grant[0].Line `
+                            -Name 'install_generation'
+                        $startupFutureUnsent =
+                            $grantAuthority -notin @('', '(none)', 'none', '[redacted]', 'redacted') -and
+                            $grantInstallGeneration -match '^[1-9][0-9]*$' -and
+                            $authority -eq $grantAuthority -and
+                            $installGeneration -eq $grantInstallGeneration -and
+                            (Get-TunaGuiLogLineFieldValue -Line $matchingSettlement.Line -Name 'settlement_reason') -eq
+                                'tuna_activation_pause_tuna_activation_negotiating' -and
+                            (Get-TunaGuiLogLineFieldValue -Line $matchingSettlement.Line -Name 'successor_authority_id') -in
+                                @('', '(none)', 'none') -and
+                            (Get-TunaGuiLogLineFieldValue -Line $matchingSettlement.Line -Name 'cleared_pressure') -eq '1' -and
+                            (Test-TunaGuiRegularV4FutureTailScopeMatch `
+                                -StallLine $stall.Line `
+                                -CandidateLine $matchingSettlement.Line)
+                    }
+                }
+                $settlementResolved = if ($outcome -eq 'stalerejected' -and -not $startupFutureUnsent) {
                     Test-TunaGuiRegularV4FrontierRepairSettlementClosed `
                         -Lines $settlementLines `
                         -RequireRecoveryProof

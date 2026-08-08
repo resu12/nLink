@@ -3113,6 +3113,186 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("gui-responder-peer-probe-fast-path-ok", result.Stdout, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task GuiSmokeFailureClassification_CurrentListenerAdoptionUsesExactIndexedProjection()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFileTransferFailureClassificationResult", "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            function Test-TunaGuiBridgeBootstrapNotReadyEvidence { return $false }
+            function Test-TunaGuiLatestFallbackFrontierRequestDispatchMissing { return $false }
+            function Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing { return $false }
+            function Test-TunaGuiLogLinesContain { return $false }
+            function Get-TunaGuiReadinessStateAfterBookmark {
+                return [pscustomobject]@{ ListenerUnavailable = $false; ListenerReady = $false; TunaActive = $false }
+            }
+            function Resolve-TunaGuiFailureClassification {
+                param($ErrorMessage, $HistoricalPhase, $HistoricalReason)
+                return [pscustomobject]@{ Phase = $HistoricalPhase; Reason = $HistoricalReason }
+            }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-current-listener-adoption-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                $writer = 'writer-a'
+                $scope = 'session_id=sess; transfer_id=transfer; direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; bridge_decision_generation=2; route_publication_generation=3; route_commit_generation=0; contract_generation=1; receive_recovery_operation_generation=0; data_session_generation=0; checkpoint_request_id=(none)'
+                $releaseScope = $scope.Replace('data_session_generation=0', 'data_session_generation=1')
+                $release = 'release_authority_id=pair; release_generation=1; release_kind=FallbackPairedTailYield'
+                $lines = @(
+                    "event=tuna_path_lease_started; session_id=sess; transfer_id=transfer; transaction_generation=0; offer_generation=0; lease_generation=2; listener_run_id=listener-start-2; payer_decision_id=7; state=starting; reason=runtime_unlock; log_writer_id=$writer",
+                    "event=tuna_sidecar_process_started; role=listener; pid=21084; run_id=process-run-2; log_writer_id=$writer",
+                    "event=tuna_path_lease_listener_ready; session_id=sess; transfer_id=transfer; transaction_generation=0; offer_generation=0; lease_generation=2; listener_run_id=listener-start-2; payer_decision_id=7; state=listenerready; current=1; reason=runtime_unlock; log_writer_id=$writer",
+                    "event=filetransfer_fallback_tail_paired_release_reserved; $releaseScope; authority_id=pair; pairing_generation=1; retry_authority_id=retry-a; decision_status=Accepted; log_writer_id=$writer",
+                    "event=runtime_unlock_retry_dispatch_install_committed; $scope; authority_id=retry-a; predecessor_authority_id=(none); install_generation=1; $release; install_status=Installed; log_writer_id=$writer",
+                    "event=runtime_unlock_retry_dispatch_install_confirmed; $scope; authority_id=retry-a; predecessor_authority_id=(none); install_generation=1; $release; decision_reason=coordinator_install_committed; log_writer_id=$writer",
+                    "event=filetransfer_fallback_tail_paired_release_consumed; $releaseScope; authority_id=pair; pairing_generation=1; retry_authority_id=retry-a; install_generation=1; decision_status=Accepted; log_writer_id=$writer",
+                    "event=runtime_unlock_retry_dispatch_authority_granted; $scope; authority_id=retry-a; install_generation=1; $release; listener_rearm_requirement=None; listener_execution_mode=AdoptCurrentCoordinatorScoped; log_writer_id=$writer",
+                    "event=runtime_unlock_retry_dispatch_listener_adoption_decided; $scope; authority_id=retry-a; install_generation=1; $release; listener_rearm_requirement=None; listener_execution_mode=AdoptCurrentCoordinatorScoped; status=Held; physical_process_id=0; decision_reason=current_coordinator_scoped_listener_missing; log_writer_id=$writer"
+                )
+                $lines | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'evidence_enrichment_timeout; child_exit_code_unavailable' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($result.Phase -ne 'route_runtime' -or
+                    $result.Reason -ne 'live_coordinator_scoped_initial_activation_listener_reported_missing_for_fallback_paired_retry' -or
+                    -not $result.RuntimeUnlockRetryCurrentListenerAdoptionMissing -or
+                    -not $result.RuntimeUnlockRetryCurrentListenerAdoptionLiveProjectionMissing -or
+                    $result.ClassificationSource -ne 'immutable_evidence_current_listener_adoption_index' -or
+                    [long]$result.EvidenceLineVisitCount -ne 9) {
+                    throw "current-listener adoption fast path mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+
+                $restartExplicit = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'failure_class=runtime_unlock_retry_dispatch_current_listener_adoption_missing; failure_variant=listener_rearm_none_restarted_current_coordinator_scoped_listener_after_unlock_expired' -RouteMode 'live-regular-activation-cycle'
+                if (-not $restartExplicit.RuntimeUnlockRetryCurrentListenerAdoptionMissing -or
+                    -not $restartExplicit.RuntimeUnlockRetryCurrentListenerAdoptionRestartExpired -or
+                    $restartExplicit.RuntimeUnlockRetryCurrentListenerAdoptionLiveProjectionMissing -or
+                    $restartExplicit.Reason -ne 'installed_fallback_retry_did_not_adopt_current_coordinator_scoped_listener') {
+                    throw "existing restart-expired adoption variant was not preserved: $($restartExplicit | ConvertTo-Json -Compress)"
+                }
+
+                $stopped = @($lines[0..7]) + @(
+                    "event=tuna_sidecar_stop_requested; role=listener; pid=21084; run_id=process-run-2; log_writer_id=$writer",
+                    $lines[8]
+                )
+                $stopped | Set-Content -LiteralPath $path
+                $stoppedResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($stoppedResult.RuntimeUnlockRetryCurrentListenerAdoptionMissing) {
+                    throw 'stopped listener was treated as current adoption evidence'
+                }
+
+                $ambiguous = @($lines[0..2]) + @(
+                    "event=tuna_path_lease_started; session_id=sess; transfer_id=transfer; transaction_generation=0; offer_generation=0; lease_generation=4; listener_run_id=listener-start-4; payer_decision_id=8; state=starting; reason=runtime_unlock; log_writer_id=$writer",
+                    "event=tuna_sidecar_process_started; role=listener; pid=21085; run_id=process-run-4; log_writer_id=$writer",
+                    "event=tuna_path_lease_listener_ready; session_id=sess; transfer_id=transfer; transaction_generation=0; offer_generation=0; lease_generation=4; listener_run_id=listener-start-4; payer_decision_id=8; state=listenerready; current=1; reason=runtime_unlock; log_writer_id=$writer"
+                ) + @($lines[3..8])
+                $ambiguous | Set-Content -LiteralPath $path
+                $ambiguousResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($ambiguousResult.RuntimeUnlockRetryCurrentListenerAdoptionMissing) {
+                    throw 'ambiguous live initial-activation listeners were treated as one current listener'
+                }
+
+                $recovered = @($lines) + @(
+                    "event=runtime_unlock_retry_dispatch_install_committed; $scope; authority_id=retry-b; predecessor_authority_id=retry-a; install_generation=2; $release; install_status=Installed; log_writer_id=$writer",
+                    "event=runtime_unlock_retry_dispatch_install_confirmed; $scope; authority_id=retry-b; predecessor_authority_id=retry-a; install_generation=2; $release; decision_reason=coordinator_install_committed; log_writer_id=$writer",
+                    "event=runtime_unlock_retry_dispatch_authority_granted; $scope; authority_id=retry-b; predecessor_authority_id=retry-a; install_generation=2; $release; listener_rearm_requirement=None; listener_execution_mode=AdoptCurrentCoordinatorScoped; log_writer_id=$writer",
+                    "event=runtime_unlock_retry_dispatch_listener_adoption_decided; $scope; authority_id=retry-b; predecessor_authority_id=retry-a; install_generation=2; $release; listener_rearm_requirement=None; listener_execution_mode=AdoptCurrentCoordinatorScoped; status=Accepted; physical_process_id=21084; physical_process_run_id=process-run-2; physical_process_started_utc_ms=123456; previous_request_identity=request-a; successor_request_identity=request-b; decision_reason=current_coordinator_scoped_listener_exact; log_writer_id=$writer",
+                    "event=runtime_unlock_retry_dispatch_listener_adoption_applied; $scope; authority_id=retry-b; predecessor_authority_id=retry-a; install_generation=2; $release; status=Accepted; physical_process_id=21084; physical_process_run_id=process-run-2; physical_process_started_utc_ms=123456; tuna_address=tuna://listener; previous_request_identity=request-a; successor_request_identity=request-b; decision_reason=current_coordinator_scoped_listener_adopted; log_writer_id=$writer",
+                    "event=tuna_path_lease_started; session_id=sess; transfer_id=transfer; lease_generation=3; listener_run_id=listener-start-3; state=starting; current=1; log_writer_id=$writer",
+                    "event=tuna_path_lease_listener_ready; session_id=sess; transfer_id=transfer; lease_generation=3; listener_run_id=listener-start-3; state=listenerready; current=1; log_writer_id=$writer",
+                    "event=runtime_unlock_retry_dispatch_observed; $scope; authority_id=retry-b; install_generation=2; $release; offer_generation=1; offer_nonce=nonce-1; decision_reason=peer_visible_offer_send_observed; log_writer_id=$writer",
+                    'event=tuna_acceleration_offer_received_raw; msg_id=offer-wire-1; log_writer_id=peer-writer',
+                    'event=runtime_unlock_tuna_dial_attempt_started; session_id=sess; payer_decision_id=9; nonce_len=7; dial_attempt_generation=1; log_writer_id=peer-writer',
+                    'event=tuna_acceleration_answer_sent; accepted=1; payer_decision_id=9; generation=1; inbound_msg_id=offer-wire-1; msg_id=answer-wire-1; target_peer_fingerprint=source-peer; log_writer_id=peer-writer',
+                    "event=tuna_acceleration_answer_received_raw; msg_id=answer-wire-1; log_writer_id=$writer",
+                    "event=runtime_unlock_offer_authority_boundary_decided; session_id=sess; transfer_id=transfer; boundary=answer_received; authority_mode=InstalledRetry; decision_status=accepted; retry_authority_id=retry-b; install_generation=2; offer_generation=1; transaction_generation=1; payer_decision_id=9; tuna_path_lease_generation=3; tuna_path_lease_listener_run_id=listener-start-3; log_writer_id=$writer",
+                    "event=runtime_unlock_transaction_answer_received; session_id=sess; transfer_id=transfer; offer_generation=1; transaction_generation=1; tuna_path_lease_generation=3; tuna_path_lease_listener_run_id=listener-start-3; answer_received=1; tuna_path_lease_current=1; log_writer_id=$writer",
+                    "event=tuna_acceleration_answer_ack_sent; session_id=sess; payer_decision_id=9; generation=1; msg_id=ack-1; target_peer_fingerprint=peer; log_writer_id=$writer",
+                    'event=tuna_acceleration_answer_ack_received_raw; msg_id=ack-1; log_writer_id=peer-writer',
+                    'event=tuna_acceleration_answer_ack_received; session_id=sess; payer_decision_id=9; log_writer_id=peer-writer',
+                    "event=runtime_unlock_precommit_probe_launch_requested; session_id=sess; transfer_id=transfer; direction=outbound; offer_generation=1; transaction_generation=1; tuna_path_lease_generation=3; tuna_path_lease_listener_run_id=listener-start-3; log_writer_id=$writer",
+                    "event=filetransfer_route_transition_prepared; session_id=sess; transfer_id=transfer; direction=outbound; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; source_transport_epoch=1; source_bridge_recovery_generation=1; source_route_publication_generation=3; source_route_commit_generation=0; source_data_session_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; retry_install_generation=2; fallback_yield_authority_id=pair; fallback_yield_generation=1; decision_status=Prepared; log_writer_id=$writer"
+                )
+                $recovered | Set-Content -LiteralPath $path
+                $recoveredResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($recoveredResult.RuntimeUnlockRetryCurrentListenerAdoptionMissing) {
+                    throw 'exact generation-2 adopted offer/receipt/answer/ACK/precommit/Prepared lineage did not recover the candidate'
+                }
+
+                $startedMutation = @($recovered)
+                $startedMutation[13] = $startedMutation[13].Replace('physical_process_started_utc_ms=123456', 'physical_process_started_utc_ms=123457')
+                $startedMutation | Set-Content -LiteralPath $path
+                $startedMutationResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if (-not $startedMutationResult.RuntimeUnlockRetryCurrentListenerAdoptionMissing) {
+                    throw 'mutated listener physical start time recovered the held candidate'
+                }
+
+                $crossRelease = @($recovered)
+                $crossRelease[11] = $crossRelease[11].Replace('release_authority_id=pair', 'release_authority_id=other-pair')
+                $crossRelease | Set-Content -LiteralPath $path
+                $crossReleaseResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if (-not $crossReleaseResult.RuntimeUnlockRetryCurrentListenerAdoptionMissing) {
+                    throw 'cross-release generation-2 adoption recovered the held candidate'
+                }
+
+                $crossLineage = @($recovered)
+                $crossLineage[12] = $crossLineage[12].Replace('predecessor_authority_id=retry-a', 'predecessor_authority_id=retry-z')
+                $crossLineage | Set-Content -LiteralPath $path
+                $crossLineageResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if (-not $crossLineageResult.RuntimeUnlockRetryCurrentListenerAdoptionMissing) {
+                    throw 'cross-lineage generation-2 adoption recovered the held candidate'
+                }
+
+                $crossPreparedScope = @($recovered)
+                $crossPreparedScope[-1] = $crossPreparedScope[-1].Replace('runtime_generation=3', 'runtime_generation=4')
+                $crossPreparedScope | Set-Content -LiteralPath $path
+                $crossPreparedResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if (-not $crossPreparedResult.RuntimeUnlockRetryCurrentListenerAdoptionMissing) {
+                    throw 'cross-scope Prepared recovered the held candidate'
+                }
+
+                $runtimeReplaced = @($recovered[0..8]) + @(
+                    "event=filetransfer_runtime_started; $($scope.Replace('runtime_generation=3', 'runtime_generation=4').Replace('route_publication_generation=3', 'route_publication_generation=4')); log_writer_id=$writer"
+                ) + @($recovered[9..($recovered.Count - 1)])
+                $runtimeReplaced | Set-Content -LiteralPath $path
+                $runtimeReplacedResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if (-not $runtimeReplacedResult.RuntimeUnlockRetryCurrentListenerAdoptionMissing) {
+                    throw 'runtime/publication replacement before adoption recovered the held candidate'
+                }
+
+                $missingRawReceipt = @($recovered | Where-Object { $_ -notlike 'event=tuna_acceleration_offer_received_raw*' })
+                $missingRawReceipt | Set-Content -LiteralPath $path
+                $missingRawResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if (-not $missingRawResult.RuntimeUnlockRetryCurrentListenerAdoptionMissing) {
+                    throw 'local offer lifecycle recovered without a raw peer receipt'
+                }
+
+                $missingAckReceipt = @($recovered | Where-Object { $_ -notlike 'event=tuna_acceleration_answer_ack_received_raw*' })
+                $missingAckReceipt | Set-Content -LiteralPath $path
+                $missingAckResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if (-not $missingAckResult.RuntimeUnlockRetryCurrentListenerAdoptionMissing) {
+                    throw 'local ACK submission recovered without a responder raw ACK receipt'
+                }
+
+                Write-Output 'gui-current-listener-adoption-fast-path-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"Current-listener adoption GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-current-listener-adoption-fast-path-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]
@@ -4743,6 +4923,34 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             )
             if (Test-TunaGuiRegularV4FrontierRepairStallUnresolved -Lines $stallLines) {
                 throw 'exact atomic StaleRejected recovery did not resolve its stall'
+            }
+            $startupScope = 'session_id=session-startup; transfer_id=transfer-startup; direction=outbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=0; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn'
+            $startupLines = @(
+                "event=filetransfer_regular_v4_frontier_repair_pressure_binding_committed; $startupScope; authority_id=repair-startup; install_generation=1; repair_request_key=42:5:42:5; log_writer_id=writer-startup",
+                "event=filetransfer_regular_v4_frontier_repair_authority_granted; $startupScope; authority_id=repair-startup; install_generation=1; repair_request_key=42:5:42:5; frontier_chunk_index=42; durable_received_highest_chunk_index=31; requested_chunk_count=5; scheduled_chunk_count=0; log_writer_id=writer-startup",
+                "event=filetransfer_regular_v4_frontier_repair_stalled; $startupScope; repair_request_key=42:5:42:5; reason=no_schedulable_repair_chunks; frontier_chunk_index=42; durable_received_highest_chunk_index=31; requested_chunk_count=5; log_writer_id=writer-startup",
+                "event=filetransfer_v4_repair_scheduled; $startupScope; repair_request_key=42:5:42:5; requested_chunk_count=5; scheduled_chunk_count=0; first_start_chunk_index=42; last_end_chunk_exclusive=47; skipped_future_count=5; skipped_obsolete_count=0; skipped_out_of_bounds_count=0; log_writer_id=writer-startup",
+                "event=filetransfer_regular_v4_frontier_repair_settlement_accepted; $startupScope; authority_id=repair-startup; successor_authority_id=(none); successor_install_generation=1; repair_request_key=42:5:42:5; frontier_chunk_index=42; durable_received_highest_chunk_index=31; requested_chunk_count=5; outcome=StaleRejected; settlement_reason=tuna_activation_pause_tuna_activation_negotiating; settlement_disposition=accepted; cleared_pressure=1; log_writer_id=writer-startup",
+                "event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided; session_id=session-startup; transfer_id=transfer-startup; direction=outbound; authority_id=[redacted]; successor_authority_id=(none); current_authority_id=[redacted]; retained_predecessor_authority_id=(none); install_generation=1; settlement_outcome=StaleRejected; apply_status=Applied; current_authority_cleared=1; retained_predecessor_cleared=0; log_writer_id=writer-startup",
+                "event=filetransfer_regular_v4_frontier_repair_pressure_binding_retired; $startupScope; authority_id=repair-startup; install_generation=1; repair_request_key=42:5:42:5; binding_state=Installed; install_boundary=settlement; log_writer_id=writer-startup"
+            )
+            if (Test-TunaGuiRegularV4FrontierRepairStallUnresolved -Lines $startupLines) {
+                throw 'exact startup future-unsent StaleRejected cleanup did not resolve its stall'
+            }
+            $scheduled = @($startupLines)
+            $scheduled[1] = $scheduled[1].Replace('scheduled_chunk_count=0', 'scheduled_chunk_count=1')
+            if (-not (Test-TunaGuiRegularV4FrontierRepairStallUnresolved -Lines $scheduled)) {
+                throw 'scheduled startup repair was recovered without proof'
+            }
+            $badSkippedFuture = @($startupLines)
+            $badSkippedFuture[3] = $badSkippedFuture[3].Replace('skipped_future_count=5', 'skipped_future_count=4')
+            if (-not (Test-TunaGuiRegularV4FrontierRepairStallUnresolved -Lines $badSkippedFuture)) {
+                throw 'partially skipped future range was treated as exact cleanup'
+            }
+            $wrongWriter = @($startupLines)
+            $wrongWriter[1] = $wrongWriter[1].Replace('log_writer_id=writer-startup', 'log_writer_id=writer-other')
+            if (-not (Test-TunaGuiRegularV4FrontierRepairStallUnresolved -Lines $wrongWriter)) {
+                throw 'cross-writer startup grant recovered a stall'
             }
             $crossScope = @(
                 $stallLines
