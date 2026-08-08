@@ -3113,6 +3113,225 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("gui-responder-peer-probe-fast-path-ok", result.Stdout, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task GuiSmokeFailureClassification_FallbackRepairHoldBindingUsesIndexedFastPath(
+        bool holdBound,
+        bool bindingBeforeHeld)
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFileTransferFailureClassificationResult", "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-fallback-repair-hold-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                $repairScope = 'session_id=sess; transfer_id=transfer; direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; bridge_decision_generation=2; checkpoint_request_id=(none); route_publication_generation=3; route_commit_generation=0'
+                $repairShape = 'repair_request_key=repair-key; range_fingerprint=range; frontier_chunk_index=10; durable_received_highest_chunk_index=9; range_count=1; requested_chunk_count=1; source_kind=PeerRequest; target_transport=regular_nkn'
+                $holdTuple = 'contract_generation=1; retired_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; predecessor_authority_id=(none); request_active_predecessor_supersession=0; listener_rearm_requirement=None; listener_execution_mode=Default; retry_reason=fallback_tail; recovery_reason=paired_release; regular_v4_liveness_generation=1; bridge_decision_generation=2; source_session_id=sess; source_transfer_id=transfer; source_direction=outbound; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; source_route_publication_generation=3; source_route_commit_generation=(none); source_route_commit_generation_present=0; source_target_route=file_tuna_v4; source_target_protocol_version=4; source_target_transport=tuna; source_route_publication_action_kind=RuntimeUnlockRetry; source_coordinator_decision_reason=paired_release'
+                $bindingTuple = 'contract_generation=1; retired_offer_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; request_predecessor_authority_id=(none); request_active_predecessor_supersession=0; listener_rearm_requirement=None; listener_execution_mode=Default; retry_reason=fallback_tail; recovery_reason=paired_release; regular_v4_liveness_generation=1; request_bridge_decision_generation=2; request_session_id=sess; request_transfer_id=transfer; request_direction=outbound; source_publication_session_id=sess; source_publication_transfer_id=transfer; source_publication_direction=outbound; source_publication_route=post_tuna_fallback_v6; source_publication_protocol_version=6; source_publication_live_route_epoch=2; source_publication_runtime_generation=3; source_publication_terminal_generation=0; source_publication_leg_generation=3; source_publication_generation=3; source_publication_route_commit_generation=0; source_publication_route_commit_generation_present=0; source_publication_target_route=file_tuna_v4; source_publication_target_protocol_version=4; source_publication_target_transport=tuna; source_publication_action_kind=RuntimeUnlockRetry; source_publication_reason=paired_release'
+                $lines = @(
+                    'event=filetransfer_fallback_tail_paired_yield_granted; session_id=sess; transfer_id=transfer; direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; authority_id=pair; log_writer_id=writer',
+                    'event=filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested; session_id=sess; transfer_id=transfer; direction=outbound; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; source_route_publication_generation=3; source_route_commit_generation=0; authority_id=pair; recovery_contract_generation=1; retired_offer_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; predecessor_authority_id=(none); request_active_predecessor_supersession=0; decision_status=Queued; log_writer_id=writer',
+                    "event=filetransfer_fallback_frontier_repair_authority_granted; $repairScope; $repairShape; authority_id=repair-a; predecessor_authority_id=(none); repair_generation=17; log_writer_id=writer",
+                    "event=runtime_unlock_retry_dispatch_authority_held; session_id=sess; transfer_id=transfer; direction=outbound; $holdTuple; decision_reason=fallback_paired_tail_yield_pending; log_writer_id=writer",
+                    "event=filetransfer_fallback_frontier_repair_authority_granted; $repairScope; $repairShape; authority_id=repair-b; predecessor_authority_id=repair-a; repair_generation=18; log_writer_id=writer",
+                    "event=filetransfer_fallback_frontier_repair_contract_settled; $repairScope; $repairShape; authority_id=repair-a; predecessor_authority_id=(none); repair_generation=17; successor_authority_id=repair-b; settlement_outcome=Superseded; log_writer_id=writer",
+                    "event=filetransfer_fallback_frontier_repair_contract_settled; $repairScope; $repairShape; authority_id=repair-b; predecessor_authority_id=repair-a; repair_generation=18; successor_authority_id=(none); settlement_outcome=ProgressObserved; log_writer_id=writer",
+                    'event=filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested; session_id=sess; transfer_id=transfer; direction=outbound; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; source_route_publication_generation=3; source_route_commit_generation=0; authority_id=pair; recovery_contract_generation=1; retired_offer_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; predecessor_authority_id=(none); request_active_predecessor_supersession=0; decision_status=Queued; log_writer_id=writer'
+                )
+                if (${{bindingBeforeHeld.ToString().ToLowerInvariant()}}) {
+                    $lines = @(
+                        $lines[0],
+                        $lines[1],
+                        $lines[2],
+                        "event=runtime_unlock_retry_dispatch_fallback_tail_hold_binding_decided; session_id=sess; transfer_id=transfer; direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; request_bridge_decision_generation=2; authority_checkpoint_request_id=(none); route_publication_generation=3; route_commit_generation=0; authority_id=repair-a; predecessor_authority_id=(none); repair_generation=17; release_authority_id=pair; release_generation=1; hold_generation=1; data_session_identity=data:1; data_session_generation=1; hold_data_session_identity=data:1; hold_data_session_generation=1; $bindingTuple; decision_status=Accepted; log_writer_id=writer",
+                        $lines[3],
+                        "event=filetransfer_fallback_frontier_repair_contract_settled; $repairScope; $repairShape; authority_id=repair-a; predecessor_authority_id=(none); repair_generation=17; successor_authority_id=(none); settlement_outcome=ProgressObserved; log_writer_id=writer",
+                        $lines[7]
+                    )
+                }
+                elseif (${{holdBound.ToString().ToLowerInvariant()}}) {
+                    $lines = @($lines[0..4]) + @(
+                        "event=runtime_unlock_retry_dispatch_fallback_tail_hold_binding_decided; session_id=sess; transfer_id=transfer; direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; request_bridge_decision_generation=2; authority_checkpoint_request_id=(none); route_publication_generation=3; route_commit_generation=0; authority_id=repair-b; predecessor_authority_id=repair-a; repair_generation=18; release_authority_id=pair; release_generation=1; hold_generation=1; data_session_identity=data:1; data_session_generation=1; hold_data_session_identity=data:1; hold_data_session_generation=1; $bindingTuple; decision_status=Accepted; log_writer_id=writer"
+                    ) + @($lines[5..($lines.Count - 1)])
+                }
+                $lines | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($result.Phase -ne 'route_runtime' -or
+                    $result.Reason -ne $(if (${{holdBound.ToString().ToLowerInvariant()}}) { 'settled_fallback_frontier_repair_did_not_republish_held_paired_tail_retry_request' } else { 'unbound_held_fallback_tail_retry_could_not_recheck_after_blocking_repair_settlement' }) -or
+                    -not $result.RuntimeUnlockRetryFallbackTailUnblockRecheckMissing -or
+                    [bool]$result.RuntimeUnlockRetryFallbackFrontierRepairHoldBindingMissing -ne (-not ${{holdBound.ToString().ToLowerInvariant()}}) -or
+                    [bool]$result.RuntimeUnlockRetryFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissing -ne ${{holdBound.ToString().ToLowerInvariant()}} -or
+                    $result.ClassificationSource -ne 'immutable_evidence_fallback_tail_repair_unblock_index' -or
+                    [long]$result.EvidenceLineVisitCount -ne $(if (${{bindingBeforeHeld.ToString().ToLowerInvariant()}}) { 7 } elseif (${{holdBound.ToString().ToLowerInvariant()}}) { 9 } else { 8 })) {
+                    throw "fallback repair hold-binding fast path mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+                Write-Output 'gui-fallback-repair-hold-binding-fast-path-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(result.ExitCode == 0, $"Fallback repair hold-binding GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-fallback-repair-hold-binding-fast-path-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("healthy")]
+    [InlineData("reverse_order")]
+    [InlineData("cross_scope")]
+    [InlineData("cross_request")]
+    [InlineData("cross_release")]
+    [InlineData("conflicting_binding")]
+    [InlineData("idempotent_only")]
+    [InlineData("hold_data_session_mutation")]
+    [InlineData("wrong_predecessor")]
+    [InlineData("mutated_initial_request")]
+    [InlineData("settlement_generation_mutation")]
+    [InlineData("settlement_range_mutation")]
+    [InlineData("broken_lineage")]
+    public async Task GuiSmokeFailureClassification_FallbackRepairRecoveryRequiresExactOrderedLineage(
+        string scenario)
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFileTransferFailureClassificationResult", "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var publishedContract = scenario == "cross_request" ? "2" : "1";
+        var expectMissing = scenario is not (
+            "healthy" or
+            "broken_lineage" or
+            "mutated_initial_request" or
+            "settlement_generation_mutation" or
+            "settlement_range_mutation");
+        var expectHoldBindingMissing = scenario is
+            "conflicting_binding" or
+            "idempotent_only" or
+            "hold_data_session_mutation" or
+            "wrong_predecessor";
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-fallback-repair-recovery-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                $repairScope = 'session_id=sess; transfer_id=transfer; direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; bridge_decision_generation=2; checkpoint_request_id=(none); route_publication_generation=3; route_commit_generation=0'
+                $repairShape = 'repair_request_key=repair-key; range_fingerprint=range; frontier_chunk_index=10; durable_received_highest_chunk_index=9; range_count=1; requested_chunk_count=1; source_kind=PeerRequest; target_transport=regular_nkn'
+                $holdTuple = 'contract_generation=1; retired_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; predecessor_authority_id=(none); request_active_predecessor_supersession=0; listener_rearm_requirement=None; listener_execution_mode=Default; retry_reason=fallback_tail; recovery_reason=paired_release; regular_v4_liveness_generation=1; bridge_decision_generation=2; source_session_id=sess; source_transfer_id=transfer; source_direction=outbound; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; source_route_publication_generation=3; source_route_commit_generation=(none); source_route_commit_generation_present=0; source_target_route=file_tuna_v4; source_target_protocol_version=4; source_target_transport=tuna; source_route_publication_action_kind=RuntimeUnlockRetry; source_coordinator_decision_reason=paired_release'
+                $bindingTuple = 'contract_generation=1; retired_offer_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; request_predecessor_authority_id=(none); request_active_predecessor_supersession=0; listener_rearm_requirement=None; listener_execution_mode=Default; retry_reason=fallback_tail; recovery_reason=paired_release; regular_v4_liveness_generation=1; request_bridge_decision_generation=2; request_session_id=sess; request_transfer_id=transfer; request_direction=outbound; source_publication_session_id=sess; source_publication_transfer_id=transfer; source_publication_direction=outbound; source_publication_route=post_tuna_fallback_v6; source_publication_protocol_version=6; source_publication_live_route_epoch=2; source_publication_runtime_generation=3; source_publication_terminal_generation=0; source_publication_leg_generation=3; source_publication_generation=3; source_publication_route_commit_generation=0; source_publication_route_commit_generation_present=0; source_publication_target_route=file_tuna_v4; source_publication_target_protocol_version=4; source_publication_target_transport=tuna; source_publication_action_kind=RuntimeUnlockRetry; source_publication_reason=paired_release'
+                $publishedTuple = "contract_generation={{publishedContract}}; retired_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; predecessor_authority_id=(none); request_active_predecessor_supersession=0; listener_rearm_requirement=None; listener_execution_mode=Default; retry_reason=fallback_tail; recovery_reason=paired_release; regular_v4_liveness_generation=1; bridge_decision_generation=2; source_session_id=sess; source_transfer_id=transfer; source_direction=outbound; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; source_route_publication_generation=3; source_route_commit_generation=0; source_route_commit_generation_present=0; source_target_route=file_tuna_v4; source_target_protocol_version=4; source_target_transport=tuna; source_route_publication_action_kind=RuntimeUnlockRetry; source_coordinator_decision_reason=paired_release"
+                $installTuple = 'authority_schema=3; authority_id=retry; authority_generation=1; predecessor_authority_id=(none); session_id=sess; transfer_id=transfer; direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; bridge_decision_generation=2; route_publication_generation=3; route_commit_generation=0; contract_generation=1; retired_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; listener_rearm_requirement=None; listener_execution_mode=Default; retry_reason=fallback_tail; recovery_reason=paired_release; release_kind=FallbackPairedTailYield; release_authority_id=pair; release_generation=1; release_outcome=paired; data_session_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; source_publication_session_id=sess; source_publication_transfer_id=transfer; source_publication_direction=outbound; source_publication_route=post_tuna_fallback_v6; source_publication_protocol_version=6; source_publication_live_route_epoch=2; source_publication_runtime_generation=3; source_publication_terminal_generation=0; source_publication_leg_generation=3; source_publication_route_commit_generation=0; source_publication_target_route=file_tuna_v4; source_publication_target_protocol_version=4; source_publication_target_transport=tuna; source_publication_generation=3; source_publication_action_kind=RuntimeUnlockRetry; source_publication_reason=paired_release; request_regular_v4_liveness_generation=1; request_bridge_decision_generation=2; request_active_predecessor_supersession=0'
+                $lines = @(
+                    'event=filetransfer_fallback_tail_paired_yield_granted; session_id=sess; transfer_id=transfer; direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; authority_id=pair; log_writer_id=writer',
+                    'event=filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested; session_id=sess; transfer_id=transfer; direction=outbound; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; source_route_publication_generation=3; source_route_commit_generation=0; authority_id=pair; recovery_contract_generation=1; retired_offer_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; predecessor_authority_id=(none); request_active_predecessor_supersession=0; decision_status=Queued; log_writer_id=writer',
+                    "event=filetransfer_fallback_frontier_repair_authority_granted; $repairScope; $repairShape; authority_id=repair-a; predecessor_authority_id=(none); repair_generation=17; log_writer_id=writer",
+                    "event=runtime_unlock_retry_dispatch_authority_held; session_id=sess; transfer_id=transfer; direction=outbound; $holdTuple; decision_reason=fallback_paired_tail_yield_pending; log_writer_id=writer",
+                    "event=filetransfer_fallback_frontier_repair_authority_granted; $repairScope; $repairShape; authority_id=repair-b; predecessor_authority_id=repair-a; repair_generation=18; log_writer_id=writer",
+                    "event=runtime_unlock_retry_dispatch_fallback_tail_hold_binding_decided; session_id=sess; transfer_id=transfer; direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; request_bridge_decision_generation=2; authority_checkpoint_request_id=(none); route_publication_generation=3; route_commit_generation=0; authority_id=repair-b; predecessor_authority_id=repair-a; repair_generation=18; release_authority_id=pair; release_generation=1; hold_generation=1; data_session_identity=data:1; data_session_generation=1; hold_data_session_identity=data:1; hold_data_session_generation=1; $bindingTuple; decision_status=Accepted; log_writer_id=writer",
+                    "event=filetransfer_fallback_frontier_repair_contract_settled; $repairScope; $repairShape; authority_id=repair-a; predecessor_authority_id=(none); repair_generation=17; successor_authority_id=repair-b; settlement_outcome=Superseded; log_writer_id=writer",
+                    "event=filetransfer_fallback_frontier_repair_contract_settled; $repairScope; $repairShape; authority_id=repair-b; predecessor_authority_id=repair-a; repair_generation=18; successor_authority_id=(none); settlement_outcome=ProgressObserved; log_writer_id=writer",
+                    "event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested; session_id=sess; transfer_id=transfer; direction=outbound; $holdTuple; recovered_transport_epoch=1; handoff_kind=regular_nkn_recovery_to_regular_nkn; boundary_source_transport=regular_nkn_recovery; boundary_target_transport=regular_nkn; fallback_epoch=1; boundary_reason=repair_settled; boundary_identity=boundary; original_hold_reason=fallback_paired_tail_yield_pending; recheck_generation=1; queue_generation=7; decision_status=Queued; log_writer_id=writer",
+                    'event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided; session_id=sess; transfer_id=transfer; direction=outbound; authority_id=pair; release_generation=1; repair_authority_id=repair-b; repair_generation=18; hold_generation=1; recheck_generation=1; decision_status=Accepted; log_writer_id=writer',
+                    "event=runtime_unlock_retry_dispatch_authority_request_published; session_id=sess; transfer_id=transfer; direction=outbound; $publishedTuple; queue_generation=7; log_writer_id=writer",
+                    'event=filetransfer_fallback_tail_paired_release_reserved; session_id=sess; transfer_id=transfer; direction=outbound; authority_id=pair; pairing_generation=1; retry_authority_id=retry; decision_status=Accepted; log_writer_id=writer',
+                    "event=runtime_unlock_retry_dispatch_decision_staged; $installTuple; stage_status=Staged; log_writer_id=writer",
+                    "event=runtime_unlock_retry_dispatch_install_receipt_issued; $installTuple; install_generation=1; log_writer_id=writer",
+                    "event=runtime_unlock_retry_dispatch_install_committed; $installTuple; install_generation=1; install_status=Installed; log_writer_id=writer",
+                    "event=runtime_unlock_retry_dispatch_authority_granted; $installTuple; install_generation=1; log_writer_id=writer",
+                    'event=filetransfer_fallback_tail_paired_release_consumed; session_id=sess; transfer_id=transfer; direction=outbound; authority_id=pair; pairing_generation=1; retry_authority_id=retry; install_generation=1; decision_status=Accepted; log_writer_id=writer',
+                    "event=runtime_unlock_retry_dispatch_observed; $installTuple; install_generation=1; offer_generation=1; offer_nonce=nonce; log_writer_id=writer",
+                    'event=runtime_unlock_offer_authority_boundary_decided; boundary=answer_received; authority_mode=InstalledRetry; decision_status=accepted; session_id=sess; transfer_id=transfer; payer_decision_id=7; offer_generation=1; transaction_generation=1; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=listener; retry_authority_id=retry; install_generation=1; log_writer_id=writer',
+                    'event=runtime_unlock_transaction_answer_received; session_id=sess; transaction_generation=1; offer_generation=1; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=listener; answer_received=1; tuna_path_lease_current=1; log_writer_id=writer',
+                    'event=tuna_acceleration_answer_ack_sent; session_id=sess; payer_decision_id=7; generation=9; msg_id=ack; target_peer_fingerprint=peer; log_writer_id=writer',
+                    'event=runtime_unlock_precommit_probe_launch_requested; session_id=sess; transfer_id=transfer; direction=outbound; transaction_generation=1; offer_generation=1; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=listener; log_writer_id=writer',
+                    'event=filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested; session_id=sess; transfer_id=transfer; direction=outbound; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; source_route_publication_generation=3; source_route_commit_generation=0; authority_id=pair; recovery_contract_generation=1; retired_offer_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; predecessor_authority_id=(none); request_active_predecessor_supersession=0; decision_status=Queued; log_writer_id=writer',
+                    'event=runtime_unlock_transaction_answer_received; session_id=sentinel; transaction_generation=1; offer_generation=6; answer_received=1; tuna_path_lease_generation=1; tuna_path_lease_current=1; tuna_path_lease_listener_run_id=sentinel-listener; log_writer_id=sentinel-writer',
+                    'event=tuna_acceleration_answer_ack_pending; session_id=sentinel; payer_decision_id=4; generation=6; log_writer_id=sentinel-writer',
+                    'event=runtime_unlock_transaction_path_probe_acked; session_id=sentinel; transaction_generation=1; offer_generation=6; path_probe_id=sentinel-probe; path_probe_state=acked; path_probe_transport=tuna; tuna_path_lease_generation=1; log_writer_id=sentinel-writer',
+                    'event=runtime_unlock_precommit_probe_acked; session_id=sentinel; transfer_id=sentinel-transfer; direction=inbound; transaction_generation=1; offer_generation=1; launch_generation=0; probe_id=sentinel-probe; probe_state=acked; received_transport=tuna; tuna_path_lease_generation=1; log_writer_id=sentinel-writer',
+                    'event=tuna_acceleration_answer_ack_received; session_id=sentinel; payer_decision_id=4; log_writer_id=sentinel-writer',
+                    'event=runtime_unlock_answer_ack_probe_barrier_received; session_id=sentinel; payer_decision_id=4; log_writer_id=sentinel-writer',
+                    'event=filetransfer_runtime_unlock_handoff_pending_route_commit; session_id=sentinel; transaction_generation=1; offer_generation=6; state=routecommitpending; path_probe_state=acked; route_commit_pending=1; route_committed=0; log_writer_id=sentinel-writer'
+                )
+                $scenario = '{{scenario}}'
+                switch ($scenario) {
+                    'reverse_order' {
+                        $swap = $lines[8]
+                        $lines[8] = $lines[9]
+                        $lines[9] = $swap
+                    }
+                    'cross_scope' {
+                        $lines[8] = $lines[8].Replace('source_runtime_generation=3', 'source_runtime_generation=4')
+                    }
+                    'cross_release' {
+                        $lines[11] = $lines[11].Replace('authority_id=pair', 'authority_id=other-pair')
+                    }
+                    'conflicting_binding' {
+                        $conflict = $lines[5].Replace('release_generation=1', 'release_generation=2')
+                        $lines = @($lines[0..5]) + @($conflict) + @($lines[6..($lines.Count - 1)])
+                    }
+                    'idempotent_only' {
+                        $lines[5] = $lines[5].Replace('decision_status=Accepted', 'decision_status=Idempotent')
+                    }
+                    'hold_data_session_mutation' {
+                        $lines[5] = $lines[5].Replace('hold_data_session_generation=1', 'hold_data_session_generation=2')
+                    }
+                    'wrong_predecessor' {
+                        $lines[5] = $lines[5].Replace('predecessor_authority_id=repair-a', 'predecessor_authority_id=other-repair')
+                    }
+                    'mutated_initial_request' {
+                        $lines[1] = $lines[1].Replace('source_runtime_generation=3', 'source_runtime_generation=4')
+                    }
+                    'settlement_generation_mutation' {
+                        $lines[7] = $lines[7].Replace('repair_generation=18', 'repair_generation=19')
+                    }
+                    'settlement_range_mutation' {
+                        $lines[7] = $lines[7].Replace('range_fingerprint=range', 'range_fingerprint=other-range')
+                    }
+                    'broken_lineage' {
+                        $lines[6] = $lines[6].Replace('successor_authority_id=repair-b', 'successor_authority_id=other-repair')
+                    }
+                }
+                $lines | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ([bool]$result.RuntimeUnlockRetryFallbackTailUnblockRecheckMissing -ne ${{expectMissing.ToString().ToLowerInvariant()}}) {
+                    throw "fallback repair scenario '$scenario' mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+                if (${{expectMissing.ToString().ToLowerInvariant()}} -and
+                    ([bool]$result.RuntimeUnlockRetryFallbackFrontierRepairHoldBindingMissing -ne ${{expectHoldBindingMissing.ToString().ToLowerInvariant()}} -or
+                        [bool]$result.RuntimeUnlockRetryFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissing -eq ${{expectHoldBindingMissing.ToString().ToLowerInvariant()}})) {
+                    throw "fallback repair scenario '$scenario' selected the wrong subtype: $($result | ConvertTo-Json -Compress)"
+                }
+                Write-Output 'gui-fallback-repair-recovery-order-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(result.ExitCode == 0, $"Fallback repair recovery GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-fallback-repair-recovery-order-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task GuiSmokeFailureClassification_FailedFallbackTailYieldUsesIndexedFastPath()
     {

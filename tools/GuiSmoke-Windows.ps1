@@ -4714,6 +4714,9 @@ function New-TunaGuiFileTransferFailureClassificationResult {
         InitialActivationAnswerPeerDeliveryMissing = $false
         InitialActivationRetiredPendingAnswerHandoffMissing = $false
         RuntimeUnlockResponderPeerProbeHandoffMissing = $false
+        RuntimeUnlockRetryFallbackTailUnblockRecheckMissing = $false
+        RuntimeUnlockRetryFallbackFrontierRepairHoldBindingMissing = $false
+        RuntimeUnlockRetryFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissing = $false
         FallbackTailFailedYieldQuiescentSuccessorMissing = $false
         FallbackTailPeerProofBeforeLocalYieldNotRetained = $false
         FallbackTailPeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetained = $false
@@ -4779,6 +4782,22 @@ function Get-TunaGuiExplicitFailureClassification {
             }
             'runtime_unlock_retry_dispatch_contract_unsettled' {
                 return [pscustomobject]@{ Phase = 'runtime_unlock_retry'; Reason = $failureClass }
+            }
+            'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing' {
+                return [pscustomobject]@{
+                    Phase = 'route_runtime'
+                    Reason = if ($ErrorMessage.IndexOf(
+                            'fallback_frontier_repair_hold_binding_missing',
+                            [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                        $ErrorMessage.IndexOf(
+                            'unbound_held_fallback_tail_retry_could_not_recheck_after_blocking_repair_settlement',
+                            [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                        'unbound_held_fallback_tail_retry_could_not_recheck_after_blocking_repair_settlement'
+                    }
+                    else {
+                        'settled_fallback_frontier_repair_did_not_republish_held_paired_tail_retry_request'
+                    }
+                }
             }
             'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved' {
                 return [pscustomobject]@{
@@ -5897,6 +5916,1146 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             }
             LineVisits = $visits
         }
+    }
+
+    function Get-TunaGuiFallbackTailRepairUnblockRecheckFailure {
+        param(
+            [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+        )
+
+        function Get-TunaGuiFallbackTailRepairField {
+            param(
+                [AllowNull()][AllowEmptyString()][string]$Line,
+                [Parameter(Mandatory = $true)][string[]]$Names
+            )
+
+            foreach ($name in $Names) {
+                $value = Get-TunaGuiLogLineFieldValue -Line $Line -Name $name
+                if (-not [string]::IsNullOrWhiteSpace($value)) {
+                    return $value
+                }
+            }
+            return ''
+        }
+
+        $requestFieldAliases = @{
+            Hold = @{
+                Contract = @('contract_generation'); Retired = @('retired_generation'); Dispatch = @('dispatch_attempt_generation')
+                MissingSuccessor = @('missing_dispatch_successor_generation'); Predecessor = @('predecessor_authority_id')
+                ActiveSupersession = @('request_active_predecessor_supersession'); ListenerRearm = @('listener_rearm_requirement')
+                ListenerExecution = @('listener_execution_mode'); RetryReason = @('retry_reason'); RecoveryReason = @('recovery_reason')
+                Liveness = @('regular_v4_liveness_generation', 'request_regular_v4_liveness_generation'); BridgeDecision = @('bridge_decision_generation', 'request_bridge_decision_generation')
+                RequestSession = @('session_id'); RequestTransfer = @('transfer_id'); RequestDirection = @('direction')
+                SourceSession = @('source_session_id', 'source_publication_session_id', 'attempted_source_publication_session_id')
+                SourceTransfer = @('source_transfer_id', 'source_publication_transfer_id', 'attempted_source_publication_transfer_id')
+                SourceDirection = @('source_direction', 'source_publication_direction', 'attempted_source_publication_direction')
+                SourceRoute = @('source_route', 'source_publication_route', 'attempted_source_publication_route')
+                SourceProtocol = @('source_protocol_version', 'source_publication_protocol_version', 'attempted_source_publication_protocol_version')
+                SourceLiveEpoch = @('source_live_route_epoch', 'source_publication_live_route_epoch', 'attempted_source_publication_live_route_epoch')
+                SourceRuntime = @('source_runtime_generation', 'source_publication_runtime_generation', 'attempted_source_publication_runtime_generation')
+                SourceTerminal = @('source_terminal_generation', 'source_publication_terminal_generation', 'attempted_source_publication_terminal_generation')
+                SourceLeg = @('source_leg_generation', 'source_publication_leg_generation', 'attempted_source_publication_leg_generation')
+                SourcePublication = @('source_route_publication_generation', 'source_publication_generation', 'attempted_source_publication_route_publication_generation')
+                SourceCommit = @('source_route_commit_generation', 'source_publication_route_commit_generation', 'attempted_source_publication_route_commit_generation')
+                SourceCommitPresent = @('source_route_commit_generation_present', 'source_publication_route_commit_generation_present', 'attempted_source_publication_route_commit_generation_present')
+                SourceTargetRoute = @('source_target_route', 'source_publication_target_route', 'attempted_source_publication_target_route')
+                SourceTargetProtocol = @('source_target_protocol_version', 'source_publication_target_protocol_version', 'attempted_source_publication_target_protocol_version')
+                SourceTargetTransport = @('source_target_transport', 'source_publication_target_transport', 'attempted_source_publication_target_transport')
+                SourceAction = @('source_route_publication_action_kind', 'source_publication_action_kind', 'attempted_source_publication_route_publication_action_kind')
+                SourceReason = @('source_coordinator_decision_reason', 'source_publication_reason', 'attempted_source_publication_coordinator_decision_reason')
+            }
+            Binding = @{
+                Contract = @('contract_generation'); Retired = @('retired_offer_generation'); Dispatch = @('dispatch_attempt_generation')
+                MissingSuccessor = @('missing_dispatch_successor_generation'); Predecessor = @('request_predecessor_authority_id')
+                ActiveSupersession = @('request_active_predecessor_supersession'); ListenerRearm = @('listener_rearm_requirement')
+                ListenerExecution = @('listener_execution_mode'); RetryReason = @('retry_reason'); RecoveryReason = @('recovery_reason')
+                Liveness = @('regular_v4_liveness_generation'); BridgeDecision = @('request_bridge_decision_generation')
+                RequestSession = @('request_session_id'); RequestTransfer = @('request_transfer_id'); RequestDirection = @('request_direction')
+                SourceSession = @('source_publication_session_id'); SourceTransfer = @('source_publication_transfer_id')
+                SourceDirection = @('source_publication_direction'); SourceRoute = @('source_publication_route')
+                SourceProtocol = @('source_publication_protocol_version'); SourceLiveEpoch = @('source_publication_live_route_epoch')
+                SourceRuntime = @('source_publication_runtime_generation'); SourceTerminal = @('source_publication_terminal_generation')
+                SourceLeg = @('source_publication_leg_generation'); SourcePublication = @('source_publication_generation')
+                SourceCommit = @('source_publication_route_commit_generation'); SourceCommitPresent = @('source_publication_route_commit_generation_present')
+                SourceTargetRoute = @('source_publication_target_route'); SourceTargetProtocol = @('source_publication_target_protocol_version')
+                SourceTargetTransport = @('source_publication_target_transport'); SourceAction = @('source_publication_action_kind')
+                SourceReason = @('source_publication_reason')
+            }
+            Evidence = @{
+                Contract = @('contract_generation', 'recovery_contract_generation'); Retired = @('retired_generation', 'retired_offer_generation'); Dispatch = @('dispatch_attempt_generation')
+                MissingSuccessor = @('missing_dispatch_successor_generation'); Predecessor = @('predecessor_authority_id')
+                ActiveSupersession = @('request_active_predecessor_supersession'); ListenerRearm = @('listener_rearm_requirement')
+                ListenerExecution = @('listener_execution_mode'); RetryReason = @('retry_reason'); RecoveryReason = @('recovery_reason')
+                Liveness = @('regular_v4_liveness_generation', 'request_regular_v4_liveness_generation'); BridgeDecision = @('bridge_decision_generation', 'request_bridge_decision_generation')
+                RequestSession = @('session_id'); RequestTransfer = @('transfer_id'); RequestDirection = @('direction')
+                SourceSession = @('source_session_id', 'source_publication_session_id'); SourceTransfer = @('source_transfer_id', 'source_publication_transfer_id')
+                SourceDirection = @('source_direction', 'source_publication_direction'); SourceRoute = @('source_route', 'source_publication_route')
+                SourceProtocol = @('source_protocol_version', 'source_publication_protocol_version'); SourceLiveEpoch = @('source_live_route_epoch', 'source_publication_live_route_epoch')
+                SourceRuntime = @('source_runtime_generation', 'source_publication_runtime_generation'); SourceTerminal = @('source_terminal_generation', 'source_publication_terminal_generation')
+                SourceLeg = @('source_leg_generation', 'source_publication_leg_generation'); SourcePublication = @('source_route_publication_generation', 'source_publication_generation')
+                SourceCommit = @('source_route_commit_generation', 'source_publication_route_commit_generation'); SourceCommitPresent = @('source_route_commit_generation_present', 'source_publication_route_commit_generation_present')
+                SourceTargetRoute = @('source_target_route', 'source_publication_target_route'); SourceTargetProtocol = @('source_target_protocol_version', 'source_publication_target_protocol_version')
+                SourceTargetTransport = @('source_target_transport', 'source_publication_target_transport'); SourceAction = @('source_route_publication_action_kind', 'source_publication_action_kind')
+                SourceReason = @('source_coordinator_decision_reason', 'source_publication_reason')
+            }
+            Candidate = @{
+                Contract = @('recovery_contract_generation'); Retired = @('retired_offer_generation')
+                Dispatch = @('dispatch_attempt_generation'); MissingSuccessor = @('missing_dispatch_successor_generation')
+                Predecessor = @('predecessor_authority_id'); ActiveSupersession = @('request_active_predecessor_supersession')
+                RequestSession = @('session_id'); RequestTransfer = @('transfer_id'); RequestDirection = @('direction')
+                SourceRoute = @('source_route'); SourceProtocol = @('source_protocol_version')
+                SourceLiveEpoch = @('source_live_route_epoch'); SourceRuntime = @('source_runtime_generation')
+                SourceTerminal = @('source_terminal_generation'); SourceLeg = @('source_leg_generation')
+                SourcePublication = @('source_route_publication_generation')
+                SourceCommit = @('source_route_commit_generation'); SourceCommitPresent = @('source_route_commit_generation_present')
+            }
+        }
+
+        function Test-TunaGuiFallbackTailRouteCommitMatch {
+            param(
+                [Parameter(Mandatory = $true)][string]$HoldLine,
+                [Parameter(Mandatory = $true)][string]$CandidateLine,
+                [Parameter(Mandatory = $true)][string[]]$CandidateCommitNames
+            )
+
+            $present = Get-TunaGuiFallbackTailRepairField `
+                -Line $HoldLine `
+                -Names $requestFieldAliases.Hold.SourceCommitPresent
+            $holdCommit = Get-TunaGuiFallbackTailRepairField `
+                -Line $HoldLine `
+                -Names $requestFieldAliases.Hold.SourceCommit
+            $candidateCommit = Get-TunaGuiFallbackTailRepairField `
+                -Line $CandidateLine `
+                -Names $CandidateCommitNames
+            if ($present -eq '0') {
+                return $holdCommit -in @('0', '(none)', 'none') -and
+                    $candidateCommit -in @('0', '(none)', 'none')
+            }
+            return $present -eq '1' -and
+                -not [string]::IsNullOrWhiteSpace($holdCommit) -and
+                [string]::Equals(
+                    $holdCommit,
+                    $candidateCommit,
+                    [System.StringComparison]::OrdinalIgnoreCase)
+        }
+
+        function Test-TunaGuiFallbackTailRepairRequestTuple {
+            param(
+                [Parameter(Mandatory = $true)][string]$HoldLine,
+                [Parameter(Mandatory = $true)][string]$CandidateLine,
+                [ValidateSet('Binding', 'Evidence', 'Install', 'Candidate')][string]$CandidateKind
+            )
+
+            $candidateAliases = if ($CandidateKind -eq 'Install') {
+                $requestFieldAliases.Evidence
+            }
+            else {
+                $requestFieldAliases[$CandidateKind]
+            }
+
+            foreach ($logicalName in @($candidateAliases.Keys | Where-Object {
+                        $_ -notin @('SourceCommit', 'SourceCommitPresent')
+                    })) {
+                $holdValue = Get-TunaGuiFallbackTailRepairField -Line $HoldLine -Names $requestFieldAliases.Hold[$logicalName]
+                $candidateValue = Get-TunaGuiFallbackTailRepairField -Line $CandidateLine -Names $candidateAliases[$logicalName]
+                if ([string]::IsNullOrWhiteSpace($holdValue) -or
+                    [string]::IsNullOrWhiteSpace($candidateValue) -or
+                    -not [string]::Equals($holdValue, $candidateValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $false
+                }
+            }
+            $holdCommitPresent = Get-TunaGuiFallbackTailRepairField `
+                -Line $HoldLine `
+                -Names $requestFieldAliases.Hold.SourceCommitPresent
+            $candidateCommitPresent = Get-TunaGuiFallbackTailRepairField `
+                -Line $CandidateLine `
+                -Names $candidateAliases.SourceCommitPresent
+            if ($holdCommitPresent -notin @('0', '1') -or
+                ($CandidateKind -notin @('Install', 'Candidate') -and
+                    $candidateCommitPresent -ne $holdCommitPresent) -or
+                ($CandidateKind -in @('Install', 'Candidate') -and
+                    -not [string]::IsNullOrWhiteSpace($candidateCommitPresent) -and
+                    $candidateCommitPresent -ne $holdCommitPresent) -or
+                -not (Test-TunaGuiFallbackTailRouteCommitMatch `
+                    -HoldLine $HoldLine `
+                    -CandidateLine $CandidateLine `
+                    -CandidateCommitNames $candidateAliases.SourceCommit)) {
+                return $false
+            }
+            return $true
+        }
+
+        function Test-TunaGuiFallbackTailRepairScope {
+            param(
+                [Parameter(Mandatory = $true)][string]$LeftLine,
+                [Parameter(Mandatory = $true)][string]$RightLine
+            )
+
+            foreach ($field in @(
+                    'session_id', 'transfer_id', 'direction', 'route', 'protocol_version',
+                    'live_route_epoch', 'runtime_generation', 'terminal_generation', 'leg_generation',
+                    'transport_epoch', 'bridge_recovery_generation', 'bridge_decision_generation',
+                    'checkpoint_request_id', 'route_publication_generation', 'route_commit_generation')) {
+                $leftValue = Get-TunaGuiFallbackTailRepairField -Line $LeftLine -Names @($field)
+                $rightValue = Get-TunaGuiFallbackTailRepairField -Line $RightLine -Names @($field)
+                if ([string]::IsNullOrWhiteSpace($leftValue) -or
+                    [string]::IsNullOrWhiteSpace($rightValue) -or
+                    -not [string]::Equals($leftValue, $rightValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        function Test-TunaGuiFallbackTailRepairContractIdentity {
+            param(
+                [Parameter(Mandatory = $true)][string]$GrantLine,
+                [Parameter(Mandatory = $true)][string]$SettlementLine
+            )
+
+            if (-not (Test-TunaGuiFallbackTailRepairScope -LeftLine $GrantLine -RightLine $SettlementLine)) {
+                return $false
+            }
+            foreach ($field in @(
+                    'authority_id', 'predecessor_authority_id', 'repair_generation',
+                    'repair_request_key', 'range_fingerprint', 'frontier_chunk_index',
+                    'durable_received_highest_chunk_index', 'range_count',
+                    'requested_chunk_count', 'source_kind', 'target_transport')) {
+                $grantValue = Get-TunaGuiFallbackTailRepairField -Line $GrantLine -Names @($field)
+                $settlementValue = Get-TunaGuiFallbackTailRepairField -Line $SettlementLine -Names @($field)
+                if ([string]::IsNullOrWhiteSpace($grantValue) -or
+                    [string]::IsNullOrWhiteSpace($settlementValue) -or
+                    -not [string]::Equals(
+                        $grantValue,
+                        $settlementValue,
+                        [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        function Test-TunaGuiFallbackTailRepairBinding {
+            param(
+                [Parameter(Mandatory = $true)][string]$BindingLine,
+                [Parameter(Mandatory = $true)][string]$RepairGrantLine,
+                [Parameter(Mandatory = $true)][string]$HoldLine,
+                [Parameter(Mandatory = $true)][string]$PairAuthority
+            )
+
+            if ((Get-TunaGuiFallbackTailRepairField -Line $BindingLine -Names @('decision_status')) -notin @('Accepted', 'Idempotent') -or
+                (Get-TunaGuiFallbackTailRepairField -Line $BindingLine -Names @('authority_id')) -ne
+                    (Get-TunaGuiFallbackTailRepairField -Line $RepairGrantLine -Names @('authority_id')) -or
+                (Get-TunaGuiFallbackTailRepairField -Line $BindingLine -Names @('predecessor_authority_id')) -ne
+                    (Get-TunaGuiFallbackTailRepairField -Line $RepairGrantLine -Names @('predecessor_authority_id')) -or
+                (Get-TunaGuiFallbackTailRepairField -Line $BindingLine -Names @('repair_generation')) -ne
+                    (Get-TunaGuiFallbackTailRepairField -Line $RepairGrantLine -Names @('repair_generation')) -or
+                (Get-TunaGuiFallbackTailRepairField -Line $BindingLine -Names @('release_authority_id')) -ne $PairAuthority -or
+                (Get-TunaGuiFallbackTailRepairField -Line $BindingLine -Names @('release_generation')) -notmatch '^[1-9][0-9]*$' -or
+                (Get-TunaGuiFallbackTailRepairField -Line $BindingLine -Names @('hold_generation')) -notmatch '^[1-9][0-9]*$' -or
+                (Get-TunaGuiFallbackTailRepairField -Line $BindingLine -Names @('data_session_identity')) -in @('', '(none)', 'none') -or
+                (Get-TunaGuiFallbackTailRepairField -Line $BindingLine -Names @('data_session_generation')) -notmatch '^[1-9][0-9]*$' -or
+                (Get-TunaGuiFallbackTailRepairField -Line $BindingLine -Names @('hold_data_session_identity')) -ne
+                    (Get-TunaGuiFallbackTailRepairField -Line $BindingLine -Names @('data_session_identity')) -or
+                (Get-TunaGuiFallbackTailRepairField -Line $BindingLine -Names @('hold_data_session_generation')) -ne
+                    (Get-TunaGuiFallbackTailRepairField -Line $BindingLine -Names @('data_session_generation')) -or
+                -not (Test-TunaGuiFallbackTailRepairRequestTuple -HoldLine $HoldLine -CandidateLine $BindingLine -CandidateKind Binding)) {
+                return $false
+            }
+
+            foreach ($mapping in @(
+                    @('route', 'route'), @('protocol_version', 'protocol_version'),
+                    @('live_route_epoch', 'live_route_epoch'), @('runtime_generation', 'runtime_generation'),
+                    @('terminal_generation', 'terminal_generation'), @('leg_generation', 'leg_generation'),
+                    @('transport_epoch', 'transport_epoch'), @('bridge_recovery_generation', 'bridge_recovery_generation'),
+                    @('request_bridge_decision_generation', 'bridge_decision_generation'),
+                    @('authority_checkpoint_request_id', 'checkpoint_request_id'),
+                    @('route_publication_generation', 'route_publication_generation'),
+                    @('route_commit_generation', 'route_commit_generation'))) {
+                $bindingValue = Get-TunaGuiFallbackTailRepairField -Line $BindingLine -Names @($mapping[0])
+                $repairValue = Get-TunaGuiFallbackTailRepairField -Line $RepairGrantLine -Names @($mapping[1])
+                if ([string]::IsNullOrWhiteSpace($bindingValue) -or
+                    [string]::IsNullOrWhiteSpace($repairValue) -or
+                    -not [string]::Equals($bindingValue, $repairValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        $installTupleFields = @(
+            'authority_schema', 'authority_id', 'authority_generation', 'predecessor_authority_id',
+            'session_id', 'transfer_id', 'direction', 'route', 'protocol_version',
+            'live_route_epoch', 'runtime_generation', 'terminal_generation', 'leg_generation',
+            'transport_epoch', 'bridge_recovery_generation', 'bridge_decision_generation',
+            'route_publication_generation', 'route_commit_generation', 'contract_generation',
+            'retired_generation', 'dispatch_attempt_generation', 'missing_dispatch_successor_generation',
+            'listener_rearm_requirement', 'listener_execution_mode', 'retry_reason', 'recovery_reason',
+            'release_kind', 'release_authority_id', 'release_generation', 'release_outcome',
+            'data_session_generation', 'target_route', 'target_protocol_version', 'target_transport',
+            'source_publication_session_id', 'source_publication_transfer_id', 'source_publication_direction',
+            'source_publication_route', 'source_publication_protocol_version', 'source_publication_live_route_epoch',
+            'source_publication_runtime_generation', 'source_publication_terminal_generation',
+            'source_publication_leg_generation', 'source_publication_route_commit_generation',
+            'source_publication_target_route', 'source_publication_target_protocol_version',
+            'source_publication_target_transport', 'source_publication_generation',
+            'source_publication_action_kind', 'source_publication_reason',
+            'request_regular_v4_liveness_generation', 'request_bridge_decision_generation',
+            'request_active_predecessor_supersession')
+
+        function Test-TunaGuiFallbackTailInstallTuple {
+            param(
+                [Parameter(Mandatory = $true)][string]$LeftLine,
+                [Parameter(Mandatory = $true)][string]$RightLine,
+                [switch]$InstallGeneration
+            )
+
+            foreach ($field in $installTupleFields) {
+                $leftValue = Get-TunaGuiFallbackTailRepairField -Line $LeftLine -Names @($field)
+                $rightValue = Get-TunaGuiFallbackTailRepairField -Line $RightLine -Names @($field)
+                if ([string]::IsNullOrWhiteSpace($leftValue) -or
+                    [string]::IsNullOrWhiteSpace($rightValue) -or
+                    -not [string]::Equals($leftValue, $rightValue, [System.StringComparison]::Ordinal)) {
+                    return $false
+                }
+            }
+            if ($InstallGeneration) {
+                $leftGeneration = Get-TunaGuiFallbackTailRepairField -Line $LeftLine -Names @('install_generation')
+                $rightGeneration = Get-TunaGuiFallbackTailRepairField -Line $RightLine -Names @('install_generation')
+                if ($leftGeneration -notmatch '^[1-9][0-9]*$' -or $leftGeneration -ne $rightGeneration) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        function Test-TunaGuiFallbackTailInstallBoundary {
+            param(
+                [Parameter(Mandatory = $true)][string]$InstallLine,
+                [Parameter(Mandatory = $true)][string]$HoldLine,
+                [Parameter(Mandatory = $true)][string]$FinalRepairLine
+            )
+
+            foreach ($field in @(
+                    'session_id', 'transfer_id', 'direction', 'route', 'protocol_version',
+                    'live_route_epoch', 'runtime_generation', 'terminal_generation', 'leg_generation',
+                    'transport_epoch', 'bridge_recovery_generation', 'bridge_decision_generation',
+                    'route_publication_generation', 'route_commit_generation')) {
+                $installValue = Get-TunaGuiFallbackTailRepairField -Line $InstallLine -Names @($field)
+                $repairValue = Get-TunaGuiFallbackTailRepairField -Line $FinalRepairLine -Names @($field)
+                if ([string]::IsNullOrWhiteSpace($installValue) -or
+                    [string]::IsNullOrWhiteSpace($repairValue) -or
+                    -not [string]::Equals($installValue, $repairValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $false
+                }
+            }
+
+            if (-not (Test-TunaGuiFallbackTailRepairRequestTuple `
+                    -HoldLine $HoldLine `
+                    -CandidateLine $InstallLine `
+                    -CandidateKind Install)) {
+                return $false
+            }
+            return $true
+        }
+
+        function Get-TunaGuiFallbackTailRepairIdentity {
+            param([Parameter(Mandatory = $true)][string]$Line)
+
+            return (@(
+                    'authority_id', 'predecessor_authority_id', 'session_id', 'transfer_id', 'direction',
+                    'route', 'protocol_version', 'live_route_epoch', 'runtime_generation',
+                    'terminal_generation', 'leg_generation', 'transport_epoch',
+                    'bridge_recovery_generation', 'bridge_decision_generation', 'checkpoint_request_id',
+                    'route_publication_generation', 'route_commit_generation', 'repair_generation',
+                    'repair_request_key', 'range_fingerprint', 'frontier_chunk_index',
+                    'durable_received_highest_chunk_index', 'range_count', 'requested_chunk_count',
+                    'source_kind', 'target_transport') | ForEach-Object {
+                    Get-TunaGuiFallbackTailRepairField -Line $Line -Names @($_)
+                }) -join '|'
+        }
+
+        function Get-TunaGuiFallbackTailBindingIdentity {
+            param([Parameter(Mandatory = $true)][string]$Line)
+
+            $parts = @(
+                'authority_id', 'predecessor_authority_id', 'repair_generation', 'release_authority_id', 'release_generation',
+                'hold_generation', 'route', 'protocol_version', 'live_route_epoch',
+                'runtime_generation', 'terminal_generation', 'leg_generation', 'transport_epoch',
+                'bridge_recovery_generation', 'request_bridge_decision_generation',
+                'authority_checkpoint_request_id', 'route_publication_generation',
+                'route_commit_generation', 'data_session_identity', 'data_session_generation',
+                'hold_data_session_identity', 'hold_data_session_generation') |
+                ForEach-Object { Get-TunaGuiFallbackTailRepairField -Line $Line -Names @($_) }
+            foreach ($logicalName in $requestFieldAliases.Binding.Keys) {
+                $parts += Get-TunaGuiFallbackTailRepairField `
+                    -Line $Line `
+                    -Names $requestFieldAliases.Binding[$logicalName]
+            }
+            return $parts -join '|'
+        }
+
+        function Register-TunaGuiFallbackTailRepairBindingCandidate {
+            param(
+                [Parameter(Mandatory = $true)][psobject]$State,
+                [Parameter(Mandatory = $true)][string]$BindingLine,
+                [switch]$ValidateCurrentHold,
+                [switch]$RevalidateStored
+            )
+
+            $boundAuthority = Get-TunaGuiLogLineFieldValue -Line $BindingLine -Name 'authority_id'
+            $decisionStatus = Get-TunaGuiFallbackTailRepairField -Line $BindingLine -Names @('decision_status')
+            if ($decisionStatus -eq 'Applied') {
+                return
+            }
+            if (-not $State.PairObserved -or
+                -not ($State.RequestObserved -or $State.InitialRequestCandidateObserved) -or
+                [string]::IsNullOrWhiteSpace($boundAuthority) -or
+                $State.AmbiguousBindingAuthorities.Contains($boundAuthority) -or
+                -not $State.RepairGrantLines.ContainsKey($boundAuthority) -or
+                $decisionStatus -notin @('Accepted', 'Idempotent') -or
+                (Get-TunaGuiFallbackTailRepairField -Line $BindingLine -Names @('release_authority_id')) -ne
+                    $State.PairAuthority) {
+                return
+            }
+
+            $bindingIdentity = Get-TunaGuiFallbackTailBindingIdentity -Line $BindingLine
+            if ($State.BindingIdentities.ContainsKey($boundAuthority) -and
+                $State.BindingIdentities[$boundAuthority] -ne $bindingIdentity) {
+                [void]$State.AmbiguousBindingAuthorities.Add($boundAuthority)
+                [void]$State.BoundRepairAuthorities.Remove($boundAuthority)
+                [void]$State.BindingReleaseByRepairAuthority.Remove($boundAuthority)
+                return
+            }
+
+            if ($decisionStatus -eq 'Accepted') {
+                if (-not $RevalidateStored -and
+                    $State.AcceptedBindingAuthorities.Contains($boundAuthority)) {
+                    [void]$State.AmbiguousBindingAuthorities.Add($boundAuthority)
+                    [void]$State.BoundRepairAuthorities.Remove($boundAuthority)
+                    [void]$State.BindingReleaseByRepairAuthority.Remove($boundAuthority)
+                    return
+                }
+                if (-not $RevalidateStored) {
+                    [void]$State.AcceptedBindingAuthorities.Add($boundAuthority)
+                }
+            }
+            if (-not $State.BindingLineByRepairAuthority.ContainsKey($boundAuthority)) {
+                $State.BindingIdentities[$boundAuthority] = $bindingIdentity
+                $State.BindingLineByRepairAuthority[$boundAuthority] = $BindingLine
+            }
+            elseif ($decisionStatus -eq 'Accepted') {
+                $State.BindingLineByRepairAuthority[$boundAuthority] = $BindingLine
+            }
+
+            if (-not $ValidateCurrentHold -or -not $State.HeldObserved -or
+                -not $State.AcceptedBindingAuthorities.Contains($boundAuthority) -or
+                -not (Test-TunaGuiFallbackTailRepairBinding `
+                    -BindingLine $BindingLine `
+                    -RepairGrantLine $State.RepairGrantLines[$boundAuthority] `
+                    -HoldLine $State.HeldLine `
+                    -PairAuthority $State.PairAuthority)) {
+                return
+            }
+
+            [void]$State.BoundRepairAuthorities.Add($boundAuthority)
+            $State.BindingReleaseByRepairAuthority[$boundAuthority] = [pscustomobject]@{
+                Authority = Get-TunaGuiLogLineFieldValue -Line $BindingLine -Name 'release_authority_id'
+                Generation = Get-TunaGuiLogLineFieldValue -Line $BindingLine -Name 'release_generation'
+                HoldGeneration = Get-TunaGuiLogLineFieldValue -Line $BindingLine -Name 'hold_generation'
+                DataSessionIdentity = Get-TunaGuiLogLineFieldValue -Line $BindingLine -Name 'data_session_identity'
+                DataSessionGeneration = Get-TunaGuiLogLineFieldValue -Line $BindingLine -Name 'data_session_generation'
+            }
+        }
+
+        $states = @{}
+        $visits = 0L
+        foreach ($line in $Lines) {
+            $visits++
+            $eventName = Get-TunaGuiLogLineFieldValue -Line $line -Name 'event'
+            if ($eventName -notin @(
+                    'filetransfer_fallback_tail_paired_yield_granted',
+                    'filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested',
+                    'runtime_unlock_retry_dispatch_authority_held',
+                    'runtime_unlock_retry_dispatch_authority_hold_preserved',
+                    'filetransfer_fallback_frontier_repair_authority_granted',
+                    'filetransfer_fallback_frontier_repair_contract_settled',
+                    'runtime_unlock_retry_dispatch_fallback_tail_hold_bound',
+                    'runtime_unlock_retry_dispatch_fallback_tail_hold_binding_decided',
+                    'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided',
+                    'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested',
+                    'runtime_unlock_retry_dispatch_authority_request_published',
+                    'filetransfer_fallback_tail_paired_release_reserved',
+                    'runtime_unlock_retry_dispatch_decision_staged',
+                    'runtime_unlock_retry_dispatch_install_receipt_issued',
+                    'runtime_unlock_retry_dispatch_install_committed',
+                    'runtime_unlock_retry_dispatch_authority_granted',
+                    'filetransfer_fallback_tail_paired_release_consumed',
+                    'runtime_unlock_retry_dispatch_observed',
+                    'tuna_acceleration_offer_queued',
+                    'runtime_unlock_offer_dispatched_after_listener_rearm',
+                    'runtime_unlock_offer_authority_boundary_decided',
+                    'runtime_unlock_transaction_answer_received',
+                    'tuna_acceleration_answer_ack_sent',
+                    'tuna_acceleration_answer_ack_replay_sent',
+                    'runtime_unlock_precommit_probe_launch_requested',
+                    'filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided',
+                    'runtime_unlock_precommit_probe_launch_started',
+                    'runtime_unlock_precommit_probe_started',
+                    'filetransfer_route_transition_prepared')) {
+                continue
+            }
+
+            $writer = Get-TunaGuiLogLineFieldValue -Line $line -Name 'log_writer_id'
+            $sessionId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'session_id'
+            $transferId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'transfer_id'
+            $direction = Get-TunaGuiLogLineFieldValue -Line $line -Name 'direction'
+            $sparseLifecycleEvent = $eventName -in @(
+                'tuna_acceleration_offer_queued',
+                'runtime_unlock_offer_dispatched_after_listener_rearm',
+                'runtime_unlock_transaction_answer_received',
+                'runtime_unlock_offer_authority_boundary_decided',
+                'tuna_acceleration_answer_ack_sent',
+                'tuna_acceleration_answer_ack_replay_sent',
+                'runtime_unlock_precommit_probe_launch_requested',
+                'runtime_unlock_precommit_probe_launch_started') -and
+                ([string]::IsNullOrWhiteSpace($transferId) -or
+                    [string]::IsNullOrWhiteSpace($direction))
+            $scopeKey = ''
+            if ($sparseLifecycleEvent) {
+                if ([string]::IsNullOrWhiteSpace($writer) -or
+                    [string]::IsNullOrWhiteSpace($sessionId)) {
+                    continue
+                }
+                $matchingScopeKeys = @($states.Keys | Where-Object {
+                        $candidateState = $states[$_]
+                        $eligible = switch ($eventName) {
+                            { $_ -in @(
+                                    'tuna_acceleration_offer_queued',
+                                    'runtime_unlock_offer_dispatched_after_listener_rearm') } {
+                                $candidateState.Consumed -and -not $candidateState.OfferObserved
+                                break
+                            }
+                            'runtime_unlock_offer_authority_boundary_decided' {
+                                $candidateState.OfferObserved -and -not $candidateState.AnswerBoundaryObserved
+                                break
+                            }
+                            'runtime_unlock_transaction_answer_received' {
+                                $candidateState.AnswerBoundaryObserved -and -not $candidateState.AnswerObserved
+                                break
+                            }
+                            { $_ -in @(
+                                    'tuna_acceleration_answer_ack_sent',
+                                    'tuna_acceleration_answer_ack_replay_sent') } {
+                                $candidateState.AnswerObserved -and -not $candidateState.AckObserved
+                                break
+                            }
+                            default {
+                                $candidateState.AckObserved -and -not $candidateState.PrecommitObserved
+                            }
+                        }
+                        $candidateState.Writer -eq $writer -and
+                            $candidateState.SessionId -eq $sessionId -and
+                            $eligible
+                    })
+                if ($matchingScopeKeys.Count -ne 1) {
+                    continue
+                }
+                $scopeKey = $matchingScopeKeys[0]
+                $transferId = $states[$scopeKey].TransferId
+                $direction = 'outbound'
+            }
+            else {
+                if ([string]::IsNullOrWhiteSpace($writer) -or
+                    [string]::IsNullOrWhiteSpace($sessionId) -or
+                    [string]::IsNullOrWhiteSpace($transferId) -or
+                    -not [string]::Equals($direction, 'outbound', [System.StringComparison]::OrdinalIgnoreCase)) {
+                    continue
+                }
+                $scopeKey = "$writer|$sessionId|$transferId|outbound".ToLowerInvariant()
+            }
+            if (-not $states.ContainsKey($scopeKey)) {
+                $states[$scopeKey] = [pscustomobject]@{
+                    Writer = $writer
+                    SessionId = $sessionId
+                    TransferId = $transferId
+                    PairAuthority = ''
+                    PairLine = ''
+                    PairObserved = $false
+                    InitialRequestCandidateObserved = $false
+                    RequestObserved = $false
+                    InitialRequestLine = ''
+                    ContractGeneration = ''
+                    RetiredGeneration = ''
+                    DispatchAttemptGeneration = ''
+                    HeldObserved = $false
+                    HeldLine = ''
+                    HeldRepairAuthority = ''
+                    LatestRepairAuthority = ''
+                    RepairGrantLines = @{}
+                    RepairGrantIdentities = @{}
+                    AmbiguousRepairAuthorities = [System.Collections.Generic.HashSet[string]]::new(
+                        [System.StringComparer]::OrdinalIgnoreCase)
+                    RepairPredecessors = @{}
+                    RepairChildren = @{}
+                    SupersededSuccessors = @{}
+                    FinalRepairAuthority = ''
+                    FinalRepairLine = ''
+                    FinalSettlementObserved = $false
+                    BoundRepairAuthorities = [System.Collections.Generic.HashSet[string]]::new(
+                        [System.StringComparer]::OrdinalIgnoreCase)
+                    BindingLineByRepairAuthority = @{}
+                    BindingIdentities = @{}
+                    AcceptedBindingAuthorities = [System.Collections.Generic.HashSet[string]]::new(
+                        [System.StringComparer]::OrdinalIgnoreCase)
+                    AmbiguousBindingAuthorities = [System.Collections.Generic.HashSet[string]]::new(
+                        [System.StringComparer]::OrdinalIgnoreCase)
+                    BindingReleaseByRepairAuthority = @{}
+                    Candidate = $false
+                    CandidateAfterBoundHold = $false
+                    RecheckDecisionObserved = $false
+                    RecheckGeneration = ''
+                    RecheckRequestedGeneration = ''
+                    RecheckQueueGeneration = ''
+                    RecheckObserved = $false
+                    Republished = $false
+                    Reserved = $false
+                    RetryAuthority = ''
+                    InstallStageLine = ''
+                    InstallReceiptLine = ''
+                    InstallCommittedLine = ''
+                    EffectiveGrantLine = ''
+                    InstallGeneration = ''
+                    Consumed = $false
+                    OfferObserved = $false
+                    OfferGeneration = ''
+                    OfferNonce = ''
+                    OfferPayerDecisionId = ''
+                    AnswerBoundaryObserved = $false
+                    AnswerObserved = $false
+                    AnswerTransactionGeneration = ''
+                    AnswerLeaseGeneration = ''
+                    AnswerListenerRunId = ''
+                    AckObserved = $false
+                    PrecommitObserved = $false
+                    Prepared = $false
+                }
+            }
+            $state = $states[$scopeKey]
+
+            switch ($eventName) {
+                'filetransfer_fallback_tail_paired_yield_granted' {
+                    if ((Get-TunaGuiLogLineFieldValue -Line $line -Name 'route') -eq 'post_tuna_fallback_v6' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'protocol_version') -eq '6') {
+                        $state.PairAuthority = Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id'
+                        $state.PairObserved = -not [string]::IsNullOrWhiteSpace($state.PairAuthority)
+                        if ($state.PairObserved) {
+                            $state.PairLine = $line
+                        }
+                    }
+                    continue
+                }
+                'filetransfer_fallback_frontier_repair_authority_granted' {
+                    $repairAuthority = Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id'
+                    if ((Get-TunaGuiLogLineFieldValue -Line $line -Name 'route') -eq 'post_tuna_fallback_v6' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'protocol_version') -eq '6' -and
+                        -not [string]::IsNullOrWhiteSpace($repairAuthority)) {
+                        $repairIdentity = Get-TunaGuiFallbackTailRepairIdentity -Line $line
+                        if ($state.RepairGrantIdentities.ContainsKey($repairAuthority) -and
+                            $state.RepairGrantIdentities[$repairAuthority] -ne $repairIdentity) {
+                            [void]$state.AmbiguousRepairAuthorities.Add($repairAuthority)
+                            continue
+                        }
+                        $state.LatestRepairAuthority = $repairAuthority
+                        if (-not $state.RepairGrantLines.ContainsKey($repairAuthority)) {
+                            $state.RepairGrantLines[$repairAuthority] = $line
+                            $state.RepairGrantIdentities[$repairAuthority] = $repairIdentity
+                        }
+                        $predecessor = Get-TunaGuiLogLineFieldValue -Line $line -Name 'predecessor_authority_id'
+                        $state.RepairPredecessors[$repairAuthority] = $predecessor
+                        if ($predecessor -notin @('', '(none)', 'none')) {
+                            if (-not $state.RepairChildren.ContainsKey($predecessor)) {
+                                $state.RepairChildren[$predecessor] =
+                                    [System.Collections.Generic.HashSet[string]]::new(
+                                        [System.StringComparer]::OrdinalIgnoreCase)
+                            }
+                            [void]$state.RepairChildren[$predecessor].Add($repairAuthority)
+                        }
+                    }
+                    continue
+                }
+                'runtime_unlock_retry_dispatch_fallback_tail_hold_bound' {
+                    # Compatibility telemetry does not contain the immutable
+                    # request, paired release, or data-session tuple.  It may
+                    # corroborate an unresolved historical hold, but cannot
+                    # satisfy the strict recovery path.
+                    continue
+                }
+                'runtime_unlock_retry_dispatch_fallback_tail_hold_binding_decided' {
+                    Register-TunaGuiFallbackTailRepairBindingCandidate `
+                        -State $state `
+                        -BindingLine $line `
+                        -ValidateCurrentHold:$state.HeldObserved
+                    continue
+                }
+                'filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested' {
+                    if ((Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -ne 'Queued' -or
+                        -not $state.PairObserved -or
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id') -ne $state.PairAuthority -or
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_route') -ne 'post_tuna_fallback_v6' -or
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_protocol_version') -ne '6') {
+                        continue
+                    }
+
+                    $contractGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'recovery_contract_generation'
+                    $retiredGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'retired_offer_generation'
+                    $dispatchGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'dispatch_attempt_generation'
+                    if (-not $state.InitialRequestCandidateObserved) {
+                        $state.InitialRequestCandidateObserved = $true
+                        $state.InitialRequestLine = $line
+                        $state.ContractGeneration = $contractGeneration
+                        $state.RetiredGeneration = $retiredGeneration
+                        $state.DispatchAttemptGeneration = $dispatchGeneration
+                    }
+                    elseif ($state.RequestObserved -and $state.FinalSettlementObserved -and -not $state.Candidate -and
+                        $state.ContractGeneration -eq $contractGeneration -and
+                        $state.RetiredGeneration -eq $retiredGeneration -and
+                        $state.DispatchAttemptGeneration -eq $dispatchGeneration) {
+                        $queueExact =
+                            (Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id') -eq $state.PairAuthority -and
+                            (Test-TunaGuiFallbackTailRepairRequestTuple `
+                                -HoldLine $state.HeldLine `
+                                -CandidateLine $line `
+                                -CandidateKind Candidate)
+                        if ($queueExact) {
+                            $state.Candidate = $true
+                            $state.CandidateAfterBoundHold =
+                                $state.BoundRepairAuthorities.Contains($state.FinalRepairAuthority) -and
+                                -not $state.AmbiguousBindingAuthorities.Contains($state.FinalRepairAuthority) -and
+                                -not $state.AmbiguousRepairAuthorities.Contains($state.FinalRepairAuthority)
+                        }
+                    }
+                    continue
+                }
+                { $_ -in @(
+                        'runtime_unlock_retry_dispatch_authority_held',
+                        'runtime_unlock_retry_dispatch_authority_hold_preserved') } {
+                    $holdScopeExact = $state.RepairGrantLines.ContainsKey($state.LatestRepairAuthority)
+                    if ($holdScopeExact) {
+                        $currentRepairLine = $state.RepairGrantLines[$state.LatestRepairAuthority]
+                        foreach ($mapping in @(
+                                @('source_route', 'route'), @('source_protocol_version', 'protocol_version'),
+                                @('source_live_route_epoch', 'live_route_epoch'), @('source_runtime_generation', 'runtime_generation'),
+                                @('source_terminal_generation', 'terminal_generation'), @('source_leg_generation', 'leg_generation'),
+                                @('source_route_publication_generation', 'route_publication_generation'),
+                                @('bridge_decision_generation', 'bridge_decision_generation'))) {
+                            $holdValue = Get-TunaGuiFallbackTailRepairField -Line $line -Names @($mapping[0])
+                            $repairValue = Get-TunaGuiFallbackTailRepairField -Line $currentRepairLine -Names @($mapping[1])
+                            if ([string]::IsNullOrWhiteSpace($holdValue) -or
+                                [string]::IsNullOrWhiteSpace($repairValue) -or
+                                -not [string]::Equals($holdValue, $repairValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                                $holdScopeExact = $false
+                                break
+                            }
+                        }
+                        if ($holdScopeExact -and
+                            -not (Test-TunaGuiFallbackTailRouteCommitMatch `
+                                -HoldLine $line `
+                                -CandidateLine $currentRepairLine `
+                                -CandidateCommitNames @('route_commit_generation'))) {
+                            $holdScopeExact = $false
+                        }
+                    }
+                    $initialRequestExact = $state.InitialRequestCandidateObserved -and
+                        (Test-TunaGuiFallbackTailRepairRequestTuple `
+                            -HoldLine $line `
+                            -CandidateLine $state.InitialRequestLine `
+                            -CandidateKind Candidate)
+                    if ($initialRequestExact -and $holdScopeExact -and
+                        (Test-TunaGuiFallbackTailRepairRequestTuple -HoldLine $line -CandidateLine $line -CandidateKind Evidence) -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_reason') -eq
+                            'fallback_paired_tail_yield_pending' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'contract_generation') -eq
+                            $state.ContractGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'retired_generation') -eq
+                            $state.RetiredGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'dispatch_attempt_generation') -eq
+                            $state.DispatchAttemptGeneration) {
+                        $state.RequestObserved = $true
+                        $state.HeldObserved = $true
+                        $state.HeldLine = $line
+                        $state.HeldRepairAuthority = $state.LatestRepairAuthority
+                        if ($state.BindingLineByRepairAuthority.ContainsKey($state.HeldRepairAuthority)) {
+                            Register-TunaGuiFallbackTailRepairBindingCandidate `
+                                -State $state `
+                                -BindingLine $state.BindingLineByRepairAuthority[$state.HeldRepairAuthority] `
+                                -ValidateCurrentHold `
+                                -RevalidateStored
+                        }
+                    }
+                    continue
+                }
+                'filetransfer_fallback_frontier_repair_contract_settled' {
+                    $settledAuthority = Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id'
+                    $successorAuthority = Get-TunaGuiLogLineFieldValue -Line $line -Name 'successor_authority_id'
+                    $settlementOutcome = Get-TunaGuiLogLineFieldValue -Line $line -Name 'settlement_outcome'
+                    $settlementScopeExact = $state.RepairGrantLines.ContainsKey($settledAuthority) -and
+                        (Test-TunaGuiFallbackTailRepairContractIdentity `
+                            -GrantLine $state.RepairGrantLines[$settledAuthority] `
+                            -SettlementLine $line)
+                    if ($settlementScopeExact -and $settlementOutcome -eq 'Superseded' -and
+                        $successorAuthority -notin @('', '(none)', 'none') -and
+                        $state.RepairGrantLines.ContainsKey($successorAuthority) -and
+                        $state.RepairPredecessors[$successorAuthority] -eq $settledAuthority -and
+                        (Test-TunaGuiFallbackTailRepairScope `
+                            -LeftLine $line `
+                            -RightLine $state.RepairGrantLines[$successorAuthority])) {
+                        $state.SupersededSuccessors[$settledAuthority] = $successorAuthority
+                    }
+
+                    if ($state.HeldObserved -and -not $state.Candidate -and
+                        $settlementScopeExact -and
+                        -not $state.AmbiguousRepairAuthorities.Contains($settledAuthority) -and
+                        $successorAuthority -in @('', '(none)', 'none') -and
+                        $settlementOutcome -ne 'Superseded' -and
+                        $settledAuthority -eq $state.LatestRepairAuthority) {
+                        $lineageValid = $true
+                        $lineageAuthority = $settledAuthority
+                        $seenLineage = [System.Collections.Generic.HashSet[string]]::new(
+                            [System.StringComparer]::OrdinalIgnoreCase)
+                        while ($lineageAuthority -ne $state.HeldRepairAuthority) {
+                            if (-not $seenLineage.Add($lineageAuthority) -or
+                                $state.AmbiguousRepairAuthorities.Contains($lineageAuthority) -or
+                                -not $state.RepairPredecessors.ContainsKey($lineageAuthority)) {
+                                $lineageValid = $false
+                                break
+                            }
+                            $predecessor = $state.RepairPredecessors[$lineageAuthority]
+                            if ($predecessor -in @('', '(none)', 'none') -or
+                                $state.AmbiguousRepairAuthorities.Contains($predecessor) -or
+                                -not $state.SupersededSuccessors.ContainsKey($predecessor) -or
+                                $state.SupersededSuccessors[$predecessor] -ne $lineageAuthority -or
+                                -not $state.RepairChildren.ContainsKey($predecessor) -or
+                                $state.RepairChildren[$predecessor].Count -ne 1) {
+                                $lineageValid = $false
+                                break
+                            }
+                            $lineageAuthority = $predecessor
+                        }
+                        if ($lineageValid -and $lineageAuthority -eq $state.HeldRepairAuthority) {
+                            $state.FinalRepairAuthority = $settledAuthority
+                            $state.FinalRepairLine = $line
+                            $state.FinalSettlementObserved = $true
+                        }
+                    }
+                    continue
+                }
+                'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested' {
+                    $requestedRecheckGeneration =
+                        Get-TunaGuiLogLineFieldValue -Line $line -Name 'recheck_generation'
+                    $requestedQueueGeneration =
+                        Get-TunaGuiLogLineFieldValue -Line $line -Name 'queue_generation'
+                    $boundaryComplete = $true
+                    foreach ($field in @(
+                            'recovered_transport_epoch', 'handoff_kind', 'boundary_source_transport',
+                            'boundary_target_transport', 'fallback_epoch', 'boundary_reason',
+                            'boundary_identity', 'original_hold_reason')) {
+                        if ([string]::IsNullOrWhiteSpace(
+                                (Get-TunaGuiFallbackTailRepairField -Line $line -Names @($field)))) {
+                            $boundaryComplete = $false
+                            break
+                        }
+                    }
+                    if ($state.FinalSettlementObserved -and $boundaryComplete -and
+                        -not $state.AmbiguousBindingAuthorities.Contains($state.FinalRepairAuthority) -and
+                        $state.BoundRepairAuthorities.Contains($state.FinalRepairAuthority) -and
+                        (Test-TunaGuiFallbackTailRepairRequestTuple `
+                            -HoldLine $state.HeldLine `
+                            -CandidateLine $line `
+                            -CandidateKind Evidence) -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -eq 'Queued' -and
+                        $requestedRecheckGeneration -match '^[1-9][0-9]*$' -and
+                        $requestedQueueGeneration -match '^[1-9][0-9]*$') {
+                        $state.RecheckRequestedGeneration = $requestedRecheckGeneration
+                        $state.RecheckQueueGeneration = $requestedQueueGeneration
+                    }
+                    continue
+                }
+                'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided' {
+                    $bindingRelease = $state.BindingReleaseByRepairAuthority[$state.FinalRepairAuthority]
+                    $recheckGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'recheck_generation'
+                    if ($state.FinalSettlementObserved -and
+                        $state.RecheckRequestedGeneration -match '^[1-9][0-9]*$' -and
+                        $null -ne $bindingRelease -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id') -eq $bindingRelease.Authority -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'release_generation') -eq $bindingRelease.Generation -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'repair_authority_id') -eq $state.FinalRepairAuthority -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'repair_generation') -eq
+                            (Get-TunaGuiFallbackTailRepairField -Line $state.FinalRepairLine -Names @('repair_generation')) -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'hold_generation') -eq $bindingRelease.HoldGeneration -and
+                        $recheckGeneration -match '^[1-9][0-9]*$' -and
+                        $recheckGeneration -eq $state.RecheckRequestedGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -in @(
+                            'Accepted', 'Applied', 'Idempotent')) {
+                        $state.RecheckDecisionObserved = $true
+                        $state.RecheckGeneration = $recheckGeneration
+                        $state.RecheckObserved = $true
+                    }
+                    continue
+                }
+                'runtime_unlock_retry_dispatch_authority_request_published' {
+                    if ($state.RecheckObserved -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'queue_generation') -eq
+                            $state.RecheckQueueGeneration -and
+                        (Test-TunaGuiFallbackTailRepairRequestTuple `
+                            -HoldLine $state.HeldLine `
+                            -CandidateLine $line `
+                            -CandidateKind Evidence)) {
+                        $state.Republished = $true
+                    }
+                    continue
+                }
+                'filetransfer_fallback_tail_paired_release_reserved' {
+                    $bindingRelease = $state.BindingReleaseByRepairAuthority[$state.FinalRepairAuthority]
+                    if ($state.Republished -and $null -ne $bindingRelease -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id') -eq $bindingRelease.Authority -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'pairing_generation') -eq $bindingRelease.Generation -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -in @(
+                            'Accepted', 'Applied', 'Idempotent') -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'retry_authority_id') -notin @('', '(none)', 'none')) {
+                        $state.Reserved = $true
+                        $state.RetryAuthority = Get-TunaGuiLogLineFieldValue -Line $line -Name 'retry_authority_id'
+                    }
+                    continue
+                }
+                'runtime_unlock_retry_dispatch_decision_staged' {
+                    $bindingRelease = $state.BindingReleaseByRepairAuthority[$state.FinalRepairAuthority]
+                    if ($state.Reserved -and $null -ne $bindingRelease -and
+                        (Test-TunaGuiFallbackTailInstallBoundary `
+                            -InstallLine $line `
+                            -HoldLine $state.HeldLine `
+                            -FinalRepairLine $state.FinalRepairLine) -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'stage_status') -in @('Staged', 'Idempotent') -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id') -eq $state.RetryAuthority -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'contract_generation') -eq $state.ContractGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'retired_generation') -eq $state.RetiredGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'dispatch_attempt_generation') -eq $state.DispatchAttemptGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'release_kind') -eq 'FallbackPairedTailYield' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'release_authority_id') -eq $bindingRelease.Authority -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'release_generation') -eq $bindingRelease.Generation -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'route') -eq 'post_tuna_fallback_v6' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'protocol_version') -eq '6' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'target_route') -eq 'file_tuna_v4' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'target_protocol_version') -eq '4' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'data_session_generation') -eq $bindingRelease.DataSessionGeneration) {
+                        $state.InstallStageLine = $line
+                    }
+                    continue
+                }
+                'runtime_unlock_retry_dispatch_install_receipt_issued' {
+                    $installGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'install_generation'
+                    if (-not [string]::IsNullOrWhiteSpace($state.InstallStageLine) -and
+                        $installGeneration -match '^[1-9][0-9]*$' -and
+                        (Test-TunaGuiFallbackTailInstallTuple `
+                            -LeftLine $state.InstallStageLine `
+                            -RightLine $line)) {
+                        $state.InstallReceiptLine = $line
+                        $state.InstallGeneration = $installGeneration
+                    }
+                    continue
+                }
+                'runtime_unlock_retry_dispatch_install_committed' {
+                    if (-not [string]::IsNullOrWhiteSpace($state.InstallReceiptLine) -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'install_status') -in @('Installed', 'Idempotent') -and
+                        (Test-TunaGuiFallbackTailInstallTuple `
+                            -LeftLine $state.InstallReceiptLine `
+                            -RightLine $line `
+                            -InstallGeneration)) {
+                        $state.InstallCommittedLine = $line
+                    }
+                    continue
+                }
+                'runtime_unlock_retry_dispatch_authority_granted' {
+                    if (-not [string]::IsNullOrWhiteSpace($state.InstallCommittedLine) -and
+                        (Test-TunaGuiFallbackTailInstallTuple `
+                            -LeftLine $state.InstallCommittedLine `
+                            -RightLine $line `
+                            -InstallGeneration)) {
+                        $state.EffectiveGrantLine = $line
+                    }
+                    continue
+                }
+                'filetransfer_fallback_tail_paired_release_consumed' {
+                    $bindingRelease = $state.BindingReleaseByRepairAuthority[$state.FinalRepairAuthority]
+                    if (-not [string]::IsNullOrWhiteSpace($state.EffectiveGrantLine) -and
+                        $null -ne $bindingRelease -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id') -eq $bindingRelease.Authority -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'pairing_generation') -eq $bindingRelease.Generation -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'retry_authority_id') -eq $state.RetryAuthority -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'install_generation') -eq $state.InstallGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -in @(
+                            'Accepted', 'Applied', 'Idempotent')) {
+                        $state.Consumed = $true
+                    }
+                    continue
+                }
+                'runtime_unlock_retry_dispatch_observed' {
+                    $bindingRelease = $state.BindingReleaseByRepairAuthority[$state.FinalRepairAuthority]
+                    $offerGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'offer_generation'
+                    $offerNonce = Get-TunaGuiLogLineFieldValue -Line $line -Name 'offer_nonce'
+                    if ($state.Consumed -and $null -ne $bindingRelease -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id') -eq $state.RetryAuthority -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'install_generation') -eq $state.InstallGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'contract_generation') -eq $state.ContractGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'dispatch_attempt_generation') -eq $state.DispatchAttemptGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'release_kind') -eq 'FallbackPairedTailYield' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'release_authority_id') -eq $bindingRelease.Authority -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'release_generation') -eq $bindingRelease.Generation -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'route') -eq 'post_tuna_fallback_v6' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'protocol_version') -eq '6' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'data_session_generation') -eq $bindingRelease.DataSessionGeneration -and
+                        $offerGeneration -match '^[1-9][0-9]*$' -and
+                        $offerNonce -notin @('', '(none)', 'none')) {
+                        $state.OfferObserved = $true
+                        $state.OfferGeneration = $offerGeneration
+                        $state.OfferNonce = $offerNonce
+                    }
+                    continue
+                }
+                { $_ -in @('tuna_acceleration_offer_queued', 'runtime_unlock_offer_dispatched_after_listener_rearm') } {
+                    # Queue-local offer projections are corroboration only.
+                    # The install-bound dispatch observation above is the
+                    # effective peer-visible offer boundary.
+                    continue
+                }
+                'runtime_unlock_offer_authority_boundary_decided' {
+                    $boundaryPayer = Get-TunaGuiLogLineFieldValue -Line $line -Name 'payer_decision_id'
+                    $boundaryTransaction = Get-TunaGuiLogLineFieldValue -Line $line -Name 'transaction_generation'
+                    $boundaryLease = Get-TunaGuiLogLineFieldValue -Line $line -Name 'tuna_path_lease_generation'
+                    $boundaryListener = Get-TunaGuiLogLineFieldValue -Line $line -Name 'tuna_path_lease_listener_run_id'
+                    if ($state.OfferObserved -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'boundary') -eq 'answer_received' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_mode').ToLowerInvariant() -eq 'installedretry' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status').ToLowerInvariant() -eq 'accepted' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'transfer_id') -eq $state.TransferId -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'retry_authority_id') -eq $state.RetryAuthority -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'install_generation') -eq $state.InstallGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'offer_generation') -eq $state.OfferGeneration -and
+                        $boundaryPayer -match '^[1-9][0-9]*$' -and
+                        $boundaryTransaction -match '^[1-9][0-9]*$' -and
+                        $boundaryLease -match '^[1-9][0-9]*$' -and
+                        $boundaryListener -notin @('', '(none)', 'none')) {
+                        $state.AnswerBoundaryObserved = $true
+                        $state.OfferPayerDecisionId = $boundaryPayer
+                        $state.AnswerTransactionGeneration = $boundaryTransaction
+                        $state.AnswerLeaseGeneration = $boundaryLease
+                        $state.AnswerListenerRunId = $boundaryListener
+                    }
+                    continue
+                }
+                'runtime_unlock_transaction_answer_received' {
+                    $answerOfferGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'offer_generation'
+                    $answerTransactionGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'transaction_generation'
+                    $answerLeaseGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'tuna_path_lease_generation'
+                    if ($state.AnswerBoundaryObserved -and
+                        $answerOfferGeneration -eq $state.OfferGeneration -and
+                        $answerTransactionGeneration -eq $state.AnswerTransactionGeneration -and
+                        $answerLeaseGeneration -eq $state.AnswerLeaseGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'tuna_path_lease_listener_run_id') -eq
+                            $state.AnswerListenerRunId -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'answer_received') -eq '1' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'tuna_path_lease_current') -eq '1') {
+                        $state.AnswerObserved = $true
+                    }
+                    continue
+                }
+                { $_ -in @('tuna_acceleration_answer_ack_sent', 'tuna_acceleration_answer_ack_replay_sent') } {
+                    if ($state.AnswerObserved -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'payer_decision_id') -eq $state.OfferPayerDecisionId -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'generation') -match '^[1-9][0-9]*$' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'msg_id') -notin @('', '(none)', 'none') -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'target_peer_fingerprint') -notin @('', '(none)', 'none')) {
+                        $state.AckObserved = $true
+                    }
+                    continue
+                }
+                { $_ -in @(
+                        'runtime_unlock_precommit_probe_launch_requested',
+                        'filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided',
+                        'runtime_unlock_precommit_probe_launch_started',
+                        'runtime_unlock_precommit_probe_started') } {
+                    if ($state.AckObserved -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'transaction_generation') -eq
+                            $state.AnswerTransactionGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'offer_generation') -eq
+                            $state.OfferGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'tuna_path_lease_generation') -eq
+                            $state.AnswerLeaseGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'tuna_path_lease_listener_run_id') -eq
+                            $state.AnswerListenerRunId) {
+                        $state.PrecommitObserved = $true
+                    }
+                    continue
+                }
+                'filetransfer_route_transition_prepared' {
+                    if ($state.AckObserved -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_route') -eq 'post_tuna_fallback_v6' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'target_route') -eq 'file_tuna_v4') {
+                        $state.Prepared = $true
+                    }
+                    continue
+                }
+            }
+        }
+
+        $unresolved = @($states.Values | Where-Object {
+                $_.Candidate -and -not (
+                    $_.BoundRepairAuthorities.Contains($_.FinalRepairAuthority) -and
+                    -not $_.AmbiguousBindingAuthorities.Contains($_.FinalRepairAuthority) -and
+                    $_.RecheckObserved -and $_.Republished -and $_.Reserved -and
+                    -not [string]::IsNullOrWhiteSpace($_.EffectiveGrantLine) -and
+                    $_.Consumed -and $_.OfferObserved -and $_.AnswerObserved -and
+                    $_.AckObserved -and ($_.PrecommitObserved -or $_.Prepared))
+            })
+        $holdBindingMissing = @($unresolved | Where-Object { -not $_.CandidateAfterBoundHold }).Count -gt 0
+        return [pscustomobject]@{
+            Unresolved = $unresolved.Count -gt 0
+            HoldBindingMissing = $holdBindingMissing
+            SettlementRecheckAfterBoundHoldMissing =
+                $unresolved.Count -gt 0 -and -not $holdBindingMissing
+            Reason = if ($holdBindingMissing) {
+                'unbound_held_fallback_tail_retry_could_not_recheck_after_blocking_repair_settlement'
+            }
+            else {
+                'settled_fallback_frontier_repair_did_not_republish_held_paired_tail_retry_request'
+            }
+            LineVisits = $visits
+        }
+    }
+
+    $fallbackTailRepairUnblockFastPath =
+        Get-TunaGuiFallbackTailRepairUnblockRecheckFailure -Lines ([string[]]$evidenceLines)
+    if ($fallbackTailRepairUnblockFastPath.Unresolved) {
+        if ($null -ne $TestMetrics) {
+            $TestMetrics.evidenceLineVisitCount = [long]$fallbackTailRepairUnblockFastPath.LineVisits
+            $TestMetrics.evidenceLookupCount = 0L
+            $TestMetrics.classificationSource = "${classificationSource}_fallback_tail_repair_unblock_index"
+        }
+        $result = New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'route_runtime' `
+            -Reason $fallbackTailRepairUnblockFastPath.Reason `
+            -RouteMode $RouteMode `
+            -ClassificationSource "${classificationSource}_fallback_tail_repair_unblock_index" `
+            -EvidenceLineVisitCount ([long]$fallbackTailRepairUnblockFastPath.LineVisits) `
+            -EvidenceParsedRecordCount 0L `
+            -EvidenceLookupCount 0L `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
+        $result.RuntimeUnlockRetryFallbackTailUnblockRecheckMissing = $true
+        $result.RuntimeUnlockRetryFallbackFrontierRepairHoldBindingMissing =
+            [bool]$fallbackTailRepairUnblockFastPath.HoldBindingMissing
+        $result.RuntimeUnlockRetryFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissing =
+            [bool]$fallbackTailRepairUnblockFastPath.SettlementRecheckAfterBoundHoldMissing
+        return $result
     }
 
     $responderPeerProbeFastPath =

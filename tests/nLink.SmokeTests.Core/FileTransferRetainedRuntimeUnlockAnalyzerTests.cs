@@ -9504,10 +9504,13 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
     public async Task AnalyzeRetained_FallbackTailUnblockRepairSettlementWithoutRepublication_OwnsQueueBoundary(
-        bool compact)
+        bool compact,
+        bool holdBound)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -9518,19 +9521,27 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         const string transferId = "transfer_fallback_repair_recheck";
         const string pairAuthority = "fta2-fallback_tail_yield-173efbaca44a422000d3e5ac";
         const string repairAuthority = "fta2-repair_replay-239d8a34244773aae16c44ec";
-        var scope = $"session_id={sessionId}; transfer_id={transferId}; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; source_route_publication_generation=3";
-        var lines = new[]
+        var scope = $"session_id={sessionId}; transfer_id={transferId}; predecessor_authority_id=(none); request_active_predecessor_supersession=0; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; source_route_publication_generation=3; source_route_commit_generation=0; source_route_commit_generation_present=0";
+        var lines = new List<string>
         {
             LogLine($"event=filetransfer_route_selected; direction=outbound; session_id={sessionId}; transfer_id={transferId}; route=post_tuna_fallback_v6; protocol_version=6", 0),
             LogLine($"event=filetransfer_fallback_tail_paired_yield_granted; direction=outbound; authority_id={pairAuthority}; session_id={sessionId}; transfer_id={transferId}; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; yield_generation=1", 1),
-            LogLine($"event=runtime_unlock_retry_dispatch_authority_held; direction=outbound; contract_generation=1; retired_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; {scope}; decision_reason=fallback_paired_tail_yield_pending", 2),
-            LogLine($"event=filetransfer_fallback_frontier_repair_contract_settled; authority_id={repairAuthority}; direction=outbound; session_id={sessionId}; transfer_id={transferId}; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; checkpoint_request_id=(none); route_publication_generation=3; repair_generation=123; successor_authority_id=(none); settlement_outcome=ProgressObserved", 3),
-            LogLine($"event=filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested; authority_id={pairAuthority}; direction=outbound; recovery_contract_generation=1; retired_offer_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; {scope}; decision_status=Queued; decision_reason=fallback_paired_tail_yield_request_queued", 4),
-            LogLine($"event=file_transfer_inbound_terminal; session_id={sessionId}; transfer_id={transferId}; state=Completed", 5),
-            LogLine($"event=file_transfer_outbound_terminal; session_id={sessionId}; transfer_id={transferId}; state=Completed", 6),
+            LogLine($"event=filetransfer_fallback_frontier_repair_authority_granted; authority_id={repairAuthority}; predecessor_authority_id=(none); direction=outbound; session_id={sessionId}; transfer_id={transferId}; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; bridge_decision_generation=1; checkpoint_request_id=(none); route_publication_generation=3; route_commit_generation=0; target_transport=regular_nkn; repair_generation=123; repair_request_key=fallback-frontier:1300:1:range; range_fingerprint=range", 2),
+            LogLine($"event=filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested; authority_id={pairAuthority}; direction=outbound; recovery_contract_generation=1; retired_offer_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; {scope}; decision_status=Queued; decision_reason=fallback_paired_tail_yield_request_queued", 3),
+            LogLine($"event=runtime_unlock_retry_dispatch_authority_held; direction=outbound; contract_generation=1; retired_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; {scope}; decision_reason=fallback_paired_tail_yield_pending", 4),
+            LogLine($"event=filetransfer_fallback_frontier_repair_contract_settled; authority_id={repairAuthority}; predecessor_authority_id=(none); direction=outbound; session_id={sessionId}; transfer_id={transferId}; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; bridge_decision_generation=1; checkpoint_request_id=(none); route_publication_generation=3; route_commit_generation=0; target_transport=regular_nkn; repair_generation=123; successor_authority_id=(none); settlement_outcome=ProgressObserved", 5),
+            LogLine($"event=filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested; authority_id={pairAuthority}; direction=outbound; recovery_contract_generation=1; retired_offer_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; {scope}; decision_status=Queued; decision_reason=fallback_paired_tail_yield_request_queued", 6),
+            LogLine($"event=file_transfer_inbound_terminal; session_id={sessionId}; transfer_id={transferId}; state=Completed", 7),
+            LogLine($"event=file_transfer_outbound_terminal; session_id={sessionId}; transfer_id={transferId}; state=Completed", 8),
         };
+        if (holdBound)
+        {
+            lines.Insert(
+                5,
+                LogLine($"event=runtime_unlock_retry_dispatch_fallback_tail_hold_bound; authority_id={repairAuthority}; session_id={sessionId}; transfer_id={transferId}; direction=outbound; repair_generation=123; hold_generation=1; decision_status=Accepted; decision_reason=fallback_tail_retry_dispatch_hold_bound", 5));
+        }
         var result = await RunAnalyzeFixtureAsync(
-            lines,
+            lines.ToArray(),
             ["-LiveRouteProofMode", "None"],
             compact
                 ? new Dictionary<string, string>
@@ -9548,9 +9559,11 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             "filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested",
             verdict["first_proof_chain_failure_event"]);
         Assert.Equal(
-            "settled_fallback_frontier_repair_did_not_republish_held_paired_tail_retry_request",
+            holdBound
+                ? "settled_fallback_frontier_repair_did_not_republish_held_paired_tail_retry_request"
+                : "unbound_held_fallback_tail_retry_could_not_recheck_after_blocking_repair_settlement",
             verdict["first_proof_chain_failure_reason"]);
-        Assert.Equal("5", verdict["first_proof_chain_failure_sequence"]);
+        Assert.Equal(holdBound ? "8" : "7", verdict["first_proof_chain_failure_sequence"]);
         Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
         Assert.Equal("fail", verdict["runtime_correctness_verdict"]);
         Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_distinct_count"]);
@@ -9559,6 +9572,195 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_distinct_count"]);
         Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_recovered_count"]);
         Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_unresolved_count"]);
+        Assert.Equal(holdBound ? "0" : "1", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_raw_count"]);
+        Assert.Equal(holdBound ? "0" : "1", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_recovered_count"]);
+        Assert.Equal(holdBound ? "0" : "1", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_unresolved_count"]);
+        Assert.Equal(holdBound ? "1" : "0", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_raw_count"]);
+        Assert.Equal(holdBound ? "1" : "0", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_unresolved_count"]);
+    }
+
+    [Theory]
+    [InlineData(false, false, "none")]
+    [InlineData(true, false, "none")]
+    [InlineData(false, true, "none")]
+    [InlineData(true, true, "none")]
+    [InlineData(false, false, "retired")]
+    [InlineData(false, false, "source_scope")]
+    [InlineData(false, false, "source_reason")]
+    public async Task AnalyzeRetained_FallbackTailRepairSettlementExactRecheckBeforeSymptomQueue_RecoversCandidate(
+        bool compact,
+        bool omitSuccessorBindingAndRecheck,
+        string successorBindingMutation)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string sessionId = "sess_runtime_unlock_dispatch_proof";
+        const string transferId = "transfer_fallback_repair_exact_recheck";
+        const string pairAuthority = "fta2-fallback-tail-pair-recheck";
+        const string initialRepairAuthority = "fta2-fallback-repair-recheck-initial";
+        const string repairAuthority = "fta2-fallback-repair-recheck";
+        const string retryAuthority = "fta2-fallback-retry-recheck";
+        var requestTuple =
+            $"session_id={sessionId}; transfer_id={transferId}; direction=outbound; contract_generation=1; retired_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; predecessor_authority_id=(none); request_active_predecessor_supersession=0; listener_rearm_requirement=None; listener_execution_mode=Default; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=post_tuna_fallback_session_liveness_timeout_pending; regular_v4_liveness_generation=0; bridge_decision_generation=0; source_session_id={sessionId}; source_transfer_id={transferId}; source_direction=outbound; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; source_route_publication_generation=3; source_route_commit_generation=(none); source_route_commit_generation_present=0; source_target_route=post_tuna_fallback_v6; source_target_protocol_version=6; source_target_transport=regular_nkn; source_route_publication_action_kind=RoutePublication; source_coordinator_decision_reason=accepted";
+        var bindingRequestTuple =
+            $"retired_offer_generation=0; request_predecessor_authority_id=(none); request_active_predecessor_supersession=0; listener_rearm_requirement=None; listener_execution_mode=Default; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=post_tuna_fallback_session_liveness_timeout_pending; regular_v4_liveness_generation=0; request_bridge_decision_generation=0; request_session_id={sessionId}; request_transfer_id={transferId}; request_direction=outbound; source_publication_session_id={sessionId}; source_publication_transfer_id={transferId}; source_publication_direction=outbound; source_publication_route=post_tuna_fallback_v6; source_publication_protocol_version=6; source_publication_live_route_epoch=2; source_publication_runtime_generation=3; source_publication_terminal_generation=0; source_publication_leg_generation=3; source_publication_generation=3; source_publication_route_commit_generation=0; source_publication_route_commit_generation_present=0; source_publication_target_route=post_tuna_fallback_v6; source_publication_target_protocol_version=6; source_publication_target_transport=regular_nkn; source_publication_action_kind=RoutePublication; source_publication_reason=accepted";
+        var sourceScope =
+            $"session_id={sessionId}; transfer_id={transferId}; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; source_route_publication_generation=3; source_route_commit_generation=0; source_route_commit_generation_present=0";
+        var repairScope =
+            $"direction=outbound; session_id={sessionId}; transfer_id={transferId}; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; bridge_decision_generation=1; checkpoint_request_id=(none); route_publication_generation=3; route_commit_generation=0; target_transport=regular_nkn";
+
+        string InstallLine(string eventName, string suffix, string reason)
+            => RuntimeUnlockRetryInstallLine(
+                    eventName,
+                    transferId,
+                    suffix,
+                    reason,
+                    runtimeGeneration: 3,
+                    authorityId: retryAuthority)
+                .Replace("route=regular_nkn_v4_fast", "route=post_tuna_fallback_v6", StringComparison.Ordinal)
+                .Replace("route_kind=RegularNknV4Fast", "route_kind=PostTunaFallbackV6", StringComparison.Ordinal)
+                .Replace("protocol_version=4", "protocol_version=6", StringComparison.Ordinal)
+                .Replace("live_route_epoch=1", "live_route_epoch=2", StringComparison.Ordinal)
+                .Replace("leg_generation=9", "leg_generation=3", StringComparison.Ordinal)
+                .Replace("transport_epoch=2", "transport_epoch=1", StringComparison.Ordinal)
+                .Replace("bridge_recovery_generation=3", "bridge_recovery_generation=1", StringComparison.Ordinal)
+                .Replace("bridge_decision_generation=5", "bridge_decision_generation=0", StringComparison.Ordinal)
+                .Replace("request_regular_v4_liveness_generation=3", "request_regular_v4_liveness_generation=0", StringComparison.Ordinal)
+                .Replace("route_publication_generation=6", "route_publication_generation=3", StringComparison.Ordinal)
+                .Replace("source_publication_generation=6", "source_publication_generation=3", StringComparison.Ordinal)
+                .Replace("contract_generation=7", "contract_generation=1", StringComparison.Ordinal)
+                .Replace("retired_generation=11", "retired_generation=0", StringComparison.Ordinal)
+                .Replace("recovery_reason=session_liveness_timeout_pending", "recovery_reason=post_tuna_fallback_session_liveness_timeout_pending", StringComparison.Ordinal)
+                .Replace("retry_reason=runtime_unlock_offer_send_not_observed", "listener_rearm_requirement=None; listener_execution_mode=Default; retry_reason=runtime_unlock_offer_send_not_observed", StringComparison.Ordinal)
+                .Replace("release_kind=RegularV4RepairSettlement", "release_kind=FallbackPairedTailYield", StringComparison.Ordinal)
+                .Replace("release_authority_id=fta2-regular-v4-release-1", $"release_authority_id={pairAuthority}", StringComparison.Ordinal)
+                .Replace("release_generation=3", "release_generation=1", StringComparison.Ordinal)
+                .Replace("release_outcome=ProgressObserved", "release_outcome=Paired", StringComparison.Ordinal)
+                .Replace("offer_generation=12", "offer_generation=1", StringComparison.Ordinal)
+                .Replace("source_publication_route=regular_nkn_v4_fast", "source_publication_route=post_tuna_fallback_v6", StringComparison.Ordinal)
+                .Replace("source_publication_route_kind=RegularNknV4Fast", "source_publication_route_kind=PostTunaFallbackV6", StringComparison.Ordinal)
+                .Replace("source_publication_protocol_version=4", "source_publication_protocol_version=6", StringComparison.Ordinal)
+                .Replace("source_publication_live_route_epoch=1", "source_publication_live_route_epoch=2", StringComparison.Ordinal)
+                .Replace("source_publication_leg_generation=9", "source_publication_leg_generation=3", StringComparison.Ordinal)
+                .Replace("source_publication_reason=test_regular_route", "source_publication_reason=accepted", StringComparison.Ordinal)
+                .Replace("target_protocol_version=6", "target_protocol_version=4", StringComparison.Ordinal)
+                .Replace("source_publication_target_protocol_version=4", "source_publication_target_protocol_version=6", StringComparison.Ordinal);
+
+        var lines = new List<string>
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; session_id={sessionId}; transfer_id={transferId}; route=post_tuna_fallback_v6; protocol_version=6", 0),
+            LogLine($"event=filetransfer_fallback_tail_paired_yield_granted; authority_id={pairAuthority}; {repairScope}; yield_generation=1", 1),
+            LogLine($"event=filetransfer_fallback_frontier_repair_authority_granted; authority_id={initialRepairAuthority}; predecessor_authority_id=(none); {repairScope}; repair_generation=122; repair_request_key=fallback-frontier:1200:1:range; range_fingerprint=range-a", 2),
+            LogLine($"event=filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested; authority_id={pairAuthority}; direction=outbound; recovery_contract_generation=1; retired_offer_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; predecessor_authority_id=(none); request_active_predecessor_supersession=0; {sourceScope}; decision_status=Queued", 3),
+            LogLine($"event=runtime_unlock_retry_dispatch_fallback_tail_hold_binding_decided; binding_transition_identity=initial:{initialRepairAuthority}:1:Accepted; authority_id={initialRepairAuthority}; predecessor_authority_id=(none); release_authority_id={pairAuthority}; release_generation=1; release_outcome=Paired; pairing_generation=1; {repairScope}; repair_generation=122; contract_generation=1; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; {bindingRequestTuple}; hold_generation=1; authority_checkpoint_request_id=(none); data_session_identity=data-session-1; data_session_generation=1; decision_status=Accepted", 4),
+            LogLine($"event=runtime_unlock_retry_dispatch_fallback_tail_hold_bound; authority_id={initialRepairAuthority}; session_id={sessionId}; transfer_id={transferId}; direction=outbound; repair_generation=122; hold_generation=1; decision_status=Accepted", 5),
+            LogLine($"event=runtime_unlock_retry_dispatch_authority_held; {requestTuple}; decision_reason=fallback_paired_tail_yield_pending", 6),
+            LogLine($"event=filetransfer_fallback_frontier_repair_authority_granted; authority_id={repairAuthority}; predecessor_authority_id={initialRepairAuthority}; {repairScope}; repair_generation=123; repair_request_key=fallback-frontier:1300:1:range; range_fingerprint=range-b", 7),
+            LogLine($"event=filetransfer_fallback_frontier_repair_contract_settled; authority_id={initialRepairAuthority}; predecessor_authority_id=(none); successor_authority_id={repairAuthority}; settlement_outcome=Superseded; {repairScope}; repair_generation=122", 8),
+            LogLine($"event=runtime_unlock_retry_dispatch_fallback_tail_hold_binding_decided; binding_transition_identity=successor:{repairAuthority}:1:Accepted; authority_id={repairAuthority}; predecessor_authority_id={initialRepairAuthority}; release_authority_id={pairAuthority}; release_generation=1; release_outcome=Paired; pairing_generation=1; {repairScope}; repair_generation=123; contract_generation=1; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; {bindingRequestTuple}; hold_generation=1; authority_checkpoint_request_id=(none); data_session_identity=data-session-1; data_session_generation=1; decision_status=Accepted", 9),
+            LogLine($"event=runtime_unlock_retry_dispatch_fallback_tail_hold_binding_decided; binding_transition_identity=successor:{repairAuthority}:1:Idempotent; authority_id={repairAuthority}; predecessor_authority_id={initialRepairAuthority}; release_authority_id={pairAuthority}; release_generation=1; release_outcome=Paired; pairing_generation=1; {repairScope}; repair_generation=123; contract_generation=1; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; {bindingRequestTuple}; hold_generation=1; authority_checkpoint_request_id=(none); data_session_identity=data-session-1; data_session_generation=1; decision_status=Idempotent", 9),
+            LogLine($"event=filetransfer_fallback_frontier_repair_contract_settled; authority_id={repairAuthority}; predecessor_authority_id={initialRepairAuthority}; successor_authority_id=(none); settlement_outcome=ProgressObserved; {repairScope}; repair_generation=123", 10),
+            LogLine($"event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested; {requestTuple}; recheck_generation=1; queue_generation=1; decision_status=Queued; decision_reason=exact_settled_fallback_frontier_repair_recheck_queued", 11),
+            LogLine($"event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided; authority_id={pairAuthority}; session_id={sessionId}; transfer_id={transferId}; direction=outbound; release_generation=1; repair_authority_id={repairAuthority}; repair_generation=123; hold_generation=1; recheck_generation=1; decision_status=Accepted; decision_reason=exact_settled_fallback_frontier_repair_recheck_queued", 12),
+            LogLine($"event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided; authority_id={pairAuthority}; session_id={sessionId}; transfer_id={transferId}; direction=outbound; release_generation=1; repair_authority_id={repairAuthority}; repair_generation=123; hold_generation=1; recheck_generation=1; decision_status=Idempotent; decision_reason=exact_settled_fallback_frontier_repair_recheck_already_queued", 12),
+            LogLine($"event=runtime_unlock_retry_dispatch_authority_request_published; {requestTuple}; queue_generation=1; decision_status=Published", 13),
+            LogLine($"event=filetransfer_fallback_tail_paired_release_reserved; authority_id={pairAuthority}; pairing_generation=1; retry_authority_id={retryAuthority}; {repairScope}; decision_status=Accepted", 14),
+            LogLine(InstallLine("runtime_unlock_retry_dispatch_decision_staged", "; stage_status=Staged; decision_status=Granted", "retry_dispatch_decision_staged"), 15),
+            LogLine(InstallLine("runtime_unlock_retry_dispatch_install_receipt_issued", "; decision_status=Granted", "retry_dispatch_install_receipt_issued"), 16),
+            LogLine(InstallLine("runtime_unlock_retry_dispatch_install_committed", "; install_status=Installed; decision_status=Granted", "retry_dispatch_install_committed"), 17),
+            LogLine(InstallLine("runtime_unlock_retry_dispatch_authority_granted", "; install_status=Installed; decision_status=Granted", "runtime_unlock_retry_dispatch_authority_granted"), 18),
+            LogLine($"event=filetransfer_fallback_tail_paired_release_consumed; authority_id={pairAuthority}; pairing_generation=1; retry_authority_id={retryAuthority}; install_generation=1; {repairScope}; decision_status=Accepted", 19),
+            LogLine(InstallLine("runtime_unlock_retry_dispatch_observed", "; observed_lane=control", "peer_visible_offer_send_observed"), 20),
+            LogLine($"event=runtime_unlock_offer_authority_boundary_decided; boundary=answer_received; authority_mode=InstalledRetry; decision_status=accepted; session_id={sessionId}; transfer_id={transferId}; payer_decision_id=7; offer_generation=1; transaction_generation=2; tuna_path_lease_generation=3; tuna_path_lease_listener_run_id=listener-run-recheck; retry_authority_id={retryAuthority}; install_generation=1; decision_reason=runtime_unlock_offer_authority_current", 21),
+            LogLine($"event=runtime_unlock_transaction_answer_received; session_id={sessionId}; transaction_generation=2; offer_generation=1; answer_received=1; tuna_path_lease_generation=3; tuna_path_lease_current=1; tuna_path_lease_listener_run_id=listener-run-recheck", 22),
+            LogLine($"event=tuna_acceleration_answer_ack_sent; session_id={sessionId}; payer_decision_id=7; generation=1", 23),
+            LogLine($"event=runtime_unlock_precommit_probe_launch_requested; session_id={sessionId}; transfer_id={transferId}; direction=outbound; offer_generation=1; transaction_generation=2; tuna_path_lease_generation=3; tuna_path_lease_listener_run_id=listener-run-recheck; launch_generation=1", 24),
+            LogLine($"event=filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested; authority_id={pairAuthority}; direction=outbound; recovery_contract_generation=1; retired_offer_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; predecessor_authority_id=(none); request_active_predecessor_supersession=0; {sourceScope}; decision_status=Queued", 25),
+            LogLine($"event=file_transfer_inbound_terminal; session_id={sessionId}; transfer_id={transferId}; state=Completed", 26),
+            LogLine($"event=file_transfer_outbound_terminal; session_id={sessionId}; transfer_id={transferId}; state=Completed", 27),
+        };
+
+        if (omitSuccessorBindingAndRecheck)
+        {
+            lines.RemoveAll(line =>
+                line.Contains($"binding_transition_identity=successor:{repairAuthority}", StringComparison.Ordinal) ||
+                line.Contains("event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested", StringComparison.Ordinal) ||
+                line.Contains("event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided", StringComparison.Ordinal) ||
+                line.Contains("event=runtime_unlock_retry_dispatch_authority_request_published", StringComparison.Ordinal) ||
+                line.Contains("event=filetransfer_fallback_tail_paired_release_reserved", StringComparison.Ordinal) ||
+                line.Contains("event=runtime_unlock_retry_dispatch_decision_staged", StringComparison.Ordinal) ||
+                line.Contains("event=runtime_unlock_retry_dispatch_install_receipt_issued", StringComparison.Ordinal) ||
+                line.Contains("event=runtime_unlock_retry_dispatch_install_committed", StringComparison.Ordinal) ||
+                line.Contains("event=runtime_unlock_retry_dispatch_authority_granted", StringComparison.Ordinal) ||
+                line.Contains("event=filetransfer_fallback_tail_paired_release_consumed", StringComparison.Ordinal) ||
+                line.Contains("event=runtime_unlock_retry_dispatch_observed", StringComparison.Ordinal) ||
+                line.Contains("event=runtime_unlock_offer_authority_boundary_decided", StringComparison.Ordinal) ||
+                line.Contains("event=runtime_unlock_transaction_answer_received", StringComparison.Ordinal) ||
+                line.Contains("event=tuna_acceleration_answer_ack_sent", StringComparison.Ordinal) ||
+                line.Contains("event=runtime_unlock_precommit_probe_launch_requested", StringComparison.Ordinal));
+        }
+
+        if (!string.Equals(successorBindingMutation, "none", StringComparison.Ordinal))
+        {
+            var successorBindingIndex = lines.FindIndex(line =>
+                line.Contains($"binding_transition_identity=successor:{repairAuthority}", StringComparison.Ordinal));
+            Assert.True(successorBindingIndex >= 0);
+            lines[successorBindingIndex] = successorBindingMutation switch
+            {
+                "retired" => lines[successorBindingIndex].Replace(
+                    "retired_offer_generation=0",
+                    "retired_offer_generation=9",
+                    StringComparison.Ordinal),
+                "source_scope" => lines[successorBindingIndex].Replace(
+                    "source_publication_runtime_generation=3",
+                    "source_publication_runtime_generation=4",
+                    StringComparison.Ordinal),
+                "source_reason" => lines[successorBindingIndex].Replace(
+                    "source_publication_reason=accepted",
+                    "source_publication_reason=mutated",
+                    StringComparison.Ordinal),
+                _ => throw new InvalidOperationException(successorBindingMutation),
+            };
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines.ToArray(),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_distinct_count"]);
+        if (omitSuccessorBindingAndRecheck ||
+            !string.Equals(successorBindingMutation, "none", StringComparison.Ordinal))
+        {
+            Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_recovered_count"]);
+            Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_unresolved_count"]);
+            Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_distinct_count"]);
+            Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_unresolved_count"]);
+            Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_distinct_count"]);
+            if (omitSuccessorBindingAndRecheck)
+            {
+                Assert.Equal("unbound_held_fallback_tail_retry_could_not_recheck_after_blocking_repair_settlement", verdict["first_proof_chain_failure_reason"]);
+            }
+            Assert.Equal("fail", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict"]);
+        }
+        else
+        {
+            Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_recovered_count"]);
+            Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_unresolved_count"]);
+            Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_recovered_count"]);
+            Assert.Equal("pass", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict"]);
+        }
     }
 
     [Theory]
@@ -9579,8 +9781,9 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             insertionIndex++,
             LogLine(RuntimeUnlockFallbackTailUnblockRecheckRequestedLine(transferId), secondsOffset: lines.Count));
         lines.Insert(
-            insertionIndex,
+            insertionIndex++,
             LogLine(RuntimeUnlockFallbackTailUnblockRecheckDecidedLine(transferId), secondsOffset: lines.Count));
+        InsertRuntimeUnlockFallbackTailUnblockEffectiveGrantLines(lines, insertionIndex, transferId);
         var result = await RunAnalyzeFixtureAsync(
             lines.ToArray(),
             ["-LiveRouteProofMode", "None"],
@@ -9669,8 +9872,9 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             boundaryIndex++,
             LogLine(RuntimeUnlockFallbackTailUnblockRecheckRequestedLine(transferId), secondsOffset: lines.Count));
         lines.Insert(
-            boundaryIndex,
+            boundaryIndex++,
             LogLine(RuntimeUnlockFallbackTailUnblockRecheckDecidedLine(transferId), secondsOffset: lines.Count));
+        InsertRuntimeUnlockFallbackTailUnblockEffectiveGrantLines(lines, boundaryIndex, transferId);
 
         var verdict = await AnalyzeFallbackTailUnblockFixtureAsync(lines, compact);
 
@@ -9700,11 +9904,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         lines.Insert(
             boundaryIndex++,
             LogLine(RuntimeUnlockFallbackTailUnblockRecheckDecidedLine(transferId), secondsOffset: lines.Count));
-        lines.Insert(
-            boundaryIndex,
-            LogLine(
-                $"event=runtime_unlock_retry_dispatch_authority_granted; {RuntimeUnlockFallbackTailUnblockRequestTuple(transferId)}; decision_reason=accepted",
-                secondsOffset: lines.Count));
+        InsertRuntimeUnlockFallbackTailUnblockEffectiveGrantLines(lines, boundaryIndex, transferId);
 
         var verdict = await AnalyzeFallbackTailUnblockFixtureAsync(lines, compact);
 
@@ -9738,6 +9938,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         lines.Insert(
             boundaryIndex + 2,
             LogLine(RuntimeUnlockFallbackTailUnblockRecheckDecidedLine(transferId), secondsOffset: lines.Count));
+        InsertRuntimeUnlockFallbackTailUnblockEffectiveGrantLines(lines, boundaryIndex + 3, transferId);
 
         var verdict = await AnalyzeFallbackTailUnblockFixtureAsync(lines, compact);
 
@@ -9920,8 +10121,9 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             terminalIndex++,
             LogLine(RuntimeUnlockFallbackTailUnblockRecheckRequestedLine(transferId), secondsOffset: lines.Count));
         lines.Insert(
-            terminalIndex,
+            terminalIndex++,
             LogLine(RuntimeUnlockFallbackTailUnblockRecheckDecidedLine(transferId), secondsOffset: lines.Count));
+        InsertRuntimeUnlockFallbackTailUnblockEffectiveGrantLines(lines, terminalIndex, transferId);
 
         var verdict = await AnalyzeFallbackTailUnblockFixtureAsync(lines, compact);
 
@@ -14442,7 +14644,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     private static string RuntimeUnlockFallbackTailUnblockRequestTuple(string transferId)
-        => $"session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=outbound; contract_generation=1; retired_generation=2; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; predecessor_authority_id=(none); request_active_predecessor_supersession=0; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=post_tuna_fallback_session_liveness_timeout_pending; regular_v4_liveness_generation=0; bridge_decision_generation=0; source_session_id=sess_runtime_unlock_dispatch_proof; source_transfer_id={transferId}; source_direction=outbound; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; source_route_publication_generation=5; source_route_commit_generation=(none); source_route_commit_generation_present=0; source_target_route=file_tuna_v4; source_target_protocol_version=4; source_target_transport=tuna; source_route_publication_action_kind=RoutePublication; source_coordinator_decision_reason=accepted";
+        => $"session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=outbound; contract_generation=1; retired_generation=2; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; predecessor_authority_id=(none); request_active_predecessor_supersession=0; listener_rearm_requirement=None; listener_execution_mode=Default; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=post_tuna_fallback_session_liveness_timeout_pending; regular_v4_liveness_generation=0; bridge_decision_generation=0; source_session_id=sess_runtime_unlock_dispatch_proof; source_transfer_id={transferId}; source_direction=outbound; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; source_route_publication_generation=5; source_route_commit_generation=(none); source_route_commit_generation_present=0; source_target_route=file_tuna_v4; source_target_protocol_version=4; source_target_transport=tuna; source_route_publication_action_kind=RoutePublication; source_coordinator_decision_reason=accepted";
 
     private static string RuntimeUnlockFallbackTailUnblockLegacyHoldPreservedLine(string transferId)
         => $"event=runtime_unlock_retry_dispatch_authority_hold_preserved; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; contract_generation=1; retired_generation=2; offer_generation=2; route=(none); protocol_version=0; live_route_epoch=0; runtime_generation=0; terminal_generation=0; leg_generation=0; regular_v4_liveness_generation=0; bridge_decision_generation=0; queued_behind_active_negotiation=0; decision_reason=fallback_paired_tail_yield_pending; attempted_source_publication_session_id=sess_runtime_unlock_dispatch_proof; attempted_source_publication_transfer_id={transferId}; attempted_source_publication_direction=outbound; attempted_source_publication_route=post_tuna_fallback_v6; attempted_source_publication_protocol_version=6; attempted_source_publication_live_route_epoch=2; attempted_source_publication_runtime_generation=3; attempted_source_publication_terminal_generation=0; attempted_source_publication_leg_generation=3; attempted_source_publication_route_publication_generation=5; attempted_source_publication_route_commit_generation=0; attempted_source_publication_target_route=post_tuna_fallback_v6; attempted_source_publication_target_protocol_version=6; attempted_source_publication_target_transport=regular_nkn; attempted_source_publication_route_publication_action_kind=RoutePublication";
@@ -14455,6 +14657,76 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
     private static string RuntimeUnlockFallbackTailUnblockRecheckDecidedLine(string transferId)
         => $"event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided; {RuntimeUnlockFallbackTailUnblockRequestTuple(transferId)}; {RuntimeUnlockFallbackTailUnblockRecheckBoundaryTuple()}; decision_status=Granted; decision_valid=1; decision_reason=accepted";
+
+    private static void InsertRuntimeUnlockFallbackTailUnblockEffectiveGrantLines(
+        List<string> lines,
+        int insertionIndex,
+        string transferId)
+    {
+        string InstallLine(string eventName, string suffix, string decisionReason)
+            => RuntimeUnlockFallbackPairedYieldInstallLine(
+                    eventName,
+                    transferId,
+                    authorityId: "fta2-fallback-recheck-1",
+                    retiredGeneration: 2,
+                    installGeneration: string.Equals(
+                        eventName,
+                        "runtime_unlock_retry_dispatch_decision_staged",
+                        StringComparison.Ordinal)
+                        ? 0
+                        : 1,
+                    suffix: suffix,
+                    decisionReason: decisionReason)
+                .Replace("live_route_epoch=1", "live_route_epoch=2", StringComparison.Ordinal)
+                .Replace("runtime_generation=4", "runtime_generation=3", StringComparison.Ordinal)
+                .Replace("leg_generation=9", "leg_generation=3", StringComparison.Ordinal)
+                .Replace("bridge_recovery_generation=3", "bridge_recovery_generation=1", StringComparison.Ordinal)
+                .Replace("bridge_decision_generation=5", "bridge_decision_generation=0", StringComparison.Ordinal)
+                .Replace("route_publication_generation=6", "route_publication_generation=5", StringComparison.Ordinal)
+                .Replace("source_publication_generation=6", "source_publication_generation=5", StringComparison.Ordinal)
+                .Replace("contract_generation=7", "contract_generation=1", StringComparison.Ordinal)
+                .Replace(
+                    "retry_reason=runtime_unlock_after_fallback_tail_quiescent",
+                    "listener_rearm_requirement=None; listener_execution_mode=Default; retry_reason=runtime_unlock_offer_send_not_observed",
+                    StringComparison.Ordinal)
+                .Replace(
+                    "recovery_reason=post_tuna_fallback_activation_intent",
+                    "recovery_reason=post_tuna_fallback_session_liveness_timeout_pending",
+                    StringComparison.Ordinal)
+                .Replace(
+                    "source_publication_target_route=post_tuna_fallback_v6; source_publication_target_route_kind=PostTunaFallbackV6; source_publication_target_protocol_version=6; source_publication_target_transport=regular_nkn",
+                    "source_publication_target_route=file_tuna_v4; source_publication_target_route_kind=FileTunaV4; source_publication_target_protocol_version=4; source_publication_target_transport=tuna",
+                    StringComparison.Ordinal)
+                .Replace(
+                    "source_publication_reason=header_switch_off",
+                    "source_publication_reason=accepted",
+                    StringComparison.Ordinal);
+
+        foreach (var installLine in new[]
+        {
+            InstallLine(
+                "runtime_unlock_retry_dispatch_decision_staged",
+                "; stage_status=Staged; decision_status=Granted",
+                "retry_dispatch_decision_staged"),
+            InstallLine(
+                "runtime_unlock_retry_dispatch_install_receipt_issued",
+                "; decision_status=Granted",
+                "retry_dispatch_install_receipt_issued"),
+            InstallLine(
+                "runtime_unlock_retry_dispatch_install_committed",
+                "; install_status=Installed; decision_status=Granted",
+                "retry_dispatch_install_committed"),
+            InstallLine(
+                "runtime_unlock_retry_dispatch_authority_granted",
+                "; install_status=Installed; decision_status=Granted",
+                "runtime_unlock_retry_dispatch_authority_granted"),
+        })
+        {
+            lines.Insert(
+                insertionIndex++,
+                LogLine(installLine, secondsOffset: lines.Count));
+        }
+    }
 
     private static string RuntimeUnlockRegularV4RecoveryLeaseClosureAdoptedLine(string transferId)
         => $"event=runtime_unlock_regular_v4_recovery_lease_closure_adopted; direction=outbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; transport_epoch=2; bridge_recovery_generation=3; bridge_decision_generation=5; regular_v4_liveness_generation=3; lease_authority_id=fta2-recovery-lease-1; lease_generation=3; lifecycle_outcome=Completed; lifecycle_reason=bridge_lifecycle_completed; adoption_boundary=regular_v4_receive_proof_observed; decision_reason=matching_local_receive_proof";

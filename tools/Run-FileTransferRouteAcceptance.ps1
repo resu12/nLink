@@ -576,6 +576,7 @@ function Test-RouteAcceptanceConclusiveRouteRuntimeCandidate {
     return $Candidate -in @(
             'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing',
             'regular_v4_frontier_tail_repair_state_publication_missing',
+            'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
             'runtime_unlock_responder_acked_probe_route_transition_handoff_missing') -and
         [string]::Equals(
             $SemanticFailureDomain,
@@ -1555,6 +1556,14 @@ function New-RouteAcceptanceRunResult {
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount = 0
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount = 0
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict = 'none'
+        runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount = 0
+        runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingDistinctCount = 0
+        runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRecoveredCount = 0
+        runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingUnresolvedCount = 0
+        runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRawCount = 0
+        runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount = 0
+        runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount = 0
+        runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount = 0
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount = 0
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount = 0
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount = 0
@@ -3521,6 +3530,14 @@ function Assert-Phase4OperatorVerdict {
     $Result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict' -DefaultValue 'none'
+    $Result.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_raw_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_distinct_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_recovered_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_unresolved_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_raw_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_distinct_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_recovered_count' -DefaultValue '0')
+    $Result.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_unresolved_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected_raw_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected_distinct_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected_recovered_count' -DefaultValue '0')
@@ -3933,11 +3950,17 @@ function Assert-Phase4ScenarioRun {
                 $result.guiReportedFailureReason = $failureReason
                 $result.guiReportedFailureError = $errorMessage
                 if (Test-RouteAcceptanceSemanticAnalysisUnavailableFailure -FailurePhase $failurePhase -FailureReason $failureReason -ErrorMessage $errorMessage) {
-                    $result.semanticFailureDomain = 'unavailable'
-                    Add-RouteAcceptanceFailure -Result $result -Message ("Tuna GUI semantic analysis unavailable: phase={0}; reason={1}; error={2}" -f `
-                        ($(if ([string]::IsNullOrWhiteSpace($failurePhase)) { '(unknown)' } else { $failurePhase })),
-                        ($(if ([string]::IsNullOrWhiteSpace($failureReason)) { '(unknown)' } else { $failureReason })),
-                        ($(if ([string]::IsNullOrWhiteSpace($errorMessage)) { '(none)' } else { $errorMessage })))
+                    $retainedRouteRuntimeClassification =
+                        Test-RouteAcceptanceConclusiveRouteRuntimeCandidate `
+                            -Candidate ([string]$result.runtimeFailureCandidate) `
+                            -SemanticFailureDomain ([string]$result.semanticFailureDomain)
+                    if (-not $retainedRouteRuntimeClassification) {
+                        $result.semanticFailureDomain = 'unavailable'
+                        Add-RouteAcceptanceFailure -Result $result -Message ("Tuna GUI semantic analysis unavailable: phase={0}; reason={1}; error={2}" -f `
+                            ($(if ([string]::IsNullOrWhiteSpace($failurePhase)) { '(unknown)' } else { $failurePhase })),
+                            ($(if ([string]::IsNullOrWhiteSpace($failureReason)) { '(unknown)' } else { $failureReason })),
+                            ($(if ([string]::IsNullOrWhiteSpace($errorMessage)) { '(none)' } else { $errorMessage })))
+                    }
                 }
                 else {
                     # Preserve the harness' legacy setup classification until Phase 5 has
@@ -5494,7 +5517,15 @@ function Write-RouteAcceptanceFakePhase4Run {
             'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_distinct_count=1',
             'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count=0',
             'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count=1',
-            'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict=fail'
+            'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict=fail',
+            'runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_raw_count=1',
+            'runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_distinct_count=1',
+            'runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_recovered_count=0',
+            'runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_unresolved_count=1',
+            'runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_raw_count=0',
+            'runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_distinct_count=0',
+            'runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_recovered_count=0',
+            'runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_unresolved_count=0'
         )
         foreach ($reportName in @('filetransfer-route-consistency-summary.txt', 'filetransfer-operator-verdict.txt')) {
             $reportPath = Join-Path $ArtifactDir $reportName
@@ -9540,6 +9571,14 @@ function New-RouteAcceptanceSummaryRunDto {
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount = [int]$Result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount = [int]$Result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict = [string]$Result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict
+        runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount = [int]$Result.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount
+        runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingDistinctCount = [int]$Result.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingDistinctCount
+        runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRecoveredCount = [int]$Result.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRecoveredCount
+        runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingUnresolvedCount = [int]$Result.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingUnresolvedCount
+        runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRawCount = [int]$Result.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRawCount
+        runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount = [int]$Result.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount
+        runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount = [int]$Result.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount
+        runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount = [int]$Result.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount = [int]$Result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount = [int]$Result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount = [int]$Result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount
@@ -9887,6 +9926,14 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingDistinctCount = 0
     $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount = 0
     $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount = 0
+    $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount = 0
+    $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingDistinctCount = 0
+    $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRecoveredCount = 0
+    $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingUnresolvedCount = 0
+    $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRawCount = 0
+    $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount = 0
+    $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount = 0
+    $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount = 0
     $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount = 0
     $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount = 0
     $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount = 0
@@ -10078,6 +10125,14 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingDistinctCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingDistinctCount
         $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount
         $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount
+        $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount
+        $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingDistinctCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingDistinctCount
+        $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRecoveredCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRecoveredCount
+        $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingUnresolvedCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingUnresolvedCount
+        $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRawCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRawCount
+        $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount
+        $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount
+        $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount
         $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount += [int]$runDto.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount
         $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount += [int]$runDto.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount
         $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount += [int]$runDto.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount
@@ -10616,6 +10671,14 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count={0}" -f $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count={0}" -f $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount),
         ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict={0}" -f $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_raw_count={0}" -f $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_distinct_count={0}" -f $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingDistinctCount),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_recovered_count={0}" -f $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRecoveredCount),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_unresolved_count={0}" -f $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_raw_count={0}" -f $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRawCount),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_distinct_count={0}" -f $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_recovered_count={0}" -f $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_unresolved_count={0}" -f $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_rejected_raw_count={0}" -f $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_rejected_distinct_count={0}" -f $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_rejected_recovered_count={0}" -f $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount),
@@ -10987,6 +11050,14 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_raw_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_distinct_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingDistinctCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRecoveredCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_unresolved_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingUnresolvedCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_raw_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRawCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_distinct_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_recovered_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount)
+        $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_unresolved_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_zero_offer_successor_rejected_raw_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_zero_offer_successor_rejected_distinct_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_zero_offer_successor_rejected_recovered_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount)
@@ -11312,6 +11383,14 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount = $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount = $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict = $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict
+        runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount = $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount
+        runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingDistinctCount = $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingDistinctCount
+        runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRecoveredCount = $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRecoveredCount
+        runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingUnresolvedCount = $runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingUnresolvedCount
+        runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRawCount = $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRawCount
+        runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount = $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount
+        runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount = $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount
+        runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount = $runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount = $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount = $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount
         runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount = $runtimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount

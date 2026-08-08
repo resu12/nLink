@@ -1720,6 +1720,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("0", evidence["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count"]);
             Assert.Equal("1", evidence["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count"]);
             Assert.Equal("fail", evidence["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict"]);
+            Assert.Equal("1", evidence["runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_raw_count"]);
+            Assert.Equal("1", evidence["runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_distinct_count"]);
+            Assert.Equal("0", evidence["runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_recovered_count"]);
+            Assert.Equal("1", evidence["runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_unresolved_count"]);
+            Assert.Equal("0", evidence["runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_unresolved_count"]);
 
             var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
             Assert.Equal("1", summary["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_raw_count"]);
@@ -1727,8 +1732,12 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("0", summary["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count"]);
             Assert.Equal("1", summary["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count"]);
             Assert.Equal("fail", summary["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict"]);
+            Assert.Equal("1", summary["runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_raw_count"]);
+            Assert.Equal("1", summary["runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_unresolved_count"]);
+            Assert.Equal("0", summary["runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_unresolved_count"]);
             Assert.Equal("1", summary[$"{scenario}.runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count"]);
             Assert.Equal("fail", summary[$"{scenario}.runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict"]);
+            Assert.Equal("1", summary[$"{scenario}.runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_unresolved_count"]);
 
             using var summaryJson = JsonDocument.Parse(
                 await File.ReadAllTextAsync(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.json")));
@@ -1736,10 +1745,16 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal(1, root.GetProperty("runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRawCount").GetInt32());
             Assert.Equal(1, root.GetProperty("runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount").GetInt32());
             Assert.Equal("fail", root.GetProperty("runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict").GetString());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingUnresolvedCount").GetInt32());
+            Assert.Equal(0, root.GetProperty("runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount").GetInt32());
             var run = Assert.Single(root.GetProperty("runs").EnumerateArray());
             Assert.Equal(1, run.GetProperty("runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRawCount").GetInt32());
             Assert.Equal(1, run.GetProperty("runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount").GetInt32());
             Assert.Equal("fail", run.GetProperty("runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict").GetString());
+            Assert.Equal(1, run.GetProperty("runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingRawCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("runtimeUnlockRetryDispatchFallbackFrontierRepairHoldBindingMissingUnresolvedCount").GetInt32());
+            Assert.Equal(0, run.GetProperty("runtimeUnlockRetryDispatchFallbackFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount").GetInt32());
         }
         finally
         {

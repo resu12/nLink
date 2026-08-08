@@ -16701,6 +16701,14 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckMissingDistinctCount),
         ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckMissingRecoveredCount),
         ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckMissingUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairHoldBindingMissingRawCount),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairHoldBindingMissingDistinctCount),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairHoldBindingMissingRecoveredCount),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairHoldBindingMissingUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckAfterBoundHoldMissingRawCount),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_rejected_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_rejected_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_rejected_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount),
@@ -26616,12 +26624,30 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
     [object[]]$recheckDiscardedEvents = @($Events | Where-Object {
         $_.EventName -eq 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded'
     } | Sort-Object Sequence)
-    [object[]]$fallbackRepairSettledEvents = @($Events | Where-Object {
+    [object[]]$fallbackRepairAllSettledEvents = @($Events | Where-Object {
         $_.EventName -eq 'filetransfer_fallback_frontier_repair_contract_settled' -and
         (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
         (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
-        (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq '6' -and
+        (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq '6'
+    } | Sort-Object Sequence)
+    [object[]]$fallbackRepairSettledEvents = @($fallbackRepairAllSettledEvents | Where-Object {
         (Get-FileTransferEventField -Event $_ -Name 'successor_authority_id' -Default '(none)') -in @('', '(none)', 'none')
+    } | Sort-Object Sequence)
+    [object[]]$fallbackRepairGrantedEvents = @($Events | Where-Object {
+        $_.EventName -eq 'filetransfer_fallback_frontier_repair_authority_granted' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+        (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq '6'
+    } | Sort-Object Sequence)
+    [object[]]$fallbackTailHoldBoundEvents = @($Events | Where-Object {
+        $_.EventName -in @(
+            'runtime_unlock_retry_dispatch_fallback_tail_hold_bound',
+            'runtime_unlock_retry_dispatch_fallback_tail_hold_binding_decided') -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in @(
+            'Accepted',
+            'Applied',
+            'Idempotent')
     } | Sort-Object Sequence)
     [object[]]$pairedRetryRequestedEvents = @($Events | Where-Object {
         $_.EventName -eq 'filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested' -and
@@ -26640,6 +26666,35 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
         $_.EventName -eq 'filetransfer_route_transition_prepared' -and
         (Get-FileTransferEventField -Event $_ -Name 'transition_kind' -Default '') -eq
             'PostTunaFallbackV6ToTunaV4'
+    } | Sort-Object Sequence)
+    [object[]]$recoveryOfferEvents = @($Events | Where-Object {
+        $_.EventName -in @(
+            'tuna_acceleration_offer_queued',
+            'runtime_unlock_offer_dispatched_after_listener_rearm')
+    } | Sort-Object Sequence)
+    [object[]]$recoveryDispatchObservedEvents = @($Events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_observed'
+    } | Sort-Object Sequence)
+    [object[]]$recoveryAnswerAuthorityBoundaryEvents = @($Events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_offer_authority_boundary_decided' -and
+        (Get-FileTransferEventField -Event $_ -Name 'boundary' -Default '') -eq 'answer_received' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '').ToLowerInvariant() -eq
+            'accepted'
+    } | Sort-Object Sequence)
+    [object[]]$recoveryAnswerEvents = @($Events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_transaction_answer_received'
+    } | Sort-Object Sequence)
+    [object[]]$recoveryAnswerAckEvents = @($Events | Where-Object {
+        $_.EventName -in @(
+            'tuna_acceleration_answer_ack_sent',
+            'tuna_acceleration_answer_ack_replay_sent')
+    } | Sort-Object Sequence)
+    [object[]]$recoveryPrecommitEvents = @($Events | Where-Object {
+        $_.EventName -in @(
+            'runtime_unlock_precommit_probe_launch_requested',
+            'filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided',
+            'runtime_unlock_precommit_probe_launch_started',
+            'runtime_unlock_precommit_probe_started')
     } | Sort-Object Sequence)
 
     function Get-FallbackTailRecheckField {
@@ -26673,6 +26728,31 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
         }
 
         return ''
+    }
+
+    function Get-CanonicalFallbackTailEvidence {
+        param(
+            [AllowEmptyCollection()][object[]]$Candidates = @(),
+            [Parameter(Mandatory = $true)][string[]]$IdentityFields
+        )
+
+        if ($Candidates.Count -eq 0) {
+            return @()
+        }
+
+        $groups = @($Candidates | Group-Object -Property {
+            $candidate = $_
+            @(foreach ($field in $IdentityFields) {
+                Get-FallbackTailRecheckExactField -Event $candidate -Names @($field)
+            }) -join '|'
+        })
+        if ($groups.Count -ne 1) {
+            return @()
+        }
+
+        return @($groups[0].Group |
+            Sort-Object Sequence, LineNumber |
+            Select-Object -First 1)
     }
 
     function Test-FallbackTailRecheckEventComplete {
@@ -26829,6 +26909,270 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
         return $true
     }
 
+    function Test-FallbackRepairHoldBindingMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Binding,
+            [Parameter(Mandatory = $true)]$RepairGrant,
+            [Parameter(Mandatory = $true)]$Settlement,
+            [Parameter(Mandatory = $true)]$Hold,
+            [Parameter(Mandatory = $true)]$Request,
+            [Parameter(Mandatory = $true)][string]$PairAuthority
+        )
+
+        if (-not (Test-FallbackTailRecheckIdentityMatch -Left $Binding -Right $Settlement) -or
+            (Get-FallbackTailRecheckField -Event $Binding -Names @('direction')) -ne 'outbound' -or
+            (Get-FallbackTailRecheckField -Event $Binding -Names @('authority_id')) -ne
+                (Get-FallbackTailRecheckField -Event $Settlement -Names @('authority_id'))) {
+            return $false
+        }
+
+        $bindingRepairGeneration = Get-FallbackTailRecheckExactField `
+            -Event $Binding `
+            -Names @('repair_generation')
+        $repairGeneration = Get-FallbackTailRecheckExactField `
+            -Event $RepairGrant `
+            -Names @('repair_generation')
+        if ([string]::IsNullOrWhiteSpace($bindingRepairGeneration) -or
+            [string]::IsNullOrWhiteSpace($repairGeneration) -or
+            $bindingRepairGeneration -ne $repairGeneration) {
+            return $false
+        }
+
+        if ($Binding.EventName -eq
+            'runtime_unlock_retry_dispatch_fallback_tail_hold_binding_decided') {
+            if ((Get-FallbackTailRecheckExactField -Event $Binding -Names @('predecessor_authority_id')) -ne
+                (Get-FallbackTailRecheckExactField -Event $RepairGrant -Names @('predecessor_authority_id'))) {
+                return $false
+            }
+
+            foreach ($mapping in @(
+                    @('route', 'route'),
+                    @('protocol_version', 'protocol_version'),
+                    @('live_route_epoch', 'live_route_epoch'),
+                    @('runtime_generation', 'runtime_generation'),
+                    @('terminal_generation', 'terminal_generation'),
+                    @('leg_generation', 'leg_generation'),
+                    @('transport_epoch', 'transport_epoch'),
+                    @('bridge_recovery_generation', 'bridge_recovery_generation'),
+                    @('bridge_decision_generation', 'bridge_decision_generation'),
+                    @('route_publication_generation', 'route_publication_generation'),
+                    @('route_commit_generation', 'route_commit_generation'),
+                    @('authority_checkpoint_request_id', 'checkpoint_request_id'))) {
+                $bindingValue = Get-FallbackTailRecheckExactField -Event $Binding -Names @($mapping[0])
+                $settlementValue = Get-FallbackTailRecheckExactField -Event $Settlement -Names @($mapping[1])
+                if ([string]::IsNullOrWhiteSpace($bindingValue) -or
+                    [string]::IsNullOrWhiteSpace($settlementValue) -or
+                    -not [string]::Equals(
+                        $bindingValue,
+                        $settlementValue,
+                        [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $false
+                }
+            }
+
+            foreach ($mapping in @(
+                    @('contract_generation', 'recovery_contract_generation'),
+                    @('retired_offer_generation', 'retired_offer_generation'),
+                    @('dispatch_attempt_generation', 'dispatch_attempt_generation'),
+                    @('missing_dispatch_successor_generation', 'missing_dispatch_successor_generation'),
+                    @('request_predecessor_authority_id', 'predecessor_authority_id'),
+                    @('request_active_predecessor_supersession', 'request_active_predecessor_supersession'))) {
+                $bindingValue = Get-FallbackTailRecheckExactField -Event $Binding -Names @($mapping[0])
+                $requestValue = Get-FallbackTailRecheckExactField -Event $Request -Names @($mapping[1])
+                if ([string]::IsNullOrWhiteSpace($bindingValue) -or
+                    [string]::IsNullOrWhiteSpace($requestValue) -or
+                    $bindingValue -ne $requestValue) {
+                    return $false
+                }
+            }
+
+            foreach ($mapping in @(
+                    @('listener_rearm_requirement', 'listener_rearm_requirement'),
+                    @('listener_execution_mode', 'listener_execution_mode'),
+                    @('retry_reason', 'retry_reason'),
+                    @('recovery_reason', 'recovery_reason'),
+                    @('regular_v4_liveness_generation', 'regular_v4_liveness_generation'),
+                    @('request_bridge_decision_generation', 'bridge_decision_generation'),
+                    @('request_session_id', 'session_id'),
+                    @('request_transfer_id', 'transfer_id'),
+                    @('request_direction', 'direction'),
+                    @('source_publication_session_id', 'source_session_id'),
+                    @('source_publication_transfer_id', 'source_transfer_id'),
+                    @('source_publication_direction', 'source_direction'),
+                    @('source_publication_route', 'source_route'),
+                    @('source_publication_protocol_version', 'source_protocol_version'),
+                    @('source_publication_live_route_epoch', 'source_live_route_epoch'),
+                    @('source_publication_runtime_generation', 'source_runtime_generation'),
+                    @('source_publication_terminal_generation', 'source_terminal_generation'),
+                    @('source_publication_leg_generation', 'source_leg_generation'),
+                    @('source_publication_generation', 'source_route_publication_generation'),
+                    @('source_publication_route_commit_generation_present', 'source_route_commit_generation_present'),
+                    @('source_publication_target_route', 'source_target_route'),
+                    @('source_publication_target_protocol_version', 'source_target_protocol_version'),
+                    @('source_publication_target_transport', 'source_target_transport'),
+                    @('source_publication_action_kind', 'source_route_publication_action_kind'),
+                    @('source_publication_reason', 'source_coordinator_decision_reason'))) {
+                $bindingValue = Get-FallbackTailRecheckExactField -Event $Binding -Names @($mapping[0])
+                $holdValue = Get-FallbackTailRecheckExactField -Event $Hold -Names @($mapping[1])
+                if ([string]::IsNullOrWhiteSpace($bindingValue) -or
+                    [string]::IsNullOrWhiteSpace($holdValue) -or
+                    -not [string]::Equals(
+                        $bindingValue,
+                        $holdValue,
+                        [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $false
+                }
+            }
+
+            $routeCommitPresent = Get-FallbackTailRecheckExactField `
+                -Event $Binding `
+                -Names @('source_publication_route_commit_generation_present')
+            if ($routeCommitPresent -eq '1' -and
+                (Get-FallbackTailRecheckExactField `
+                    -Event $Binding `
+                    -Names @('source_publication_route_commit_generation')) -ne
+                (Get-FallbackTailRecheckExactField `
+                    -Event $Hold `
+                    -Names @('source_route_commit_generation'))) {
+                return $false
+            }
+
+            $releaseAuthority = Get-FallbackTailRecheckExactField `
+                -Event $Binding `
+                -Names @('release_authority_id')
+            $releaseGeneration = Get-FallbackTailRecheckExactField `
+                -Event $Binding `
+                -Names @('release_generation')
+            $dataSessionIdentity = Get-FallbackTailRecheckExactField `
+                -Event $Binding `
+                -Names @('data_session_identity')
+            $dataSessionGeneration = Get-FallbackTailRecheckExactField `
+                -Event $Binding `
+                -Names @('data_session_generation')
+            if ($releaseAuthority -ne $PairAuthority -or
+                $releaseGeneration -notmatch '^[1-9][0-9]*$' -or
+                [string]::IsNullOrWhiteSpace($dataSessionIdentity) -or
+                $dataSessionIdentity -in @('(none)', 'none') -or
+                $dataSessionGeneration -notmatch '^[1-9][0-9]*$') {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Get-CanonicalFallbackRepairHoldBinding {
+        param(
+            [AllowEmptyCollection()][object[]]$Candidates = @()
+        )
+
+        [object[]]$canonical = @($Candidates | Where-Object {
+            $_.EventName -eq
+                'runtime_unlock_retry_dispatch_fallback_tail_hold_binding_decided'
+        })
+        if ($canonical.Count -gt 0) {
+            $groups = @($canonical | Group-Object -Property {
+                @(
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('log_writer_id')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('session_id')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('transfer_id')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('direction')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('authority_id')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('predecessor_authority_id')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('repair_generation')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('release_authority_id')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('release_generation')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('hold_generation')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('contract_generation')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('retired_offer_generation')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('dispatch_attempt_generation')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('missing_dispatch_successor_generation')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('request_predecessor_authority_id')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('request_active_predecessor_supersession')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('listener_rearm_requirement')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('listener_execution_mode')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('retry_reason')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('recovery_reason')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('regular_v4_liveness_generation')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('request_bridge_decision_generation')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('request_session_id')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('request_transfer_id')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('request_direction')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('route')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('protocol_version')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('live_route_epoch')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('runtime_generation')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('terminal_generation')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('leg_generation')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('transport_epoch')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('bridge_recovery_generation')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('bridge_decision_generation')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('route_publication_generation')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('route_commit_generation')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('authority_checkpoint_request_id')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('leg_checkpoint_request_id')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('canonical_authority_checkpoint_request_id')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('canonical_leg_checkpoint_request_id')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('source_publication_session_id')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('source_publication_transfer_id')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('source_publication_direction')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('source_publication_route')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('source_publication_protocol_version')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('source_publication_live_route_epoch')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('source_publication_runtime_generation')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('source_publication_terminal_generation')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('source_publication_leg_generation')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('source_publication_generation')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('source_publication_route_commit_generation')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('source_publication_route_commit_generation_present')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('source_publication_target_route')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('source_publication_target_protocol_version')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('source_publication_target_transport')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('source_publication_action_kind')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('source_publication_reason')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('data_session_identity')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('data_session_generation')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('hold_data_session_identity')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('hold_data_session_generation'))
+                ) -join '|'
+            })
+            if ($groups.Count -ne 1) {
+                return @()
+            }
+
+            [object[]]$accepted = @($groups[0].Group | Where-Object {
+                (Get-FallbackTailRecheckExactField `
+                    -Event $_ `
+                    -Names @('decision_status')) -eq 'Accepted'
+            })
+            if ($accepted.Count -ne 1) {
+                return @()
+            }
+
+            # Accepted and exact idempotent compatibility projections describe
+            # one immutable binding. Preserve the earliest accepted chronology.
+            return @($groups[0].Group | Sort-Object `
+                @{ Expression = {
+                    if ((Get-FallbackTailRecheckExactField `
+                            -Event $_ `
+                            -Names @('decision_status')) -eq 'Accepted') { 0 } else { 1 }
+                } },
+                Sequence,
+                LineNumber | Select-Object -First 1)
+        }
+
+        # Sparse compatibility telemetry has no immutable release/data-session
+        # identity. It is authoritative only as one unique legacy projection.
+        [object[]]$legacy = @($Candidates | Where-Object {
+            $_.EventName -eq 'runtime_unlock_retry_dispatch_fallback_tail_hold_bound'
+        })
+        if ($legacy.Count -eq 1) {
+            return @($legacy[0])
+        }
+
+        return @()
+    }
+
     function Test-FallbackTailRecheckRequestMatch {
         param(
             [Parameter(Mandatory = $true)]$Hold,
@@ -26860,6 +27204,8 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
             [pscustomobject]@{ Hold = @('missing_dispatch_successor_generation'); Decision = @('missing_dispatch_successor_generation', 'request_missing_dispatch_successor_generation') },
             [pscustomobject]@{ Hold = @('predecessor_authority_id'); Decision = @('predecessor_authority_id', 'request_predecessor_authority_id') },
             [pscustomobject]@{ Hold = @('request_active_predecessor_supersession'); Decision = @('request_active_predecessor_supersession') },
+            [pscustomobject]@{ Hold = @('listener_rearm_requirement'); Decision = @('listener_rearm_requirement') },
+            [pscustomobject]@{ Hold = @('listener_execution_mode'); Decision = @('listener_execution_mode') },
             [pscustomobject]@{ Hold = @('retry_reason'); Decision = @('retry_reason') },
             [pscustomobject]@{ Hold = @('recovery_reason'); Decision = @('recovery_reason') },
             [pscustomobject]@{ Hold = @('regular_v4_liveness_generation'); Decision = @('regular_v4_liveness_generation') },
@@ -26881,6 +27227,192 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
             if ([string]::IsNullOrWhiteSpace($holdValue) -or
                 [string]::IsNullOrWhiteSpace($decisionValue) -or
                 -not [string]::Equals($holdValue, $decisionValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-FallbackTailEffectiveGrantMatchesHold {
+        param(
+            [Parameter(Mandatory = $true)]$Grant,
+            [Parameter(Mandatory = $true)]$Hold
+        )
+
+        if (-not (Test-FallbackTailRecheckIdentityMatch -Left $Grant -Right $Hold) -or
+            (Get-FallbackTailRecheckExactField -Event $Grant -Names @('direction')) -ne 'outbound') {
+            return $false
+        }
+
+        foreach ($aliases in @(
+                [pscustomobject]@{ Hold = @('contract_generation'); Grant = @('contract_generation') },
+                [pscustomobject]@{ Hold = @('retired_generation'); Grant = @('retired_generation') },
+                [pscustomobject]@{ Hold = @('dispatch_attempt_generation'); Grant = @('dispatch_attempt_generation') },
+                [pscustomobject]@{ Hold = @('missing_dispatch_successor_generation'); Grant = @('missing_dispatch_successor_generation') },
+                [pscustomobject]@{ Hold = @('predecessor_authority_id'); Grant = @('predecessor_authority_id') },
+                [pscustomobject]@{ Hold = @('request_active_predecessor_supersession'); Grant = @('request_active_predecessor_supersession') },
+                [pscustomobject]@{ Hold = @('listener_rearm_requirement'); Grant = @('listener_rearm_requirement') },
+                [pscustomobject]@{ Hold = @('listener_execution_mode'); Grant = @('listener_execution_mode') },
+                [pscustomobject]@{ Hold = @('retry_reason'); Grant = @('retry_reason') },
+                [pscustomobject]@{ Hold = @('recovery_reason'); Grant = @('recovery_reason') },
+                [pscustomobject]@{ Hold = @('regular_v4_liveness_generation'); Grant = @('request_regular_v4_liveness_generation') },
+                [pscustomobject]@{ Hold = @('bridge_decision_generation'); Grant = @('request_bridge_decision_generation') },
+                [pscustomobject]@{ Hold = @('source_session_id'); Grant = @('source_publication_session_id') },
+                [pscustomobject]@{ Hold = @('source_transfer_id'); Grant = @('source_publication_transfer_id') },
+                [pscustomobject]@{ Hold = @('source_direction'); Grant = @('source_publication_direction') },
+                [pscustomobject]@{ Hold = @('source_route'); Grant = @('source_publication_route') },
+                [pscustomobject]@{ Hold = @('source_protocol_version'); Grant = @('source_publication_protocol_version') },
+                [pscustomobject]@{ Hold = @('source_live_route_epoch'); Grant = @('source_publication_live_route_epoch') },
+                [pscustomobject]@{ Hold = @('source_runtime_generation'); Grant = @('source_publication_runtime_generation') },
+                [pscustomobject]@{ Hold = @('source_terminal_generation'); Grant = @('source_publication_terminal_generation') },
+                [pscustomobject]@{ Hold = @('source_leg_generation'); Grant = @('source_publication_leg_generation') },
+                [pscustomobject]@{ Hold = @('source_route_publication_generation'); Grant = @('source_publication_generation') },
+                [pscustomobject]@{ Hold = @('source_target_route'); Grant = @('source_publication_target_route') },
+                [pscustomobject]@{ Hold = @('source_target_protocol_version'); Grant = @('source_publication_target_protocol_version') },
+                [pscustomobject]@{ Hold = @('source_target_transport'); Grant = @('source_publication_target_transport') },
+                [pscustomobject]@{ Hold = @('source_route_publication_action_kind'); Grant = @('source_publication_action_kind') },
+                [pscustomobject]@{ Hold = @('source_coordinator_decision_reason'); Grant = @('source_publication_reason') })) {
+            $holdValue = Get-FallbackTailRecheckExactField -Event $Hold -Names $aliases.Hold
+            $grantValue = Get-FallbackTailRecheckExactField -Event $Grant -Names $aliases.Grant
+            if ([string]::IsNullOrWhiteSpace($holdValue) -or
+                [string]::IsNullOrWhiteSpace($grantValue) -or
+                -not [string]::Equals(
+                    $holdValue,
+                    $grantValue,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        $holdRouteCommitPresent = Get-FallbackTailRecheckExactField `
+            -Event $Hold `
+            -Names @('source_route_commit_generation_present')
+        $holdRouteCommit = Get-FallbackTailRecheckExactField `
+            -Event $Hold `
+            -Names @('source_route_commit_generation')
+        $grantRouteCommit = Get-FallbackTailRecheckExactField `
+            -Event $Grant `
+            -Names @('source_publication_route_commit_generation')
+        if ($holdRouteCommitPresent -eq '1') {
+            if ($holdRouteCommit -ne $grantRouteCommit) { return $false }
+        }
+        elseif ($holdRouteCommitPresent -ne '0' -or
+            $grantRouteCommit -notin @('0', '(none)', 'none')) {
+            return $false
+        }
+
+        return $true
+    }
+
+    function Test-FallbackTailPairedRetryQueueMatchesHold {
+        param(
+            [Parameter(Mandatory = $true)]$Queue,
+            [Parameter(Mandatory = $true)]$Hold
+        )
+
+        if (-not (Test-FallbackTailRecheckIdentityMatch -Left $Queue -Right $Hold) -or
+            (Get-FallbackTailRecheckExactField -Event $Queue -Names @('direction')) -ne 'outbound') {
+            return $false
+        }
+
+        foreach ($aliases in @(
+                [pscustomobject]@{ Hold = @('contract_generation'); Queue = @('recovery_contract_generation') },
+                [pscustomobject]@{ Hold = @('retired_generation'); Queue = @('retired_offer_generation') },
+                [pscustomobject]@{ Hold = @('dispatch_attempt_generation'); Queue = @('dispatch_attempt_generation') },
+                [pscustomobject]@{ Hold = @('missing_dispatch_successor_generation'); Queue = @('missing_dispatch_successor_generation') },
+                [pscustomobject]@{ Hold = @('predecessor_authority_id'); Queue = @('predecessor_authority_id') },
+                [pscustomobject]@{ Hold = @('request_active_predecessor_supersession'); Queue = @('request_active_predecessor_supersession') },
+                [pscustomobject]@{ Hold = @('source_route'); Queue = @('source_route') },
+                [pscustomobject]@{ Hold = @('source_protocol_version'); Queue = @('source_protocol_version') },
+                [pscustomobject]@{ Hold = @('source_live_route_epoch'); Queue = @('source_live_route_epoch') },
+                [pscustomobject]@{ Hold = @('source_runtime_generation'); Queue = @('source_runtime_generation') },
+                [pscustomobject]@{ Hold = @('source_terminal_generation'); Queue = @('source_terminal_generation') },
+                [pscustomobject]@{ Hold = @('source_leg_generation'); Queue = @('source_leg_generation') },
+                [pscustomobject]@{ Hold = @('source_route_publication_generation'); Queue = @('source_route_publication_generation') })) {
+            $holdValue = Get-FallbackTailRecheckExactField -Event $Hold -Names $aliases.Hold
+            $queueValue = Get-FallbackTailRecheckExactField -Event $Queue -Names $aliases.Queue
+            if ([string]::IsNullOrWhiteSpace($holdValue) -or
+                [string]::IsNullOrWhiteSpace($queueValue) -or
+                -not [string]::Equals(
+                    $holdValue,
+                    $queueValue,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        $holdRouteCommitPresent = Get-FallbackTailRecheckExactField `
+            -Event $Hold `
+            -Names @('source_route_commit_generation_present')
+        $holdRouteCommit = Get-FallbackTailRecheckExactField `
+            -Event $Hold `
+            -Names @('source_route_commit_generation')
+        $queueRouteCommit = Get-FallbackTailRecheckExactField `
+            -Event $Queue `
+            -Names @('source_route_commit_generation')
+        if ($holdRouteCommitPresent -eq '1') {
+            return $holdRouteCommit -eq $queueRouteCommit
+        }
+
+        return $holdRouteCommitPresent -eq '0' -and
+            $queueRouteCommit -in @('0', '(none)', 'none')
+    }
+
+    function Test-FallbackTailRepairUnblockRequestedMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Hold,
+            [Parameter(Mandatory = $true)]$Requested
+        )
+
+        if (-not (Test-FallbackTailRecheckIdentityMatch -Left $Hold -Right $Requested) -or
+            (Get-FallbackTailRecheckExactField -Event $Requested -Names @('direction')) -ne 'outbound' -or
+            (Get-FallbackTailRecheckExactField -Event $Requested -Names @('recheck_generation')) -notmatch
+                '^[1-9][0-9]*$' -or
+            (Get-FallbackTailRecheckExactField -Event $Requested -Names @('queue_generation')) -notmatch
+                '^[1-9][0-9]*$' -or
+            (Get-FallbackTailRecheckExactField -Event $Requested -Names @('decision_status')) -ne 'Queued') {
+            return $false
+        }
+
+        foreach ($aliases in @(
+                [pscustomobject]@{ Hold = @('contract_generation'); Requested = @('contract_generation') },
+                [pscustomobject]@{ Hold = @('retired_generation'); Requested = @('retired_generation') },
+                [pscustomobject]@{ Hold = @('dispatch_attempt_generation'); Requested = @('dispatch_attempt_generation') },
+                [pscustomobject]@{ Hold = @('missing_dispatch_successor_generation'); Requested = @('missing_dispatch_successor_generation') },
+                [pscustomobject]@{ Hold = @('predecessor_authority_id'); Requested = @('predecessor_authority_id') },
+                [pscustomobject]@{ Hold = @('request_active_predecessor_supersession'); Requested = @('request_active_predecessor_supersession') },
+                [pscustomobject]@{ Hold = @('listener_rearm_requirement'); Requested = @('listener_rearm_requirement') },
+                [pscustomobject]@{ Hold = @('listener_execution_mode'); Requested = @('listener_execution_mode') },
+                [pscustomobject]@{ Hold = @('retry_reason'); Requested = @('retry_reason') },
+                [pscustomobject]@{ Hold = @('recovery_reason'); Requested = @('recovery_reason') },
+                [pscustomobject]@{ Hold = @('regular_v4_liveness_generation'); Requested = @('regular_v4_liveness_generation') },
+                [pscustomobject]@{ Hold = @('bridge_decision_generation'); Requested = @('bridge_decision_generation') },
+                [pscustomobject]@{ Hold = @('source_session_id', 'source_publication_session_id', 'attempted_source_publication_session_id'); Requested = @('source_session_id') },
+                [pscustomobject]@{ Hold = @('source_transfer_id', 'source_publication_transfer_id', 'attempted_source_publication_transfer_id'); Requested = @('source_transfer_id') },
+                [pscustomobject]@{ Hold = @('source_direction', 'source_publication_direction', 'attempted_source_publication_direction'); Requested = @('source_direction') },
+                [pscustomobject]@{ Hold = @('source_route', 'source_publication_route', 'attempted_source_publication_route'); Requested = @('source_route') },
+                [pscustomobject]@{ Hold = @('source_protocol_version', 'source_publication_protocol_version', 'attempted_source_publication_protocol_version'); Requested = @('source_protocol_version') },
+                [pscustomobject]@{ Hold = @('source_live_route_epoch', 'source_publication_live_route_epoch', 'attempted_source_publication_live_route_epoch'); Requested = @('source_live_route_epoch') },
+                [pscustomobject]@{ Hold = @('source_runtime_generation', 'source_publication_runtime_generation', 'attempted_source_publication_runtime_generation'); Requested = @('source_runtime_generation') },
+                [pscustomobject]@{ Hold = @('source_terminal_generation', 'source_publication_terminal_generation', 'attempted_source_publication_terminal_generation'); Requested = @('source_terminal_generation') },
+                [pscustomobject]@{ Hold = @('source_leg_generation', 'source_publication_leg_generation', 'attempted_source_publication_leg_generation'); Requested = @('source_leg_generation') },
+                [pscustomobject]@{ Hold = @('source_route_publication_generation', 'source_publication_generation', 'attempted_source_publication_route_publication_generation'); Requested = @('source_route_publication_generation') },
+                [pscustomobject]@{ Hold = @('source_route_commit_generation', 'source_publication_route_commit_generation', 'attempted_source_publication_route_commit_generation'); Requested = @('source_route_commit_generation') },
+                [pscustomobject]@{ Hold = @('source_route_commit_generation_present', 'source_publication_route_commit_generation_present', 'attempted_source_publication_route_commit_generation_present'); Requested = @('source_route_commit_generation_present') },
+                [pscustomobject]@{ Hold = @('source_target_route', 'source_publication_target_route', 'attempted_source_publication_target_route'); Requested = @('source_target_route') },
+                [pscustomobject]@{ Hold = @('source_target_protocol_version', 'source_publication_target_protocol_version', 'attempted_source_publication_target_protocol_version'); Requested = @('source_target_protocol_version') },
+                [pscustomobject]@{ Hold = @('source_target_transport', 'source_publication_target_transport', 'attempted_source_publication_target_transport'); Requested = @('source_target_transport') },
+                [pscustomobject]@{ Hold = @('source_route_publication_action_kind', 'source_publication_action_kind', 'attempted_source_publication_route_publication_action_kind'); Requested = @('source_route_publication_action_kind') },
+                [pscustomobject]@{ Hold = @('source_coordinator_decision_reason', 'source_publication_reason', 'attempted_source_publication_coordinator_decision_reason'); Requested = @('source_coordinator_decision_reason') })) {
+            $holdValue = Get-FallbackTailRecheckExactField -Event $Hold -Names $aliases.Hold
+            $requestedValue = Get-FallbackTailRecheckExactField -Event $Requested -Names $aliases.Requested
+            if ([string]::IsNullOrWhiteSpace($holdValue) -or
+                [string]::IsNullOrWhiteSpace($requestedValue) -or
+                -not [string]::Equals(
+                    $holdValue,
+                    $requestedValue,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
                 return $false
             }
         }
@@ -27358,6 +27890,14 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
     $fallbackRepairSettlementDistinct = New-Object System.Collections.Generic.List[object]
     $fallbackRepairSettlementRecovered = New-Object System.Collections.Generic.List[object]
     $fallbackRepairSettlementUnresolved = New-Object System.Collections.Generic.List[object]
+    $fallbackRepairHoldBindingRaw = New-Object System.Collections.Generic.List[object]
+    $fallbackRepairHoldBindingDistinct = New-Object System.Collections.Generic.List[object]
+    $fallbackRepairHoldBindingRecovered = New-Object System.Collections.Generic.List[object]
+    $fallbackRepairHoldBindingUnresolved = New-Object System.Collections.Generic.List[object]
+    $fallbackRepairSettlementAfterBoundHoldRaw = New-Object System.Collections.Generic.List[object]
+    $fallbackRepairSettlementAfterBoundHoldDistinct = New-Object System.Collections.Generic.List[object]
+    $fallbackRepairSettlementAfterBoundHoldRecovered = New-Object System.Collections.Generic.List[object]
+    $fallbackRepairSettlementAfterBoundHoldUnresolved = New-Object System.Collections.Generic.List[object]
     $seenFallbackRepairSettlementKeys = @{}
     foreach ($settlement in $fallbackRepairSettledEvents) {
         $settlementSequence = [int64]$settlement.Sequence
@@ -27420,7 +27960,8 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
             (Get-FallbackTailRecheckField -Event $_ -Names @('retired_offer_generation')) -eq
                 (Get-FallbackTailRecheckField -Event $hold[0] -Names @('retired_generation')) -and
             (Get-FallbackTailRecheckField -Event $_ -Names @('dispatch_attempt_generation')) -eq
-                (Get-FallbackTailRecheckField -Event $hold[0] -Names @('dispatch_attempt_generation'))
+                (Get-FallbackTailRecheckField -Event $hold[0] -Names @('dispatch_attempt_generation')) -and
+            (Test-FallbackTailPairedRetryQueueMatchesHold -Queue $_ -Hold $hold[0])
         } | Sort-Object Sequence | Select-Object -First 1)
         if ($queue.Count -ne 1) { continue }
 
@@ -27451,6 +27992,190 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
         if ($paired.Count -ne 1) { continue }
 
         $repairAuthority = Get-FallbackTailRecheckField -Event $settlement -Names @('authority_id')
+        $scopeRepairGrants = @($fallbackRepairGrantedEvents | Where-Object {
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $writerId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('live_route_epoch')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('live_route_epoch')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('runtime_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('runtime_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('terminal_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('terminal_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('leg_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('leg_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transport_epoch')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('transport_epoch')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('bridge_recovery_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('bridge_recovery_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('bridge_decision_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('bridge_decision_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('checkpoint_request_id') -Default '(none)') -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('checkpoint_request_id') -Default '(none)') -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('route_publication_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('route_publication_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('route_commit_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('route_commit_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('target_transport')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('target_transport'))
+        } | Sort-Object Sequence)
+        $repairGrantByAuthority = @{}
+        $repairGrantAuthorityAmbiguous = $false
+        foreach ($grant in $scopeRepairGrants) {
+            $grantAuthority = Get-FallbackTailRecheckField -Event $grant -Names @('authority_id')
+            if (-not [string]::IsNullOrWhiteSpace($grantAuthority)) {
+                $grantKey = $grantAuthority.ToLowerInvariant()
+                if ($repairGrantByAuthority.ContainsKey($grantKey)) {
+                    $repairGrantAuthorityAmbiguous = $true
+                    break
+                }
+                $repairGrantByAuthority[$grantKey] = $grant
+            }
+        }
+        if ($repairGrantAuthorityAmbiguous) { continue }
+        $lineageAuthorityIds = @{}
+        $lineageAuthority = $repairAuthority
+        $lineageSteps = 0
+        $lineageValid = $true
+        while (-not [string]::IsNullOrWhiteSpace($lineageAuthority) -and
+            $lineageAuthority -notin @('(none)', 'none') -and
+            $lineageSteps -lt 32) {
+            $lineageKey = $lineageAuthority.ToLowerInvariant()
+            if ($lineageAuthorityIds.ContainsKey($lineageKey)) {
+                $lineageValid = $false
+                break
+            }
+            $lineageAuthorityIds[$lineageKey] = $true
+            $lineageSteps++
+            if ($lineageSteps -eq 1) {
+                $lineageAuthority = Get-FallbackTailRecheckField `
+                    -Event $settlement `
+                    -Names @('predecessor_authority_id') `
+                    -Default '(none)'
+            }
+            elseif ($repairGrantByAuthority.ContainsKey($lineageKey)) {
+                $lineageAuthority = Get-FallbackTailRecheckField `
+                    -Event $repairGrantByAuthority[$lineageKey] `
+                    -Names @('predecessor_authority_id') `
+                    -Default '(none)'
+            }
+            else {
+                $lineageValid = $false
+                break
+            }
+        }
+        if ($lineageSteps -ge 32 -and $lineageAuthority -notin @('', '(none)', 'none')) {
+            $lineageValid = $false
+        }
+        if ($lineageValid) {
+            foreach ($lineageKey in @($lineageAuthorityIds.Keys)) {
+                $forks = @($scopeRepairGrants | Where-Object {
+                    [int64]$_.Sequence -lt $settlementSequence -and
+                    (Get-FallbackTailRecheckField -Event $_ -Names @('predecessor_authority_id') -Default '(none)').ToLowerInvariant() -eq
+                        $lineageKey
+                })
+                if ($forks.Count -gt 1) {
+                    $lineageValid = $false
+                    break
+                }
+            }
+        }
+        if ($lineageValid) {
+            foreach ($childKey in @($lineageAuthorityIds.Keys)) {
+                if (-not $repairGrantByAuthority.ContainsKey($childKey)) { continue }
+                $childGrant = $repairGrantByAuthority[$childKey]
+                $parentAuthority = Get-FallbackTailRecheckField `
+                    -Event $childGrant `
+                    -Names @('predecessor_authority_id') `
+                    -Default '(none)'
+                if ($parentAuthority -in @('', '(none)', 'none')) { continue }
+
+                $hopSettlements = @($fallbackRepairAllSettledEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$childGrant.Sequence -and
+                    [int64]$_.Sequence -lt $settlementSequence -and
+                    (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $writerId -and
+                    (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+                    (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+                    (Get-FallbackTailRecheckField -Event $_ -Names @('authority_id')) -eq $parentAuthority -and
+                    (Get-FallbackTailRecheckField -Event $_ -Names @('successor_authority_id')) -eq
+                        (Get-FallbackTailRecheckField -Event $childGrant -Names @('authority_id')) -and
+                    (Get-FallbackTailRecheckField -Event $_ -Names @('settlement_outcome')) -eq 'Superseded' -and
+                    (Get-FallbackTailRecheckField -Event $_ -Names @('live_route_epoch')) -eq
+                        (Get-FallbackTailRecheckField -Event $settlement -Names @('live_route_epoch')) -and
+                    (Get-FallbackTailRecheckField -Event $_ -Names @('runtime_generation')) -eq
+                        (Get-FallbackTailRecheckField -Event $settlement -Names @('runtime_generation')) -and
+                    (Get-FallbackTailRecheckField -Event $_ -Names @('terminal_generation')) -eq
+                        (Get-FallbackTailRecheckField -Event $settlement -Names @('terminal_generation')) -and
+                    (Get-FallbackTailRecheckField -Event $_ -Names @('leg_generation')) -eq
+                        (Get-FallbackTailRecheckField -Event $settlement -Names @('leg_generation')) -and
+                    (Get-FallbackTailRecheckField -Event $_ -Names @('transport_epoch')) -eq
+                        (Get-FallbackTailRecheckField -Event $settlement -Names @('transport_epoch')) -and
+                    (Get-FallbackTailRecheckField -Event $_ -Names @('bridge_recovery_generation')) -eq
+                        (Get-FallbackTailRecheckField -Event $settlement -Names @('bridge_recovery_generation')) -and
+                    (Get-FallbackTailRecheckField -Event $_ -Names @('bridge_decision_generation')) -eq
+                        (Get-FallbackTailRecheckField -Event $settlement -Names @('bridge_decision_generation')) -and
+                    (Get-FallbackTailRecheckField -Event $_ -Names @('checkpoint_request_id') -Default '(none)') -eq
+                        (Get-FallbackTailRecheckField -Event $settlement -Names @('checkpoint_request_id') -Default '(none)') -and
+                    (Get-FallbackTailRecheckField -Event $_ -Names @('route_publication_generation')) -eq
+                        (Get-FallbackTailRecheckField -Event $settlement -Names @('route_publication_generation')) -and
+                    (Get-FallbackTailRecheckField -Event $_ -Names @('route_commit_generation')) -eq
+                        (Get-FallbackTailRecheckField -Event $settlement -Names @('route_commit_generation')) -and
+                    (Get-FallbackTailRecheckField -Event $_ -Names @('target_transport')) -eq
+                        (Get-FallbackTailRecheckField -Event $settlement -Names @('target_transport'))
+                })
+                if ($hopSettlements.Count -ne 1) {
+                    $lineageValid = $false
+                    break
+                }
+            }
+        }
+        if (-not $lineageValid) { continue }
+        $blockingRepairAtHold = @($scopeRepairGrants | Where-Object {
+            [int64]$_.Sequence -lt [int64]$hold[0].Sequence -and
+            $lineageAuthorityIds.ContainsKey(
+                (Get-FallbackTailRecheckField -Event $_ -Names @('authority_id')).ToLowerInvariant())
+        } | Sort-Object Sequence -Descending | Select-Object -First 1)
+        if ($blockingRepairAtHold.Count -ne 1) { continue }
+
+        $requestBeforeHold = @($pairedRetryRequestedEvents | Where-Object {
+            [int64]$_.Sequence -lt [int64]$hold[0].Sequence -and
+            [int64]$_.Sequence -gt [int64]$paired[0].Sequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $writerId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('authority_id')) -eq $pairAuthority -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('recovery_contract_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $hold[0] -Names @('contract_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('retired_offer_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $hold[0] -Names @('retired_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('dispatch_attempt_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $hold[0] -Names @('dispatch_attempt_generation')) -and
+            (Test-FallbackTailPairedRetryQueueMatchesHold -Queue $_ -Hold $hold[0])
+        } | Sort-Object Sequence -Descending | Select-Object -First 1)
+        if ($requestBeforeHold.Count -ne 1) { continue }
+        $finalRepairGrant = @($scopeRepairGrants | Where-Object {
+            (Get-FallbackTailRecheckField -Event $_ -Names @('authority_id')) -eq $repairAuthority -and
+            [int64]$_.Sequence -lt $settlementSequence
+        } | Sort-Object Sequence -Descending | Select-Object -First 1)
+        if ($finalRepairGrant.Count -ne 1) { continue }
+        $bindingLowerBoundSequence = [Math]::Max(
+            [int64]$requestBeforeHold[0].Sequence,
+            [int64]$finalRepairGrant[0].Sequence)
+        $matchingHoldBindingCandidates = @($fallbackTailHoldBoundEvents | Where-Object {
+            [int64]$_.Sequence -gt $bindingLowerBoundSequence -and
+            [int64]$_.Sequence -lt $settlementSequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $writerId -and
+            (Test-FallbackRepairHoldBindingMatch `
+                -Binding $_ `
+                -RepairGrant $finalRepairGrant[0] `
+                -Settlement $settlement `
+                -Hold $hold[0] `
+                -Request $requestBeforeHold[0] `
+                -PairAuthority $pairAuthority)
+        } | Sort-Object Sequence)
+        $matchingHoldBinding = @(Get-CanonicalFallbackRepairHoldBinding `
+            -Candidates $matchingHoldBindingCandidates)
+        $holdWasBound = $matchingHoldBinding.Count -eq 1
         $candidateKey = @(
             $writerId, $sessionId, $transferId, $pairAuthority, $repairAuthority,
             (Get-FallbackTailRecheckField -Event $queue[0] -Names @('recovery_contract_generation')),
@@ -27462,50 +28187,407 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
         $fallbackRepairSettlementDistinct.Add($candidate) | Out-Null
         $rawCandidates.Add($candidate) | Out-Null
         $distinctCandidates.Add($candidate) | Out-Null
+        if ($holdWasBound) {
+            $fallbackRepairSettlementAfterBoundHoldRaw.Add($candidate) | Out-Null
+            $fallbackRepairSettlementAfterBoundHoldDistinct.Add($candidate) | Out-Null
+        }
+        else {
+            $fallbackRepairHoldBindingRaw.Add($candidate) | Out-Null
+            $fallbackRepairHoldBindingDistinct.Add($candidate) | Out-Null
+        }
 
-        $recheck = @($recheckRequestedEvents | Where-Object {
-            [int64]$_.Sequence -gt [int64]$candidate.Sequence -and
-            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
-            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
-            (Get-FallbackTailRecheckField -Event $_ -Names @('direction')) -eq 'outbound'
-        } | Sort-Object Sequence | Select-Object -First 1)
-        $republished = @($authorityPublishedEvents | Where-Object {
-            $recheck.Count -eq 1 -and
-            [int64]$_.Sequence -gt [int64]$recheck[0].Sequence -and
+        $recheckCandidates = @($recheckRequestedEvents | Where-Object {
+            # The coordinator emits the typed recheck synchronously from the
+            # terminal repair settlement. It may therefore precede the later
+            # ordinary Core queue that exposes the missing-edge symptom.
+            [int64]$_.Sequence -gt $settlementSequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $writerId -and
             (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
             (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
             (Get-FallbackTailRecheckField -Event $_ -Names @('direction')) -eq 'outbound' -and
-            (Get-FallbackTailRecheckField -Event $_ -Names @('contract_generation')) -eq
-                (Get-FallbackTailRecheckField -Event $hold[0] -Names @('contract_generation'))
-        } | Sort-Object Sequence | Select-Object -First 1)
-        $releaseEvents = @($releaseReservationEvents | Where-Object {
-            $republished.Count -eq 1 -and
-            [int64]$_.Sequence -gt [int64]$republished[0].Sequence -and
-            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
-            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
-            (Get-FallbackTailRecheckField -Event $_ -Names @('direction')) -eq 'outbound'
+            (Get-FallbackTailRecheckField -Event $_ -Names @('recheck_generation')) -match '^[1-9][0-9]*$' -and
+            (Test-FallbackTailRepairUnblockRequestedMatch `
+                -Hold $hold[0] `
+                -Requested $_)
         } | Sort-Object Sequence)
-        $prepared = @($fallbackToTunaPreparedEvents | Where-Object {
-            $releaseEvents.Count -gt 0 -and
-            [int64]$_.Sequence -gt [int64]$releaseEvents[-1].Sequence -and
+        $recheck = @(Get-CanonicalFallbackTailEvidence `
+            -Candidates $recheckCandidates `
+            -IdentityFields @(
+                'log_writer_id', 'session_id', 'transfer_id', 'direction',
+                'contract_generation', 'retired_generation',
+                'dispatch_attempt_generation', 'missing_dispatch_successor_generation',
+                'predecessor_authority_id', 'request_active_predecessor_supersession',
+                'listener_rearm_requirement', 'listener_execution_mode',
+                'retry_reason', 'recovery_reason', 'regular_v4_liveness_generation',
+                'bridge_decision_generation', 'source_session_id', 'source_transfer_id',
+                'source_direction', 'source_route', 'source_protocol_version',
+                'source_live_route_epoch', 'source_runtime_generation',
+                'source_terminal_generation', 'source_leg_generation',
+                'source_route_publication_generation',
+                'source_route_commit_generation',
+                'source_route_commit_generation_present', 'source_target_route',
+                'source_target_protocol_version', 'source_target_transport',
+                'source_route_publication_action_kind',
+                'source_coordinator_decision_reason', 'recheck_generation',
+                'queue_generation'))
+        $republished = @($authorityPublishedEvents | Where-Object {
+            $recheck.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$recheck[0].Sequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $writerId -and
             (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
             (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
-            (Get-FallbackTailRecheckField -Event $_ -Names @('direction')) -eq 'outbound'
-        } | Select-Object -First 1)
-        $hasReservation = @($releaseEvents | Where-Object {
-            $_.EventName -eq 'filetransfer_fallback_tail_paired_release_reserved'
-        }).Count -gt 0
-        $hasConsumption = @($releaseEvents | Where-Object {
-            $_.EventName -eq 'filetransfer_fallback_tail_paired_release_consumed'
-        }).Count -gt 0
-        if ($recheck.Count -eq 1 -and $republished.Count -eq 1 -and
-            $hasReservation -and $hasConsumption -and $prepared.Count -eq 1) {
+            (Get-FallbackTailRecheckField -Event $_ -Names @('direction')) -eq 'outbound' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('queue_generation')) -match
+                '^[1-9][0-9]*$' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('queue_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $recheck[0] -Names @('queue_generation')) -and
+            (Test-FallbackTailRecheckRequestMatch `
+                -Hold $hold[0] `
+                -Decision $_ `
+                -DecisionKind Hold)
+        } | Sort-Object Sequence | Select-Object -First 1)
+        $recoveryHoldBindingCandidates = @($fallbackTailHoldBoundEvents | Where-Object {
+            $recheck.Count -eq 1 -and
+            $_.EventName -eq 'runtime_unlock_retry_dispatch_fallback_tail_hold_binding_decided' -and
+            [int64]$_.Sequence -gt $bindingLowerBoundSequence -and
+            [int64]$_.Sequence -lt [int64]$recheck[0].Sequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $writerId -and
+            (Test-FallbackRepairHoldBindingMatch `
+                -Binding $_ `
+                -RepairGrant $finalRepairGrant[0] `
+                -Settlement $settlement `
+                -Hold $hold[0] `
+                -Request $requestBeforeHold[0] `
+                -PairAuthority $pairAuthority)
+        } | Sort-Object `
+            @{ Expression = {
+                if ((Get-FallbackTailRecheckField -Event $_ -Names @('decision_status')) -eq
+                    'Accepted') { 0 } else { 1 }
+            } },
+            Sequence)
+        $recoveryHoldBinding = @(Get-CanonicalFallbackRepairHoldBinding `
+            -Candidates $recoveryHoldBindingCandidates)
+        $releaseAuthority = if ($recoveryHoldBinding.Count -eq 1) {
+            Get-FallbackTailRecheckField -Event $recoveryHoldBinding[0] -Names @('release_authority_id')
+        }
+        else { '' }
+        $releaseGeneration = if ($recoveryHoldBinding.Count -eq 1) {
+            Get-FallbackTailRecheckField -Event $recoveryHoldBinding[0] -Names @('release_generation')
+        }
+        else { '' }
+        $recheckDecisionCandidates = @($recheckDecidedEvents | Where-Object {
+            $recheck.Count -eq 1 -and $republished.Count -eq 1 -and
+            $recoveryHoldBinding.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$recheck[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$republished[0].Sequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $writerId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('direction')) -eq 'outbound' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('authority_id')) -eq $releaseAuthority -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('release_generation')) -eq $releaseGeneration -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('repair_authority_id')) -eq $repairAuthority -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('repair_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $finalRepairGrant[0] -Names @('repair_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('hold_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $recoveryHoldBinding[0] -Names @('hold_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('recheck_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $recheck[0] -Names @('recheck_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('decision_status')) -in @(
+                'Accepted', 'Applied', 'Idempotent')
+        } | Sort-Object Sequence)
+        $recheckDecision = @()
+        $recheckDecisionGroups = @($recheckDecisionCandidates | Group-Object -Property {
+            @(
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('log_writer_id')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('session_id')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('transfer_id')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('direction')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('authority_id')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('release_generation')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('repair_authority_id')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('repair_generation')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('hold_generation')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('recheck_generation'))
+            ) -join '|'
+        })
+        if ($recheckDecisionGroups.Count -eq 1) {
+            $recheckDecision = @($recheckDecisionGroups[0].Group | Sort-Object `
+                @{ Expression = {
+                    if ((Get-FallbackTailRecheckExactField `
+                            -Event $_ `
+                            -Names @('decision_status')) -eq 'Accepted') { 0 } else { 1 }
+                } },
+                Sequence,
+                LineNumber | Select-Object -First 1)
+        }
+        $reservation = @($releaseReservationEvents | Where-Object {
+            $republished.Count -eq 1 -and
+            $_.EventName -eq 'filetransfer_fallback_tail_paired_release_reserved' -and
+            [int64]$_.Sequence -gt [int64]$republished[0].Sequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $writerId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('direction')) -eq 'outbound' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('authority_id')) -eq $releaseAuthority -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('pairing_generation')) -eq $releaseGeneration -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('decision_status')) -in @('Accepted', 'Applied', 'Idempotent')
+        } | Sort-Object Sequence | Select-Object -First 1)
+        $effectiveGrantCandidates = @($EffectiveGrantEvents | Where-Object {
+            $reservation.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$reservation[0].Sequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $writerId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('direction')) -eq 'outbound' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('authority_id')) -eq
+                (Get-FallbackTailRecheckField -Event $reservation[0] -Names @('retry_authority_id')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('contract_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $hold[0] -Names @('contract_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('retired_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $hold[0] -Names @('retired_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('dispatch_attempt_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $hold[0] -Names @('dispatch_attempt_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('release_kind')) -eq 'FallbackPairedTailYield' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('release_authority_id')) -eq $releaseAuthority -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('release_generation')) -eq $releaseGeneration -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('route')) -eq 'post_tuna_fallback_v6' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('protocol_version')) -eq '6' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('live_route_epoch')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('live_route_epoch')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('runtime_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('runtime_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('terminal_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('terminal_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('leg_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('leg_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transport_epoch')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('transport_epoch')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('bridge_recovery_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('bridge_recovery_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('route_publication_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('route_publication_generation')) -and
+            (Test-FallbackTailEffectiveGrantMatchesHold -Grant $_ -Hold $hold[0])
+        } | Sort-Object Sequence)
+        $effectiveGrant = @()
+        $effectiveGrantGroups = @($effectiveGrantCandidates | Group-Object -Property {
+            @(
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('log_writer_id')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('session_id')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('transfer_id')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('direction')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('authority_id')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('authority_generation')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('install_generation')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('contract_generation')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('retired_generation')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('dispatch_attempt_generation')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('missing_dispatch_successor_generation')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('release_authority_id')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('release_generation')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('route')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('live_route_epoch')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('runtime_generation')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('terminal_generation')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('leg_generation')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('transport_epoch')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('bridge_recovery_generation')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('route_publication_generation')),
+                (Get-FallbackTailRecheckExactField -Event $_ -Names @('data_session_generation'))
+            ) -join '|'
+        })
+        if ($effectiveGrantGroups.Count -eq 1) {
+            $effectiveGrant = @($effectiveGrantGroups[0].Group |
+                Sort-Object Sequence, LineNumber |
+                Select-Object -First 1)
+        }
+        $consumption = @($releaseReservationEvents | Where-Object {
+            $reservation.Count -eq 1 -and $effectiveGrant.Count -eq 1 -and
+            $_.EventName -eq 'filetransfer_fallback_tail_paired_release_consumed' -and
+            [int64]$_.Sequence -gt [int64]$effectiveGrant[0].Sequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $writerId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('direction')) -eq 'outbound' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('authority_id')) -eq $releaseAuthority -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('pairing_generation')) -eq $releaseGeneration -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('retry_authority_id')) -eq
+                (Get-FallbackTailRecheckField -Event $effectiveGrant[0] -Names @('authority_id')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('install_generation')) -match '^[1-9][0-9]*$' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('decision_status')) -in @('Accepted', 'Applied', 'Idempotent')
+        } | Sort-Object Sequence | Select-Object -First 1)
+        $offerCandidates = @($recoveryDispatchObservedEvents | Where-Object {
+            $consumption.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$consumption[0].Sequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $writerId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('direction')) -eq 'outbound' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('authority_id')) -eq
+                (Get-FallbackTailRecheckField -Event $effectiveGrant[0] -Names @('authority_id')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('contract_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $effectiveGrant[0] -Names @('contract_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('dispatch_attempt_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $effectiveGrant[0] -Names @('dispatch_attempt_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('release_kind')) -eq
+                'FallbackPairedTailYield' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('release_authority_id')) -eq
+                $releaseAuthority -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('release_generation')) -eq
+                $releaseGeneration -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('route')) -eq 'post_tuna_fallback_v6' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('protocol_version')) -eq '6' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('live_route_epoch')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('live_route_epoch')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('runtime_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('runtime_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('terminal_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('terminal_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('leg_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('leg_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transport_epoch')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('transport_epoch')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('bridge_recovery_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('bridge_recovery_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('route_publication_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $settlement -Names @('route_publication_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('data_session_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $effectiveGrant[0] -Names @('data_session_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('offer_generation')) -match '^[1-9][0-9]*$' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('offer_nonce')) -notin @('', '(none)', 'none')
+        } | Sort-Object Sequence)
+        $offer = @(Get-CanonicalFallbackTailEvidence `
+            -Candidates $offerCandidates `
+            -IdentityFields @(
+                'log_writer_id', 'session_id', 'transfer_id', 'direction',
+                'authority_id', 'contract_generation', 'dispatch_attempt_generation',
+                'release_authority_id', 'release_generation', 'offer_generation',
+                'offer_nonce', 'route', 'protocol_version', 'live_route_epoch',
+                'runtime_generation', 'terminal_generation', 'leg_generation',
+                'transport_epoch', 'bridge_recovery_generation',
+                'route_publication_generation', 'data_session_generation'))
+        $answerBoundaryCandidates = @($recoveryAnswerAuthorityBoundaryEvents | Where-Object {
+            $offer.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$offer[0].Sequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $writerId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('authority_mode')).ToLowerInvariant() -eq
+                'installedretry' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('retry_authority_id')) -eq
+                (Get-FallbackTailRecheckField -Event $effectiveGrant[0] -Names @('authority_id')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('install_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $effectiveGrant[0] -Names @('install_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('offer_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $offer[0] -Names @('offer_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('payer_decision_id')) -match '^[1-9][0-9]*$' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transaction_generation')) -match '^[1-9][0-9]*$' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('tuna_path_lease_generation')) -match '^[1-9][0-9]*$' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('tuna_path_lease_listener_run_id')) -notin
+                @('', '(none)', 'none')
+        } | Sort-Object Sequence)
+        $answerBoundary = @(Get-CanonicalFallbackTailEvidence `
+            -Candidates $answerBoundaryCandidates `
+            -IdentityFields @(
+                'log_writer_id', 'session_id', 'transfer_id', 'boundary',
+                'authority_mode', 'retry_authority_id', 'install_generation',
+                'payer_decision_id', 'offer_generation', 'transaction_generation',
+                'tuna_path_lease_generation', 'tuna_path_lease_listener_run_id'))
+        $answerCandidates = @($recoveryAnswerEvents | Where-Object {
+            $answerBoundary.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$answerBoundary[0].Sequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $writerId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('offer_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $answerBoundary[0] -Names @('offer_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transaction_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $answerBoundary[0] -Names @('transaction_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('tuna_path_lease_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $answerBoundary[0] -Names @('tuna_path_lease_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('tuna_path_lease_listener_run_id')) -eq
+                (Get-FallbackTailRecheckField -Event $answerBoundary[0] -Names @('tuna_path_lease_listener_run_id')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('answer_received')) -eq '1' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('tuna_path_lease_current')) -eq '1'
+        } | Sort-Object Sequence)
+        $answer = @(Get-CanonicalFallbackTailEvidence `
+            -Candidates $answerCandidates `
+            -IdentityFields @(
+                'log_writer_id', 'session_id', 'offer_generation',
+                'transaction_generation', 'tuna_path_lease_generation',
+                'tuna_path_lease_listener_run_id'))
+        $answerAckCandidates = @($recoveryAnswerAckEvents | Where-Object {
+            $answer.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$answer[0].Sequence -and
+            $_.EventName -eq 'tuna_acceleration_answer_ack_sent' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $writerId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('payer_decision_id')) -eq
+                (Get-FallbackTailRecheckField -Event $answerBoundary[0] -Names @('payer_decision_id')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('generation')) -match '^[1-9][0-9]*$'
+        } | Sort-Object Sequence)
+        $answerAck = @(Get-CanonicalFallbackTailEvidence `
+            -Candidates $answerAckCandidates `
+            -IdentityFields @(
+                'log_writer_id', 'session_id', 'payer_decision_id', 'generation'))
+        $precommitCandidates = @($recoveryPrecommitEvents | Where-Object {
+            $answerAck.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$answerAck[0].Sequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $writerId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('direction')) -eq 'outbound' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('offer_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $answerBoundary[0] -Names @('offer_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transaction_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $answerBoundary[0] -Names @('transaction_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('tuna_path_lease_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $answerBoundary[0] -Names @('tuna_path_lease_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('tuna_path_lease_listener_run_id')) -eq
+                (Get-FallbackTailRecheckField -Event $answerBoundary[0] -Names @('tuna_path_lease_listener_run_id'))
+        } | Sort-Object Sequence)
+        $precommit = @(Get-CanonicalFallbackTailEvidence `
+            -Candidates $precommitCandidates `
+            -IdentityFields @(
+                'log_writer_id', 'session_id', 'transfer_id', 'direction',
+                'offer_generation', 'transaction_generation',
+                'tuna_path_lease_generation', 'launch_generation'))
+        $prepared = @($fallbackToTunaPreparedEvents | Where-Object {
+            $answerAck.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$answerAck[0].Sequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $writerId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('direction')) -eq 'outbound' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('source_route')) -eq 'post_tuna_fallback_v6' -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('target_route')) -eq 'file_tuna_v4'
+        } | Sort-Object Sequence | Select-Object -First 1)
+        if ($recoveryHoldBinding.Count -eq 1 -and
+            $recheckDecision.Count -eq 1 -and $recheck.Count -eq 1 -and
+            $republished.Count -eq 1 -and
+            $reservation.Count -eq 1 -and $effectiveGrant.Count -eq 1 -and
+            $consumption.Count -eq 1 -and
+            $offer.Count -eq 1 -and $answerBoundary.Count -eq 1 -and
+            $answer.Count -eq 1 -and
+            $answerAck.Count -eq 1 -and
+            ($precommit.Count -eq 1 -or $prepared.Count -eq 1)) {
             $fallbackRepairSettlementRecovered.Add($candidate) | Out-Null
             $recoveredCandidates.Add($candidate) | Out-Null
+            if ($holdWasBound) {
+                $fallbackRepairSettlementAfterBoundHoldRecovered.Add($candidate) | Out-Null
+            }
+            else {
+                $fallbackRepairHoldBindingRecovered.Add($candidate) | Out-Null
+            }
         }
         else {
             $fallbackRepairSettlementUnresolved.Add($candidate) | Out-Null
             $unresolvedCandidates.Add($candidate) | Out-Null
+            if ($holdWasBound) {
+                $fallbackRepairSettlementAfterBoundHoldUnresolved.Add($candidate) | Out-Null
+            }
+            else {
+                $fallbackRepairHoldBindingUnresolved.Add($candidate) | Out-Null
+            }
         }
     }
 
@@ -27537,6 +28619,16 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
         FallbackFrontierRepairSettlementRecoveredCount = $fallbackRepairSettlementRecovered.Count
         FallbackFrontierRepairSettlementUnresolvedCount = $fallbackRepairSettlementUnresolved.Count
         FallbackFrontierRepairSettlementUnresolvedCandidateEvents = @($fallbackRepairSettlementUnresolved.ToArray())
+        FallbackFrontierRepairHoldBindingRawCount = $fallbackRepairHoldBindingRaw.Count
+        FallbackFrontierRepairHoldBindingDistinctCount = $fallbackRepairHoldBindingDistinct.Count
+        FallbackFrontierRepairHoldBindingRecoveredCount = $fallbackRepairHoldBindingRecovered.Count
+        FallbackFrontierRepairHoldBindingUnresolvedCount = $fallbackRepairHoldBindingUnresolved.Count
+        FallbackFrontierRepairHoldBindingUnresolvedCandidateEvents = @($fallbackRepairHoldBindingUnresolved.ToArray())
+        FallbackFrontierRepairSettlementAfterBoundHoldRawCount = $fallbackRepairSettlementAfterBoundHoldRaw.Count
+        FallbackFrontierRepairSettlementAfterBoundHoldDistinctCount = $fallbackRepairSettlementAfterBoundHoldDistinct.Count
+        FallbackFrontierRepairSettlementAfterBoundHoldRecoveredCount = $fallbackRepairSettlementAfterBoundHoldRecovered.Count
+        FallbackFrontierRepairSettlementAfterBoundHoldUnresolvedCount = $fallbackRepairSettlementAfterBoundHoldUnresolved.Count
+        FallbackFrontierRepairSettlementAfterBoundHoldUnresolvedCandidateEvents = @($fallbackRepairSettlementAfterBoundHoldUnresolved.ToArray())
     }
 }
 
@@ -48112,7 +49204,13 @@ function Get-FileTransferRecoveryFailureClassification {
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing' `
-        -Events @($runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementUnresolvedCandidateEvents) `
+        -Events @($runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairHoldBindingUnresolvedCandidateEvents) `
+        -DefaultReason 'unbound_held_fallback_tail_retry_could_not_recheck_after_blocking_repair_settlement' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing' `
+        -Events @($runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementAfterBoundHoldUnresolvedCandidateEvents) `
         -DefaultReason 'settled_fallback_frontier_repair_did_not_republish_held_paired_tail_retry_request' `
         -UseDefaultReason
     Add-FileTransferProofChainFailureCandidates `
@@ -49682,6 +50780,14 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckMissingDistinctCount = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementDistinctCount
         RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckMissingRecoveredCount = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementRecoveredCount
         RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckMissingUnresolvedCount = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementUnresolvedCount
+        RuntimeUnlockRetryDispatchFallbackTailFrontierRepairHoldBindingMissingRawCount = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairHoldBindingRawCount
+        RuntimeUnlockRetryDispatchFallbackTailFrontierRepairHoldBindingMissingDistinctCount = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairHoldBindingDistinctCount
+        RuntimeUnlockRetryDispatchFallbackTailFrontierRepairHoldBindingMissingRecoveredCount = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairHoldBindingRecoveredCount
+        RuntimeUnlockRetryDispatchFallbackTailFrontierRepairHoldBindingMissingUnresolvedCount = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairHoldBindingUnresolvedCount
+        RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckAfterBoundHoldMissingRawCount = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementAfterBoundHoldRawCount
+        RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementAfterBoundHoldDistinctCount
+        RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementAfterBoundHoldRecoveredCount
+        RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementAfterBoundHoldUnresolvedCount
         PostTunaFallbackOutboundReceiveWorkerHandoffMissingCount = $postTunaFallbackOutboundReceiveWorkerHandoffMissingCount
         RuntimeUnlockBrokenStateFreshRetryConsumedCount = $runtimeUnlockBrokenStateFreshRetryConsumedEvents.Count
         RuntimeUnlockBrokenStateRetrySuppressedCount = $runtimeUnlockBrokenStateRetrySuppressedEvents.Count
@@ -50581,6 +51687,14 @@ function New-FileTransferInvariantLedgerObject {
         runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_distinct_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckMissingDistinctCount
         runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_recovered_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckMissingRecoveredCount
         runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_unresolved_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckMissingUnresolvedCount
+        runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_raw_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairHoldBindingMissingRawCount
+        runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_distinct_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairHoldBindingMissingDistinctCount
+        runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_recovered_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairHoldBindingMissingRecoveredCount
+        runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_unresolved_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairHoldBindingMissingUnresolvedCount
+        runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_raw_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckAfterBoundHoldMissingRawCount
+        runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_distinct_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount
+        runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_recovered_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount
+        runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_unresolved_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount
         runtime_unlock_retry_dispatch_zero_offer_successor_rejected_raw_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount
         runtime_unlock_retry_dispatch_zero_offer_successor_rejected_distinct_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount
         runtime_unlock_retry_dispatch_zero_offer_successor_rejected_recovered_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount
@@ -51269,6 +52383,14 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckMissingDistinctCount),
         ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckMissingRecoveredCount),
         ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckMissingUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairHoldBindingMissingRawCount),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairHoldBindingMissingDistinctCount),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairHoldBindingMissingRecoveredCount),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairHoldBindingMissingUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckAfterBoundHoldMissingRawCount),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckAfterBoundHoldMissingDistinctCount),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckAfterBoundHoldMissingRecoveredCount),
+        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailFrontierRepairSettlementRecheckAfterBoundHoldMissingUnresolvedCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_rejected_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchZeroOfferSuccessorRejectedRawCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_rejected_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchZeroOfferSuccessorRejectedDistinctCount),
         ("runtime_unlock_retry_dispatch_zero_offer_successor_rejected_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchZeroOfferSuccessorRejectedRecoveredCount),
