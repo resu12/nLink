@@ -29948,6 +29948,14 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             CancellationToken ct)
             => Task.FromResult<NknTunaListenerSidecarEndpoint?>(null);
 
+        public NknTunaListenerAdoptionSnapshot? CaptureCurrentListenerAdoptionSnapshot()
+            => null;
+
+        public bool TryAdoptCurrentListener(
+            NknTunaListenerAdoptionSnapshot snapshot,
+            NknTunaListenerStartRequest successorRequest)
+            => false;
+
         public void Stop(string reason)
             => StopReasons.Add(reason);
 

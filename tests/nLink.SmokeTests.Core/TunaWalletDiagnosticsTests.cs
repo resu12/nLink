@@ -795,6 +795,162 @@ public sealed class TunaWalletDiagnosticsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task TunaRuntimeListenerSupervisor_ForwardsCurrentListenerAdoptionWithoutReplacingPhysicalListener()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var context = await CreateListenerSupervisorRuntimeContextAsync(root);
+            var snapshot = CreateListenerAdoptionSnapshot(
+                NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen);
+            var currentRequest = snapshot.CurrentRequest;
+            var child = new RecordingTunaListenerSidecarSupervisor(snapshot);
+            using var supervisor = context.RuntimeService.CreateRuntimeListenerSupervisorForTests(child);
+            var successorRequest = currentRequest with
+            {
+                ExecutionIdentity = "fallback-paired-installed-retry-1",
+            };
+
+            var captured = supervisor.CaptureCurrentListenerAdoptionSnapshot();
+            var adopted = supervisor.TryAdoptCurrentListener(snapshot, successorRequest);
+            var current = supervisor.CaptureCurrentListenerAdoptionSnapshot();
+
+            Assert.Same(snapshot, captured);
+            Assert.True(adopted);
+            Assert.NotNull(current);
+            Assert.Equal(successorRequest, current.CurrentRequest);
+            Assert.Equal(snapshot.Endpoint, current.Endpoint);
+            Assert.Equal(snapshot.ProcessId, current.ProcessId);
+            Assert.Equal(snapshot.ProcessRunId, current.ProcessRunId);
+            Assert.Equal(snapshot.ProcessStartedUtc, current.ProcessStartedUtc);
+            Assert.Equal(1, child.SuccessfulAdoptionCount);
+            Assert.Equal(0, child.EnsureStartedCount);
+            Assert.Equal(0, child.StopCount);
+
+            Assert.False(
+                supervisor.TryAdoptCurrentListener(
+                    snapshot,
+                    successorRequest with { ExecutionIdentity = "stale-successor" }));
+            Assert.Equal(1, child.SuccessfulAdoptionCount);
+        }
+        finally
+        {
+            DeleteTempRoot(root);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TunaRuntimeListenerSupervisor_NoChildOrDisposedReturnsNoAdoptionAuthority()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var context = await CreateListenerSupervisorRuntimeContextAsync(root);
+            var snapshot = CreateListenerAdoptionSnapshot();
+            var request = snapshot.CurrentRequest;
+            using var noChild = context.RuntimeService.CreateRuntimeListenerSupervisorForTests();
+
+            Assert.Null(noChild.CaptureCurrentListenerAdoptionSnapshot());
+            Assert.False(noChild.TryAdoptCurrentListener(snapshot, request));
+
+            var child = new RecordingTunaListenerSidecarSupervisor(snapshot);
+            var disposed = context.RuntimeService.CreateRuntimeListenerSupervisorForTests(child);
+            disposed.Dispose();
+
+            Assert.Null(disposed.CaptureCurrentListenerAdoptionSnapshot());
+            Assert.False(disposed.TryAdoptCurrentListener(snapshot, request));
+            Assert.Equal(1, child.DisposeCount);
+            Assert.Equal(0, child.AdoptionAttemptCount);
+        }
+        finally
+        {
+            DeleteTempRoot(root);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TunaRuntimeListenerSupervisor_ChildReplacementRejectsCapturedSnapshot()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var context = await CreateListenerSupervisorRuntimeContextAsync(
+                root,
+                Path.Combine(root, "missing-sidecar.exe"));
+            var snapshot = CreateListenerAdoptionSnapshot();
+            var request = snapshot.CurrentRequest;
+            var child = new RecordingTunaListenerSidecarSupervisor(snapshot);
+            using var supervisor = context.RuntimeService.CreateRuntimeListenerSupervisorForTests(child);
+
+            Assert.Same(snapshot, supervisor.CaptureCurrentListenerAdoptionSnapshot());
+            Assert.Null(await supervisor.EnsureStartedAsync(request, CancellationToken.None));
+            Assert.Equal(1, child.DisposeCount);
+
+            Assert.False(
+                supervisor.TryAdoptCurrentListener(
+                    snapshot,
+                    request with { ExecutionIdentity = "fallback-paired-installed-retry-1" }));
+            Assert.Null(supervisor.CaptureCurrentListenerAdoptionSnapshot());
+            Assert.Equal(0, child.AdoptionAttemptCount);
+        }
+        finally
+        {
+            DeleteTempRoot(root);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TunaRuntimeListenerSupervisor_StopCannotInterleaveWithAdoption()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var context = await CreateListenerSupervisorRuntimeContextAsync(root);
+            var snapshot = CreateListenerAdoptionSnapshot();
+            var request = snapshot.CurrentRequest;
+            var child = new RecordingTunaListenerSidecarSupervisor(snapshot)
+            {
+                BlockAdoption = true,
+            };
+            using var supervisor = context.RuntimeService.CreateRuntimeListenerSupervisorForTests(child);
+            var successor = request with
+            {
+                ExecutionIdentity = "fallback-paired-installed-retry-1",
+            };
+
+            var adoption = Task.Run(
+                () => supervisor.TryAdoptCurrentListener(snapshot, successor));
+            Task? stop = null;
+            try
+            {
+                await child.AdoptionEntered.WaitAsync(TimeSpan.FromSeconds(2));
+                stop = Task.Run(() => supervisor.Stop("stop_race"));
+                await Task.Delay(100);
+
+                Assert.False(stop.IsCompleted);
+                Assert.Equal(0, child.StopCount);
+            }
+            finally
+            {
+                child.ReleaseAdoption();
+            }
+
+            Assert.True(await adoption);
+            Assert.NotNull(stop);
+            await stop;
+            Assert.Equal(1, child.StopCount);
+        }
+        finally
+        {
+            DeleteTempRoot(root);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public void TunaRuntimeListenerSupervisor_RetainsUnlockAcrossListenerAcceptWindow()
     {
         Assert.True(
@@ -1580,6 +1736,36 @@ public sealed class TunaWalletDiagnosticsTests
         return new VerifiedRuntimeContext(walletStore, preferenceStore, usageStore, runtimeService, walletPath);
     }
 
+    private static Task<VerifiedRuntimeContext> CreateListenerSupervisorRuntimeContextAsync(
+        string root,
+        string sidecarPath = "nlink-tuna-sidecar.exe")
+        => CreateVerifiedRuntimeContextAsync(
+            root,
+            new FakeTunaWalletVerifier(
+                TunaWalletValidationResult.Ok(
+                    "wallet-test-nkn.json",
+                    "NKN0123456789PUBLICADDRESS",
+                    "1.2500"),
+                sidecarPath));
+
+    private static NknTunaListenerAdoptionSnapshot CreateListenerAdoptionSnapshot(
+        NknAccelerationLaneKind lanes = NknAccelerationLaneKind.File)
+    {
+        var request = new NknTunaListenerStartRequest(
+            "remote-peer",
+            lanes,
+            NknTunaListenerLifetimePolicy.CoordinatorScopedInitialActivation,
+            "listener-start-2");
+        return new NknTunaListenerAdoptionSnapshot(
+            request,
+            new NknTunaListenerSidecarEndpoint(
+                "127.0.0.1:30303",
+                "nlink-tuna-sidecar.listener-address"),
+            ProcessId: 21084,
+            ProcessRunId: "listener-process-run-2",
+            ProcessStartedUtc: DateTimeOffset.Parse("2026-08-08T12:51:00Z"));
+    }
+
     private static async Task WaitUntilAsync(Func<bool> predicate, TimeSpan timeout)
     {
         var deadline = DateTimeOffset.UtcNow.Add(timeout);
@@ -1639,6 +1825,120 @@ public sealed class TunaWalletDiagnosticsTests
         public void RecordSummary(NknTunaSessionUsageTelemetry summary) => Summaries.Add(summary);
 
         public void RecordIncomplete(string reason) => IncompleteReasons.Add(reason);
+    }
+
+    private sealed class RecordingTunaListenerSidecarSupervisor : INknTunaListenerSidecarSupervisor
+    {
+        private readonly object gate = new();
+        private NknTunaListenerAdoptionSnapshot? current;
+        private bool disposed;
+        private int ensureStartedCount;
+        private int adoptionAttemptCount;
+        private int successfulAdoptionCount;
+        private int stopCount;
+        private int disposeCount;
+        private readonly TaskCompletionSource adoptionEntered =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource adoptionRelease =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public RecordingTunaListenerSidecarSupervisor(
+            NknTunaListenerAdoptionSnapshot current)
+        {
+            this.current = current;
+        }
+
+        public bool CanOfferListener => !disposed && current is not null;
+
+        public int EnsureStartedCount => Volatile.Read(ref ensureStartedCount);
+
+        public int AdoptionAttemptCount => Volatile.Read(ref adoptionAttemptCount);
+
+        public int SuccessfulAdoptionCount => Volatile.Read(ref successfulAdoptionCount);
+
+        public int StopCount => Volatile.Read(ref stopCount);
+
+        public int DisposeCount => Volatile.Read(ref disposeCount);
+
+        public bool BlockAdoption { get; init; }
+
+        public Task AdoptionEntered => adoptionEntered.Task;
+
+        public event EventHandler<AccelerationStateChangedEventArgs>? StateChanged;
+
+        public Task<NknTunaListenerSidecarEndpoint?> EnsureStartedAsync(
+            NknTunaListenerStartRequest request,
+            CancellationToken ct)
+        {
+            Interlocked.Increment(ref ensureStartedCount);
+            lock (gate)
+            {
+                return Task.FromResult(disposed ? null : current?.Endpoint);
+            }
+        }
+
+        public NknTunaListenerAdoptionSnapshot? CaptureCurrentListenerAdoptionSnapshot()
+        {
+            lock (gate)
+            {
+                return disposed ? null : current;
+            }
+        }
+
+        public bool TryAdoptCurrentListener(
+            NknTunaListenerAdoptionSnapshot snapshot,
+            NknTunaListenerStartRequest successorRequest)
+        {
+            Interlocked.Increment(ref adoptionAttemptCount);
+            if (BlockAdoption)
+            {
+                adoptionEntered.TrySetResult();
+                adoptionRelease.Task.GetAwaiter().GetResult();
+            }
+
+            lock (gate)
+            {
+                if (disposed ||
+                    current != snapshot ||
+                    snapshot.CurrentRequest.LifetimePolicy !=
+                        NknTunaListenerLifetimePolicy.CoordinatorScopedInitialActivation ||
+                    successorRequest.LifetimePolicy !=
+                        NknTunaListenerLifetimePolicy.CoordinatorScopedInitialActivation ||
+                    !string.Equals(
+                        snapshot.CurrentRequest.ExpectedRemotePeer,
+                        successorRequest.ExpectedRemotePeer,
+                        StringComparison.Ordinal) ||
+                    snapshot.CurrentRequest.Lanes != successorRequest.Lanes)
+                {
+                    return false;
+                }
+
+                current = snapshot with { CurrentRequest = successorRequest };
+                Interlocked.Increment(ref successfulAdoptionCount);
+                return true;
+            }
+        }
+
+        public void Stop(string reason)
+            => Interlocked.Increment(ref stopCount);
+
+        public void ReleaseAdoption()
+            => adoptionRelease.TrySetResult();
+
+        public void Dispose()
+        {
+            lock (gate)
+            {
+                if (disposed)
+                {
+                    return;
+                }
+
+                disposed = true;
+                current = null;
+                Interlocked.Increment(ref disposeCount);
+            }
+        }
     }
 
     private sealed record VerifiedRuntimeContext(

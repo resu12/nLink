@@ -1193,6 +1193,10 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
     internal INknTunaListenerSidecarSupervisor CreateRuntimeListenerSupervisorForTests()
         => new RuntimeListenerSupervisor(this);
 
+    internal INknTunaListenerSidecarSupervisor CreateRuntimeListenerSupervisorForTests(
+        INknTunaListenerSidecarSupervisor supervisor)
+        => new RuntimeListenerSupervisor(this, supervisor);
+
     private ISignalingTransport TrackTransport(ISignalingTransport transport)
     {
         lock (gate)
@@ -2194,13 +2198,20 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
     {
         private readonly object gate = new();
         private readonly TunaRuntimePilotService owner;
-        private NknTunaListenerSidecarSupervisor? supervisor;
+        private INknTunaListenerSidecarSupervisor? supervisor;
         private string? supervisorKey;
         private bool disposed;
 
-        public RuntimeListenerSupervisor(TunaRuntimePilotService owner)
+        public RuntimeListenerSupervisor(
+            TunaRuntimePilotService owner,
+            INknTunaListenerSidecarSupervisor? supervisor = null)
         {
             this.owner = owner;
+            this.supervisor = supervisor;
+            if (supervisor is not null)
+            {
+                supervisor.StateChanged += OnSupervisorStateChanged;
+            }
         }
 
         public event EventHandler<AccelerationStateChangedEventArgs>? StateChanged;
@@ -2223,7 +2234,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
 
         public async Task<NknTunaListenerSidecarEndpoint?> EnsureStartedAsync(NknTunaListenerStartRequest request, CancellationToken ct)
         {
-            NknTunaListenerSidecarSupervisor current;
+            INknTunaListenerSidecarSupervisor current;
             var usageSink = new RuntimeUsageSink(owner);
             var options = owner.CreateListenerSidecarOptions(usageSink);
             if (options is null)
@@ -2252,6 +2263,27 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             }
 
             return await current.EnsureStartedAsync(request, ct).ConfigureAwait(false);
+        }
+
+        public NknTunaListenerAdoptionSnapshot? CaptureCurrentListenerAdoptionSnapshot()
+        {
+            lock (gate)
+            {
+                return disposed
+                    ? null
+                    : supervisor?.CaptureCurrentListenerAdoptionSnapshot();
+            }
+        }
+
+        public bool TryAdoptCurrentListener(
+            NknTunaListenerAdoptionSnapshot snapshot,
+            NknTunaListenerStartRequest successorRequest)
+        {
+            lock (gate)
+            {
+                return !disposed &&
+                       supervisor?.TryAdoptCurrentListener(snapshot, successorRequest) == true;
+            }
         }
 
         public void Dispose()

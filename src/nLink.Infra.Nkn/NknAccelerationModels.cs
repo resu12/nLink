@@ -180,13 +180,11 @@ internal interface INknTunaListenerSidecarSupervisor : IDisposable
 
     Task<NknTunaListenerSidecarEndpoint?> EnsureStartedAsync(NknTunaListenerStartRequest request, CancellationToken ct);
 
-    NknTunaListenerAdoptionSnapshot? CaptureCurrentListenerAdoptionSnapshot()
-        => null;
+    NknTunaListenerAdoptionSnapshot? CaptureCurrentListenerAdoptionSnapshot();
 
     bool TryAdoptCurrentListener(
         NknTunaListenerAdoptionSnapshot snapshot,
-        NknTunaListenerStartRequest successorRequest)
-        => false;
+        NknTunaListenerStartRequest successorRequest);
 
     void Stop(string reason);
 
