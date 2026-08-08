@@ -21942,6 +21942,73 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     [Fact]
+    public async Task RuntimeUnlockPrecommitResponderRoutePromotion_PublishesTypedAnswerAcceptanceAfterAckSend()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId = "transfer_runtime_unlock_precommit_typed_answer_acceptance";
+        var sessionId = $"session_{transferId}";
+        using var transport = new PeerPreCommitAnswerAcceptanceTransport(sessionId);
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4InboundContext(transferId);
+        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "test_typed_answer_acceptance");
+        var dataSession = new RecordingDataSession(sessionId, transferId);
+        SetPrivateProperty(context, "DataSession", dataSession);
+        SetPrivateProperty(context, "DataSessionGeneration", 3L);
+        serviceType
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var probe = new FileTransferRuntimeUnlockPreCommitProbeFrame
+        {
+            SessionId = sessionId,
+            TransferId = transferId,
+            TransactionGeneration = 11,
+            OfferGeneration = 13,
+            TunaPathLeaseGeneration = 17,
+            ProbeId = "runtime-unlock-precommit:11:13:typed-answer-acceptance",
+            TargetRoute = FileTransferRouteResolver.FileTunaV4Token,
+            TargetProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+            TargetTransport = "tuna",
+            HandoffKind = "normal_to_tuna_activation",
+            SentUnixTimeMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+        };
+
+        var handled = await (Task<bool>)serviceType
+            .GetMethod("TryHandleRuntimeUnlockPreCommitProbeDataFrameAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Inbound,
+                    probe,
+                    FileTransferTransportKind.Tuna,
+                    dataSession,
+                ])!;
+
+        Assert.True(handled);
+        var ack = Assert.IsType<FileTransferRuntimeUnlockPreCommitProbeAckFrame>(
+            Assert.Single(dataSession.SentFrames));
+        Assert.True(ack.Accepted);
+        var receipt = Assert.IsType<RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt>(
+            transport.AnswerAcceptanceReceipt);
+        Assert.Equal(sessionId, receipt.SessionId);
+        Assert.Equal(transferId, receipt.TransferId);
+        Assert.Equal(FileTransferDirection.Inbound, receipt.Direction);
+        Assert.Equal(probe.TransactionGeneration, receipt.PeerTransactionGeneration);
+        Assert.Equal(probe.OfferGeneration, receipt.PeerOfferGeneration);
+        Assert.Equal(probe.TunaPathLeaseGeneration, receipt.PeerTunaPathLeaseGeneration);
+        Assert.Equal(probe.ProbeId, receipt.ProbeId);
+        Assert.Equal(FileTransferTransportKind.Tuna, receipt.ReceivedTransport);
+        Assert.Equal(3, receipt.DataSessionGeneration);
+        Assert.Equal(64, receipt.ProbeFrameFingerprint.Length);
+        Assert.True(receipt.ProbeAckSentUtcMs >= receipt.ReceivedUtcMs);
+        Assert.False(receipt.AdmissionToken.IsDefault);
+        Assert.Empty(transport.RuntimeUnlockProbeEvents);
+    }
+
+    [Fact]
     public async Task RuntimeUnlockPrecommitAck_WithoutCurrentAdmissionOnlyLogsRejection()
     {
         using var service = new SessionFileTransferService();
@@ -28768,6 +28835,29 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         }
 
         return count;
+    }
+
+    private sealed class PeerPreCommitAnswerAcceptanceTransport(string sessionId)
+        : LoopbackFileTransferTransport(sessionId),
+          IRuntimeUnlockPeerPreCommitAnswerAcceptanceObserver
+    {
+        public RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt? AnswerAcceptanceReceipt { get; private set; }
+
+        public RuntimeUnlockPeerPreCommitAnswerAcceptanceDecision
+            ObserveRuntimeUnlockPeerPreCommitAnswerAcceptance(
+                RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt receipt)
+        {
+            AnswerAcceptanceReceipt = receipt;
+            return new RuntimeUnlockPeerPreCommitAnswerAcceptanceDecision(
+                receipt,
+                RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Accepted,
+                "test_typed_answer_acceptance_bound",
+                LocalTransactionGeneration: 1,
+                LocalOfferGeneration: 1,
+                LocalTunaPathLeaseGeneration: 1,
+                PendingAnswerAckGeneration: 1,
+                LaunchGeneration: 1);
+        }
     }
 
     private static string CreatePeerFallbackTailYieldAuthorityId(string seed)

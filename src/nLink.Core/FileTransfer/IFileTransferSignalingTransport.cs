@@ -936,6 +936,45 @@ internal interface IRuntimeUnlockRouteCommitProofProvider
         string reason);
 }
 
+internal enum RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus
+{
+    NotApplicable = 0,
+    Accepted = 1,
+    Idempotent = 2,
+    Rejected = 3,
+}
+
+internal sealed record RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    RuntimeUnlockAdmissionToken AdmissionToken,
+    long PeerTransactionGeneration,
+    long PeerOfferGeneration,
+    long PeerTunaPathLeaseGeneration,
+    string ProbeId,
+    string ProbeFrameFingerprint,
+    FileTransferTransportKind ReceivedTransport,
+    long ReceivedUtcMs,
+    long ProbeAckSentUtcMs,
+    long DataSessionGeneration);
+
+internal sealed record RuntimeUnlockPeerPreCommitAnswerAcceptanceDecision(
+    RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt Receipt,
+    RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus Status,
+    string Reason,
+    long LocalTransactionGeneration = 0,
+    long LocalOfferGeneration = 0,
+    long LocalTunaPathLeaseGeneration = 0,
+    long PendingAnswerAckGeneration = 0,
+    long LaunchGeneration = 0);
+
+internal interface IRuntimeUnlockPeerPreCommitAnswerAcceptanceObserver
+{
+    RuntimeUnlockPeerPreCommitAnswerAcceptanceDecision ObserveRuntimeUnlockPeerPreCommitAnswerAcceptance(
+        RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt receipt);
+}
+
 internal enum RuntimeUnlockRetryReleaseKind
 {
     Unknown = 0,
