@@ -1645,6 +1645,10 @@ function New-RouteAcceptanceRunResult {
         runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount = 0
         runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount = 0
         runtimeUnlockInitialActivationAnswerPeerDeliveryVerdict = 'none'
+        runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRawCount = 0
+        runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingDistinctCount = 0
+        runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRecoveredCount = 0
+        runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingUnresolvedCount = 0
         runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount = 0
         runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount = 0
         runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount = 0
@@ -3339,6 +3343,10 @@ function Assert-Phase4OperatorVerdict {
     $Result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count' -DefaultValue '0')
     $Result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count' -DefaultValue '0')
     $Result.runtimeUnlockInitialActivationAnswerPeerDeliveryVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_activation_answer_peer_delivery_verdict' -DefaultValue ([string]$Result.runtimeUnlockInitialActivationAnswerPeerDeliveryVerdict)
+    $Result.runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_activation_answer_ack_return_delivery_missing_raw_count' -DefaultValue '0')
+    $Result.runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_activation_answer_ack_return_delivery_missing_distinct_count' -DefaultValue '0')
+    $Result.runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_activation_answer_ack_return_delivery_missing_recovered_count' -DefaultValue '0')
+    $Result.runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_initial_activation_answer_ack_return_delivery_missing_unresolved_count' -DefaultValue '0')
     $Result.runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_dial_failed_rejected_answer_not_retained_raw_count' -DefaultValue '0')
     $Result.runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_dial_failed_rejected_answer_not_retained_distinct_count' -DefaultValue '0')
     $Result.runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_dial_failed_rejected_answer_not_retained_recovered_count' -DefaultValue '0')
@@ -7541,6 +7549,10 @@ function Write-Phase5PreflightFailureSummaryFiles {
         runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount = 0
         runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount = 0
         runtimeUnlockInitialActivationAnswerPeerDeliveryVerdict = 'none'
+        runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRawCount = 0
+        runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingDistinctCount = 0
+        runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRecoveredCount = 0
+        runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingUnresolvedCount = 0
         runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount = 0
         runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount = 0
         runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount = 0
@@ -9318,6 +9330,10 @@ function New-RouteAcceptanceSummaryRunDto {
         runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount = [int]$Result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount
         runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount = [int]$Result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount
         runtimeUnlockInitialActivationAnswerPeerDeliveryVerdict = [string]$Result.runtimeUnlockInitialActivationAnswerPeerDeliveryVerdict
+        runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRawCount = [int]$Result.runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRawCount
+        runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingDistinctCount = [int]$Result.runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingDistinctCount
+        runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRecoveredCount = [int]$Result.runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRecoveredCount
+        runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingUnresolvedCount = [int]$Result.runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingUnresolvedCount
         runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount = [int]$Result.runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount
         runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount = [int]$Result.runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount
         runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount = [int]$Result.runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount
@@ -9726,6 +9742,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount = 0
     $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingUnresolvedCount = 0
     $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRawCount = 0
+    $runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRawCount = 0
+    $runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingDistinctCount = 0
+    $runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRecoveredCount = 0
+    $runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingUnresolvedCount = 0
     $runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount = 0
     $runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount = 0
     $runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount = 0
@@ -9944,6 +9964,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount += [int]$runDto.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingRecoveredCount
         $runtimeUnlockInitialOfferRetryLifecycleHandoffMissingUnresolvedCount += [int]$runDto.runtimeUnlockInitialOfferRetryLifecycleHandoffMissingUnresolvedCount
         $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRawCount += [int]$runDto.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRawCount
+        $runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRawCount += [int]$runDto.runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRawCount
+        $runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingDistinctCount += [int]$runDto.runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingDistinctCount
+        $runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRecoveredCount += [int]$runDto.runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRecoveredCount
+        $runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingUnresolvedCount += [int]$runDto.runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingUnresolvedCount
         $runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount += [int]$runDto.runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount
         $runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount += [int]$runDto.runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount
         $runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount += [int]$runDto.runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount
@@ -10650,6 +10674,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount),
         ("runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count={0}" -f $runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount),
         ("runtime_unlock_initial_activation_answer_peer_delivery_verdict={0}" -f ($(if ($runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount -gt 0) { 'fail' } elseif ($runtimeUnlockInitialActivationAnswerPeerDeliveryMissingDistinctCount -gt 0) { 'pass' } else { 'none' }))),
+        ("runtime_unlock_initial_activation_answer_ack_return_delivery_missing_raw_count={0}" -f $runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRawCount),
+        ("runtime_unlock_initial_activation_answer_ack_return_delivery_missing_distinct_count={0}" -f $runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingDistinctCount),
+        ("runtime_unlock_initial_activation_answer_ack_return_delivery_missing_recovered_count={0}" -f $runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRecoveredCount),
+        ("runtime_unlock_initial_activation_answer_ack_return_delivery_missing_unresolved_count={0}" -f $runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingUnresolvedCount),
         ("runtime_unlock_dial_failed_rejected_answer_not_retained_raw_count={0}" -f $runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount),
         ("runtime_unlock_dial_failed_rejected_answer_not_retained_distinct_count={0}" -f $runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount),
         ("runtime_unlock_dial_failed_rejected_answer_not_retained_recovered_count={0}" -f $runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount),
@@ -10751,6 +10779,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount)
         $textLines += ("{0}.runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count={1}" -f $prefix, $result.runtimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount)
         $textLines += ("{0}.runtime_unlock_initial_activation_answer_peer_delivery_verdict={1}" -f $prefix, $result.runtimeUnlockInitialActivationAnswerPeerDeliveryVerdict)
+        $textLines += ("{0}.runtime_unlock_initial_activation_answer_ack_return_delivery_missing_raw_count={1}" -f $prefix, $result.runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRawCount)
+        $textLines += ("{0}.runtime_unlock_initial_activation_answer_ack_return_delivery_missing_distinct_count={1}" -f $prefix, $result.runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingDistinctCount)
+        $textLines += ("{0}.runtime_unlock_initial_activation_answer_ack_return_delivery_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRecoveredCount)
+        $textLines += ("{0}.runtime_unlock_initial_activation_answer_ack_return_delivery_missing_unresolved_count={1}" -f $prefix, $result.runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingUnresolvedCount)
         $textLines += ("{0}.runtime_unlock_dial_failed_rejected_answer_not_retained_raw_count={1}" -f $prefix, $result.runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount)
         $textLines += ("{0}.runtime_unlock_dial_failed_rejected_answer_not_retained_distinct_count={1}" -f $prefix, $result.runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount)
         $textLines += ("{0}.runtime_unlock_dial_failed_rejected_answer_not_retained_recovered_count={1}" -f $prefix, $result.runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount)
@@ -11378,6 +11410,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         else {
             'none'
         }
+        runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRawCount = $runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRawCount
+        runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingDistinctCount = $runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingDistinctCount
+        runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRecoveredCount = $runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRecoveredCount
+        runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingUnresolvedCount = $runtimeUnlockInitialActivationAnswerAckReturnDeliveryMissingUnresolvedCount
         runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount = $runtimeUnlockDialFailedRejectedAnswerNotRetainedRawCount
         runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount = $runtimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount
         runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount = $runtimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount

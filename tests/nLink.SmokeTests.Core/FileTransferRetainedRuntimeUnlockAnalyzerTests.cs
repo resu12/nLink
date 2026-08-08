@@ -393,6 +393,80 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task AnalyzeRetained_RuntimeUnlockInitialActivationAnswerPeerDelivery_RequiresResponderAckReceiptAndInboundPrepared(
+        bool compact,
+        bool recovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string responderScope =
+            "session_id=sess_answer_ack_return; payer_decision_id=41; generation=7; " +
+            "log_writer_id=writer_responder";
+        var messages = new List<string>
+        {
+            LogLine($"event=tuna_acceleration_answer_ack_pending; {responderScope}"),
+            LogLine($"event=tuna_acceleration_answer_sent; {responderScope}; accepted=1; msg_id=answer-1"),
+            LogLine("event=tuna_acceleration_answer_received_raw; session_id=sess_answer_ack_return; " +
+                "msg_id=answer-1; log_writer_id=writer_initiator"),
+            LogLine("event=runtime_unlock_acceleration_reply_target_decided; " +
+                "session_id=sess_answer_ack_return; payer_decision_id=41; generation=1; " +
+                "purpose=answer_ack; status=accepted; target_mode=validated_inbound_source; " +
+                "log_writer_id=writer_initiator"),
+            LogLine("event=tuna_acceleration_answer_ack_sent; session_id=sess_answer_ack_return; " +
+                "payer_decision_id=41; generation=1; msg_id=answer-ack-1; " +
+                "log_writer_id=writer_initiator"),
+            LogLine("event=tuna_acceleration_answer_ack_replay_sent; session_id=sess_answer_ack_return; " +
+                "payer_decision_id=41; generation=1; msg_id=answer-ack-1; attempt=19; " +
+                "log_writer_id=writer_initiator"),
+            LogLine($"event=tuna_acceleration_answer_ack_timeout; {responderScope}; " +
+                "trigger=runtime_unlock; retry_reason=runtime_unlock_answer_ack_timeout")
+        };
+        if (recovered)
+        {
+            messages.Add(LogLine("event=runtime_unlock_peer_precommit_answer_acceptance_decided; " +
+                "status=Accepted; session_id=sess_answer_ack_return; transfer_id=transfer-1; " +
+                "launch_generation=1; log_writer_id=writer_responder"));
+            messages.Add(LogLine("event=runtime_unlock_precommit_responder_peer_probe_handoff_bound; " +
+                "session_id=sess_answer_ack_return; transfer_id=transfer-1; launch_generation=1; " +
+                "answer_acceptance_source=PeerPreCommitProbe; log_writer_id=writer_responder"));
+            messages.Add(LogLine("event=filetransfer_route_transition_prepared; " +
+                "session_id=sess_answer_ack_return; transfer_id=transfer-1; direction=inbound; " +
+                "log_writer_id=writer_responder"));
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            messages,
+            [],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_ack_return_delivery_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_ack_return_delivery_missing_distinct_count"]);
+        Assert.Equal(recovered ? "1" : "0", verdict["runtime_unlock_initial_activation_answer_ack_return_delivery_missing_recovered_count"]);
+        Assert.Equal(recovered ? "0" : "1", verdict["runtime_unlock_initial_activation_answer_ack_return_delivery_missing_unresolved_count"]);
+        if (!recovered)
+        {
+            Assert.Equal("tuna_acceleration_answer_ack_timeout", verdict["first_proof_chain_failure_event"]);
+            Assert.Equal(
+                "exact_source_answer_ack_not_delivered_to_responder_before_wire_deadline",
+                verdict["first_proof_chain_failure_reason"]);
+        }
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task AnalyzeRetained_RuntimeUnlockInitialActivationAnswerPeerDelivery_DialFailureRejectRequiresDuplicateReplay(

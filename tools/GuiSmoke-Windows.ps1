@@ -4773,7 +4773,19 @@ function Get-TunaGuiExplicitFailureClassification {
             'runtime_unlock_initial_activation_answer_peer_delivery_missing' {
                 return [pscustomobject]@{
                     Phase = 'runtime_unlock_initial_activation'
-                    Reason = 'validated_offer_answer_not_delivered_to_initiator'
+                    Reason = if ($ErrorMessage.IndexOf(
+                            'exact_source_answer_ack_not_delivered_to_responder_before_wire_deadline',
+                            [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                        'exact_source_answer_ack_not_delivered_to_responder_before_wire_deadline'
+                    }
+                    elseif ($ErrorMessage.IndexOf(
+                            'exact_runtime_unlock_dial_failure_rejection_not_replayed_after_same_offer_refresh',
+                            [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                        'exact_runtime_unlock_dial_failure_rejection_not_replayed_after_same_offer_refresh'
+                    }
+                    else {
+                        'validated_offer_answer_not_delivered_to_initiator'
+                    }
                 }
             }
             'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing' {
@@ -6356,14 +6368,62 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('tuna_acceleration_answer_received_raw')) -and
                 (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -ne $writer
             } | Select-Object -First 1)
-            $preCommit = @($indexed | Where-Object {
-                $_.Index -gt $timeout.Index -and
+            $peerWriter = if ($peerAnswer.Count -eq 1) {
+                Get-TunaGuiLogLineFieldValue -Line $peerAnswer[0].Line -Name 'log_writer_id'
+            }
+            else { '' }
+            $ackTarget = @($indexed | Where-Object {
+                $peerAnswer.Count -eq 1 -and
+                $_.Index -gt $peerAnswer[0].Index -and
                 (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
-                        'runtime_unlock_precommit_probe_launch_requested',
-                        'filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided',
+                        'runtime_unlock_acceleration_reply_target_decided')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'purpose') -eq 'answer_ack' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'status') -eq 'accepted' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $peerWriter
+            } | Select-Object -First 1)
+            $localAck = @($indexed | Where-Object {
+                $ackTarget.Count -eq 1 -and
+                $_.Index -gt $peerAnswer[0].Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'tuna_acceleration_answer_ack_sent',
+                        'tuna_acceleration_answer_ack_replay_sent')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $peerWriter
+            } | Select-Object -First 1)
+            $responderReceipt = @($indexed | Where-Object {
+                $localAck.Count -eq 1 -and
+                $_.Index -gt $localAck[0].Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                ((Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                            'tuna_acceleration_answer_ack_received_raw',
+                            'tuna_acceleration_answer_ack_received')) -or
+                    ((Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                                'runtime_unlock_peer_precommit_answer_acceptance_decided')) -and
+                        (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'status') -in @(
+                            'Accepted', 'Idempotent', 'accepted', 'idempotent')))
+            } | Select-Object -First 1)
+            $responderLaunch = @($indexed | Where-Object {
+                $responderReceipt.Count -eq 1 -and
+                $_.Index -gt $responderReceipt[0].Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'runtime_unlock_precommit_responder_peer_probe_handoff_bound',
+                        'runtime_unlock_precommit_probe_launch_requested')) -and
+                [int64](Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'launch_generation') -gt 0
+            } | Select-Object -First 1)
+            $inboundPrepared = @($indexed | Where-Object {
+                $responderLaunch.Count -eq 1 -and
+                $_.Index -gt $responderLaunch[0].Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -eq 'inbound' -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
                         'filetransfer_route_transition_prepared'))
             } | Select-Object -First 1)
-            if ($peerAnswer.Count -eq 0 -or $preCommit.Count -eq 0) {
+            if ($peerAnswer.Count -eq 0 -or
+                $localAck.Count -eq 0 -or
+                $ackTarget.Count -eq 0 -or
+                $responderReceipt.Count -eq 0 -or
+                $responderLaunch.Count -eq 0 -or
+                $inboundPrepared.Count -eq 0) {
                 return $true
             }
         }
@@ -12436,6 +12496,21 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $initialActivationAnswerPeerDeliveryMissing =
         Test-TunaGuiInitialActivationAnswerPeerDeliveryMissing `
             -Lines $regularV4EvidenceLineText
+    $acceptedAnswerAckReturnNotDelivered =
+        $initialActivationAnswerPeerDeliveryMissing -and
+        (Test-TunaGuiLogLinesContain -Lines $regularV4EvidenceLineText -Needles @(
+                'event=tuna_acceleration_answer_received_raw')) -and
+        ((Test-TunaGuiLogLinesContain -Lines $regularV4EvidenceLineText -Needles @(
+                    'event=tuna_acceleration_answer_ack_sent')) -or
+            (Test-TunaGuiLogLinesContain -Lines $regularV4EvidenceLineText -Needles @(
+                    'event=tuna_acceleration_answer_ack_replay_sent'))) -and
+        (Test-TunaGuiLogLinesContain -Lines $regularV4EvidenceLineText -Needles @(
+                'event=tuna_acceleration_answer_ack_timeout')) -and
+        (-not (Test-TunaGuiLogLinesContain -Lines $regularV4EvidenceLineText -Needles @(
+                    'event=tuna_acceleration_answer_ack_received_raw'))) -and
+        (-not (Test-TunaGuiLogLinesContain -Lines $regularV4EvidenceLineText -Needles @(
+                    'event=runtime_unlock_peer_precommit_answer_acceptance_decided',
+                    'status=Accepted')))
     $dialFailedRejectedAnswerNotRetained =
         (Test-TunaGuiLogLinesContain -Lines $regularV4EvidenceLineText -Needles @(
                 'event=runtime_unlock_tuna_dial_offer_duplicate_ignored',
@@ -12661,6 +12736,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $phase = 'runtime_unlock_initial_activation'
         $reason = if ($dialFailedRejectedAnswerNotRetained) {
             'exact_runtime_unlock_dial_failure_rejection_not_replayed_after_same_offer_refresh'
+        }
+        elseif ($acceptedAnswerAckReturnNotDelivered) {
+            'exact_source_answer_ack_not_delivered_to_responder_before_wire_deadline'
         }
         elseif ($initialActivationAnswerPeerRecoveryReplayWindowMissing) {
             'exact_source_answer_replay_exhausted_before_receive_stalled_peer_replacement_ready'
@@ -13003,6 +13081,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         RuntimeUnlockRetrySourcePublicationMismatch = [bool]$runtimeUnlockRetrySourcePublicationMismatch
         InitialActivationAnswerPeerDeliveryMissing =
             [bool]$initialActivationAnswerPeerDeliveryMissing
+        InitialActivationAnswerAckReturnDeliveryMissing =
+            [bool]$acceptedAnswerAckReturnNotDelivered
         InitialActivationReceiveRecoveryHoldNotPreserved =
             [bool]$initialActivationReceiveRecoveryHoldNotPreserved
         InitialActivationReceiveRecoveryHoldReleasedOfferExpired =

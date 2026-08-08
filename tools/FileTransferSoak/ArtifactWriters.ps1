@@ -10952,24 +10952,36 @@ function Get-FileTransferRouteTransitionCorrelation {
         $fallbackEpoch = Get-RouteTransitionField -Event $starts[-1] -Name 'fallback_epoch'
         $transferId = Get-RouteTransitionField -Event $commit -Name 'transfer_id'
         $direction = Get-RouteTransitionField -Event $commit -Name 'direction'
-        $deliveredBootstrap = @($bootstrapReceiptEvents | Where-Object {
-                (Get-RouteTransitionField -Event $_ -Name 'session_id') -eq $sessionId -and
-                (Get-RouteTransitionField -Event $_ -Name 'transfer_id') -eq $transferId -and
-                (Get-RouteTransitionField -Event $_ -Name 'direction') -eq $direction -and
-                (Get-RouteTransitionField -Event $_ -Name 'fallback_epoch') -eq $fallbackEpoch
-            } | Select-Object -First 1)
-        $acceptedBootstrapFrame = @($bootstrapPeerFrameDecisionEvents | Where-Object {
-                $deliveredBootstrap.Count -gt 0 -and
+        $issuedBootstrap = @($bootstrapDecisionEvents | Where-Object {
+                [int64]$_.Sequence -gt $skipSequence -and
                 (Get-RouteTransitionField -Event $_ -Name 'session_id') -eq $sessionId -and
                 (Get-RouteTransitionField -Event $_ -Name 'transfer_id') -eq $transferId -and
                 (Get-RouteTransitionField -Event $_ -Name 'direction') -eq $direction -and
                 (Get-RouteTransitionField -Event $_ -Name 'fallback_epoch') -eq $fallbackEpoch -and
-                (Get-RouteTransitionField -Event $_ -Name 'status') -in
-                    @('Accepted', 'Idempotent')
+                (Get-RouteTransitionField -Event $_ -Name 'decision_status') -in @('Issued', 'Idempotent')
             } | Select-Object -First 1)
-        if ($deliveredBootstrap.Count -gt 0 -and $acceptedBootstrapFrame.Count -gt 0) {
-            continue
-        }
+        $deliveredExecution = @($bootstrapExecutionEvents | Where-Object {
+                $issuedBootstrap.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$issuedBootstrap[0].Sequence -and
+                (Get-RouteTransitionField -Event $_ -Name 'session_id') -eq $sessionId -and
+                (Get-RouteTransitionField -Event $_ -Name 'transfer_id') -eq $transferId -and
+                (Get-RouteTransitionField -Event $_ -Name 'direction') -eq $direction -and
+                (Get-RouteTransitionField -Event $_ -Name 'fallback_epoch') -eq $fallbackEpoch -and
+                (Get-RouteTransitionField -Event $_ -Name 'receipt_status') -eq 'Delivered'
+            } | Select-Object -First 1)
+        $deliveredBootstrap = @($bootstrapReceiptEvents | Where-Object {
+                $deliveredExecution.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$deliveredExecution[0].Sequence -and
+                (Get-RouteTransitionField -Event $_ -Name 'session_id') -eq $sessionId -and
+                (Get-RouteTransitionField -Event $_ -Name 'transfer_id') -eq $transferId -and
+                (Get-RouteTransitionField -Event $_ -Name 'direction') -eq $direction -and
+                (Get-RouteTransitionField -Event $_ -Name 'fallback_epoch') -eq $fallbackEpoch -and
+                (Get-RouteTransitionField -Event $_ -Name 'receipt_status') -eq 'Delivered' -and
+                (Get-RouteTransitionField -Event $_ -Name 'application_status') -in @('Applied', 'Idempotent')
+            } | Select-Object -First 1)
+        $commandRecovered = $issuedBootstrap.Count -eq 1 -and
+            $deliveredExecution.Count -eq 1 -and
+            $deliveredBootstrap.Count -eq 1
         [object[]]$recoveryPrepared = @($preparedEvents | Where-Object {
                 [int64]$_.Sequence -gt $skipSequence -and
                 (Get-RouteTransitionField -Event $_ -Name 'session_id') -eq $sessionId -and
@@ -10978,7 +10990,7 @@ function Get-FileTransferRouteTransitionCorrelation {
                 (Get-RouteTransitionField -Event $_ -Name 'source_route') -eq 'file_tuna_v4' -and
                 (Get-RouteTransitionField -Event $_ -Name 'target_route') -eq 'post_tuna_fallback_v6'
             } | Sort-Object Sequence, LineNumber)
-        $recovered = $false
+        $recovered = $commandRecovered
         if ($recoveryPrepared.Count -gt 0) {
             $prepared = $recoveryPrepared[0]
             [object[]]$decisions = @($bootstrapDecisionEvents | Where-Object {
@@ -10996,21 +11008,19 @@ function Get-FileTransferRouteTransitionCorrelation {
                     [int64]$_.Sequence -lt [int64]$prepared.Sequence -and
                     (Test-RouteTransitionTransferScopeMatch -Authority $commit -Candidate $_)
                 })
-            $recovered = $decisions.Count -gt 0 -and
+            $recovered = $recovered -or (
+                $decisions.Count -gt 0 -and
                 $receipts.Count -gt 0 -and
-                $proofs.Count -gt 0
+                $proofs.Count -gt 0)
         }
-        if ($recovered) {
-            continue
-        }
-
         $commitAuthority = Get-RouteTransitionField -Event $commit -Name 'authority_id'
         $candidateKey = "fallback-v6-proof-bootstrap|$sessionId|$transferId|$direction|$commitAuthority|$fallbackEpoch"
         Add-RouteTransitionCandidate `
             -Event $skip `
             -Key $candidateKey.ToLowerInvariant() `
             -Reason 'post_tuna_fallback_v6_proof_bootstrap_gated_on_committed_target_runtime' `
-            -Class 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing'
+            -Class 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing' `
+            -Recovered:$recovered
     }
 
     foreach ($disposition in @($dispositionEvents | Sort-Object Sequence, LineNumber)) {
@@ -14505,6 +14515,10 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount)) | Out-Null
     $lines.Add(("runtime_unlock_initial_activation_answer_peer_delivery_verdict={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryVerdict)) | Out-Null
+    $lines.Add(("runtime_unlock_initial_activation_answer_ack_return_delivery_missing_raw_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRawCount)) | Out-Null
+    $lines.Add(("runtime_unlock_initial_activation_answer_ack_return_delivery_missing_distinct_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationAnswerAckReturnDeliveryMissingDistinctCount)) | Out-Null
+    $lines.Add(("runtime_unlock_initial_activation_answer_ack_return_delivery_missing_recovered_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRecoveredCount)) | Out-Null
+    $lines.Add(("runtime_unlock_initial_activation_answer_ack_return_delivery_missing_unresolved_count={0}" -f $RecoveryClassification.RuntimeUnlockInitialActivationAnswerAckReturnDeliveryMissingUnresolvedCount)) | Out-Null
     $lines.Add(("runtime_unlock_dial_failed_rejected_answer_not_retained_raw_count={0}" -f $RecoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedRawCount)) | Out-Null
     $lines.Add(("runtime_unlock_dial_failed_rejected_answer_not_retained_distinct_count={0}" -f $RecoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount)) | Out-Null
     $lines.Add(("runtime_unlock_dial_failed_rejected_answer_not_retained_recovered_count={0}" -f $RecoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount)) | Out-Null
@@ -16647,6 +16661,10 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount),
         ("runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount),
         ("runtime_unlock_initial_activation_answer_peer_delivery_verdict={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryVerdict),
+        ("runtime_unlock_initial_activation_answer_ack_return_delivery_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRawCount),
+        ("runtime_unlock_initial_activation_answer_ack_return_delivery_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerAckReturnDeliveryMissingDistinctCount),
+        ("runtime_unlock_initial_activation_answer_ack_return_delivery_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRecoveredCount),
+        ("runtime_unlock_initial_activation_answer_ack_return_delivery_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerAckReturnDeliveryMissingUnresolvedCount),
         ("runtime_unlock_dial_failed_rejected_answer_not_retained_raw_count={0}" -f $recoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedRawCount),
         ("runtime_unlock_dial_failed_rejected_answer_not_retained_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount),
         ("runtime_unlock_dial_failed_rejected_answer_not_retained_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount),
@@ -23156,11 +23174,27 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
     [object[]]$rawAnswerReceipts = @($orderedEvents | Where-Object {
         $_.EventName -eq 'tuna_acceleration_answer_received_raw'
     })
-    [object[]]$answerAcks = @($orderedEvents | Where-Object {
+    [object[]]$answerAckSubmissions = @($orderedEvents | Where-Object {
         $_.EventName -in @(
             'tuna_acceleration_answer_ack_sent',
+            'tuna_acceleration_answer_ack_replay_sent')
+    })
+    [object[]]$answerAckReceipts = @($orderedEvents | Where-Object {
+        $_.EventName -in @(
             'tuna_acceleration_answer_ack_received_raw',
             'tuna_acceleration_answer_ack_received')
+    })
+    [object[]]$peerPreCommitAnswerAcceptanceReceipts = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_peer_precommit_answer_acceptance_decided' -and
+        (Get-FileTransferEventField -Event $_ -Name 'status' -Default '') -in @(
+            'Accepted',
+            'Idempotent',
+            'accepted',
+            'idempotent')
+    })
+    [object[]]$responderPeerProbeHandoffs = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_precommit_responder_peer_probe_handoff_bound' -and
+        [int64](Get-FileTransferEventField -Event $_ -Name 'launch_generation' -Default '0') -gt 0
     })
     [object[]]$answerAckSubmissionRejections = @($orderedEvents | Where-Object {
         $_.EventName -eq 'tuna_acceleration_answer_ack_rejected'
@@ -23252,6 +23286,14 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
         New-Object System.Collections.Generic.List[object]
     $failedDialRejectedAnswerUnresolved =
         New-Object System.Collections.Generic.List[object]
+    $acceptedAnswerAckReturnRaw =
+        New-Object System.Collections.Generic.List[object]
+    $acceptedAnswerAckReturnDistinct =
+        New-Object System.Collections.Generic.List[object]
+    $acceptedAnswerAckReturnRecovered =
+        New-Object System.Collections.Generic.List[object]
+    $acceptedAnswerAckReturnUnresolved =
+        New-Object System.Collections.Generic.List[object]
     $failedDialRejectedAnswerRaw =
         New-Object System.Collections.Generic.List[object]
     $failedDialRejectedAnswerDistinct =
@@ -23302,28 +23344,97 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
 
         $peerRaw = @($rawAnswerReceipts | Where-Object {
             [int64]$_.Sequence -gt [int64]$sends[0].Sequence -and
-            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -ne $writer
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -ne $writer -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId) -and
+            (Get-AnswerDeliveryIdentityValue $_ @('msg_id')) -in @(
+                '',
+                (Get-AnswerDeliveryIdentityValue $sends[0] @('msg_id')))
         } | Select-Object -First 1)
-        $ack = @()
-        $preCommit = @()
+        $localAck = @()
+        $ackReplyTarget = @()
+        $responderReceipt = @()
+        $responderLaunch = @()
+        $inboundPrepared = @()
         if ($peerRaw.Count -eq 1) {
-            $ack = @($answerAcks | Where-Object {
+            $peerWriter = Get-AnswerDeliveryIdentityValue $peerRaw[0] @('log_writer_id')
+            $ackReplyTarget = @($replyTargetEvents | Where-Object {
                 [int64]$_.Sequence -gt [int64]$peerRaw[0].Sequence -and
-                (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId)
+                (Get-AnswerDeliveryIdentityValue $_ @('purpose')) -eq 'answer_ack' -and
+                (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $peerWriter -and
+                (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId) -and
+                (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -in @('', $payerDecisionId)
+            } | Select-Object -First 1)
+            $localAck = @($answerAckSubmissions | Where-Object {
+                $ackReplyTarget.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$peerRaw[0].Sequence -and
+                (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $peerWriter -and
+                (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId) -and
+                (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -in @('', $payerDecisionId)
             } | Select-Object -First 1)
         }
-        if ($ack.Count -eq 1) {
-            $preCommit = @($preCommitEvents | Where-Object {
-                [int64]$_.Sequence -gt [int64]$ack[0].Sequence -and
+        if ($localAck.Count -eq 1) {
+            $rawReceipt = @($answerAckReceipts | Where-Object {
+                [int64]$_.Sequence -gt [int64]$localAck[0].Sequence -and
+                (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer -and
+                (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId) -and
+                (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -in @('', $payerDecisionId) -and
+                (Get-AnswerDeliveryIdentityValue $_ @('msg_id')) -in @(
+                    '',
+                    (Get-AnswerDeliveryIdentityValue $localAck[0] @('msg_id')))
+            } | Select-Object -First 1)
+            $typedReceipt = @($peerPreCommitAnswerAcceptanceReceipts | Where-Object {
+                [int64]$_.Sequence -gt [int64]$localAck[0].Sequence -and
+                (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer -and
+                (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId)
+            } | Select-Object -First 1)
+            $responderReceipt = @(
+                @($rawReceipt) + @($typedReceipt) |
+                    Sort-Object Sequence, LineNumber |
+                    Select-Object -First 1)
+        }
+        if ($responderReceipt.Count -eq 1) {
+            $responderLaunch = @($responderPeerProbeHandoffs | Where-Object {
+                [int64]$_.Sequence -gt [int64]$responderReceipt[0].Sequence -and
+                (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer -and
+                (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId)
+            } | Select-Object -First 1)
+            if ($responderLaunch.Count -eq 0) {
+                $responderLaunch = @($preCommitEvents | Where-Object {
+                    $_.EventName -eq 'runtime_unlock_precommit_probe_launch_requested' -and
+                    [int64]$_.Sequence -gt [int64]$responderReceipt[0].Sequence -and
+                    [int64](Get-AnswerDeliveryIdentityValue $_ @('launch_generation')) -gt 0 -and
+                    (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer -and
+                    (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId)
+                } | Select-Object -First 1)
+            }
+        }
+        if ($responderLaunch.Count -eq 1) {
+            $inboundPrepared = @($preCommitEvents | Where-Object {
+                $_.EventName -eq 'filetransfer_route_transition_prepared' -and
+                [int64]$_.Sequence -gt [int64]$responderLaunch[0].Sequence -and
+                (Get-AnswerDeliveryIdentityValue $_ @('direction')) -eq 'inbound' -and
+                (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer -and
                 (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId)
             } | Select-Object -First 1)
         }
 
-        if ($peerRaw.Count -eq 1 -and $ack.Count -eq 1 -and $preCommit.Count -eq 1) {
+        if ($peerRaw.Count -eq 1 -and
+            $localAck.Count -eq 1 -and
+            $responderReceipt.Count -eq 1 -and
+            $responderLaunch.Count -eq 1 -and
+            $inboundPrepared.Count -eq 1) {
             $recovered.Add($timeout) | Out-Null
+            $acceptedAnswerAckReturnRaw.Add($timeout) | Out-Null
+            $acceptedAnswerAckReturnDistinct.Add($timeout) | Out-Null
+            $acceptedAnswerAckReturnRecovered.Add($timeout) | Out-Null
         }
         else {
             $unresolved.Add($timeout) | Out-Null
+            if ($peerRaw.Count -eq 1 -and $localAck.Count -eq 1) {
+                $acceptedAnswerAckReturnRaw.Add($timeout) | Out-Null
+                $acceptedAnswerAckReturnDistinct.Add($timeout) | Out-Null
+                $acceptedAnswerAckReturnUnresolved.Add($timeout) | Out-Null
+            }
             $lastSend = @($sends | Sort-Object Sequence, LineNumber |
                 Select-Object -Last 1)
             $replyTarget = @($replyTargetEvents | Where-Object {
@@ -23425,7 +23536,7 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
         $seen[$key] = $true
         $distinct.Add($rejection) | Out-Null
 
-        $laterSubmission = @($answerAcks | Where-Object {
+        $laterSubmission = @($answerAckSubmissions | Where-Object {
             $_.EventName -eq 'tuna_acceleration_answer_ack_sent' -and
             [int64]$_.Sequence -gt [int64]$rejection.Sequence -and
             (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
@@ -23433,7 +23544,7 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
             (Get-AnswerDeliveryIdentityValue $_ @('generation')) -eq $generation -and
             (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
         } | Select-Object -First 1)
-        $peerAck = @($answerAcks | Where-Object {
+        $peerAck = @($answerAckReceipts | Where-Object {
             $laterSubmission.Count -eq 1 -and
             $_.EventName -in @(
                 'tuna_acceleration_answer_ack_received_raw',
@@ -23575,7 +23686,7 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
             (Get-AnswerDeliveryIdentityValue $_ @('accepted')) -ne '0' -and
             (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
         } | Select-Object -First 1)
-        $positiveAck = @($answerAcks | Where-Object {
+        $positiveAck = @($answerAckReceipts | Where-Object {
             $positiveAnswer.Count -eq 1 -and
             [int64]$_.Sequence -gt [int64]$positiveAnswer[0].Sequence
         } | Select-Object -First 1)
@@ -23614,6 +23725,12 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
             @($peerRecoveryReplayWindowUnresolved.ToArray())
         AnswerAckSubmissionBarrierUnresolvedCandidateEvents =
             @($answerAckSubmissionBarrierUnresolved.ToArray())
+        AcceptedAnswerAckReturnRawCount = $acceptedAnswerAckReturnRaw.Count
+        AcceptedAnswerAckReturnDistinctCount = $acceptedAnswerAckReturnDistinct.Count
+        AcceptedAnswerAckReturnRecoveredCount = $acceptedAnswerAckReturnRecovered.Count
+        AcceptedAnswerAckReturnUnresolvedCount = $acceptedAnswerAckReturnUnresolved.Count
+        AcceptedAnswerAckReturnUnresolvedCandidateEvents =
+            @($acceptedAnswerAckReturnUnresolved.ToArray())
         FailedDialRejectedAnswerRawCount = $failedDialRejectedAnswerRaw.Count
         FailedDialRejectedAnswerDistinctCount = $failedDialRejectedAnswerDistinct.Count
         FailedDialRejectedAnswerRecoveredCount = $failedDialRejectedAnswerRecovered.Count
@@ -48239,6 +48356,13 @@ function Get-FileTransferRecoveryFailureClassification {
             'exact_runtime_unlock_dial_failure_rejection_not_replayed_after_same_offer_refresh'
         }
         elseif (@(
+                $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.AcceptedAnswerAckReturnUnresolvedCandidateEvents |
+                    Where-Object {
+                        [int64]$_.Sequence -eq [int64]$candidateEvent.Sequence
+                    }).Count -gt 0) {
+            'exact_source_answer_ack_not_delivered_to_responder_before_wire_deadline'
+        }
+        elseif (@(
                 $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.AnswerAckSubmissionBarrierUnresolvedCandidateEvents |
                     Where-Object {
                         [int64]$_.Sequence -eq [int64]$candidateEvent.Sequence
@@ -49520,6 +49644,10 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.RecoveredCount
         RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.UnresolvedCount
         RuntimeUnlockInitialActivationAnswerPeerDeliveryVerdict = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.Verdict
+        RuntimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRawCount = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.AcceptedAnswerAckReturnRawCount
+        RuntimeUnlockInitialActivationAnswerAckReturnDeliveryMissingDistinctCount = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.AcceptedAnswerAckReturnDistinctCount
+        RuntimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRecoveredCount = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.AcceptedAnswerAckReturnRecoveredCount
+        RuntimeUnlockInitialActivationAnswerAckReturnDeliveryMissingUnresolvedCount = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.AcceptedAnswerAckReturnUnresolvedCount
         RuntimeUnlockDialFailedRejectedAnswerNotRetainedRawCount = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerRawCount
         RuntimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerDistinctCount
         RuntimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount = $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerRecoveredCount
@@ -50413,6 +50541,10 @@ function New-FileTransferInvariantLedgerObject {
         runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count = [string]$recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount
         runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count = [string]$recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount
         runtime_unlock_initial_activation_answer_peer_delivery_verdict = $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryVerdict
+        runtime_unlock_initial_activation_answer_ack_return_delivery_missing_raw_count = [string]$recoveryClassification.RuntimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRawCount
+        runtime_unlock_initial_activation_answer_ack_return_delivery_missing_distinct_count = [string]$recoveryClassification.RuntimeUnlockInitialActivationAnswerAckReturnDeliveryMissingDistinctCount
+        runtime_unlock_initial_activation_answer_ack_return_delivery_missing_recovered_count = [string]$recoveryClassification.RuntimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRecoveredCount
+        runtime_unlock_initial_activation_answer_ack_return_delivery_missing_unresolved_count = [string]$recoveryClassification.RuntimeUnlockInitialActivationAnswerAckReturnDeliveryMissingUnresolvedCount
         runtime_unlock_dial_failed_rejected_answer_not_retained_raw_count = [string]$recoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedRawCount
         runtime_unlock_dial_failed_rejected_answer_not_retained_distinct_count = [string]$recoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount
         runtime_unlock_dial_failed_rejected_answer_not_retained_recovered_count = [string]$recoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount
@@ -51097,6 +51229,10 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingRecoveredCount),
         ("runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryMissingUnresolvedCount),
         ("runtime_unlock_initial_activation_answer_peer_delivery_verdict={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerPeerDeliveryVerdict),
+        ("runtime_unlock_initial_activation_answer_ack_return_delivery_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRawCount),
+        ("runtime_unlock_initial_activation_answer_ack_return_delivery_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerAckReturnDeliveryMissingDistinctCount),
+        ("runtime_unlock_initial_activation_answer_ack_return_delivery_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerAckReturnDeliveryMissingRecoveredCount),
+        ("runtime_unlock_initial_activation_answer_ack_return_delivery_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockInitialActivationAnswerAckReturnDeliveryMissingUnresolvedCount),
         ("runtime_unlock_dial_failed_rejected_answer_not_retained_raw_count={0}" -f $recoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedRawCount),
         ("runtime_unlock_dial_failed_rejected_answer_not_retained_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedDistinctCount),
         ("runtime_unlock_dial_failed_rejected_answer_not_retained_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockDialFailedRejectedAnswerNotRetainedRecoveredCount),
