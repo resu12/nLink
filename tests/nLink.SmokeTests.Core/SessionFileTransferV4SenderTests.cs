@@ -23611,6 +23611,375 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     [Fact]
+    public void FileTransferReceiveRecoveryFallbackCheckpointFrontierRequest_AcceptanceRechecksLatestNativeAndRetainedRequest()
+    {
+        foreach (var retainedSparseV4 in new[] { false, true })
+        {
+            using var service = new SessionFileTransferService();
+            var serviceType = typeof(SessionFileTransferService);
+            var suffix = retainedSparseV4 ? "retained" : "native";
+            var transferId =
+                $"transfer_checkpoint_frontier_recheck_{suffix}";
+            using var transport = new LoopbackFileTransferTransport(
+                $"session_{transferId}");
+            service.AttachTransport(transport);
+            var context = CreatePostTunaFallbackV6OutboundContext(
+                transferId,
+                remoteNextExpectedChunkIndex: 1050,
+                chunksAcceptedForTransport: 1198,
+                remoteGrantedUntilExclusive: 1198,
+                chunkCount: 4096);
+            serviceType
+                .GetField(
+                    "outboundTransfer",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!
+                .SetValue(service, context);
+            SetPrivateProperty(
+                context,
+                "DataSession",
+                new CompletingDataSession(
+                    $"session_{transferId}",
+                    transferId));
+            SetPrivateProperty(context, "DataSessionGeneration", 1L);
+            serviceType
+                .GetMethod(
+                    "StartOutboundPostTunaRecoveryLocked",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(
+                    service,
+                    [context, "test_checkpoint_frontier_recheck"]);
+            Assert.True((bool)serviceType
+                .GetMethod(
+                    "TryRequestFileTransferReceiveRecovery",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(
+                    service,
+                    [
+                        new FileTransferReceiveRecoveryRequest(
+                            $"session_{transferId}",
+                            transferId,
+                            FileTransferDirection.Outbound,
+                            "session_liveness_timeout_pending"),
+                    ])!);
+
+            var leg = GetPrivatePropertyValue(
+                context,
+                "CurrentTransferLeg")!;
+            var transportEpoch = GetPrivateProperty<long>(
+                leg,
+                "TransportEpochId");
+            var checkpointRequest = new FileTransferFrontierRequestFrameV6
+            {
+                SessionId = $"session_{transferId}",
+                TransferId = transferId,
+                TransportEpoch = transportEpoch,
+                RepairRequestId =
+                    "v6-regular-nkn-state-refresh:checkpoint",
+                RequestCorrelationId =
+                    "receive-recovery-fallback-checkpoint:test",
+                MissingRanges =
+                [
+                    new FileTransferRangeV4
+                    {
+                        StartChunkIndex = 1050,
+                        ChunkCount = 1,
+                    },
+                ],
+                Priority = "state_refresh",
+                RecoveryMode = "regular_nkn_state_refresh",
+            };
+            serviceType
+                .GetMethod(
+                    "MarkOutboundFallbackCheckpointRequestedLocked",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(
+                    service,
+                    [
+                        context,
+                        checkpointRequest,
+                        "test_checkpoint_frontier_recheck",
+                    ]);
+
+            var persistentState =
+                GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                    context,
+                    "CoordinatorPersistentState");
+            Assert.NotNull(
+                persistentState.FileTransferReceiveRecovery
+                    .CurrentFallbackCheckpointBinding);
+
+            var logStart = GetOperationalLogLength();
+            foreach (var requestGeneration in
+                     new[] { 78, 78, 79, 79, 80, 80, 81 })
+            {
+                var request = new FileTransferFrontierRequestFrameV6
+                {
+                    SessionId = checkpointRequest.SessionId,
+                    TransferId = checkpointRequest.TransferId,
+                    TransportEpoch = transportEpoch,
+                    RepairRequestId =
+                        $"v6-frontier:1050:{requestGeneration}",
+                    RequestCorrelationId =
+                        $"frq-checkpoint-frontier-{requestGeneration}",
+                    MissingRanges =
+                    [
+                        new FileTransferRangeV4
+                        {
+                            StartChunkIndex = 1050,
+                            ChunkCount = 2,
+                        },
+                    ],
+                    Priority = "frontier",
+                    RecoveryMode =
+                        "regular_nkn_frontier_stall_control_bulk",
+                };
+                if (retainedSparseV4)
+                {
+                    serviceType
+                        .GetMethod(
+                            "ApplyOutboundV6RepairRequestCore",
+                            BindingFlags.Instance |
+                            BindingFlags.NonPublic)!
+                        .Invoke(
+                            service,
+                            [
+                                context,
+                                request,
+                                FileTransferTransportKind.RegularNkn,
+                                null,
+                                null,
+                                null,
+                                0L,
+                                0L,
+                            ]);
+                }
+                else
+                {
+                    serviceType
+                        .GetMethod(
+                            "ApplyOutboundV6FrontierRequest",
+                            BindingFlags.Instance |
+                            BindingFlags.NonPublic)!
+                        .Invoke(
+                            service,
+                            [
+                                context,
+                                request,
+                                FileTransferTransportKind.RegularNkn,
+                            ]);
+                }
+            }
+
+            Assert.Null(
+                GetPrivatePropertyValue(
+                    context,
+                    "CurrentFallbackFrontierRepairContract"));
+            persistentState =
+                GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                    context,
+                    "CoordinatorPersistentState");
+            var hold = Assert.IsType<
+                FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestHold>(
+                    persistentState.FileTransferReceiveRecovery
+                        .PendingFallbackCheckpointFrontierRequestHold);
+            Assert.Equal(
+                "v6-frontier:1050:81",
+                hold.Observation.Frame.RepairRequestId);
+            Assert.True(
+                persistentState.FileTransferReceiveRecovery.CurrentOperation
+                    .HasValue);
+            var currentRecoveryOperation = persistentState
+                .FileTransferReceiveRecovery.CurrentOperation.Value;
+            Assert.Equal(
+                currentRecoveryOperation.Authority.Observation
+                    .DataSessionIdentity,
+                hold.Observation.ReceivingDataSessionIdentity);
+            Assert.Equal(
+                currentRecoveryOperation.Authority.Observation
+                    .DataSessionGeneration,
+                hold.Observation.ReceivingDataSessionGeneration);
+
+            var accepted = (bool)serviceType
+                .GetMethod(
+                    "TryAcceptOutboundFallbackCheckpointLocked",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(
+                    service,
+                    [
+                        context,
+                        new FileTransferReceiverStateFrameV6
+                        {
+                            SessionId = checkpointRequest.SessionId,
+                            TransferId = checkpointRequest.TransferId,
+                            Epoch = 91,
+                            ContiguousCommittedChunkIndex = 1050,
+                            DurableReceivedHighestChunkIndex = 1197,
+                            CreditUntilChunkIndexExclusive = 1198,
+                            MissingRanges = checkpointRequest.MissingRanges,
+                            BytesCommitted = 1050L * 21 * 1024,
+                            TransportEpoch = transportEpoch,
+                            RepairRequestId =
+                                checkpointRequest.RepairRequestId,
+                            Priority = checkpointRequest.Priority,
+                            RecoveryMode = checkpointRequest.RecoveryMode,
+                        },
+                        "receiver_state_sparse_runtime",
+                    ])!;
+            Assert.True(accepted);
+
+            var contract = GetPrivatePropertyValue(
+                context,
+                "CurrentFallbackFrontierRepairContract");
+            Assert.NotNull(contract);
+            Assert.Equal(
+                serviceType.GetNestedType(
+                    "FallbackFrontierRepairContract",
+                    BindingFlags.NonPublic),
+                contract.GetType());
+            var authority = contract.GetType()
+                .GetProperty("Authority")!
+                .GetValue(contract)!;
+            Assert.Equal(
+                "v6-frontier:1050:81",
+                authority.GetType()
+                    .GetProperty("ProtocolRepairRequestId")!
+                    .GetValue(authority));
+            persistentState =
+                GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                    context,
+                    "CoordinatorPersistentState");
+            Assert.Null(
+                persistentState.FileTransferReceiveRecovery
+                    .PendingFallbackCheckpointFrontierRequestHold);
+            Assert.Null(
+                persistentState.FileTransferReceiveRecovery
+                    .PendingFallbackCheckpointFrontierRequestRecheckCommand);
+            Assert.Equal(
+                FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestRecheckStatus
+                    .Applied,
+                Assert.IsType<
+                    FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestRecheckReceipt>(
+                        persistentState.FileTransferReceiveRecovery
+                            .LastFallbackCheckpointFrontierRequestRecheckReceipt)
+                    .Status);
+
+            var postAcceptanceLogStart = GetOperationalLogLength();
+            var postAcceptanceRequest = new FileTransferFrontierRequestFrameV6
+            {
+                SessionId = checkpointRequest.SessionId,
+                TransferId = checkpointRequest.TransferId,
+                TransportEpoch = transportEpoch,
+                RepairRequestId = "v6-frontier:1050:82",
+                RequestCorrelationId =
+                    "frq-checkpoint-frontier-82",
+                MissingRanges =
+                [
+                    new FileTransferRangeV4
+                    {
+                        StartChunkIndex = 1050,
+                        ChunkCount = 2,
+                    },
+                ],
+                Priority = "frontier",
+                RecoveryMode =
+                    "regular_nkn_frontier_stall_control_bulk",
+            };
+            if (retainedSparseV4)
+            {
+                serviceType
+                    .GetMethod(
+                        "ApplyOutboundV6RepairRequestCore",
+                        BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .Invoke(
+                        service,
+                        [
+                            context,
+                            postAcceptanceRequest,
+                            FileTransferTransportKind.RegularNkn,
+                            null,
+                            null,
+                            null,
+                            0L,
+                            0L,
+                        ]);
+            }
+            else
+            {
+                serviceType
+                    .GetMethod(
+                        "ApplyOutboundV6FrontierRequest",
+                        BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .Invoke(
+                        service,
+                        [
+                            context,
+                            postAcceptanceRequest,
+                            FileTransferTransportKind.RegularNkn,
+                        ]);
+            }
+
+            persistentState =
+                GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                    context,
+                    "CoordinatorPersistentState");
+            Assert.Null(
+                persistentState.FileTransferReceiveRecovery
+                    .PendingFallbackCheckpointFrontierRequestHold);
+            Assert.Null(
+                persistentState.FileTransferReceiveRecovery
+                    .PendingFallbackCheckpointFrontierRequestRecheckCommand);
+            var postAcceptanceLog =
+                ReadOperationalLogTail(postAcceptanceLogStart);
+            Assert.Contains(
+                "repair_request_id=v6-frontier:1050:82",
+                postAcceptanceLog,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=filetransfer_receive_recovery_fallback_checkpoint_frontier_request_hold_decided;",
+                postAcceptanceLog,
+                StringComparison.Ordinal);
+
+            var log = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=filetransfer_receive_recovery_fallback_checkpoint_frontier_request_hold_decided;",
+                log,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=filetransfer_receive_recovery_fallback_checkpoint_frontier_request_recheck_issued;",
+                log,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=filetransfer_receive_recovery_fallback_checkpoint_frontier_request_recheck_applied;",
+                log,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "repair_request_id=v6-frontier:1050:81",
+                log,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=filetransfer_v6_frontier_request_receive_dispatch_staged;",
+                log,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "decision_reason=checkpoint_pending_frontier_request_retained",
+                log,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=filetransfer_v6_frontier_request_receive_dispatch_coalesced;",
+                log,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "decision_reason=hold_idempotent",
+                log,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=filetransfer_v6_frontier_request_receive_dispatch_rejected;",
+                log,
+                StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public void PostTunaFallbackV6TailReconciliation_RetiresPendingNormalCheckpoint()
     {
         using var service = new SessionFileTransferService();

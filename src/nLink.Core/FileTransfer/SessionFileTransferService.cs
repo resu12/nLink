@@ -16838,7 +16838,7 @@ public sealed partial class SessionFileTransferService :
             return false;
         }
 
-        return TryApplyOutboundCoordinatorLegMutationLocked(
+        var applied = TryApplyOutboundCoordinatorLegMutationLocked(
             context,
             new FileTransferCoordinatorEvent(
                 FileTransferCoordinatorEventKind.FallbackCheckpointAccepted,
@@ -16859,7 +16859,22 @@ public sealed partial class SessionFileTransferService :
             leg,
             checkpointRequestId,
             transportEpoch,
-            out _);
+            out var decision);
+        if (!applied)
+        {
+            return false;
+        }
+
+        if (decision
+                .ReceiveRecoveryFallbackCheckpointFrontierRequestRecheckCommand
+            is { } recheckCommand)
+        {
+            DispatchReceiveRecoveryFallbackCheckpointFrontierRequestRecheckLocked(
+                context,
+                recheckCommand);
+        }
+
+        return true;
     }
 
     private bool TryAcceptInboundFallbackCheckpointWithCoordinatorLocked(

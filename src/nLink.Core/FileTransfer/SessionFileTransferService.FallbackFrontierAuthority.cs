@@ -1288,12 +1288,143 @@ public sealed partial class SessionFileTransferService
             $"event=filetransfer_fallback_frontier_repair_progress_observed; {FormatFallbackFrontierRepairAuthorityTuple(authority)}; request_correlation_id={FormatProtocolLogValue(authority.RequestCorrelationId)}; reason={FormatProtocolLogValue(reason)}; previous_frontier_chunk_index={previousFrontierChunkIndex}; current_frontier_chunk_index={currentFrontierChunkIndex}");
     }
 
-    private void ApplyOutboundAuthorizedFallbackFrontierRequest(
+    private bool
+        TryHoldReceiveRecoveryFallbackCheckpointFrontierRequestLocked(
+            OutboundTransferContext context,
+            FileTransferFrontierRequestFrameV6 request,
+            FileTransferTransportKind receivedTransportKind,
+            FallbackFrontierRepairIdentity identity,
+            FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestDispatchPath
+                dispatchPath,
+            string receivingDataSessionIdentity,
+            long receivingDataSessionGeneration,
+            out FileTransferReceiveRecoveryDecision decision)
+    {
+        var state = CreateCoordinatorStateLocked(context);
+        var binding = state.PersistentState.FileTransferReceiveRecovery
+            .CurrentFallbackCheckpointBinding;
+        if (binding is null)
+        {
+            decision = new FileTransferReceiveRecoveryDecision(
+                FileTransferReceiveRecoveryTransitionStatus.Rejected,
+                "filetransfer_receive_recovery_fallback_checkpoint_frontier_request_binding_missing")
+            {
+                State = state,
+            };
+            return false;
+        }
+
+        if (!PostTunaFallbackPeerProofFrameIdentity.TryCreate(
+                request,
+                out var frameIdentity))
+        {
+            decision = new FileTransferReceiveRecoveryDecision(
+                FileTransferReceiveRecoveryTransitionStatus.Rejected,
+                "filetransfer_receive_recovery_fallback_checkpoint_frontier_request_frame_identity_invalid")
+            {
+                State = state,
+            };
+            return false;
+        }
+
+        var observation =
+            new FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestObservation(
+                binding,
+                request with
+                {
+                    MissingRanges = request.MissingRanges.ToArray(),
+                },
+                dispatchPath,
+                receivedTransportKind,
+                receivingDataSessionIdentity,
+                receivingDataSessionGeneration,
+                identity.RangeFingerprint,
+                frameIdentity,
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        decision = FileTransferCoordinator
+            .ObserveReceiveRecoveryFallbackCheckpointFrontierRequest(
+                state,
+                observation);
+        context.CoordinatorPersistentState = decision.State.PersistentState;
+        var hold = decision.FallbackCheckpointFrontierRequestHold;
+        var scope = binding.OriginalObservation;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_receive_recovery_fallback_checkpoint_frontier_request_hold_decided; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; recovery_operation_authority_id={FormatProtocolLogValue(binding.ParentAuthority.AuthorityId.ToString())}; recovery_operation_generation={binding.ParentAuthority.OperationGeneration}; root_checkpoint_request_id={FormatProtocolLogValue(binding.ParentCheckpointRequestId ?? "(none)")}; root_checkpoint_generation={binding.ParentCheckpointGeneration}; effective_checkpoint_request_id={FormatProtocolLogValue(binding.EffectiveCheckpointRequestId)}; effective_checkpoint_generation={binding.EffectiveCheckpointGeneration}; checkpoint_binding_generation={binding.BindingGeneration}; checkpoint_binding_state={binding.State.ToString().ToLowerInvariant()}; checkpoint_frame_fingerprint={FormatProtocolLogValue(binding.FrameIdentity.Sha256)}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId ?? "(none)")}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId ?? "(none)")}; range_fingerprint={FormatProtocolLogValue(identity.RangeFingerprint)}; frontier_frame_type={FormatProtocolLogValue(frameIdentity.FrameType)}; frontier_frame_transport_epoch={frameIdentity.TransportEpoch}; frontier_frame_fingerprint={FormatProtocolLogValue(frameIdentity.Sha256)}; hold_generation={hold?.HoldGeneration ?? 0}; dispatch_path={FormatProtocolLogValue(dispatchPath.ToString())}; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}; receiving_data_session_identity={FormatProtocolLogValue(receivingDataSessionIdentity)}; receiving_data_session_generation={receivingDataSessionGeneration}; route={FormatProtocolLogValue(scope.RouteToken)}; protocol_version={scope.ProtocolVersion}; live_route_epoch={scope.LiveRouteEpoch}; runtime_generation={scope.RuntimeOwner.RuntimeGeneration}; route_publication_generation={scope.RoutePublication.PublicationGeneration}; route_commit_generation={scope.RoutePublication.RouteCommitGeneration ?? 0}; terminal_generation={scope.TerminalGeneration}; leg_generation={scope.LegGeneration}; transport_epoch={scope.TransportEpoch}; bridge_recovery_generation={scope.BridgeRecoveryGeneration}; data_session_identity={FormatProtocolLogValue(scope.DataSessionIdentity)}; data_session_generation={scope.DataSessionGeneration}; status={decision.Status.ToString().ToLowerInvariant()}; outcome={(decision.Status == FileTransferReceiveRecoveryTransitionStatus.Idempotent ? "coalesced" : decision.Accepted ? "held" : "rejected")}; decision_reason={FormatProtocolLogValue(decision.Reason)}");
+        return decision.Accepted;
+    }
+
+    private void
+        DispatchReceiveRecoveryFallbackCheckpointFrontierRequestRecheckLocked(
+            OutboundTransferContext context,
+            FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestRecheckCommand
+                command)
+    {
+        var hold = command.Hold;
+        var observation = hold.Observation;
+        var binding = command.AcceptedBinding;
+        var scope = binding.OriginalObservation;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_receive_recovery_fallback_checkpoint_frontier_request_recheck_issued; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; recovery_operation_authority_id={FormatProtocolLogValue(binding.ParentAuthority.AuthorityId.ToString())}; recovery_operation_generation={binding.ParentAuthority.OperationGeneration}; root_checkpoint_request_id={FormatProtocolLogValue(binding.ParentCheckpointRequestId ?? "(none)")}; root_checkpoint_generation={binding.ParentCheckpointGeneration}; effective_checkpoint_request_id={FormatProtocolLogValue(binding.EffectiveCheckpointRequestId)}; effective_checkpoint_generation={binding.EffectiveCheckpointGeneration}; checkpoint_binding_generation={binding.BindingGeneration}; checkpoint_binding_state={binding.State.ToString().ToLowerInvariant()}; checkpoint_frame_fingerprint={FormatProtocolLogValue(binding.FrameIdentity.Sha256)}; repair_request_id={FormatProtocolLogValue(observation.Frame.RepairRequestId ?? "(none)")}; request_correlation_id={FormatProtocolLogValue(observation.Frame.RequestCorrelationId ?? "(none)")}; range_fingerprint={FormatProtocolLogValue(observation.RangeFingerprint)}; frontier_frame_type={FormatProtocolLogValue(observation.FrameIdentity.FrameType)}; frontier_frame_transport_epoch={observation.FrameIdentity.TransportEpoch}; frontier_frame_fingerprint={FormatProtocolLogValue(observation.FrameIdentity.Sha256)}; hold_generation={hold.HoldGeneration}; recheck_generation={command.RecheckGeneration}; dispatch_path={FormatProtocolLogValue(observation.DispatchPath.ToString())}; received_transport={FormatFileTransferTransportKind(observation.ReceivedTransportKind)}; receiving_data_session_identity={FormatProtocolLogValue(observation.ReceivingDataSessionIdentity)}; receiving_data_session_generation={observation.ReceivingDataSessionGeneration}; route={FormatProtocolLogValue(scope.RouteToken)}; protocol_version={scope.ProtocolVersion}; live_route_epoch={scope.LiveRouteEpoch}; runtime_generation={scope.RuntimeOwner.RuntimeGeneration}; route_publication_generation={scope.RoutePublication.PublicationGeneration}; route_commit_generation={scope.RoutePublication.RouteCommitGeneration ?? 0}; terminal_generation={scope.TerminalGeneration}; leg_generation={scope.LegGeneration}; transport_epoch={scope.TransportEpoch}; bridge_recovery_generation={scope.BridgeRecoveryGeneration}; data_session_identity={FormatProtocolLogValue(scope.DataSessionIdentity)}; data_session_generation={scope.DataSessionGeneration}; status=issued; decision_reason=filetransfer_receive_recovery_fallback_checkpoint_frontier_request_recheck_issued");
+
+        RetainedPeerProofApplicationResult application;
+        if (observation.DispatchPath ==
+            FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestDispatchPath
+                .NativeV6)
+        {
+            application = ApplyOutboundAuthorizedFallbackFrontierRequest(
+                context,
+                observation.Frame,
+                observation.ReceivedTransportKind);
+        }
+        else
+        {
+            application = ApplyOutboundV6RepairRequestCore(
+                context,
+                observation.Frame,
+                observation.ReceivedTransportKind);
+        }
+
+        var receiptStatus = application.Status switch
+        {
+            RetainedPeerProofApplicationStatus.Applied =>
+                FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestRecheckStatus
+                    .Applied,
+            RetainedPeerProofApplicationStatus.Idempotent =>
+                FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestRecheckStatus
+                    .Idempotent,
+            _ =>
+                FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestRecheckStatus
+                    .Rejected,
+        };
+        var receiptReason = application.Reason;
+
+        var receipt =
+            new FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestRecheckReceipt(
+                command,
+                receiptStatus,
+                receiptReason,
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        var receiptDecision = FileTransferCoordinator
+            .ApplyReceiveRecoveryFallbackCheckpointFrontierRequestRecheckReceipt(
+                CreateCoordinatorStateLocked(context),
+                receipt);
+        context.CoordinatorPersistentState =
+            receiptDecision.State.PersistentState;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_receive_recovery_fallback_checkpoint_frontier_request_recheck_applied; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; recovery_operation_authority_id={FormatProtocolLogValue(binding.ParentAuthority.AuthorityId.ToString())}; recovery_operation_generation={binding.ParentAuthority.OperationGeneration}; root_checkpoint_request_id={FormatProtocolLogValue(binding.ParentCheckpointRequestId ?? "(none)")}; root_checkpoint_generation={binding.ParentCheckpointGeneration}; effective_checkpoint_request_id={FormatProtocolLogValue(binding.EffectiveCheckpointRequestId)}; effective_checkpoint_generation={binding.EffectiveCheckpointGeneration}; checkpoint_binding_generation={binding.BindingGeneration}; checkpoint_binding_state={binding.State.ToString().ToLowerInvariant()}; checkpoint_frame_fingerprint={FormatProtocolLogValue(binding.FrameIdentity.Sha256)}; repair_request_id={FormatProtocolLogValue(observation.Frame.RepairRequestId ?? "(none)")}; request_correlation_id={FormatProtocolLogValue(observation.Frame.RequestCorrelationId ?? "(none)")}; range_fingerprint={FormatProtocolLogValue(observation.RangeFingerprint)}; frontier_frame_type={FormatProtocolLogValue(observation.FrameIdentity.FrameType)}; frontier_frame_transport_epoch={observation.FrameIdentity.TransportEpoch}; frontier_frame_fingerprint={FormatProtocolLogValue(observation.FrameIdentity.Sha256)}; hold_generation={hold.HoldGeneration}; recheck_generation={command.RecheckGeneration}; dispatch_path={FormatProtocolLogValue(observation.DispatchPath.ToString())}; received_transport={FormatFileTransferTransportKind(observation.ReceivedTransportKind)}; receiving_data_session_identity={FormatProtocolLogValue(observation.ReceivingDataSessionIdentity)}; receiving_data_session_generation={observation.ReceivingDataSessionGeneration}; route={FormatProtocolLogValue(scope.RouteToken)}; protocol_version={scope.ProtocolVersion}; live_route_epoch={scope.LiveRouteEpoch}; runtime_generation={scope.RuntimeOwner.RuntimeGeneration}; route_publication_generation={scope.RoutePublication.PublicationGeneration}; route_commit_generation={scope.RoutePublication.RouteCommitGeneration ?? 0}; terminal_generation={scope.TerminalGeneration}; leg_generation={scope.LegGeneration}; transport_epoch={scope.TransportEpoch}; bridge_recovery_generation={scope.BridgeRecoveryGeneration}; data_session_identity={FormatProtocolLogValue(scope.DataSessionIdentity)}; data_session_generation={scope.DataSessionGeneration}; receipt_status={receiptStatus.ToString().ToLowerInvariant()}; decision_status={receiptDecision.Status.ToString().ToLowerInvariant()}; outcome={(receiptDecision.Accepted ? receiptStatus.ToString().ToLowerInvariant() : "rejected")}; decision_reason={FormatProtocolLogValue(receiptDecision.Reason)}");
+    }
+
+    private RetainedPeerProofApplicationResult
+        ApplyOutboundAuthorizedFallbackFrontierRequest(
         OutboundTransferContext context,
         FileTransferFrontierRequestFrameV6 request,
         FileTransferTransportKind receivedTransportKind)
     {
         SessionFileTransferSnapshot? snapshot = null;
+        RetainedPeerProofApplicationResult result;
         lock (gate)
         {
             var firstRaw = request.MissingRanges.Count > 0 ? request.MissingRanges[0] : null;
@@ -1315,7 +1446,11 @@ public sealed partial class SessionFileTransferService
                     request,
                     receivedTransportKind,
                     context.IsTerminal ? "transfer_terminal" : "stale_or_non_fallback_context");
-                return;
+                return new RetainedPeerProofApplicationResult(
+                    RetainedPeerProofApplicationStatus.Rejected,
+                    context.IsTerminal
+                        ? "transfer_terminal"
+                        : "stale_or_non_fallback_context");
             }
 
             if (request.MissingRanges.Count == 0 ||
@@ -1332,20 +1467,12 @@ public sealed partial class SessionFileTransferService
                     request,
                     receivedTransportKind,
                     reason);
-                return;
+                return new RetainedPeerProofApplicationResult(
+                    RetainedPeerProofApplicationStatus.Rejected,
+                    reason);
             }
 
             var leg = context.CurrentTransferLeg!;
-            if (IsCurrentPostTunaFallbackLegCheckpointPending(leg))
-            {
-                LogAuthorizedFallbackFrontierReceiveRejected(
-                    context,
-                    request,
-                    receivedTransportKind,
-                    "checkpoint_pending_frontier_request");
-                return;
-            }
-
             if (request.TransportEpoch <= 0 || request.TransportEpoch != leg.TransportEpochId)
             {
                 LogAuthorizedFallbackFrontierReceiveRejected(
@@ -1355,7 +1482,11 @@ public sealed partial class SessionFileTransferService
                     request.TransportEpoch <= 0
                         ? "missing_transport_epoch"
                         : "frontier_transport_epoch_mismatch");
-                return;
+                return new RetainedPeerProofApplicationResult(
+                    RetainedPeerProofApplicationStatus.Rejected,
+                    request.TransportEpoch <= 0
+                        ? "missing_transport_epoch"
+                        : "frontier_transport_epoch_mismatch");
             }
 
             var durableHighest = ResolveFallbackFrontierDurableHighest(request.MissingRanges);
@@ -1370,7 +1501,9 @@ public sealed partial class SessionFileTransferService
                     request,
                     receivedTransportKind,
                     "empty_normalized_repair_window");
-                return;
+                return new RetainedPeerProofApplicationResult(
+                    RetainedPeerProofApplicationStatus.Rejected,
+                    "empty_normalized_repair_window");
             }
 
             var first = identity.Ranges[0];
@@ -1391,7 +1524,62 @@ public sealed partial class SessionFileTransferService
                     request,
                     receivedTransportKind,
                     ignoreReason);
-                return;
+                return new RetainedPeerProofApplicationResult(
+                    RetainedPeerProofApplicationStatus.Rejected,
+                    ignoreReason);
+            }
+
+            if (IsCurrentPostTunaFallbackLegCheckpointPending(leg))
+            {
+                var receivingDataSessionIdentity =
+                    CreateReceiveRecoveryDataSessionIdentity(
+                        context.TransferId,
+                        context.DataSession,
+                        context.DataSessionGeneration);
+                var held =
+                    TryHoldReceiveRecoveryFallbackCheckpointFrontierRequestLocked(
+                        context,
+                        request,
+                        receivedTransportKind,
+                        identity,
+                        FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestDispatchPath
+                            .NativeV6,
+                        receivingDataSessionIdentity,
+                        context.DataSessionGeneration,
+                        out var holdDecision);
+                if (held)
+                {
+                    LogOutboundV6FrontierRequestReceiveDispatch(
+                        context,
+                        request,
+                        receivedTransportKind,
+                        holdDecision.Status ==
+                            FileTransferReceiveRecoveryTransitionStatus.Idempotent
+                            ? "coalesced"
+                            : "staged",
+                        holdDecision.Status ==
+                            FileTransferReceiveRecoveryTransitionStatus.Idempotent
+                            ? "hold_idempotent"
+                            : "checkpoint_pending_frontier_request_retained",
+                        first.StartChunkIndex,
+                        first.ChunkCount,
+                        identity.RangeCount);
+                    return new RetainedPeerProofApplicationResult(
+                        holdDecision.Status ==
+                            FileTransferReceiveRecoveryTransitionStatus.Idempotent
+                            ? RetainedPeerProofApplicationStatus.Idempotent
+                            : RetainedPeerProofApplicationStatus.Held,
+                        holdDecision.Reason);
+                }
+
+                LogAuthorizedFallbackFrontierReceiveRejected(
+                    context,
+                    request,
+                    receivedTransportKind,
+                    "checkpoint_pending_frontier_request");
+                return new RetainedPeerProofApplicationResult(
+                    RetainedPeerProofApplicationStatus.Rejected,
+                    holdDecision.Reason);
             }
 
             var currentContract = context.CurrentFallbackFrontierRepairContract;
@@ -1415,7 +1603,9 @@ public sealed partial class SessionFileTransferService
                         request,
                         receivedTransportKind,
                         "request_correlation_identity_mismatch");
-                    return;
+                    return new RetainedPeerProofApplicationResult(
+                        RetainedPeerProofApplicationStatus.Rejected,
+                        "request_correlation_identity_mismatch");
                 }
 
                 var duplicateReason = !IsFallbackFrontierRepairContractCurrent(
@@ -1432,7 +1622,9 @@ public sealed partial class SessionFileTransferService
                     currentContract,
                     receivedTransportKind,
                     duplicateReason);
-                return;
+                return new RetainedPeerProofApplicationResult(
+                    RetainedPeerProofApplicationStatus.Idempotent,
+                    duplicateReason);
             }
 
             if (currentContract is not null &&
@@ -1463,7 +1655,9 @@ public sealed partial class SessionFileTransferService
                         currentContract,
                         receivedTransportKind,
                         "alias_limit_reached");
-                    return;
+                    return new RetainedPeerProofApplicationResult(
+                        RetainedPeerProofApplicationStatus.Idempotent,
+                        "alias_limit_reached");
                 }
 
                 activeAliasCoalesced = true;
@@ -1491,7 +1685,9 @@ public sealed partial class SessionFileTransferService
                         request,
                         receivedTransportKind,
                         rejectionReason);
-                    return;
+                    return new RetainedPeerProofApplicationResult(
+                        RetainedPeerProofApplicationStatus.Rejected,
+                        rejectionReason);
                 }
 
                 if (predecessorContract is not null &&
@@ -1550,7 +1746,9 @@ public sealed partial class SessionFileTransferService
                         request,
                         receivedTransportKind,
                         handoffRejectionReason);
-                    return;
+                    return new RetainedPeerProofApplicationResult(
+                        RetainedPeerProofApplicationStatus.Rejected,
+                        handoffRejectionReason);
                 }
 
                 var handoffPredecessor = contract;
@@ -1653,6 +1851,17 @@ public sealed partial class SessionFileTransferService
                     FallbackFrontierRepairSettlementOutcome.MissingDispatch,
                     "native_v6_request_had_no_schedulable_chunks");
             }
+            result = queuedChunkCount > 0
+                ? new RetainedPeerProofApplicationResult(
+                    RetainedPeerProofApplicationStatus.Applied,
+                    "frontier_request_dispatched")
+                : issuedNewContract
+                    ? new RetainedPeerProofApplicationResult(
+                        RetainedPeerProofApplicationStatus.Rejected,
+                        "native_v6_request_had_no_schedulable_chunks")
+                    : new RetainedPeerProofApplicationResult(
+                        RetainedPeerProofApplicationStatus.Idempotent,
+                        "frontier_request_already_scheduled");
             context.V6SenderPumpLastWakeReason = "frontier_request";
             snapshot = CreateSnapshotLocked();
             if (activeAliasCoalesced)
@@ -1677,6 +1886,8 @@ public sealed partial class SessionFileTransferService
             RaiseTransferChanged(snapshot);
             MaybeLogProgressMilestone(context, FileTransferDirection.Outbound);
         }
+
+        return result;
     }
 
     private static void LogAuthorizedFallbackFrontierReceiveRejected(
@@ -1791,6 +2002,9 @@ public sealed partial class SessionFileTransferService
     private bool TryAcceptOutboundFallbackFrontierRepairLocked(
         OutboundTransferContext context,
         FileTransferFrontierRequestFrameV6 request,
+        FileTransferTransportKind receivedTransportKind,
+        string receivingDataSessionIdentity,
+        long receivingDataSessionGeneration,
         out FallbackFrontierRepairContract? contract,
         out FallbackFrontierRepairIdentity? identity,
         out FallbackFrontierRepairAcceptance acceptance,
@@ -1820,12 +2034,6 @@ public sealed partial class SessionFileTransferService
         }
 
         var leg = context.CurrentTransferLeg!;
-        if (IsCurrentPostTunaFallbackLegCheckpointPending(leg))
-        {
-            rejectionReason = "checkpoint_pending_frontier_request";
-            return false;
-        }
-
         if (request.TransportEpoch <= 0 || request.TransportEpoch != leg.TransportEpochId)
         {
             rejectionReason = request.TransportEpoch <= 0
@@ -1853,6 +2061,27 @@ public sealed partial class SessionFileTransferService
                 identity.Ranges,
                 out rejectionReason))
         {
+            return false;
+        }
+
+        if (IsCurrentPostTunaFallbackLegCheckpointPending(leg))
+        {
+            TryHoldReceiveRecoveryFallbackCheckpointFrontierRequestLocked(
+                context,
+                request,
+                receivedTransportKind,
+                identity,
+                FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestDispatchPath
+                    .RetainedSparseV4,
+                receivingDataSessionIdentity,
+                receivingDataSessionGeneration,
+                out var holdDecision);
+            rejectionReason = holdDecision.Accepted
+                ? holdDecision.Status ==
+                    FileTransferReceiveRecoveryTransitionStatus.Idempotent
+                    ? "hold_idempotent"
+                    : "checkpoint_pending_frontier_request_retained"
+                : "checkpoint_pending_frontier_request";
             return false;
         }
 

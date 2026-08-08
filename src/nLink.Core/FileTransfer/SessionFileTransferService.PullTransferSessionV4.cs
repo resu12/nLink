@@ -14164,6 +14164,15 @@ public sealed partial class SessionFileTransferService
             }
 
             var strictFallbackFrontierRuntime = IsStrictFallbackFrontierRuntime(context);
+            var receivingDataSession = receiveDataSession ?? context.DataSession;
+            var receivingDataSessionGeneration = receiveDataSession is null
+                ? context.DataSessionGeneration
+                : receiveDataSessionGeneration;
+            var receivingDataSessionIdentity =
+                CreateReceiveRecoveryDataSessionIdentity(
+                    context.TransferId,
+                    receivingDataSession,
+                    receivingDataSessionGeneration);
             var postYieldFallbackTailOwnerRetired =
                 IsPostYieldFallbackTailOwnerRetiredAndYieldedLocked(context, context.CurrentTransferLeg);
             if (!strictFallbackFrontierRuntime &&
@@ -14218,12 +14227,45 @@ public sealed partial class SessionFileTransferService
                 if (!TryAcceptOutboundFallbackFrontierRepairLocked(
                         context,
                         repairRequest,
+                        receivedTransportKind,
+                        receivingDataSessionIdentity,
+                        receivingDataSessionGeneration,
                         out fallbackFrontierContract,
                         out _,
                         out var acceptance,
                         out var authorityRejectionReason) ||
                     fallbackFrontierContract is null)
                 {
+                    if (string.Equals(
+                            authorityRejectionReason,
+                            "checkpoint_pending_frontier_request_retained",
+                            StringComparison.Ordinal) ||
+                        string.Equals(
+                            authorityRejectionReason,
+                            "hold_idempotent",
+                            StringComparison.Ordinal))
+                    {
+                        var idempotent = string.Equals(
+                            authorityRejectionReason,
+                            "hold_idempotent",
+                            StringComparison.Ordinal);
+                        LogOutboundV6FrontierRequestReceiveDispatch(
+                            context,
+                            repairRequest,
+                            receivedTransportKind,
+                            idempotent ? "coalesced" : "staged",
+                            authorityRejectionReason,
+                            first.StartChunkIndex,
+                            first.ChunkCount,
+                            repairRequest.MissingRanges.Count,
+                            receiveInstall);
+                        return new RetainedPeerProofApplicationResult(
+                            idempotent
+                                ? RetainedPeerProofApplicationStatus.Idempotent
+                                : RetainedPeerProofApplicationStatus.Held,
+                            authorityRejectionReason);
+                    }
+
                     LogAuthorizedFallbackFrontierReceiveRejected(
                         context,
                         repairRequest,

@@ -9872,7 +9872,7 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
-    public void FileTransferReceiveRecoveryFallbackCheckpoint_ChildPreservesRunningOperationAndConvergesAfterProof()
+    public void FileTransferReceiveRecoveryFallbackCheckpointFrontierRequest_ChildPreservesRunningOperationAndConvergesAfterProof()
     {
         var fixture = CreateNonRegularV4ReceiveRecoveryOperationFixture();
         var authority =
@@ -10223,6 +10223,42 @@ public sealed class FileTransferCoordinatorTests
             frame.TransportEpoch,
             committedChunk: 7,
             highestObservedChunk: 7);
+        Assert.Null(
+            acceptedBeforeRefresh
+                .ReceiveRecoveryFallbackCheckpointFrontierRequestRecheckCommand);
+        var acceptFirstFrame = frame with
+        {
+            RepairRequestId = "v6-frontier:accept-first",
+            RequestCorrelationId = "v6-frontier:accept-first:correlation",
+            Priority = "frontier",
+            RecoveryMode = "regular_nkn_frontier_stall",
+        };
+        var acceptFirstObservation = FileTransferCoordinator
+            .ObserveReceiveRecoveryFallbackCheckpointFrontierRequest(
+                acceptedBeforeRefresh.State,
+                new FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestObservation(
+                    binding,
+                    acceptFirstFrame,
+                    FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestDispatchPath
+                        .NativeV6,
+                    FileTransferTransportKind.RegularNkn,
+                    acceptedBeforeRefresh.State.CurrentDataSessionIdentity!,
+                    acceptedBeforeRefresh.State.CurrentDataSessionGeneration,
+                    "frng-accept-first",
+                    PostTunaFallbackPeerProofFrameIdentity.Create(
+                        acceptFirstFrame),
+                    ObservedUtcMs: 139));
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Rejected,
+            acceptFirstObservation.Status);
+        Assert.Null(
+            FileTransferCoordinator.GetReceiveRecoverySubstate(
+                    acceptFirstObservation.State)
+                .PendingFallbackCheckpointFrontierRequestHold);
+        Assert.Null(
+            FileTransferCoordinator.GetReceiveRecoverySubstate(
+                    acceptFirstObservation.State)
+                .PendingFallbackCheckpointFrontierRequestRecheckCommand);
         var refreshCommittedAfterAcceptance = FileTransferCoordinator
             .CommitRuntimeUnlockInitialActivationOfferEnvelopeRefresh(
                 acceptedBeforeRefresh.State,
@@ -10242,15 +10278,339 @@ public sealed class FileTransferCoordinatorTests
                     refreshCommitted.State)
                 .CurrentOperation);
 
+        var retainedBinding = Assert.IsType<
+            FileTransferReceiveRecoveryFallbackCheckpointBinding>(
+                FileTransferCoordinator.GetReceiveRecoverySubstate(
+                        refreshCommitted.State)
+                    .CurrentFallbackCheckpointBinding);
+        var peerFrontierRequest78 = frame with
+        {
+            RepairRequestId = "v6-frontier:2151:78",
+            RequestCorrelationId = "v6-frontier:2151:78:correlation",
+            MissingRanges =
+            [
+                new FileTransferRangeV4
+                {
+                    StartChunkIndex = 7,
+                    ChunkCount = 3,
+                },
+            ],
+            Priority = "frontier",
+            RecoveryMode = "regular_nkn_frontier_stall",
+        };
+        var held78 = FileTransferCoordinator
+            .ObserveReceiveRecoveryFallbackCheckpointFrontierRequest(
+                refreshCommitted.State,
+                new FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestObservation(
+                    retainedBinding,
+                    peerFrontierRequest78,
+                    FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestDispatchPath
+                        .NativeV6,
+                    FileTransferTransportKind.RegularNkn,
+                    refreshCommitted.State.CurrentDataSessionIdentity!,
+                    refreshCommitted.State.CurrentDataSessionGeneration,
+                    "frng-peer-frontier-78",
+                    PostTunaFallbackPeerProofFrameIdentity.Create(
+                        peerFrontierRequest78),
+                    ObservedUtcMs: 140));
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Accepted,
+            held78.Status);
+        var hold78 = Assert.IsType<
+            FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestHold>(
+                held78.FallbackCheckpointFrontierRequestHold);
+        var duplicate78 = FileTransferCoordinator
+            .ObserveReceiveRecoveryFallbackCheckpointFrontierRequest(
+                held78.State,
+                hold78.Observation with { ObservedUtcMs = 141 });
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Idempotent,
+            duplicate78.Status);
+        Assert.Equal(hold78, duplicate78.FallbackCheckpointFrontierRequestHold);
+
+        var peerFrontierRequest81 = peerFrontierRequest78 with
+        {
+            RepairRequestId = "v6-frontier:2151:81",
+            RequestCorrelationId = "v6-frontier:2151:81:correlation",
+        };
+        var held81 = FileTransferCoordinator
+            .ObserveReceiveRecoveryFallbackCheckpointFrontierRequest(
+                duplicate78.State,
+                new FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestObservation(
+                    retainedBinding,
+                    peerFrontierRequest81,
+                    FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestDispatchPath
+                        .RetainedSparseV4,
+                    FileTransferTransportKind.RegularNkn,
+                    refreshCommitted.State.CurrentDataSessionIdentity!,
+                    refreshCommitted.State.CurrentDataSessionGeneration,
+                    "frng-peer-frontier-81",
+                    PostTunaFallbackPeerProofFrameIdentity.Create(
+                        peerFrontierRequest81),
+                    // The coordinator gate provides ordering authority. Distinct requests
+                    // received in the same clock millisecond must still advance the hold.
+                    ObservedUtcMs: 140));
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Accepted,
+            held81.Status);
+        var hold81 = Assert.IsType<
+            FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestHold>(
+                held81.FallbackCheckpointFrontierRequestHold);
+        Assert.Equal(hold78.HoldGeneration + 1, hold81.HoldGeneration);
+        Assert.Equal(
+            peerFrontierRequest81.RepairRequestId,
+            hold81.Observation.Frame.RepairRequestId);
+        var wrongReceivingTransport = FileTransferCoordinator
+            .ObserveReceiveRecoveryFallbackCheckpointFrontierRequest(
+                held81.State,
+                hold81.Observation with
+                {
+                    ReceivedTransportKind =
+                        FileTransferTransportKind.Tuna,
+                    ObservedUtcMs = 143,
+                });
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Rejected,
+            wrongReceivingTransport.Status);
+        var wrongReceivingDataSession = FileTransferCoordinator
+            .ObserveReceiveRecoveryFallbackCheckpointFrontierRequest(
+                held81.State,
+                hold81.Observation with
+                {
+                    ReceivingDataSessionGeneration =
+                        hold81.Observation.ReceivingDataSessionGeneration + 1,
+                });
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Rejected,
+            wrongReceivingDataSession.Status);
+        Assert.Equal(held81.State, wrongReceivingDataSession.State);
+        var mutated81Frame = peerFrontierRequest81 with
+        {
+            Priority = "backfill",
+        };
+        var mutated81 = FileTransferCoordinator
+            .ObserveReceiveRecoveryFallbackCheckpointFrontierRequest(
+                held81.State,
+                hold81.Observation with
+                {
+                    Frame = mutated81Frame,
+                    FrameIdentity =
+                        PostTunaFallbackPeerProofFrameIdentity.Create(
+                            mutated81Frame),
+                    ObservedUtcMs = 143,
+                });
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Rejected,
+            mutated81.Status);
+        var conflictingRequestIdFrame = peerFrontierRequest81 with
+        {
+            RepairRequestId = "v6-frontier:2151:81-conflict",
+        };
+        var conflictingRequestId = FileTransferCoordinator
+            .ObserveReceiveRecoveryFallbackCheckpointFrontierRequest(
+                held81.State,
+                hold81.Observation with
+                {
+                    Frame = conflictingRequestIdFrame,
+                    FrameIdentity =
+                        PostTunaFallbackPeerProofFrameIdentity.Create(
+                            conflictingRequestIdFrame),
+                    ObservedUtcMs = 143,
+                });
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Rejected,
+            conflictingRequestId.Status);
+        Assert.Equal(
+            "filetransfer_receive_recovery_fallback_checkpoint_frontier_request_identity_mutated",
+            conflictingRequestId.Reason);
+
+        var invalidatedHeld = FileTransferCoordinator
+            .InvalidateReceiveRecoveryOperation(
+                held81.State,
+                authority,
+                "unit_test_checkpoint_frontier_hold_invalidated");
+        Assert.True(invalidatedHeld.Accepted, invalidatedHeld.Reason);
+        Assert.Null(
+            FileTransferCoordinator.GetReceiveRecoverySubstate(
+                    invalidatedHeld.State)
+                .PendingFallbackCheckpointFrontierRequestHold);
+        Assert.Null(
+            FileTransferCoordinator.GetReceiveRecoverySubstate(
+                    invalidatedHeld.State)
+                .PendingFallbackCheckpointFrontierRequestRecheckCommand);
+
         var accepted = AcceptFallbackCheckpoint(
-            refreshCommitted.State,
+            held81.State,
             fallback,
             frame.RepairRequestId,
             frame.TransportEpoch,
             committedChunk: 7,
             highestObservedChunk: 7);
+        var frontierRecheckCommand = Assert.IsType<
+            FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestRecheckCommand>(
+                accepted
+                    .ReceiveRecoveryFallbackCheckpointFrontierRequestRecheckCommand);
+        Assert.Equal(hold81, frontierRecheckCommand.Hold);
+        Assert.Equal(
+            FileTransferReceiveRecoveryFallbackCheckpointBindingState.Accepted,
+            frontierRecheckCommand.AcceptedBinding.State);
+        Assert.Equal(
+            peerFrontierRequest81.RepairRequestId,
+            frontierRecheckCommand.Hold.Observation.Frame.RepairRequestId);
+        var appliedReceipt =
+            new FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestRecheckReceipt(
+                frontierRecheckCommand,
+                FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestRecheckStatus
+                    .Applied,
+                "frontier_recheck_dispatched",
+                ObservedUtcMs: 144);
+        var publication = Assert.IsType<RoutePublicationToken>(
+            accepted.State.CurrentRoutePublicationToken);
+        var stalePublicationReceipt = FileTransferCoordinator
+            .ApplyReceiveRecoveryFallbackCheckpointFrontierRequestRecheckReceipt(
+                accepted.State with
+                {
+                    CurrentRoutePublicationToken = publication with
+                    {
+                        PublicationGeneration =
+                            publication.PublicationGeneration + 1,
+                    },
+                },
+                appliedReceipt);
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Rejected,
+            stalePublicationReceipt.Status);
+        var staleDataSessionReceipt = FileTransferCoordinator
+            .ApplyReceiveRecoveryFallbackCheckpointFrontierRequestRecheckReceipt(
+                accepted.State with
+                {
+                    CurrentDataSessionGeneration =
+                        accepted.State.CurrentDataSessionGeneration + 1,
+                },
+                appliedReceipt);
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Rejected,
+            staleDataSessionReceipt.Status);
+        var staleCheckpointReceipt = FileTransferCoordinator
+            .ApplyReceiveRecoveryFallbackCheckpointFrontierRequestRecheckReceipt(
+                accepted.State with
+                {
+                    CurrentFallbackCheckpointLease =
+                        frontierRecheckCommand.AcceptedBinding.CheckpointLease,
+                },
+                appliedReceipt);
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Rejected,
+            staleCheckpointReceipt.Status);
+        var acceptedLeg = Assert.IsType<FileTransferLeg>(
+            accepted.State.CurrentLeg);
+        acceptedLeg.TransportEpochId++;
+        var staleLegReceipt = FileTransferCoordinator
+            .ApplyReceiveRecoveryFallbackCheckpointFrontierRequestRecheckReceipt(
+                accepted.State,
+                appliedReceipt);
+        acceptedLeg.TransportEpochId--;
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Rejected,
+            staleLegReceipt.Status);
+
+        var terminalizedBeforeReceipt = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.Terminalized,
+                fallback,
+                reason: "unit_test_checkpoint_frontier_terminalized"),
+            accepted.State);
+        Assert.False(terminalizedBeforeReceipt.TerminalMutationRejected);
+        Assert.Null(
+            FileTransferCoordinator.GetReceiveRecoverySubstate(
+                    terminalizedBeforeReceipt.State)
+                .PendingFallbackCheckpointFrontierRequestHold);
+        Assert.Null(
+            FileTransferCoordinator.GetReceiveRecoverySubstate(
+                    terminalizedBeforeReceipt.State)
+                .PendingFallbackCheckpointFrontierRequestRecheckCommand);
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Rejected,
+            FileTransferCoordinator
+                .ApplyReceiveRecoveryFallbackCheckpointFrontierRequestRecheckReceipt(
+                    terminalizedBeforeReceipt.State,
+                    appliedReceipt)
+                .Status);
+
+        var idempotentTerminal = FileTransferCoordinator
+            .ApplyReceiveRecoveryFallbackCheckpointFrontierRequestRecheckReceipt(
+                accepted.State,
+                appliedReceipt with
+                {
+                    Status =
+                        FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestRecheckStatus
+                            .Idempotent,
+                });
+        Assert.True(idempotentTerminal.Accepted, idempotentTerminal.Reason);
+        Assert.Null(
+            FileTransferCoordinator.GetReceiveRecoverySubstate(
+                    idempotentTerminal.State)
+                .PendingFallbackCheckpointFrontierRequestRecheckCommand);
+        Assert.Equal(
+            FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestRecheckStatus
+                .Idempotent,
+            Assert.IsType<
+                FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestRecheckReceipt>(
+                    FileTransferCoordinator.GetReceiveRecoverySubstate(
+                            idempotentTerminal.State)
+                        .LastFallbackCheckpointFrontierRequestRecheckReceipt)
+                .Status);
+        var rejectedTerminal = FileTransferCoordinator
+            .ApplyReceiveRecoveryFallbackCheckpointFrontierRequestRecheckReceipt(
+                accepted.State,
+                appliedReceipt with
+                {
+                    Status =
+                        FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestRecheckStatus
+                            .Rejected,
+                    Reason = "frontier_recheck_dispatch_rejected",
+                });
+        Assert.True(rejectedTerminal.Accepted, rejectedTerminal.Reason);
+        Assert.Null(
+            FileTransferCoordinator.GetReceiveRecoverySubstate(
+                    rejectedTerminal.State)
+                .PendingFallbackCheckpointFrontierRequestRecheckCommand);
+        Assert.Equal(
+            FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestRecheckStatus
+                .Rejected,
+            Assert.IsType<
+                FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestRecheckReceipt>(
+                    FileTransferCoordinator.GetReceiveRecoverySubstate(
+                            rejectedTerminal.State)
+                        .LastFallbackCheckpointFrontierRequestRecheckReceipt)
+                .Status);
+        var recheckApplied = FileTransferCoordinator
+            .ApplyReceiveRecoveryFallbackCheckpointFrontierRequestRecheckReceipt(
+                accepted.State,
+                appliedReceipt);
+        Assert.True(recheckApplied.Accepted, recheckApplied.Reason);
+        Assert.Null(
+            FileTransferCoordinator.GetReceiveRecoverySubstate(
+                    recheckApplied.State)
+                .PendingFallbackCheckpointFrontierRequestHold);
+        Assert.Null(
+            FileTransferCoordinator.GetReceiveRecoverySubstate(
+                    recheckApplied.State)
+                .PendingFallbackCheckpointFrontierRequestRecheckCommand);
+        var duplicateApplied = FileTransferCoordinator
+            .ApplyReceiveRecoveryFallbackCheckpointFrontierRequestRecheckReceipt(
+                recheckApplied.State,
+                new FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestRecheckReceipt(
+                    frontierRecheckCommand,
+                    FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestRecheckStatus
+                        .Applied,
+                    "frontier_recheck_dispatched",
+                    ObservedUtcMs: 145));
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Idempotent,
+            duplicateApplied.Status);
         var terminalRecovery = FileTransferCoordinator
-            .GetReceiveRecoverySubstate(accepted.State);
+            .GetReceiveRecoverySubstate(recheckApplied.State);
         Assert.Null(terminalRecovery.CurrentOperation);
         Assert.Equal(
             authority,
