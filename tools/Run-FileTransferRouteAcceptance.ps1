@@ -1434,6 +1434,14 @@ function New-RouteAcceptanceRunResult {
         runtimeUnlockResponderPeerProbeHandoffMissingRecoveredCount = 0
         runtimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount = 0
         runtimeUnlockResponderPeerProbeHandoffVerdict = 'none'
+        runtimeUnlockResponderPeerProbeBindingMissingRawCount = 0
+        runtimeUnlockResponderPeerProbeBindingMissingDistinctCount = 0
+        runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount = 0
+        runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount = 0
+        runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount = 0
+        runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount = 0
+        runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount = 0
+        runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeUnresolvedCount = 0
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount = 0
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount = 0
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount = 0
@@ -3439,6 +3447,14 @@ function Assert-Phase4OperatorVerdict {
     $Result.runtimeUnlockResponderPeerProbeHandoffMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count' -DefaultValue '0')
     $Result.runtimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count' -DefaultValue '0')
     $Result.runtimeUnlockResponderPeerProbeHandoffVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_route_transition_handoff_verdict' -DefaultValue 'none'
+    $Result.runtimeUnlockResponderPeerProbeBindingMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_binding_missing_raw_count' -DefaultValue '0')
+    $Result.runtimeUnlockResponderPeerProbeBindingMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_binding_missing_distinct_count' -DefaultValue '0')
+    $Result.runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_binding_missing_recovered_count' -DefaultValue '0')
+    $Result.runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_binding_missing_unresolved_count' -DefaultValue '0')
+    $Result.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_raw_count' -DefaultValue '0')
+    $Result.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_distinct_count' -DefaultValue '0')
+    $Result.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_recovered_count' -DefaultValue '0')
+    $Result.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_unresolved_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_distinct_count' -DefaultValue '0')
     $Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count' -DefaultValue '0')
@@ -5638,6 +5654,49 @@ function Write-RouteAcceptanceFakePhase4Run {
             $reportPath = Join-Path $ArtifactDir $reportName
             $reportText = Get-Content -LiteralPath $reportPath -Raw
             foreach ($fixtureLine in $currentListenerAdoptionFixtureLines) {
+                $separatorIndex = $fixtureLine.IndexOf('=')
+                $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
+                $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
+                if ([regex]::IsMatch($reportText, $fixturePattern)) {
+                    $reportText = [regex]::Replace($reportText, $fixturePattern, $fixtureLine)
+                }
+                else {
+                    $reportText = $reportText.TrimEnd("`r", "`n") + [Environment]::NewLine + $fixtureLine + [Environment]::NewLine
+                }
+            }
+            Set-Content -LiteralPath $reportPath -Value $reportText -Encoding UTF8
+        }
+    }
+
+    if (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RESPONDER_ACKED_PROBE_HANDOFF_SUMMARY_FIXTURE') {
+        $responderAckedProbeHandoffFixtureLines = @(
+            'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_raw_count=1',
+            'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_distinct_count=1',
+            'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count=0',
+            'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count=1',
+            'runtime_unlock_responder_acked_probe_route_transition_handoff_verdict=fail',
+            'runtime_unlock_responder_acked_probe_binding_missing_raw_count=0',
+            'runtime_unlock_responder_acked_probe_binding_missing_distinct_count=0',
+            'runtime_unlock_responder_acked_probe_binding_missing_recovered_count=0',
+            'runtime_unlock_responder_acked_probe_binding_missing_unresolved_count=0',
+            'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_raw_count=1',
+            'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_distinct_count=1',
+            'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_recovered_count=0',
+            'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_unresolved_count=1',
+            'runtime_failure_candidate=runtime_unlock_responder_acked_probe_route_transition_handoff_missing',
+            'first_proof_chain_failure_class=runtime_unlock_responder_acked_probe_route_transition_handoff_missing',
+            'first_proof_chain_failure_event=filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided',
+            'first_proof_chain_failure_reason=bound_responder_acked_peer_probe_route_transition_handoff_invalidated_as_transfer_context_replaced',
+            'first_proof_chain_failure_sequence=66643',
+            'first_proof_chain_failure_source_path=filetransfer-retained-log-slice.log',
+            'first_proof_chain_failure_line_number=66643',
+            'first_proof_chain_failure_writer_sequence=30114',
+            'semantic_failure_domain=route_runtime'
+        )
+        foreach ($reportName in @('filetransfer-route-consistency-summary.txt', 'filetransfer-operator-verdict.txt')) {
+            $reportPath = Join-Path $ArtifactDir $reportName
+            $reportText = Get-Content -LiteralPath $reportPath -Raw
+            foreach ($fixtureLine in $responderAckedProbeHandoffFixtureLines) {
                 $separatorIndex = $fixtureLine.IndexOf('=')
                 $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
                 $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
@@ -8881,6 +8940,7 @@ function Get-RouteAcceptanceResultFailureClass {
             'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing',
             'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing',
             'runtime_unlock_retry_dispatch_current_listener_adoption_missing',
+            'runtime_unlock_responder_acked_probe_route_transition_handoff_missing',
             'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing',
             'runtime_unlock_regular_v4_route_commit_send_drain_missing')) {
             return 'route_runtime'
@@ -9603,6 +9663,14 @@ function New-RouteAcceptanceSummaryRunDto {
         runtimeUnlockResponderPeerProbeHandoffMissingRecoveredCount = [int]$Result.runtimeUnlockResponderPeerProbeHandoffMissingRecoveredCount
         runtimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount = [int]$Result.runtimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount
         runtimeUnlockResponderPeerProbeHandoffVerdict = [string]$Result.runtimeUnlockResponderPeerProbeHandoffVerdict
+        runtimeUnlockResponderPeerProbeBindingMissingRawCount = [int]$Result.runtimeUnlockResponderPeerProbeBindingMissingRawCount
+        runtimeUnlockResponderPeerProbeBindingMissingDistinctCount = [int]$Result.runtimeUnlockResponderPeerProbeBindingMissingDistinctCount
+        runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount = [int]$Result.runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount
+        runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount = [int]$Result.runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount
+        runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount = [int]$Result.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount
+        runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount = [int]$Result.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount
+        runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount = [int]$Result.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount
+        runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeUnresolvedCount = [int]$Result.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeUnresolvedCount
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount = [int]$Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount = [int]$Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount = [int]$Result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount
@@ -10097,6 +10165,14 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $runtimeUnlockResponderPeerProbeHandoffMissingDistinctCount = 0
     $runtimeUnlockResponderPeerProbeHandoffMissingRecoveredCount = 0
     $runtimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount = 0
+    $runtimeUnlockResponderPeerProbeBindingMissingRawCount = 0
+    $runtimeUnlockResponderPeerProbeBindingMissingDistinctCount = 0
+    $runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount = 0
+    $runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount = 0
+    $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount = 0
+    $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount = 0
+    $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount = 0
+    $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeUnresolvedCount = 0
     $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount = 0
     $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount = 0
     $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount = 0
@@ -10183,6 +10259,14 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $runtimeUnlockResponderPeerProbeHandoffMissingDistinctCount += [int]$runDto.runtimeUnlockResponderPeerProbeHandoffMissingDistinctCount
         $runtimeUnlockResponderPeerProbeHandoffMissingRecoveredCount += [int]$runDto.runtimeUnlockResponderPeerProbeHandoffMissingRecoveredCount
         $runtimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount += [int]$runDto.runtimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount
+        $runtimeUnlockResponderPeerProbeBindingMissingRawCount += [int]$runDto.runtimeUnlockResponderPeerProbeBindingMissingRawCount
+        $runtimeUnlockResponderPeerProbeBindingMissingDistinctCount += [int]$runDto.runtimeUnlockResponderPeerProbeBindingMissingDistinctCount
+        $runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount += [int]$runDto.runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount
+        $runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount += [int]$runDto.runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount
+        $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount += [int]$runDto.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount
+        $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount += [int]$runDto.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount
+        $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount += [int]$runDto.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount
+        $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeUnresolvedCount += [int]$runDto.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeUnresolvedCount
         $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount += [int]$runDto.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount
         $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount += [int]$runDto.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount
         $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount += [int]$runDto.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount
@@ -10823,6 +10907,14 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffMissingRecoveredCount),
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount),
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_verdict={0}" -f $runtimeUnlockResponderPeerProbeHandoffVerdict),
+        ("runtime_unlock_responder_acked_probe_binding_missing_raw_count={0}" -f $runtimeUnlockResponderPeerProbeBindingMissingRawCount),
+        ("runtime_unlock_responder_acked_probe_binding_missing_distinct_count={0}" -f $runtimeUnlockResponderPeerProbeBindingMissingDistinctCount),
+        ("runtime_unlock_responder_acked_probe_binding_missing_recovered_count={0}" -f $runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount),
+        ("runtime_unlock_responder_acked_probe_binding_missing_unresolved_count={0}" -f $runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_raw_count={0}" -f $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_distinct_count={0}" -f $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_recovered_count={0}" -f $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_unresolved_count={0}" -f $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeUnresolvedCount),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_distinct_count={0}" -f $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count={0}" -f $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount),
@@ -11247,6 +11339,14 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeHandoffMissingRecoveredCount)
         $textLines += ("{0}.runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount)
         $textLines += ("{0}.runtime_unlock_responder_acked_probe_route_transition_handoff_verdict={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeHandoffVerdict)
+        $textLines += ("{0}.runtime_unlock_responder_acked_probe_binding_missing_raw_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeBindingMissingRawCount)
+        $textLines += ("{0}.runtime_unlock_responder_acked_probe_binding_missing_distinct_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeBindingMissingDistinctCount)
+        $textLines += ("{0}.runtime_unlock_responder_acked_probe_binding_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount)
+        $textLines += ("{0}.runtime_unlock_responder_acked_probe_binding_missing_unresolved_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount)
+        $textLines += ("{0}.runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_raw_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount)
+        $textLines += ("{0}.runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_distinct_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount)
+        $textLines += ("{0}.runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_recovered_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount)
+        $textLines += ("{0}.runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_unresolved_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeUnresolvedCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_distinct_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount)
@@ -11599,6 +11699,14 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         runtimeUnlockResponderPeerProbeHandoffMissingRecoveredCount = $runtimeUnlockResponderPeerProbeHandoffMissingRecoveredCount
         runtimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount = $runtimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount
         runtimeUnlockResponderPeerProbeHandoffVerdict = $runtimeUnlockResponderPeerProbeHandoffVerdict
+        runtimeUnlockResponderPeerProbeBindingMissingRawCount = $runtimeUnlockResponderPeerProbeBindingMissingRawCount
+        runtimeUnlockResponderPeerProbeBindingMissingDistinctCount = $runtimeUnlockResponderPeerProbeBindingMissingDistinctCount
+        runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount = $runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount
+        runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount = $runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount
+        runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount = $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount
+        runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount = $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount
+        runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount = $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount
+        runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeUnresolvedCount = $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeUnresolvedCount
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount = $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRawCount
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount = $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteDistinctCount
         runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount = $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteRecoveredCount

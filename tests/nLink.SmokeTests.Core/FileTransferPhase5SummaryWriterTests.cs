@@ -663,6 +663,100 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
     }
 
     [Fact]
+    public async Task RunFileTransferRouteAcceptance_ResponderAckedProbeHandoffVariantsReachScenarioAndRootSummaries()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string scenario = "regular-v4-live-activation-off-on-off-256mb";
+        const string candidate = "runtime_unlock_responder_acked_probe_route_transition_handoff_missing";
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-responder-acked-probe-handoff-summary-propagation");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-responder-acked-probe-handoff-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_RESPONDER_ACKED_PROBE_HANDOFF_SUMMARY_FIXTURE"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_SHA_FAIL"] = "1";
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ScenarioName", scenario,
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.True(
+                File.Exists(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.txt")),
+                $"Expected fake responder ACKed-probe summary propagation output.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+
+            var evidence = ReadArtifactReport(Path.Combine(runRoot, scenario), "filetransfer-operator-verdict.txt");
+            Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_raw_count"]);
+            Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count"]);
+            Assert.Equal("0", evidence["runtime_unlock_responder_acked_probe_binding_missing_unresolved_count"]);
+            Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_raw_count"]);
+            Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_distinct_count"]);
+            Assert.Equal("0", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_recovered_count"]);
+            Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_unresolved_count"]);
+
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal(candidate, summary["runtime_failure_candidate"]);
+            Assert.Equal("route_runtime", summary["acceptance_failure_class"]);
+            Assert.Equal("incomplete", summary["transfer_evidence_status"]);
+            Assert.Equal("fail", summary["runtime_correctness_verdict"]);
+            Assert.Equal("route_runtime", summary["semantic_failure_domain"]);
+            Assert.Equal("66643", summary["first_proof_chain_failure_sequence"]);
+            Assert.Equal("30114", summary["first_proof_chain_failure_writer_sequence"]);
+            Assert.Equal("0", summary["runtime_unlock_responder_acked_probe_binding_missing_unresolved_count"]);
+            Assert.Equal("1", summary["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_unresolved_count"]);
+            Assert.Equal(candidate, summary[$"{scenario}.runtime_failure_candidate"]);
+            Assert.Equal("route_runtime", summary[$"{scenario}.acceptance_failure_class"]);
+            Assert.Equal("incomplete", summary[$"{scenario}.transfer_evidence_status"]);
+            Assert.Equal("fail", summary[$"{scenario}.runtime_correctness_verdict"]);
+            Assert.Equal("0", summary[$"{scenario}.runtime_unlock_responder_acked_probe_binding_missing_unresolved_count"]);
+            Assert.Equal("1", summary[$"{scenario}.runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_unresolved_count"]);
+
+            using var summaryJson = JsonDocument.Parse(
+                await File.ReadAllTextAsync(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.json")));
+            var root = summaryJson.RootElement;
+            Assert.Equal(candidate, root.GetProperty("runtimeFailureCandidate").GetString());
+            Assert.Equal("route_runtime", root.GetProperty("acceptanceFailureClass").GetString());
+            Assert.Equal("incomplete", root.GetProperty("transferEvidenceStatus").GetString());
+            Assert.Equal("fail", root.GetProperty("runtimeCorrectnessVerdict").GetString());
+            Assert.Equal("route_runtime", root.GetProperty("semanticFailureDomain").GetString());
+            Assert.Equal(0, root.GetProperty("runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount").GetInt32());
+            Assert.Equal(0, root.GetProperty("runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeUnresolvedCount").GetInt32());
+
+            var run = Assert.Single(root.GetProperty("runs").EnumerateArray());
+            Assert.Equal(candidate, run.GetProperty("runtimeFailureCandidate").GetString());
+            Assert.Equal("route_runtime", run.GetProperty("acceptanceFailureClass").GetString());
+            Assert.Equal("incomplete", run.GetProperty("transferEvidenceStatus").GetString());
+            Assert.Equal("fail", run.GetProperty("runtimeCorrectnessVerdict").GetString());
+            Assert.Equal("route_runtime", run.GetProperty("semanticFailureDomain").GetString());
+            Assert.Equal(0, run.GetProperty("runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount").GetInt32());
+            Assert.Equal(0, run.GetProperty("runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeUnresolvedCount").GetInt32());
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
     public async Task RunFileTransferRouteAcceptance_FallbackFrontierCheckpointAcceptanceRecheckCountsReachScenarioAndRootSummaries()
     {
         if (!OperatingSystem.IsWindows())

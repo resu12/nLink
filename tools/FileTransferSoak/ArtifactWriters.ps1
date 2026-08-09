@@ -16872,6 +16872,16 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingRecoveredCount),
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount),
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_verdict={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffVerdict),
+        ("runtime_unlock_responder_acked_probe_binding_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeBindingMissingRawCount),
+        ("runtime_unlock_responder_acked_probe_binding_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeBindingMissingDistinctCount),
+        ("runtime_unlock_responder_acked_probe_binding_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeBindingMissingRecoveredCount),
+        ("runtime_unlock_responder_acked_probe_binding_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeBindingMissingUnresolvedCount),
+        ("runtime_unlock_responder_acked_probe_binding_missing_verdict={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeBindingMissingVerdict),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_raw_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeAfterBoundHandoffMissingRawCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeAfterBoundHandoffMissingDistinctCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeAfterBoundHandoffMissingRecoveredCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeAfterBoundHandoffMissingUnresolvedCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_verdict={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeAfterBoundHandoffMissingVerdict),
         ("runtime_unlock_precommit_probe_delivery_result_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeDeliveryResultCount),
         ("runtime_unlock_tuna_probe_sent_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSentCount),
         ("runtime_unlock_tuna_probe_received_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeReceivedCount),
@@ -45031,6 +45041,21 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
         return ''
     }
 
+    function Get-ResponderOptionalScopeField {
+        param($Event, [string[]]$Names)
+        foreach ($name in $Names) {
+            $value = Get-FileTransferEventField -Event $Event -Name $name -Default '(missing)'
+            if ($value -eq '(missing)') {
+                continue
+            }
+            if ([string]::IsNullOrWhiteSpace($value) -or $value -in @('(none)', 'none')) {
+                return '(none)'
+            }
+            return $value
+        }
+        return '(missing)'
+    }
+
     function Test-ResponderProbeFieldEqual {
         param($Left, $Right, [string[]]$Names, [switch]$OptionalRight)
         $leftValue = Get-ResponderProbeField -Event $Left -Names $Names
@@ -45042,6 +45067,171 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
         return -not [string]::IsNullOrWhiteSpace($leftValue) -and
             -not [string]::IsNullOrWhiteSpace($rightValue) -and
             [string]::Equals($leftValue, $rightValue, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+
+    function Get-ResponderBoundEvidenceMode {
+        param($Bound, $RawAnswerAck, $AcceptedAnswerAck, $PathProbe, $CoreProbe)
+
+        $ackMessageId = Get-ResponderProbeField -Event $Bound -Names @('ack_message_id', 'answer_ack_message_id')
+        $ackSourceFingerprint = Get-ResponderProbeField -Event $Bound -Names @('ack_source_fingerprint')
+        $peerProbeFrameFingerprint = Get-ResponderProbeField -Event $Bound -Names @('peer_probe_frame_fingerprint')
+        $presentCount = @(
+            $ackMessageId,
+            $ackSourceFingerprint,
+            $peerProbeFrameFingerprint |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        ).Count
+        if ($presentCount -eq 0) {
+            return 'legacy'
+        }
+        if ($presentCount -ne 3) {
+            return 'invalid'
+        }
+
+        $rawMessageId = Get-ResponderProbeField -Event $RawAnswerAck -Names @('msg_id', 'answer_ack_message_id')
+        if ([string]::IsNullOrWhiteSpace($rawMessageId) -or
+            -not [string]::Equals($ackMessageId, $rawMessageId, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return 'invalid'
+        }
+
+        foreach ($evidence in @(
+                [pscustomobject]@{
+                    Event = $AcceptedAnswerAck
+                    Names = @('ack_message_id', 'answer_ack_message_id', 'msg_id')
+                    Expected = $ackMessageId
+                },
+                [pscustomobject]@{
+                    Event = $AcceptedAnswerAck
+                    Names = @('ack_source_fingerprint')
+                    Expected = $ackSourceFingerprint
+                },
+                [pscustomobject]@{
+                    Event = $PathProbe
+                    Names = @('peer_probe_frame_fingerprint')
+                    Expected = $peerProbeFrameFingerprint
+                },
+                [pscustomobject]@{
+                    Event = $CoreProbe
+                    Names = @('peer_probe_frame_fingerprint')
+                    Expected = $peerProbeFrameFingerprint
+                })) {
+            $observed = Get-ResponderProbeField -Event $evidence.Event -Names $evidence.Names
+            if (-not [string]::IsNullOrWhiteSpace($observed) -and
+                -not [string]::Equals($observed, $evidence.Expected, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return 'invalid'
+            }
+        }
+        return 'explicit'
+    }
+
+    function Get-ResponderBoundSemanticKey {
+        param($Bound, [string]$EvidenceMode)
+
+        return ((@(
+            (Get-ResponderProbeField -Event $Bound -Names @('log_writer_id')),
+            (Get-ResponderProbeField -Event $Bound -Names @('session_id')),
+            (Get-ResponderProbeField -Event $Bound -Names @('transfer_id')),
+            (Get-ResponderProbeField -Event $Bound -Names @('transaction_generation')),
+            (Get-ResponderProbeField -Event $Bound -Names @('offer_generation')),
+            (Get-ResponderProbeField -Event $Bound -Names @('launch_generation')),
+            (Get-ResponderProbeField -Event $Bound -Names @('tuna_path_lease_generation', 'path_lease_generation')),
+            (Get-ResponderProbeField -Event $Bound -Names @('tuna_path_lease_listener_run_id', 'path_lease_listener_run_id')),
+            (Get-ResponderProbeField -Event $Bound -Names @('probe_id', 'path_probe_id')),
+            (Get-ResponderProbeField -Event $Bound -Names @('probe_state', 'path_probe_state')),
+            (Get-ResponderProbeField -Event $Bound -Names @('probe_transport', 'received_transport')),
+            (Get-ResponderProbeField -Event $Bound -Names @('probe_acked_utc_ms', 'path_probe_acked_utc_ms')),
+            (Get-ResponderProbeField -Event $Bound -Names @('launch_role')),
+            (Get-ResponderProbeField -Event $Bound -Names @('answer_acceptance_source')),
+            (Get-ResponderProbeField -Event $Bound -Names @('normalized_reason')),
+            $EvidenceMode,
+            (Get-ResponderProbeField -Event $Bound -Names @('ack_message_id', 'answer_ack_message_id')),
+            (Get-ResponderProbeField -Event $Bound -Names @('ack_source_fingerprint')),
+            (Get-ResponderProbeField -Event $Bound -Names @('peer_probe_frame_fingerprint'))
+        )) -join '|').ToLowerInvariant()
+    }
+
+    function Test-ResponderTypedEvidenceMatch {
+        param($Bound, $Decision, $RawAnswerAck, $AcceptedAnswerAck, $PathProbe, $CoreProbe)
+
+        if ((Get-ResponderBoundEvidenceMode `
+                -Bound $Bound `
+                -RawAnswerAck $RawAnswerAck `
+                -AcceptedAnswerAck $AcceptedAnswerAck `
+                -PathProbe $PathProbe `
+                -CoreProbe $CoreProbe) -ne 'explicit') {
+            return $false
+        }
+
+        foreach ($names in @(
+                @('ack_message_id', 'answer_ack_message_id'),
+                @('ack_source_fingerprint'),
+                @('peer_probe_frame_fingerprint'))) {
+            $boundValue = Get-ResponderProbeField -Event $Bound -Names $names
+            $decisionValue = Get-ResponderProbeField -Event $Decision -Names $names
+            if ([string]::IsNullOrWhiteSpace($boundValue) -or
+                [string]::IsNullOrWhiteSpace($decisionValue) -or
+                -not [string]::Equals($boundValue, $decisionValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        return (Get-ResponderProbeField -Event $Decision -Names @('ack_message_id', 'answer_ack_message_id')) -eq
+            (Get-ResponderProbeField -Event $RawAnswerAck -Names @('msg_id', 'answer_ack_message_id'))
+    }
+
+    function Test-ResponderCompletePairTuple {
+        param($Decision)
+
+        foreach ($names in @(
+                @('fallback_yield_authority_id', 'paired_fallback_yield_authority_id'),
+                @('pair_key'),
+                @('local_yield_authority_id'),
+                @('local_proof_identity'),
+                @('local_frame_fingerprint'),
+                @('peer_yield_authority_id'),
+                @('peer_observation_identity'),
+                @('peer_frame_fingerprint'),
+                @('peer_owner_key'),
+                @('peer_pair_key'))) {
+            if ([string]::IsNullOrWhiteSpace((Get-ResponderProbeField -Event $Decision -Names $names))) {
+                return $false
+            }
+        }
+        foreach ($names in @(
+                @('fallback_yield_generation', 'paired_fallback_yield_generation'),
+                @('pairing_generation'),
+                @('local_yield_generation'),
+                @('peer_yield_generation'))) {
+            if ([int64](Get-ResponderProbeField -Event $Decision -Names $names) -le 0) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    function Test-ResponderDispositionPublicationResultMatch {
+        param($Disposition, $Publication)
+
+        foreach ($fieldPair in @(
+                [pscustomobject]@{ Result = 'resulting_live_route_epoch'; Published = 'live_route_epoch'; Positive = $true },
+                [pscustomobject]@{ Result = 'resulting_runtime_generation'; Published = 'runtime_generation'; Positive = $true },
+                [pscustomobject]@{ Result = 'resulting_route_publication_generation'; Published = 'route_publication_generation'; Positive = $true },
+                [pscustomobject]@{ Result = 'resulting_route_commit_generation'; Published = 'route_commit_generation'; Positive = $false },
+                [pscustomobject]@{ Result = 'resulting_terminal_generation'; Published = 'terminal_generation'; Positive = $false },
+                [pscustomobject]@{ Result = 'resulting_leg_generation'; Published = 'leg_generation'; Positive = $true })) {
+            $resultValue = Get-ResponderProbeField -Event $Disposition -Names @($fieldPair.Result)
+            $publishedValue = Get-ResponderProbeField -Event $Publication -Names @($fieldPair.Published)
+            $requiredPattern = if ($fieldPair.Positive) { '^[1-9][0-9]*$' } else { '^[0-9]+$' }
+            if ($resultValue -notmatch $requiredPattern -or
+                $publishedValue -notmatch $requiredPattern -or
+                -not [string]::Equals($resultValue, $publishedValue, [System.StringComparison]::Ordinal)) {
+                return $false
+            }
+        }
+
+        return (Get-ResponderProbeField -Event $Publication -Names @('target_route')) -ieq 'file_tuna_v4' -and
+            (Get-ResponderProbeField -Event $Publication -Names @('target_protocol_version')) -eq '4' -and
+            (Get-ResponderProbeField -Event $Publication -Names @('target_transport')) -ieq 'tuna'
     }
 
     function Test-ResponderLocalTupleMatch {
@@ -45085,6 +45275,254 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
         return $true
     }
 
+    function Test-ResponderProbeLaunchMatch {
+        param($Boundary, $PathProbe, $CoreProbe, $Candidate)
+        if (-not (Test-ResponderLocalTupleMatch -Boundary $Boundary -Candidate $Candidate) -or
+            -not (Test-ResponderProbeIdentityMatch -PathProbe $PathProbe -Candidate $Candidate)) {
+            return $false
+        }
+        foreach ($names in @(
+                @('transfer_id'),
+                @('probe_id', 'path_probe_id'))) {
+            if (-not (Test-ResponderProbeFieldEqual -Left $CoreProbe -Right $Candidate -Names $names)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    function Test-ResponderLaunchGenerationMatch {
+        param($Launch, $Candidate)
+        return Test-ResponderProbeFieldEqual `
+            -Left $Launch `
+            -Right $Candidate `
+            -Names @('launch_generation')
+    }
+
+    function Test-ResponderAuthorityScopeMatch {
+        param($Decision, $Transition)
+        foreach ($fieldPair in @(
+                [pscustomobject]@{ Left = @('route', 'source_route'); Right = @('source_route', 'route') },
+                [pscustomobject]@{ Left = @('protocol_version', 'source_protocol_version'); Right = @('source_protocol_version', 'protocol_version') },
+                [pscustomobject]@{ Left = @('live_route_epoch', 'source_live_route_epoch'); Right = @('source_live_route_epoch', 'live_route_epoch') },
+                [pscustomobject]@{ Left = @('runtime_generation', 'source_runtime_generation'); Right = @('source_runtime_generation', 'runtime_generation') },
+                [pscustomobject]@{ Left = @('route_publication_generation', 'source_route_publication_generation'); Right = @('source_route_publication_generation', 'route_publication_generation') },
+                [pscustomobject]@{ Left = @('route_commit_generation', 'source_route_commit_generation'); Right = @('source_route_commit_generation', 'route_commit_generation') },
+                [pscustomobject]@{ Left = @('terminal_generation', 'source_terminal_generation'); Right = @('source_terminal_generation', 'terminal_generation') },
+                [pscustomobject]@{ Left = @('leg_generation', 'source_leg_generation'); Right = @('source_leg_generation', 'leg_generation') },
+                [pscustomobject]@{ Left = @('transport_epoch', 'source_transport_epoch'); Right = @('source_transport_epoch', 'transport_epoch') },
+                [pscustomobject]@{ Left = @('bridge_recovery_generation', 'source_bridge_recovery_generation'); Right = @('source_bridge_recovery_generation', 'bridge_recovery_generation') },
+                [pscustomobject]@{ Left = @('checkpoint_request_id', 'source_checkpoint_request_id'); Right = @('checkpoint_request_id', 'source_checkpoint_request_id') },
+                [pscustomobject]@{ Left = @('checkpoint_generation', 'source_checkpoint_generation'); Right = @('checkpoint_generation', 'source_checkpoint_generation') },
+                [pscustomobject]@{ Left = @('data_session_identity', 'source_data_session_identity'); Right = @('data_session_identity', 'source_data_session_identity') },
+                [pscustomobject]@{ Left = @('data_session_generation', 'source_data_session_generation'); Right = @('source_data_session_generation', 'data_session_generation') })) {
+            if ($fieldPair.Left -contains 'checkpoint_request_id') {
+                $leftValue = Get-ResponderOptionalScopeField -Event $Decision -Names $fieldPair.Left
+                $rightValue = Get-ResponderOptionalScopeField -Event $Transition -Names $fieldPair.Right
+                if ($leftValue -eq '(missing)' -or $rightValue -eq '(missing)' -or
+                    -not [string]::Equals($leftValue, $rightValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $false
+                }
+                continue
+            }
+            $leftValue = Get-ResponderProbeField -Event $Decision -Names $fieldPair.Left
+            $rightValue = Get-ResponderProbeField -Event $Transition -Names $fieldPair.Right
+            if ([string]::IsNullOrWhiteSpace($leftValue) -or
+                [string]::IsNullOrWhiteSpace($rightValue) -or
+                -not [string]::Equals($leftValue, $rightValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    function Test-ResponderAuthorityScopeConflict {
+        param($Decision, $Candidate)
+        foreach ($fieldPair in @(
+                [pscustomobject]@{ Left = @('route', 'source_route'); Right = @('source_route', 'route') },
+                [pscustomobject]@{ Left = @('protocol_version', 'source_protocol_version'); Right = @('source_protocol_version', 'protocol_version') },
+                [pscustomobject]@{ Left = @('live_route_epoch', 'source_live_route_epoch'); Right = @('source_live_route_epoch', 'live_route_epoch') },
+                [pscustomobject]@{ Left = @('runtime_generation', 'source_runtime_generation'); Right = @('source_runtime_generation', 'runtime_generation') },
+                [pscustomobject]@{ Left = @('route_publication_generation', 'source_route_publication_generation'); Right = @('source_route_publication_generation', 'route_publication_generation') },
+                [pscustomobject]@{ Left = @('route_commit_generation', 'source_route_commit_generation'); Right = @('source_route_commit_generation', 'route_commit_generation') },
+                [pscustomobject]@{ Left = @('terminal_generation', 'source_terminal_generation'); Right = @('source_terminal_generation', 'terminal_generation') },
+                [pscustomobject]@{ Left = @('leg_generation', 'source_leg_generation'); Right = @('source_leg_generation', 'leg_generation') },
+                [pscustomobject]@{ Left = @('transport_epoch', 'source_transport_epoch'); Right = @('source_transport_epoch', 'transport_epoch') },
+                [pscustomobject]@{ Left = @('bridge_recovery_generation', 'source_bridge_recovery_generation'); Right = @('source_bridge_recovery_generation', 'bridge_recovery_generation') },
+                [pscustomobject]@{ Left = @('checkpoint_request_id', 'source_checkpoint_request_id'); Right = @('checkpoint_request_id', 'source_checkpoint_request_id') },
+                [pscustomobject]@{ Left = @('checkpoint_generation', 'source_checkpoint_generation'); Right = @('checkpoint_generation', 'source_checkpoint_generation') },
+                [pscustomobject]@{ Left = @('data_session_identity', 'source_data_session_identity'); Right = @('data_session_identity', 'source_data_session_identity') },
+                [pscustomobject]@{ Left = @('data_session_generation', 'source_data_session_generation'); Right = @('source_data_session_generation', 'data_session_generation') })) {
+            if ($fieldPair.Left -contains 'checkpoint_request_id') {
+                $candidateValue = Get-ResponderOptionalScopeField -Event $Candidate -Names $fieldPair.Right
+                if ($candidateValue -eq '(missing)') {
+                    continue
+                }
+                $decisionValue = Get-ResponderOptionalScopeField -Event $Decision -Names $fieldPair.Left
+                if ($decisionValue -eq '(missing)' -or
+                    -not [string]::Equals($decisionValue, $candidateValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $true
+                }
+                continue
+            }
+            $candidateValue = Get-ResponderProbeField -Event $Candidate -Names $fieldPair.Right
+            if ([string]::IsNullOrWhiteSpace($candidateValue)) {
+                continue
+            }
+            $decisionValue = Get-ResponderProbeField -Event $Decision -Names $fieldPair.Left
+            if ([string]::IsNullOrWhiteSpace($decisionValue) -or
+                -not [string]::Equals($decisionValue, $candidateValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $true
+            }
+        }
+        return $false
+    }
+
+    function Test-ResponderInboundTerminalMatch {
+        param(
+            $Decision,
+            $Candidate,
+            [string]$Writer,
+            [string]$SessionId,
+            [string]$TransferId)
+
+        if ((Get-ResponderProbeField -Event $Candidate -Names @('log_writer_id')) -ne $Writer -or
+            (Get-ResponderProbeField -Event $Candidate -Names @('session_id')) -ne $SessionId -or
+            (Get-ResponderProbeField -Event $Candidate -Names @('transfer_id')) -ne $TransferId) {
+            return $false
+        }
+
+        $candidateDirection = Get-ResponderProbeField -Event $Candidate -Names @('direction')
+        if ($Candidate.EventName -ne 'file_transfer_inbound_terminal' -and
+            $candidateDirection -ine 'inbound') {
+            return $false
+        }
+        if (-not [string]::IsNullOrWhiteSpace($candidateDirection) -and
+            $candidateDirection -ine 'inbound') {
+            return $false
+        }
+
+        return -not (Test-ResponderAuthorityScopeConflict -Decision $Decision -Candidate $Candidate)
+    }
+
+    function Test-ResponderHandoffAuthorityMatch {
+        param($Decision, $Transition)
+        foreach ($names in @(
+                @('runtime_unlock_responder_peer_probe_handoff_authority_id', 'responder_handoff_authority_id'),
+                @('runtime_unlock_responder_peer_probe_handoff_generation', 'responder_handoff_generation'),
+                @('fallback_yield_authority_id', 'paired_fallback_yield_authority_id'),
+                @('fallback_yield_generation', 'paired_fallback_yield_generation'),
+                @('pairing_generation'),
+                @('pair_key'),
+                @('admission_generation'),
+                @('pending_precommit_generation'),
+                @('activation_authority_mode'))) {
+            if (-not (Test-ResponderProbeFieldEqual -Left $Decision -Right $Transition -Names $names)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    function Test-ResponderPrePrepareTransitionUnassigned {
+        param($Decision)
+
+        $authority = Get-FileTransferEventField -Event $Decision -Name 'transition_authority_id' -Default '(missing)'
+        $generation = Get-FileTransferEventField -Event $Decision -Name 'transition_generation' -Default '(missing)'
+        return $authority -in @('(none)', 'none') -and $generation -eq '0'
+    }
+
+    function Test-ResponderPairingCurrentMatch {
+        param($Decision, $Candidate)
+
+        if ((Get-ResponderProbeField -Event $Candidate -Names @('pairing_state', 'pair_state')) -ine 'Paired' -or
+            -not (Test-ResponderAuthorityScopeMatch -Decision $Decision -Transition $Candidate)) {
+            return $false
+        }
+        foreach ($fieldPair in @(
+                [pscustomobject]@{ Decision = @('pairing_generation'); Candidate = @('pairing_generation') },
+                [pscustomobject]@{ Decision = @('pair_key'); Candidate = @('pair_key') },
+                [pscustomobject]@{ Decision = @('local_yield_authority_id'); Candidate = @('authority_id', 'local_yield_authority_id') },
+                [pscustomobject]@{ Decision = @('local_yield_generation'); Candidate = @('yield_generation', 'local_yield_generation') },
+                [pscustomobject]@{ Decision = @('local_proof_identity'); Candidate = @('local_proof_identity') },
+                [pscustomobject]@{ Decision = @('local_frame_fingerprint'); Candidate = @('local_frame_fingerprint') },
+                [pscustomobject]@{ Decision = @('peer_yield_authority_id'); Candidate = @('peer_authority_id', 'peer_yield_authority_id') },
+                [pscustomobject]@{ Decision = @('peer_yield_generation'); Candidate = @('peer_yield_generation') },
+                [pscustomobject]@{ Decision = @('peer_observation_identity'); Candidate = @('peer_observation_identity') },
+                [pscustomobject]@{ Decision = @('peer_frame_fingerprint'); Candidate = @('peer_frame_fingerprint') },
+                [pscustomobject]@{ Decision = @('peer_owner_key'); Candidate = @('peer_owner_key') },
+                [pscustomobject]@{ Decision = @('peer_pair_key'); Candidate = @('peer_pair_key') })) {
+            $decisionValue = Get-ResponderProbeField -Event $Decision -Names $fieldPair.Decision
+            $candidateValue = Get-ResponderProbeField -Event $Candidate -Names $fieldPair.Candidate
+            if ([string]::IsNullOrWhiteSpace($decisionValue) -or
+                [string]::IsNullOrWhiteSpace($candidateValue) -or
+                -not [string]::Equals($decisionValue, $candidateValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    function Test-ResponderRecoveryReplacementMatch {
+        param(
+            $Decision,
+            $Candidate,
+            [string]$Writer,
+            [string]$SessionId,
+            [string]$TransferId)
+
+        if ((Get-ResponderProbeField -Event $Candidate -Names @('log_writer_id')) -ne $Writer -or
+            (Get-ResponderProbeField -Event $Candidate -Names @('session_id')) -ne $SessionId -or
+            (Get-ResponderProbeField -Event $Candidate -Names @('transfer_id')) -ne $TransferId) {
+            return $false
+        }
+        $candidateDirection = Get-ResponderProbeField -Event $Candidate -Names @('direction')
+        if ($Candidate.EventName -notin @(
+                'filetransfer_data_session_recreated',
+                'filetransfer_data_session_removed') -and
+            $candidateDirection -ine 'inbound') {
+            return $false
+        }
+        if (-not [string]::IsNullOrWhiteSpace($candidateDirection) -and
+            $candidateDirection -ine 'inbound') {
+            return $false
+        }
+
+        switch ($Candidate.EventName) {
+            'filetransfer_runtime_unlock_admission_granted' {
+                $decisionGeneration = Get-ResponderProbeField -Event $Decision -Names @('admission_generation')
+                $candidateGeneration = Get-ResponderProbeField -Event $Candidate -Names @('admission_generation')
+                return [string]::IsNullOrWhiteSpace($candidateGeneration) -or
+                    $candidateGeneration -ne $decisionGeneration -or
+                    (Test-ResponderAuthorityScopeConflict -Decision $Decision -Candidate $Candidate)
+            }
+            'filetransfer_fallback_tail_pairing_committed' {
+                return -not (Test-ResponderPairingCurrentMatch -Decision $Decision -Candidate $Candidate)
+            }
+            'filetransfer_data_session_recreated' { return $true }
+            'filetransfer_data_session_removed' { return $true }
+            'filetransfer_receive_recovery_fallback_checkpoint_bound' {
+                $decisionRequest = Get-ResponderOptionalScopeField -Event $Decision -Names @('checkpoint_request_id')
+                $candidateRequest = Get-ResponderOptionalScopeField -Event $Candidate -Names @(
+                    'effective_checkpoint_request_id',
+                    'checkpoint_request_id')
+                $decisionGeneration = Get-ResponderProbeField -Event $Decision -Names @('checkpoint_generation')
+                $candidateGeneration = Get-ResponderProbeField -Event $Candidate -Names @(
+                    'effective_checkpoint_generation',
+                    'checkpoint_generation')
+                return $decisionRequest -eq '(missing)' -or
+                    $candidateRequest -eq '(missing)' -or
+                    $decisionRequest -ne $candidateRequest -or
+                    [string]::IsNullOrWhiteSpace($candidateGeneration) -or
+                    $candidateGeneration -ne $decisionGeneration -or
+                    (Test-ResponderAuthorityScopeConflict -Decision $Decision -Candidate $Candidate)
+            }
+            default {
+                return Test-ResponderAuthorityScopeConflict -Decision $Decision -Candidate $Candidate
+            }
+        }
+    }
+
     [object[]]$pendingBoundaries = @($orderedEvents | Where-Object {
         $_.EventName -eq 'filetransfer_runtime_unlock_handoff_pending_route_commit' -and
         (Get-FileTransferEventField -Event $_ -Name 'state' -Default '') -ieq 'routecommitpending' -and
@@ -45113,6 +45551,15 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
     [object[]]$pendingAnswerAcks = @($orderedEvents | Where-Object {
         $_.EventName -eq 'tuna_acceleration_answer_ack_pending'
     })
+    [object[]]$rawAnswerAcks = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_answer_ack_received_raw'
+    })
+    [object[]]$rawAnswerAckEnvelopes = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'nkn_inbound_envelope_received' -and
+        (Get-FileTransferEventField -Event $_ -Name 'envelope_type' -Default '') -eq
+            'TransportAccelerationAnswerAck' -and
+        (Get-FileTransferEventField -Event $_ -Name 'source_matches_expected' -Default '0') -eq '1'
+    })
     [object[]]$acceptedAnswerAcks = @($orderedEvents | Where-Object {
         $_.EventName -eq 'tuna_acceleration_answer_ack_received'
     })
@@ -45130,10 +45577,16 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
         $_.EventName -eq 'runtime_unlock_precommit_responder_peer_probe_handoff_bound' -and
         (Get-FileTransferEventField -Event $_ -Name 'status' -Default '') -in @('Accepted', 'Idempotent')
     })
+    [object[]]$launchHandoffDecisions = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided'
+    })
+    [object[]]$responderHandoffDecisions = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided'
+    })
     [object[]]$prepared = @($orderedEvents | Where-Object {
         $_.EventName -eq 'filetransfer_route_transition_prepared' -and
         (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -ieq 'inbound' -and
-        (Get-FileTransferEventField -Event $_ -Name 'transition_kind' -Default '') -eq 'RegularV4ToTunaV4'
+        (Get-FileTransferEventField -Event $_ -Name 'transition_kind' -Default '') -eq 'PostTunaFallbackV6ToTunaV4'
     })
     [object[]]$draining = @($orderedEvents | Where-Object {
         $_.EventName -eq 'filetransfer_route_transition_draining' -and
@@ -45149,134 +45602,555 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
         (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default (
             Get-FileTransferEventField -Event $_ -Name 'apply_status' -Default '')) -in @('Applied', 'applied', 'Idempotent', 'idempotent')
     })
+    [object[]]$routePublications = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_live_route_epoch_recovered' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -ieq 'inbound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -ieq 'file_tuna_v4' -and
+        (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq '4' -and
+        (Get-FileTransferEventField -Event $_ -Name 'projection_source' -Default '') -ieq 'coordinator_route_transition' -and
+        (Get-FileTransferEventField -Event $_ -Name 'route_publication_action_kind' -Default '') -ieq 'RoutePublication' -and
+        (Get-FileTransferEventField -Event $_ -Name 'coordinator_decision_reason' -Default '') -eq
+            'filetransfer_route_transition_committed'
+    })
+    [object[]]$terminalEvents = @($orderedEvents | Where-Object {
+        $_.EventName -in @(
+            'transfer_terminal',
+            'file_transfer_inbound_terminal',
+            'filetransfer_runtime_terminalized',
+            'filetransfer_terminalized_by_peer_down',
+            'filetransfer_terminalized_by_session_end',
+            'filetransfer_live_route_epoch_terminal',
+            'filetransfer_v6_epoch_terminal')
+    })
+    [object[]]$scopeReplacementEvents = @($orderedEvents | Where-Object {
+        $_.EventName -in @(
+            'filetransfer_runtime_unlock_admission_granted',
+            'filetransfer_fallback_tail_pairing_committed',
+            'filetransfer_data_session_recreated',
+            'filetransfer_data_session_removed',
+            'filetransfer_receive_recovery_fallback_checkpoint_bound',
+            'filetransfer_route_selected',
+            'filetransfer_route_transitioned',
+            'filetransfer_live_route_epoch_started',
+            'filetransfer_leg_started',
+            'filetransfer_fallback_transport_epoch_adopted',
+            'filetransfer_fallback_leg_transport_epoch_adopted',
+            'filetransfer_runtime_started',
+            'filetransfer_runtime_owner_changed',
+            'filetransfer_live_route_epoch_recovered')
+    })
 
-    $rawCandidates = New-Object System.Collections.Generic.List[object]
-    $records = New-Object System.Collections.Generic.List[object]
+    $bindingRawCandidates = New-Object System.Collections.Generic.List[object]
+    $bindingRecords = New-Object System.Collections.Generic.List[object]
+    $afterBoundRawCandidates = New-Object System.Collections.Generic.List[object]
+    $afterBoundRecords = New-Object System.Collections.Generic.List[object]
     $seen = @{}
     foreach ($boundary in $pendingBoundaries) {
+        $localAnswer = $null
+        $pendingAnswerAck = $null
+        $pathProbeAck = $null
+        $coreProbeAck = $null
+        $rawAnswerAckEnvelope = $null
+        $rawAnswerAck = $null
+        $acceptedAnswerAck = $null
+        $answerAckBarrier = $null
         [object[]]$localAnswers = @($transactionAnswers | Where-Object {
             [int64]$_.Sequence -lt [int64]$boundary.Sequence -and
             (Test-ResponderLocalTupleMatch -Boundary $boundary -Candidate $_)
         } | Sort-Object Sequence, LineNumber -Descending)
-        [object[]]$localAcks = @($pathProbeAcks | Where-Object {
-            [int64]$_.Sequence -lt [int64]$boundary.Sequence -and
-            (Test-ResponderLocalTupleMatch -Boundary $boundary -Candidate $_)
-        } | Sort-Object Sequence, LineNumber -Descending)
-        if ($localAnswers.Count -eq 0 -or $localAcks.Count -eq 0) {
+        foreach ($answer in $localAnswers) {
+            [object[]]$pendingCandidates = @($pendingAnswerAcks | Where-Object {
+                [int64]$_.Sequence -gt [int64]$answer.Sequence -and
+                [int64]$_.Sequence -lt [int64]$boundary.Sequence -and
+                (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq
+                    (Get-ResponderProbeField -Event $boundary -Names @('log_writer_id')) -and
+                (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq
+                    (Get-ResponderProbeField -Event $boundary -Names @('session_id')) -and
+                (Get-ResponderProbeField -Event $_ -Names @('generation', 'offer_generation')) -eq
+                    (Get-ResponderProbeField -Event $boundary -Names @('offer_generation')) -and
+                (Get-ResponderProbeField -Event $_ -Names @('lanes')) -ieq 'file' -and
+                -not [string]::IsNullOrWhiteSpace(
+                    (Get-ResponderProbeField -Event $_ -Names @('payer_decision_id')))
+            } | Sort-Object Sequence, LineNumber -Descending)
+            foreach ($pendingCandidate in $pendingCandidates) {
+                [object[]]$localAcks = @($pathProbeAcks | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$pendingCandidate.Sequence -and
+                    [int64]$_.Sequence -lt [int64]$boundary.Sequence -and
+                    (Test-ResponderLocalTupleMatch -Boundary $boundary -Candidate $_) -and
+                    (Test-ResponderProbeFieldEqual `
+                        -Left $answer `
+                        -Right $_ `
+                        -Names @('tuna_path_lease_generation', 'path_lease_generation')) -and
+                    (Test-ResponderProbeFieldEqual `
+                        -Left $answer `
+                        -Right $_ `
+                        -Names @('tuna_path_lease_listener_run_id', 'path_lease_listener_run_id'))
+                } | Sort-Object Sequence, LineNumber -Descending)
+                foreach ($localAck in $localAcks) {
+                    [object[]]$matchingCoreAcks = @($coreProbeAcks | Where-Object {
+                        [int64]$_.Sequence -ge [int64]$localAck.Sequence -and
+                        [int64]$_.Sequence -lt [int64]$boundary.Sequence -and
+                        (Test-ResponderProbeIdentityMatch -PathProbe $localAck -Candidate $_)
+                    } | Sort-Object Sequence, LineNumber -Descending)
+                    foreach ($coreAck in $matchingCoreAcks) {
+                        $payer = Get-ResponderProbeField -Event $pendingCandidate -Names @('payer_decision_id')
+                        [object[]]$acceptedCandidates = @($acceptedAnswerAcks | Where-Object {
+                            [int64]$_.Sequence -gt [int64]$coreAck.Sequence -and
+                            [int64]$_.Sequence -lt [int64]$boundary.Sequence -and
+                            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq
+                                (Get-ResponderProbeField -Event $boundary -Names @('log_writer_id')) -and
+                            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq
+                                (Get-ResponderProbeField -Event $boundary -Names @('session_id')) -and
+                            (Get-ResponderProbeField -Event $_ -Names @('payer_decision_id')) -eq $payer -and
+                            (Get-ResponderProbeField -Event $_ -Names @('lanes')) -ieq 'file'
+                        } | Sort-Object Sequence, LineNumber -Descending)
+                        foreach ($acceptedCandidate in $acceptedCandidates) {
+                            [object[]]$rawCandidatesForAck = @($rawAnswerAcks | Where-Object {
+                                [int64]$_.Sequence -gt [int64]$coreAck.Sequence -and
+                                [int64]$_.Sequence -lt [int64]$acceptedCandidate.Sequence -and
+                                (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq
+                                    (Get-ResponderProbeField -Event $boundary -Names @('log_writer_id'))
+                            } | Sort-Object Sequence, LineNumber -Descending)
+                            [object[]]$barrierCandidates = @($answerAckBarriers | Where-Object {
+                                [int64]$_.Sequence -gt [int64]$acceptedCandidate.Sequence -and
+                                [int64]$_.Sequence -lt [int64]$boundary.Sequence -and
+                                (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq
+                                    (Get-ResponderProbeField -Event $boundary -Names @('log_writer_id')) -and
+                                (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq
+                                    (Get-ResponderProbeField -Event $boundary -Names @('session_id')) -and
+                                (Get-ResponderProbeField -Event $_ -Names @('payer_decision_id')) -eq $payer -and
+                                (Get-ResponderProbeField -Event $_ -Names @('lanes')) -ieq 'file'
+                            } | Sort-Object Sequence, LineNumber)
+                            if ($rawCandidatesForAck.Count -ne 1 -or $barrierCandidates.Count -eq 0) {
+                                continue
+                            }
+                            $rawMessageId = Get-ResponderProbeField `
+                                -Event $rawCandidatesForAck[0] `
+                                -Names @('msg_id', 'answer_ack_message_id')
+                            [object[]]$rawEnvelopeCandidates = @($rawAnswerAckEnvelopes | Where-Object {
+                                [int64]$_.Sequence -gt [int64]$coreAck.Sequence -and
+                                [int64]$_.Sequence -lt [int64]$rawCandidatesForAck[0].Sequence -and
+                                (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq
+                                    (Get-ResponderProbeField -Event $boundary -Names @('log_writer_id')) -and
+                                (Get-ResponderProbeField -Event $_ -Names @('msg_id')) -eq $rawMessageId
+                            })
+                            if ([string]::IsNullOrWhiteSpace($rawMessageId) -or
+                                $rawEnvelopeCandidates.Count -ne 1) {
+                                continue
+                            }
+                            $localAnswer = $answer
+                            $pendingAnswerAck = $pendingCandidate
+                            $pathProbeAck = $localAck
+                            $coreProbeAck = $coreAck
+                            $rawAnswerAckEnvelope = $rawEnvelopeCandidates[0]
+                            $rawAnswerAck = $rawCandidatesForAck[0]
+                            $acceptedAnswerAck = $acceptedCandidate
+                            $answerAckBarrier = $barrierCandidates[0]
+                            break
+                        }
+                        if ($null -ne $answerAckBarrier) { break }
+                    }
+                    if ($null -ne $answerAckBarrier) { break }
+                }
+                if ($null -ne $answerAckBarrier) { break }
+            }
+            if ($null -ne $answerAckBarrier) { break }
+        }
+        if ($null -eq $localAnswer -or
+            $null -eq $pendingAnswerAck -or
+            $null -eq $pathProbeAck -or
+            $null -eq $coreProbeAck -or
+            $null -eq $rawAnswerAckEnvelope -or
+            $null -eq $rawAnswerAck -or
+            $null -eq $acceptedAnswerAck -or
+            $null -eq $answerAckBarrier) {
             continue
         }
-        $pathProbeAck = $localAcks[0]
-        [object[]]$matchingCoreAcks = @($coreProbeAcks | Where-Object {
-            [int64]$_.Sequence -le [int64]$boundary.Sequence -and
-            (Test-ResponderProbeIdentityMatch -PathProbe $pathProbeAck -Candidate $_)
-        })
-        if ($matchingCoreAcks.Count -eq 0) {
-            continue
-        }
-
         $writer = Get-ResponderProbeField -Event $boundary -Names @('log_writer_id')
         $sessionId = Get-ResponderProbeField -Event $boundary -Names @('session_id')
-        $offerGeneration = Get-ResponderProbeField -Event $boundary -Names @('offer_generation')
-        [object[]]$pending = @($pendingAnswerAcks | Where-Object {
-            [int64]$_.Sequence -lt [int64]$boundary.Sequence -and
-            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
-            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $sessionId -and
-            (Get-ResponderProbeField -Event $_ -Names @('generation', 'offer_generation')) -eq $offerGeneration
-        } | Sort-Object Sequence, LineNumber -Descending)
-        if ($pending.Count -eq 0) {
-            continue
-        }
-        $payer = Get-ResponderProbeField -Event $pending[0] -Names @('payer_decision_id')
-        [object[]]$accepted = @($acceptedAnswerAcks | Where-Object {
-            [int64]$_.Sequence -gt [int64]$pathProbeAck.Sequence -and
-            [int64]$_.Sequence -lt [int64]$boundary.Sequence -and
-            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
-            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $sessionId -and
-            (Get-ResponderProbeField -Event $_ -Names @('payer_decision_id')) -eq $payer
-        })
-        [object[]]$barriers = @($answerAckBarriers | Where-Object {
-            [int64]$_.Sequence -gt [int64]$pathProbeAck.Sequence -and
-            [int64]$_.Sequence -lt [int64]$boundary.Sequence -and
-            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
-            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $sessionId -and
-            (Get-ResponderProbeField -Event $_ -Names @('payer_decision_id')) -eq $payer
-        })
-        if ($accepted.Count -eq 0 -or $barriers.Count -eq 0) {
-            continue
-        }
-
-        $rawCandidates.Add($boundary) | Out-Null
-        $key = (@(
+        $transferId = Get-ResponderProbeField -Event $coreProbeAck -Names @('transfer_id')
+        $localOfferGeneration = Get-ResponderProbeField -Event $boundary -Names @('offer_generation')
+        $peerOfferGeneration = Get-ResponderProbeField -Event $coreProbeAck -Names @('offer_generation')
+        $payer = Get-ResponderProbeField -Event $pendingAnswerAck -Names @('payer_decision_id')
+        $pendingAckGeneration = Get-ResponderProbeField -Event $pendingAnswerAck -Names @('generation', 'offer_generation')
+        $key = ((@(
             $writer,
             $sessionId,
+            $transferId,
             (Get-ResponderProbeField -Event $boundary -Names @('transaction_generation')),
-            $offerGeneration,
+            $localOfferGeneration,
+            $peerOfferGeneration,
+            $payer,
+            $pendingAckGeneration,
             (Get-ResponderProbeField -Event $pathProbeAck -Names @('tuna_path_lease_generation', 'path_lease_generation')),
+            (Get-ResponderProbeField -Event $pathProbeAck -Names @('tuna_path_lease_listener_run_id', 'path_lease_listener_run_id')),
             (Get-ResponderProbeField -Event $pathProbeAck -Names @('probe_id', 'path_probe_id'))
-        )) -join '|'
+        )) -join '|').ToLowerInvariant()
         if ($seen.ContainsKey($key)) {
             continue
         }
         $seen[$key] = $true
 
-        [object[]]$matchingLaunches = @($launches + $boundLaunches | Where-Object {
+        [object[]]$matchingLaunches = @($launches | Where-Object {
             [int64]$_.Sequence -gt [int64]$boundary.Sequence -and
-            (Test-ResponderLocalTupleMatch -Boundary $boundary -Candidate $_) -and
-            (Test-ResponderProbeIdentityMatch -PathProbe $pathProbeAck -Candidate $_)
+            (Test-ResponderProbeLaunchMatch `
+                -Boundary $boundary `
+                -PathProbe $pathProbeAck `
+                -CoreProbe $coreProbeAck `
+                -Candidate $_) -and
+            (Get-ResponderProbeField -Event $_ -Names @('launch_role')) -eq 'ResponderAdoptingAckedPeerProbe' -and
+            (Get-ResponderProbeField -Event $_ -Names @('peer_probe_adoption')) -eq '1' -and
+            (Get-ResponderProbeField -Event $_ -Names @('responder_waiting_for_peer_probe')) -eq '0' -and
+            (Get-ResponderProbeField -Event $_ -Names @('duplicate')) -eq '0' -and
+            (Get-ResponderProbeField -Event $_ -Names @('tuple_mutation')) -eq '0' -and
+            (Get-ResponderProbeField -Event $_ -Names @('probe_state', 'path_probe_state')) -ieq 'acked'
         } | Sort-Object Sequence, LineNumber)
-        $recovered = $false
-        foreach ($launch in $matchingLaunches) {
-            $launchGeneration = Get-ResponderProbeField -Event $launch -Names @('launch_generation')
-            [object[]]$matchingPrepared = @($prepared | Where-Object {
+        $launch = if ($matchingLaunches.Count -eq 1) { $matchingLaunches[0] } else { $null }
+        [object[]]$matchingBounds = @()
+        if ($null -ne $launch) {
+            $matchingBounds = @($boundLaunches | Where-Object {
                 [int64]$_.Sequence -gt [int64]$launch.Sequence -and
+                (Test-ResponderProbeLaunchMatch `
+                    -Boundary $boundary `
+                    -PathProbe $pathProbeAck `
+                    -CoreProbe $coreProbeAck `
+                    -Candidate $_) -and
+                (Test-ResponderLaunchGenerationMatch -Launch $launch -Candidate $_) -and
+                (Get-ResponderProbeField -Event $_ -Names @('launch_role')) -eq 'ResponderAdoptingAckedPeerProbe' -and
+                (Get-ResponderProbeField -Event $_ -Names @('answer_acceptance_source')) -eq 'SemanticAnswerAck' -and
+                (Get-ResponderProbeField -Event $_ -Names @('normalized_reason')) -eq 'exact_responder_peer_probe_adopted' -and
+                (Get-ResponderProbeField -Event $_ -Names @('probe_state')) -ieq 'acked' -and
+                (Get-ResponderProbeField -Event $_ -Names @('probe_transport', 'received_transport')) -ieq 'tuna' -and
+                [int64](Get-ResponderProbeField -Event $_ -Names @('probe_acked_utc_ms', 'path_probe_acked_utc_ms')) -gt 0 -and
+                (Get-ResponderBoundEvidenceMode `
+                    -Bound $_ `
+                    -RawAnswerAck $rawAnswerAck `
+                    -AcceptedAnswerAck $acceptedAnswerAck `
+                    -PathProbe $pathProbeAck `
+                    -CoreProbe $coreProbeAck) -ne 'invalid'
+            } | Sort-Object Sequence, LineNumber)
+            $uniqueBoundTuples = @{}
+            $matchingBounds = @($matchingBounds | Where-Object {
+                $evidenceMode = Get-ResponderBoundEvidenceMode `
+                    -Bound $_ `
+                    -RawAnswerAck $rawAnswerAck `
+                    -AcceptedAnswerAck $acceptedAnswerAck `
+                    -PathProbe $pathProbeAck `
+                    -CoreProbe $coreProbeAck
+                $boundKey = Get-ResponderBoundSemanticKey -Bound $_ -EvidenceMode $evidenceMode
+                if ($uniqueBoundTuples.ContainsKey($boundKey)) {
+                    return $false
+                }
+                $uniqueBoundTuples[$boundKey] = $true
+                return $true
+            })
+        }
+        if ($matchingBounds.Count -ne 1) {
+            $bindingEvent = if ($null -ne $launch) { $launch } else { $boundary }
+            $bindingRawCandidates.Add($bindingEvent) | Out-Null
+            $bindingRecords.Add([pscustomobject]@{
+                Event = $bindingEvent
+                Recovered = $false
+                Reason = 'accepted_responder_answer_ack_did_not_bind_acked_peer_probe'
+            }) | Out-Null
+            continue
+        }
+
+        $bound = $matchingBounds[0]
+        [object[]]$matchingLaunchDecisions = @($launchHandoffDecisions | Where-Object {
+            [int64]$_.Sequence -gt [int64]$bound.Sequence -and
+            (Test-ResponderLocalTupleMatch -Boundary $boundary -Candidate $_) -and
+            (Test-ResponderLaunchGenerationMatch -Launch $launch -Candidate $_) -and
+            (Test-ResponderProbeFieldEqual -Left $coreProbeAck -Right $_ -Names @('transfer_id')) -and
+            (Test-ResponderProbeFieldEqual -Left $launch -Right $_ -Names @('tuna_path_lease_generation', 'path_lease_generation')) -and
+            (Test-ResponderProbeFieldEqual -Left $launch -Right $_ -Names @('tuna_path_lease_listener_run_id', 'path_lease_listener_run_id'))
+        } | Sort-Object Sequence, LineNumber)
+        [object[]]$negativeLaunchDecisions = @($matchingLaunchDecisions | Where-Object {
+            (Get-ResponderProbeField -Event $_ -Names @('status', 'decision_status')) -in @('Rejected', 'Invalidated')
+        })
+        [object[]]$exactResponderDecisions = @($responderHandoffDecisions | Where-Object {
+            [int64]$_.Sequence -gt [int64]$bound.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('status', 'decision_status')) -in
+                @('Accepted', 'Idempotent', 'Held', 'Rejected', 'Invalidated') -and
+            (Get-ResponderProbeField -Event $_ -Names @('direction')) -ieq 'inbound' -and
+            (Get-ResponderProbeField -Event $_ -Names @('lanes')) -ieq 'file' -and
+            (Get-ResponderProbeField -Event $_ -Names @('answer_acceptance_source')) -eq 'SemanticAnswerAck' -and
+            (Test-ResponderTypedEvidenceMatch `
+                -Bound $bound `
+                -Decision $_ `
+                -RawAnswerAck $rawAnswerAck `
+                -AcceptedAnswerAck $acceptedAnswerAck `
+                -PathProbe $pathProbeAck `
+                -CoreProbe $coreProbeAck) -and
+            (Get-ResponderProbeField -Event $_ -Names @('probe_state')) -ieq 'acked' -and
+            (Get-ResponderProbeField -Event $_ -Names @('probe_transport', 'received_transport')) -ieq 'tuna' -and
+            [int64](Get-ResponderProbeField -Event $_ -Names @('probe_acked_utc_ms', 'path_probe_acked_utc_ms')) -gt 0 -and
+            (Test-ResponderProbeLaunchMatch `
+                -Boundary $boundary `
+                -PathProbe $pathProbeAck `
+                -CoreProbe $coreProbeAck `
+                -Candidate $_) -and
+            (Test-ResponderLaunchGenerationMatch -Launch $launch -Candidate $_) -and
+            (Get-ResponderProbeField -Event $_ -Names @('payer_decision_id')) -eq $payer -and
+            (Get-ResponderProbeField -Event $_ -Names @('pending_answer_ack_generation', 'answer_ack_generation')) -eq $pendingAckGeneration -and
+            (Get-ResponderProbeField -Event $_ -Names @('answer_ack_message_id', 'ack_message_id', 'msg_id')) -eq
+                (Get-ResponderProbeField -Event $rawAnswerAck -Names @('msg_id', 'answer_ack_message_id')) -and
+            (Test-ResponderPrePrepareTransitionUnassigned -Decision $_)
+        } | Sort-Object Sequence, LineNumber)
+        [object[]]$negativeTypedDecisions = @($exactResponderDecisions | Where-Object {
+            (Get-ResponderProbeField -Event $_ -Names @('status', 'decision_status')) -in @('Held', 'Rejected', 'Invalidated')
+        })
+        [object[]]$negativeDecisions = @(
+            @($negativeLaunchDecisions) + @($negativeTypedDecisions) |
+                Sort-Object Sequence, LineNumber
+        )
+        $incidentEvent = if ($negativeDecisions.Count -gt 0) {
+            $negativeDecisions[0]
+        }
+        elseif ($exactResponderDecisions.Count -gt 0) {
+            $exactResponderDecisions[0]
+        }
+        elseif ($matchingLaunchDecisions.Count -gt 0) {
+            $matchingLaunchDecisions[0]
+        }
+        else {
+            $bound
+        }
+        $afterBoundRawCandidates.Add($incidentEvent) | Out-Null
+
+        $recovered = $false
+        [object[]]$matchingResponderDecisions = @($exactResponderDecisions | Where-Object {
+            (Get-ResponderProbeField -Event $_ -Names @('status', 'decision_status')) -in @('Accepted', 'Idempotent') -and
+            (Get-ResponderProbeField -Event $_ -Names @('pair_state')) -ieq 'paired' -and
+            (Test-ResponderCompletePairTuple -Decision $_) -and
+            (Get-ResponderProbeField -Event $_ -Names @('activation_authority_mode')) -ieq 'responder' -and
+            [int64](Get-ResponderProbeField -Event $_ -Names @('pairing_generation')) -gt 0 -and
+            -not [string]::IsNullOrWhiteSpace(
+                (Get-ResponderProbeField -Event $_ -Names @('pair_key'))) -and
+            [int64](Get-ResponderProbeField -Event $_ -Names @('admission_generation')) -gt 0 -and
+            [int64](Get-ResponderProbeField -Event $_ -Names @('pending_precommit_generation')) -gt 0 -and
+            (Get-ResponderProbeField -Event $_ -Names @('route', 'source_route')) -ieq 'post_tuna_fallback_v6' -and
+            (Get-ResponderProbeField -Event $_ -Names @('protocol_version', 'source_protocol_version')) -eq '6' -and
+            (Get-ResponderProbeField -Event $_ -Names @('target_route')) -ieq 'file_tuna_v4' -and
+            (Get-ResponderProbeField -Event $_ -Names @('target_protocol_version')) -eq '4' -and
+            (Get-ResponderProbeField -Event $_ -Names @('target_transport')) -ieq 'tuna'
+        } | Sort-Object Sequence, LineNumber)
+        foreach ($responderDecision in $matchingResponderDecisions) {
+            $terminalBeforeDecision = @($terminalEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$bound.Sequence -and
+                [int64]$_.Sequence -lt [int64]$responderDecision.Sequence -and
+                (Test-ResponderInboundTerminalMatch `
+                    -Decision $responderDecision `
+                    -Candidate $_ `
+                    -Writer $writer `
+                    -SessionId $sessionId `
+                    -TransferId $transferId)
+            }).Count -gt 0
+            $scopeWasReplacedBeforeDecision = @($scopeReplacementEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$bound.Sequence -and
+                [int64]$_.Sequence -lt [int64]$responderDecision.Sequence -and
+                (Test-ResponderRecoveryReplacementMatch `
+                    -Decision $responderDecision `
+                    -Candidate $_ `
+                    -Writer $writer `
+                    -SessionId $sessionId `
+                    -TransferId $transferId)
+            }).Count -gt 0
+            if ($terminalBeforeDecision -or $scopeWasReplacedBeforeDecision) {
+                continue
+            }
+            [object[]]$matchingPrepared = @($prepared | Where-Object {
+                [int64]$_.Sequence -gt [int64]$responderDecision.Sequence -and
                 (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
                 (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $sessionId -and
+                (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $transferId -and
                 (Get-ResponderProbeField -Event $_ -Names @('transaction_generation')) -eq
                     (Get-ResponderProbeField -Event $boundary -Names @('transaction_generation')) -and
-                (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -eq $offerGeneration -and
-                (Get-ResponderProbeField -Event $_ -Names @('launch_generation')) -eq $launchGeneration
+                (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -eq $localOfferGeneration -and
+                (Get-ResponderProbeField -Event $_ -Names @('launch_generation')) -eq
+                    (Get-ResponderProbeField -Event $launch -Names @('launch_generation')) -and
+                (Get-ResponderProbeField -Event $_ -Names @('tuna_path_lease_generation', 'path_lease_generation')) -eq
+                    (Get-ResponderProbeField -Event $launch -Names @('tuna_path_lease_generation', 'path_lease_generation')) -and
+                (Get-ResponderProbeField -Event $_ -Names @('source_route')) -ieq 'post_tuna_fallback_v6' -and
+                (Get-ResponderProbeField -Event $_ -Names @('source_protocol_version')) -eq '6' -and
+                (Get-ResponderProbeField -Event $_ -Names @('target_route')) -ieq 'file_tuna_v4' -and
+                (Get-ResponderProbeField -Event $_ -Names @('target_protocol_version')) -eq '4' -and
+                (Get-ResponderProbeField -Event $_ -Names @('activation_authority_mode')) -ieq 'responder' -and
+                [int64](Get-FileTransferEventField -Event $_ -Name 'retry_install_generation' -Default '0') -eq 0 -and
+                -not [string]::IsNullOrWhiteSpace((Get-ResponderProbeField -Event $_ -Names @('authority_id'))) -and
+                [int64](Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -gt 0 -and
+                (Test-ResponderAuthorityScopeMatch -Decision $responderDecision -Transition $_) -and
+                (Test-ResponderHandoffAuthorityMatch -Decision $responderDecision -Transition $_)
             } | Sort-Object Sequence, LineNumber)
             foreach ($prepare in $matchingPrepared) {
+                $negativeDecisionBeforePrepare = @($negativeTypedDecisions | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$responderDecision.Sequence -and
+                    [int64]$_.Sequence -lt [int64]$prepare.Sequence
+                }).Count -gt 0
+                if ($negativeDecisionBeforePrepare) { continue }
                 $authority = Get-ResponderProbeField -Event $prepare -Names @('authority_id')
                 $transitionGeneration = Get-ResponderProbeField -Event $prepare -Names @('transition_generation')
-                $hasDrain = @($draining | Where-Object {
+                [object[]]$matchingDrain = @($draining | Where-Object {
                     [int64]$_.Sequence -gt [int64]$prepare.Sequence -and
                     (Get-ResponderProbeField -Event $_ -Names @('authority_id')) -eq $authority -and
-                    (Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -eq $transitionGeneration
-                }).Count -gt 0
-                $matchingCommit = @($committed | Where-Object {
-                    [int64]$_.Sequence -gt [int64]$prepare.Sequence -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -eq $transitionGeneration -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transition_kind')) -eq 'PostTunaFallbackV6ToTunaV4' -and
+                    (Get-ResponderProbeField -Event $_ -Names @('direction')) -ieq 'inbound' -and
+                    (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+                    (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $sessionId -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+                    (Get-ResponderProbeField -Event $_ -Names @('activation_authority_mode')) -ieq 'responder' -and
+                    [int64](Get-FileTransferEventField -Event $_ -Name 'retry_install_generation' -Default '0') -eq 0 -and
+                    (Test-ResponderAuthorityScopeMatch -Decision $responderDecision -Transition $_) -and
+                    (Test-ResponderHandoffAuthorityMatch -Decision $responderDecision -Transition $_)
+                } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+                if ($matchingDrain.Count -eq 0) { continue }
+                [object[]]$matchingCommit = @($committed | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$matchingDrain[0].Sequence -and
                     (Get-ResponderProbeField -Event $_ -Names @('authority_id')) -eq $authority -and
-                    (Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -eq $transitionGeneration
-                } | Select-Object -First 1)
-                $hasDisposition = $matchingCommit.Count -gt 0 -and @($dispositions | Where-Object {
+                    (Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -eq $transitionGeneration -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transition_kind')) -eq 'PostTunaFallbackV6ToTunaV4' -and
+                    (Get-ResponderProbeField -Event $_ -Names @('direction')) -ieq 'inbound' -and
+                    (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+                    (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $sessionId -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+                    (Get-ResponderProbeField -Event $_ -Names @('activation_authority_mode')) -ieq 'responder' -and
+                    [int64](Get-FileTransferEventField -Event $_ -Name 'retry_install_generation' -Default '0') -eq 0 -and
+                    (Test-ResponderAuthorityScopeMatch -Decision $responderDecision -Transition $_) -and
+                    (Test-ResponderHandoffAuthorityMatch -Decision $responderDecision -Transition $_)
+                } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+                if ($matchingCommit.Count -eq 0) { continue }
+                [object[]]$matchingDisposition = @($dispositions | Where-Object {
                     [int64]$_.Sequence -gt [int64]$matchingCommit[0].Sequence -and
                     (Get-ResponderProbeField -Event $_ -Names @('authority_id')) -eq $authority -and
-                    (Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -eq $transitionGeneration
+                    (Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -eq $transitionGeneration -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transition_kind')) -eq 'PostTunaFallbackV6ToTunaV4' -and
+                    (Get-ResponderProbeField -Event $_ -Names @('direction')) -ieq 'inbound' -and
+                    (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+                    (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $sessionId -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+                    (Get-ResponderProbeField -Event $_ -Names @('activation_authority_mode')) -ieq 'responder' -and
+                    [int64](Get-FileTransferEventField -Event $_ -Name 'retry_install_generation' -Default '0') -eq 0 -and
+                    (Test-ResponderAuthorityScopeMatch -Decision $responderDecision -Transition $_) -and
+                    (Test-ResponderHandoffAuthorityMatch -Decision $responderDecision -Transition $_)
+                } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+                if ($matchingDisposition.Count -eq 0) { continue }
+                [object[]]$matchingPublication = @($routePublications | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$matchingDisposition[0].Sequence -and
+                    (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+                    (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $sessionId -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transition_authority_id', 'authority_id')) -eq $authority -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -eq $transitionGeneration -and
+                    (Test-ResponderDispositionPublicationResultMatch -Disposition $matchingDisposition[0] -Publication $_)
+                } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+                if ($matchingPublication.Count -eq 0) { continue }
+                $hasTerminalBeforePublication = @($terminalEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$bound.Sequence -and
+                    [int64]$_.Sequence -lt [int64]$matchingPublication[0].Sequence -and
+                    (Test-ResponderInboundTerminalMatch `
+                        -Decision $responderDecision `
+                        -Candidate $_ `
+                        -Writer $writer `
+                        -SessionId $sessionId `
+                        -TransferId $transferId)
                 }).Count -gt 0
-                if ($hasDrain -and $matchingCommit.Count -gt 0 -and $hasDisposition) {
+                $scopeWasReplacedBeforePublication = @($scopeReplacementEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$responderDecision.Sequence -and
+                    [int64]$_.Sequence -lt [int64]$matchingPublication[0].Sequence -and
+                    (Test-ResponderRecoveryReplacementMatch `
+                        -Decision $responderDecision `
+                        -Candidate $_ `
+                        -Writer $writer `
+                        -SessionId $sessionId `
+                        -TransferId $transferId)
+                }).Count -gt 0
+                $negativeDecisionBeforePublication = @($negativeTypedDecisions | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$responderDecision.Sequence -and
+                    [int64]$_.Sequence -lt [int64]$matchingPublication[0].Sequence
+                }).Count -gt 0
+                if (-not $hasTerminalBeforePublication -and
+                    -not $scopeWasReplacedBeforePublication -and
+                    -not $negativeDecisionBeforePublication) {
                     $recovered = $true
                     break
                 }
             }
             if ($recovered) { break }
         }
-        $records.Add([pscustomobject]@{ Event = $boundary; Recovered = $recovered }) | Out-Null
+        $handoffStatus = Get-ResponderProbeField -Event $incidentEvent -Names @('status', 'decision_status')
+        $handoffReason = Get-ResponderProbeField -Event $incidentEvent -Names @('decision_reason', 'normalized_reason')
+        $failureReason = if ($handoffStatus -ieq 'Invalidated' -and $handoffReason -eq 'transfer_context_replaced') {
+            'bound_responder_acked_peer_probe_route_transition_handoff_invalidated_as_transfer_context_replaced'
+        }
+        elseif ($handoffStatus -ieq 'Invalidated') {
+            'bound_responder_acked_peer_probe_route_transition_handoff_invalidated'
+        }
+        elseif ($handoffStatus -ieq 'Rejected') {
+            'bound_responder_acked_peer_probe_route_transition_handoff_rejected'
+        }
+        elseif ($handoffStatus -ieq 'Held') {
+            'bound_responder_acked_peer_probe_route_transition_handoff_held'
+        }
+        else {
+            'bound_responder_acked_peer_probe_route_transition_handoff_missing'
+        }
+        $afterBoundRecords.Add([pscustomobject]@{
+            Event = $incidentEvent
+            Recovered = $recovered
+            Reason = $failureReason
+        }) | Out-Null
     }
 
-    [object[]]$distinct = @($records.ToArray() | ForEach-Object { $_.Event })
-    [object[]]$recoveredEvents = @($records.ToArray() | Where-Object { $_.Recovered } | ForEach-Object { $_.Event })
-    [object[]]$unresolved = @($records.ToArray() | Where-Object { -not $_.Recovered } | ForEach-Object { $_.Event })
+    [object[]]$bindingDistinct = @($bindingRecords.ToArray() | ForEach-Object { $_.Event })
+    [object[]]$bindingRecovered = @($bindingRecords.ToArray() | Where-Object { $_.Recovered } | ForEach-Object { $_.Event })
+    [object[]]$bindingUnresolved = @($bindingRecords.ToArray() | Where-Object { -not $_.Recovered } | ForEach-Object { $_.Event })
+    [object[]]$afterBoundDistinct = @($afterBoundRecords.ToArray() | ForEach-Object { $_.Event })
+    [object[]]$afterBoundRecovered = @($afterBoundRecords.ToArray() | Where-Object { $_.Recovered } | ForEach-Object { $_.Event })
+    [object[]]$afterBoundUnresolved = @($afterBoundRecords.ToArray() | Where-Object { -not $_.Recovered } | ForEach-Object { $_.Event })
+    [object[]]$rawCandidates = @(
+        @($bindingRawCandidates.ToArray()) +
+        @($afterBoundRawCandidates.ToArray()) |
+            Sort-Object Sequence, LineNumber
+    )
+    [object[]]$distinct = @($bindingDistinct + $afterBoundDistinct | Sort-Object Sequence, LineNumber)
+    [object[]]$recoveredEvents = @($bindingRecovered + $afterBoundRecovered | Sort-Object Sequence, LineNumber)
+    [object[]]$unresolved = @($bindingUnresolved + $afterBoundUnresolved | Sort-Object Sequence, LineNumber)
+    [object[]]$unresolvedRecords = @(
+        @($bindingRecords.ToArray()) +
+        @($afterBoundRecords.ToArray()) |
+            Where-Object { -not $_.Recovered } |
+            Sort-Object { [int64]$_.Event.Sequence }, { [int]$_.Event.LineNumber }
+    )
     return [pscustomobject]@{
         RawCount = $rawCandidates.Count
         DistinctCount = $distinct.Count
         RecoveredCount = $recoveredEvents.Count
         UnresolvedCount = $unresolved.Count
         Verdict = if ($unresolved.Count -gt 0) { 'fail' } elseif ($distinct.Count -gt 0) { 'pass' } else { 'none' }
-        RawCandidateEvents = @($rawCandidates.ToArray())
+        RawCandidateEvents = $rawCandidates
         DistinctCandidateEvents = $distinct
         RecoveredCandidateEvents = $recoveredEvents
         UnresolvedCandidateEvents = $unresolved
+        UnresolvedCandidateRecords = $unresolvedRecords
+        BindingMissingRawCount = $bindingRawCandidates.Count
+        BindingMissingDistinctCount = $bindingDistinct.Count
+        BindingMissingRecoveredCount = $bindingRecovered.Count
+        BindingMissingUnresolvedCount = $bindingUnresolved.Count
+        BindingMissingVerdict = if ($bindingUnresolved.Count -gt 0) { 'fail' } elseif ($bindingDistinct.Count -gt 0) { 'pass' } else { 'none' }
+        BindingMissingRawCandidateEvents = @($bindingRawCandidates.ToArray())
+        BindingMissingDistinctCandidateEvents = $bindingDistinct
+        BindingMissingRecoveredCandidateEvents = $bindingRecovered
+        BindingMissingUnresolvedCandidateEvents = $bindingUnresolved
+        AfterBoundHandoffMissingRawCount = $afterBoundRawCandidates.Count
+        AfterBoundHandoffMissingDistinctCount = $afterBoundDistinct.Count
+        AfterBoundHandoffMissingRecoveredCount = $afterBoundRecovered.Count
+        AfterBoundHandoffMissingUnresolvedCount = $afterBoundUnresolved.Count
+        AfterBoundHandoffMissingVerdict = if ($afterBoundUnresolved.Count -gt 0) { 'fail' } elseif ($afterBoundDistinct.Count -gt 0) { 'pass' } else { 'none' }
+        AfterBoundHandoffMissingRawCandidateEvents = @($afterBoundRawCandidates.ToArray())
+        AfterBoundHandoffMissingDistinctCandidateEvents = $afterBoundDistinct
+        AfterBoundHandoffMissingRecoveredCandidateEvents = $afterBoundRecovered
+        AfterBoundHandoffMissingUnresolvedCandidateEvents = $afterBoundUnresolved
     }
 }
 
@@ -51342,12 +52216,14 @@ function Get-FileTransferRecoveryFailureClassification {
         -Events @($runtimeUnlockPreCommitProbeStartHandoffProof.UnresolvedCandidateEvents) `
         -DefaultReason 'runtime_unlock_probe_start_timeout' `
         -UseDefaultReason
-    Add-FileTransferProofChainFailureCandidates `
-        -Candidates $proofChainFailureCandidates `
-        -Class 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing' `
-        -Events @($runtimeUnlockResponderPeerProbeHandoffProof.UnresolvedCandidateEvents) `
-        -DefaultReason 'late_answer_ack_did_not_bind_acked_peer_probe_to_responder_route_transition' `
-        -UseDefaultReason
+    foreach ($candidateRecord in @($runtimeUnlockResponderPeerProbeHandoffProof.UnresolvedCandidateRecords)) {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing' `
+            -Events @($candidateRecord.Event) `
+            -DefaultReason $candidateRecord.Reason `
+            -UseDefaultReason
+    }
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_retry_dispatch_missing_after_authority_granted' `
@@ -52641,6 +53517,16 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockResponderPeerProbeHandoffMissingRecoveredCount = $runtimeUnlockResponderPeerProbeHandoffProof.RecoveredCount
         RuntimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount = $runtimeUnlockResponderPeerProbeHandoffProof.UnresolvedCount
         RuntimeUnlockResponderPeerProbeHandoffVerdict = $runtimeUnlockResponderPeerProbeHandoffProof.Verdict
+        RuntimeUnlockResponderPeerProbeBindingMissingRawCount = $runtimeUnlockResponderPeerProbeHandoffProof.BindingMissingRawCount
+        RuntimeUnlockResponderPeerProbeBindingMissingDistinctCount = $runtimeUnlockResponderPeerProbeHandoffProof.BindingMissingDistinctCount
+        RuntimeUnlockResponderPeerProbeBindingMissingRecoveredCount = $runtimeUnlockResponderPeerProbeHandoffProof.BindingMissingRecoveredCount
+        RuntimeUnlockResponderPeerProbeBindingMissingUnresolvedCount = $runtimeUnlockResponderPeerProbeHandoffProof.BindingMissingUnresolvedCount
+        RuntimeUnlockResponderPeerProbeBindingMissingVerdict = $runtimeUnlockResponderPeerProbeHandoffProof.BindingMissingVerdict
+        RuntimeUnlockResponderPeerProbeAfterBoundHandoffMissingRawCount = $runtimeUnlockResponderPeerProbeHandoffProof.AfterBoundHandoffMissingRawCount
+        RuntimeUnlockResponderPeerProbeAfterBoundHandoffMissingDistinctCount = $runtimeUnlockResponderPeerProbeHandoffProof.AfterBoundHandoffMissingDistinctCount
+        RuntimeUnlockResponderPeerProbeAfterBoundHandoffMissingRecoveredCount = $runtimeUnlockResponderPeerProbeHandoffProof.AfterBoundHandoffMissingRecoveredCount
+        RuntimeUnlockResponderPeerProbeAfterBoundHandoffMissingUnresolvedCount = $runtimeUnlockResponderPeerProbeHandoffProof.AfterBoundHandoffMissingUnresolvedCount
+        RuntimeUnlockResponderPeerProbeAfterBoundHandoffMissingVerdict = $runtimeUnlockResponderPeerProbeHandoffProof.AfterBoundHandoffMissingVerdict
         RuntimeUnlockTunaProbeSentCount = $runtimeUnlockTunaProbeSentEvents.Count
         RuntimeUnlockTunaProbeReceivedCount = $runtimeUnlockTunaProbeReceivedEvents.Count
         RuntimeUnlockTunaProbeAckSentCount = $runtimeUnlockTunaProbeAckSentEvents.Count
@@ -53603,6 +54489,16 @@ function New-FileTransferInvariantLedgerObject {
         runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count = [string]$recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingRecoveredCount
         runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count = [string]$recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount
         runtime_unlock_responder_acked_probe_route_transition_handoff_verdict = $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffVerdict
+        runtime_unlock_responder_acked_probe_binding_missing_raw_count = [string]$recoveryClassification.RuntimeUnlockResponderPeerProbeBindingMissingRawCount
+        runtime_unlock_responder_acked_probe_binding_missing_distinct_count = [string]$recoveryClassification.RuntimeUnlockResponderPeerProbeBindingMissingDistinctCount
+        runtime_unlock_responder_acked_probe_binding_missing_recovered_count = [string]$recoveryClassification.RuntimeUnlockResponderPeerProbeBindingMissingRecoveredCount
+        runtime_unlock_responder_acked_probe_binding_missing_unresolved_count = [string]$recoveryClassification.RuntimeUnlockResponderPeerProbeBindingMissingUnresolvedCount
+        runtime_unlock_responder_acked_probe_binding_missing_verdict = $recoveryClassification.RuntimeUnlockResponderPeerProbeBindingMissingVerdict
+        runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_raw_count = [string]$recoveryClassification.RuntimeUnlockResponderPeerProbeAfterBoundHandoffMissingRawCount
+        runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_distinct_count = [string]$recoveryClassification.RuntimeUnlockResponderPeerProbeAfterBoundHandoffMissingDistinctCount
+        runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_recovered_count = [string]$recoveryClassification.RuntimeUnlockResponderPeerProbeAfterBoundHandoffMissingRecoveredCount
+        runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_unresolved_count = [string]$recoveryClassification.RuntimeUnlockResponderPeerProbeAfterBoundHandoffMissingUnresolvedCount
+        runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_verdict = $recoveryClassification.RuntimeUnlockResponderPeerProbeAfterBoundHandoffMissingVerdict
         runtime_unlock_retry_dispatch_chain_closure_proof_verdict = $recoveryClassification.RuntimeUnlockRetryDispatchChainClosureProofVerdict
         runtime_unlock_retry_dispatch_settlement_reported_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchSettlementReportedCount
         runtime_unlock_retry_dispatch_settlement_accepted_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchSettlementAcceptedCount
@@ -53894,7 +54790,7 @@ function Write-FileTransferDiagnosticsArtifacts {
                 break
             }
             'runtime_unlock_responder_acked_probe_route_transition_handoff_missing' {
-                'recovery: accepted responder answer ACK did not bind the existing peer Tuna probe to the inbound route transition'
+                'recovery: ACKed responder peer probe did not acquire the exact inbound route-transition handoff authority'
                 break
             }
             'runtime_unlock_initial_activation_answer_peer_delivery_missing' {
@@ -54026,6 +54922,16 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingRecoveredCount),
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount),
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_verdict={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffVerdict),
+        ("runtime_unlock_responder_acked_probe_binding_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeBindingMissingRawCount),
+        ("runtime_unlock_responder_acked_probe_binding_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeBindingMissingDistinctCount),
+        ("runtime_unlock_responder_acked_probe_binding_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeBindingMissingRecoveredCount),
+        ("runtime_unlock_responder_acked_probe_binding_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeBindingMissingUnresolvedCount),
+        ("runtime_unlock_responder_acked_probe_binding_missing_verdict={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeBindingMissingVerdict),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_raw_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeAfterBoundHandoffMissingRawCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeAfterBoundHandoffMissingDistinctCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeAfterBoundHandoffMissingRecoveredCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeAfterBoundHandoffMissingUnresolvedCount),
+        ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_verdict={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeAfterBoundHandoffMissingVerdict),
         ("runtime_unlock_regular_v4_recovery_lease_closure_retained_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureRetainedCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_adopted_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureAdoptedCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureRejectedCount),
