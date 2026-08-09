@@ -18193,6 +18193,71 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             var positiveLogTail = logTail + Environment.NewLine + LocalOperationalLog.GetRecentLogText();
             Assert.Contains("event=tuna_acceleration_answer_ack_pending;", positiveLogTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_answer_ack_received;", positiveLogTail, StringComparison.Ordinal);
+            var rawAnswerAck = Regex.Matches(
+                logTail,
+                @"event=tuna_acceleration_answer_ack_received_raw;[^\r\n]*");
+            Assert.NotEmpty(rawAnswerAck.Cast<Match>());
+            var rawAnswerAckTuples = rawAnswerAck
+                .Cast<Match>()
+                .Select(match => Regex.Match(
+                    match.Value,
+                    @"msg_id=(?<message>[^;]+); ack_correlation_id=(?<correlation>[^;]+); ack_frame_fingerprint=(?<frame>(?:[a-f0-9]{64}|\[redacted\])); ack_source_fingerprint=(?<source>(?:[a-f0-9]{64}|\[redacted\])); session_id=(?<session>[^;]+); payer_decision_id=(?<payer>\d+)"))
+                .ToArray();
+            Assert.All(
+                rawAnswerAckTuples,
+                match => Assert.True(match.Success, logTail));
+            var semanticAnswerAcks = Regex.Matches(
+                    logTail,
+                    @"event=tuna_acceleration_answer_ack_received;[^\r\n]*")
+                .Cast<Match>()
+                .Select(match => Regex.Match(
+                    match.Value,
+                    @"session_id=(?<session>[^;]+); lanes=[^;]+; payer_decision_id=(?<payer>\d+); ack_message_id=(?<message>[^;]+); ack_correlation_id=(?<correlation>[^;]+); ack_frame_fingerprint=(?<frame>(?:[a-f0-9]{64}|\[redacted\])); ack_source_fingerprint=(?<source>(?:[a-f0-9]{64}|\[redacted\])); pending_answer_ack_generation=\d+; authority_mode=[^;]+"))
+                .ToArray();
+            Assert.NotEmpty(semanticAnswerAcks);
+            Assert.All(
+                semanticAnswerAcks,
+                semantic =>
+                {
+                    Assert.True(semantic.Success, logTail);
+                    var sameMessageLineage = rawAnswerAckTuples
+                        .Where(raw =>
+                            string.Equals(
+                                raw.Groups["message"].Value,
+                                semantic.Groups["message"].Value,
+                                StringComparison.Ordinal) &&
+                            string.Equals(
+                                raw.Groups["correlation"].Value,
+                                semantic.Groups["correlation"].Value,
+                                StringComparison.Ordinal) &&
+                            string.Equals(
+                                raw.Groups["session"].Value,
+                                semantic.Groups["session"].Value,
+                                StringComparison.Ordinal) &&
+                            string.Equals(
+                                raw.Groups["payer"].Value,
+                                semantic.Groups["payer"].Value,
+                                StringComparison.Ordinal))
+                        .ToArray();
+                    Assert.NotEmpty(sameMessageLineage);
+                    Assert.All(
+                        sameMessageLineage,
+                        raw =>
+                        {
+                            Assert.Equal(
+                                semantic.Groups["frame"].Value,
+                                raw.Groups["frame"].Value);
+                            Assert.Equal(
+                                semantic.Groups["source"].Value,
+                                raw.Groups["source"].Value);
+                            Assert.Equal(
+                                semantic.Groups["session"].Value,
+                                raw.Groups["session"].Value);
+                            Assert.Equal(
+                                semantic.Groups["payer"].Value,
+                                raw.Groups["payer"].Value);
+                        });
+                });
             Assert.Contains("reason=runtime_unlock_answer_ack_probe_ready", positiveLogTail, StringComparison.Ordinal);
             Assert.Contains("event=filetransfer_runtime_unlock_handoff_pending_route_commit;", positiveLogTail, StringComparison.Ordinal);
             Assert.Contains("event=runtime_unlock_precommit_probe_launch_requested;", positiveLogTail, StringComparison.Ordinal);
@@ -18336,6 +18401,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             BindingFlags.Static | BindingFlags.NonPublic)!;
         var authorityMode = Enum.Parse(authorityModeType, "InitialActivation");
         var acceptanceSource = Enum.Parse(acceptanceSourceType, "SemanticAnswerAck");
+        var receiveScope =
+            CreateRuntimeUnlockResponderPeerReceiveScopeForTests(
+                "session_responder_adoption",
+                "transfer_responder_adoption");
 
         static RuntimeUnlockTransactionSnapshot CreateSnapshot(RuntimeUnlockPathProbeState state, long ackedUtcMs) => new(
             SessionId: "session_responder_adoption",
@@ -18379,8 +18448,15 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 4L,
                 acceptanceSource,
                 "answer-ack-message",
-                "peer-fingerprint",
-                null,
+                new string('a', 64),
+                new string('b', 64),
+                11L,
+                13L,
+                5L,
+                FileTransferTransportKind.Tuna,
+                100L,
+                101L,
+                receiveScope,
                 5L,
                 "peer-offer-dialer-5",
                 probeId,
@@ -18406,6 +18482,1083 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             null,
         };
         Assert.False(Assert.IsType<bool>(resolver.Invoke(null, mutatedArgs)));
+    }
+
+    [Theory]
+    [InlineData("ack_first")]
+    [InlineData("probe_first")]
+    [InlineData("concurrent")]
+    [InlineData("probe_ack_before_peer_receipt")]
+    [Trait("Category", "Smoke")]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockResponderPeerProbe")]
+    public async Task RuntimeUnlockResponderAnswerProbeConvergence_ExactHalvesBindOnlyAfterAckedProbe(
+        string arrivalOrder)
+    {
+        FakeNknClient.ResetNetwork();
+        const string sessionId = "session-responder-answer-probe-convergence";
+        const string transferId = "transfer-responder-answer-probe-convergence";
+        const string listenerRunId = "peer-offer-dialer-convergence";
+        const string nonce = "responder-answer-probe-convergence-nonce";
+        const string answerMessageId = "responder-answer-message";
+        const string answerAckMessageId = "responder-answer-ack-message";
+        const string probeId = "responder-peer-precommit-probe";
+        const long transactionGeneration = 3;
+        const long offerGeneration = 7;
+        const long pendingGeneration = 9;
+        const long payerDecisionId = 11;
+        const long leaseGeneration = 13;
+        const long peerLeaseGeneration = 23;
+        var nowUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var answerDeadlineUtcMs = nowUtcMs + 60_000;
+        var sourceFingerprint = new string('a', 64);
+        var answerAckFrameFingerprint = new string('b', 64);
+        var peerProbeFrameFingerprint = new string('c', 64);
+        var scope = CreateRuntimeUnlockResponderPeerReceiveScopeForTests(
+            sessionId,
+            transferId);
+        var receipt = new RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt(
+            sessionId,
+            transferId,
+            FileTransferDirection.Inbound,
+            scope.Admission,
+            PeerTransactionGeneration: 17,
+            PeerOfferGeneration: 19,
+            PeerTunaPathLeaseGeneration: peerLeaseGeneration,
+            probeId,
+            peerProbeFrameFingerprint,
+            FileTransferTransportKind.Tuna,
+            ReceivedUtcMs: nowUtcMs + 1,
+            ProbeAckSentUtcMs: nowUtcMs + 2,
+            scope.DataSessionGeneration,
+            scope);
+        var transaction = new RuntimeUnlockTransactionSnapshot(
+            sessionId,
+            transferId,
+            transactionGeneration,
+            offerGeneration,
+            RuntimeUnlockTransactionState.RouteCommitPending,
+            CreatedUtcMs: nowUtcMs - 100,
+            UpdatedUtcMs: nowUtcMs,
+            DeadlineUtcMs: answerDeadlineUtcMs,
+            ListenerReady: true,
+            ListenerUnavailable: false,
+            ObservedSend: true,
+            ObservedLane: "peer_answer",
+            PeerReceived: true,
+            AnswerReceived: true,
+            PathProbeId: null,
+            RuntimeUnlockPathProbeState.None,
+            FileTransferTransportKind.Unknown,
+            PathProbeAckedUtcMs: 0,
+            PathProbeFailureReason: null,
+            RouteCommitPending: true,
+            RouteCommitted: false,
+            FailureReason: null,
+            RetiredReason: null,
+            leaseGeneration,
+            RuntimeUnlockTunaPathLeaseState.ListenerReady,
+            listenerRunId,
+            TunaPathLeaseCurrent: true,
+            TunaPathLeaseFailureReason: null);
+        var lease = new RuntimeUnlockTunaPathLeaseSnapshot(
+            sessionId,
+            transferId,
+            transactionGeneration,
+            offerGeneration,
+            leaseGeneration,
+            listenerRunId,
+            payerDecisionId,
+            RuntimeUnlockTunaPathLeaseState.ListenerReady,
+            CreatedUtcMs: nowUtcMs - 100,
+            UpdatedUtcMs: nowUtcMs,
+            DeadlineUtcMs: answerDeadlineUtcMs,
+            FailureReason: null,
+            RetiredReason: null);
+        var ack = new TransportAccelerationAnswerAckPayload
+        {
+            SessionId = sessionId,
+            Accepted = true,
+            SupportedLanes = ["file"],
+            SentAtUnixMs = nowUtcMs,
+            ExpiresAtUnixMs = answerDeadlineUtcMs,
+            Nonce = nonce,
+            SidecarProtocolVersion = 1,
+            PayerDecisionId = payerDecisionId,
+        };
+
+        using var transport = new NknSignalingTransport(
+            new FakeNknClient("responder.answer-probe-convergence.address"),
+            NknTransportOptions.Load(),
+            new NknIdentity(
+                "responder-answer-probe-convergence-id",
+                "responder.answer-probe-convergence.address"));
+        SetPrivateField(transport, "runtimeUnlockTransactionState", transaction);
+        SetPrivateField(transport, "runtimeUnlockTunaPathLeaseState", lease);
+        SetPrivateField(
+            transport,
+            "pendingAccelerationAnswerAckSessionId",
+            sessionId);
+        SetPrivateField(transport, "pendingAccelerationAnswerAckNonce", nonce);
+        SetPrivateField(
+            transport,
+            "pendingAccelerationAnswerAckTrigger",
+            "runtime_unlock");
+        SetPrivateField(
+            transport,
+            "pendingAccelerationAnswerAckLanes",
+            NknAccelerationLaneKind.File);
+        SetPrivateField(
+            transport,
+            "pendingAccelerationAnswerAckPayerDecisionId",
+            payerDecisionId);
+        SetPrivateField(
+            transport,
+            "pendingAccelerationAnswerAckGeneration",
+            pendingGeneration);
+        var transportType = typeof(NknSignalingTransport);
+        var authorityModeType = transportType.GetNestedType(
+            "RuntimeUnlockOfferAuthorityMode",
+            BindingFlags.NonPublic)!;
+        var authorityMode = Enum.Parse(authorityModeType, "InitialActivation");
+        SetPrivateField(
+            transport,
+            "pendingAccelerationAnswerAckAuthorityMode",
+            authorityMode);
+        var replyTargetType = transportType.GetNestedType(
+            "AccelerationReplyTargetEvidence",
+            BindingFlags.NonPublic)!;
+        var replyTarget = Activator.CreateInstance(
+            replyTargetType,
+            "peer.answer-probe-convergence.address",
+            new string('d', 64),
+            "peer-offer-message",
+            sessionId,
+            nonce,
+            payerDecisionId,
+            pendingGeneration,
+            "answer")!;
+        var answerEnvelope = new Envelope(
+            Version: 1,
+            Code: "000000",
+            MessageId: answerMessageId,
+            MsgType.TransportAccelerationAnswer,
+            Payload: [],
+            UnixTimeMs: nowUtcMs,
+            ReplyTo: null);
+        var replyShadowType = transportType.GetNestedType(
+            "PendingAccelerationReplyShadow",
+            BindingFlags.NonPublic)!;
+        var replyShadow = Activator.CreateInstance(
+            replyShadowType,
+            answerEnvelope,
+            replyTarget,
+            sessionId,
+            nonce,
+            payerDecisionId,
+            pendingGeneration,
+            authorityMode,
+            answerDeadlineUtcMs,
+            1L,
+            "answer",
+            new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously))!;
+        SetPrivateField(
+            transport,
+            "pendingAccelerationAnswerReplyShadow",
+            replyShadow);
+        var recordAckMethod = transportType.GetMethod(
+            "TryRecordRuntimeUnlockResponderSemanticAnswerAckUnsafe",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var semanticAckMatcher = transportType.GetMethod(
+            "RuntimeUnlockResponderSemanticAnswerAckMatches",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        var semanticAckLineageMatcher = transportType.GetMethod(
+            "IsRuntimeUnlockResponderSemanticAnswerAckLineageMatch",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        var logConvergenceDecision = transportType.GetMethod(
+            "LogRuntimeUnlockResponderAnswerProbeConvergenceDecision",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        var accelerationGate = Assert.IsType<object>(
+            GetPrivateField(transport, "accelerationGate"));
+
+        object RecordSemanticAck()
+        {
+            object?[] arguments =
+            [
+                ack,
+                answerAckMessageId,
+                sourceFingerprint,
+                answerAckFrameFingerprint,
+                NknAccelerationLaneKind.File,
+                authorityMode,
+                pendingGeneration,
+                null,
+                null,
+            ];
+            lock (accelerationGate)
+            {
+                Assert.True(Assert.IsType<bool>(
+                    recordAckMethod.Invoke(transport, arguments)));
+            }
+
+            var retentionReason = Assert.IsType<string>(arguments[8]);
+            Assert.Contains(
+                retentionReason,
+                new[]
+                {
+                    "semantic_answer_ack_retained_waiting_for_peer_probe",
+                    "semantic_answer_ack_joined_waiting_for_probe_ack",
+                });
+            Assert.NotNull(arguments[7]);
+            var retainedConvergence = arguments[7]!;
+            logConvergenceDecision.Invoke(
+                null,
+                [retainedConvergence, "Held", retentionReason]);
+            return retainedConvergence;
+        }
+
+        var observer =
+            (IRuntimeUnlockPeerPreCommitAnswerAcceptanceObserver)transport;
+        var proofProvider = (IRuntimeUnlockRouteCommitProofProvider)transport;
+
+        void AssertStaleProbeAckCallbackTuplesIgnored(
+            bool includePeerTupleMutations)
+        {
+            var staleLocalTuples = new (
+                long TransactionGeneration,
+                long OfferGeneration,
+                long LeaseGeneration,
+                string? ListenerRunId)[]
+            {
+                (
+                    transactionGeneration + 1,
+                    offerGeneration,
+                    leaseGeneration,
+                    listenerRunId),
+                (
+                    transactionGeneration,
+                    offerGeneration + 1,
+                    leaseGeneration,
+                    listenerRunId),
+                (
+                    transactionGeneration,
+                    offerGeneration,
+                    leaseGeneration + 1,
+                    listenerRunId),
+                (
+                    transactionGeneration,
+                    offerGeneration,
+                    leaseGeneration,
+                    $"{listenerRunId}-replaced"),
+            };
+            foreach (var staleTuple in staleLocalTuples)
+            {
+                Assert.True(proofProvider.TryGetRuntimeUnlockRouteCommitProof(
+                    sessionId,
+                    transferId,
+                    out var before));
+                var beforeScopeReceipt = GetPrivateField(
+                    transport,
+                    "runtimeUnlockResponderProbeAckScopeReceipt");
+                var staleLogStart = GetOperationalLogLength();
+                Assert.False(proofProvider.NotifyRuntimeUnlockPathProbeResult(
+                    sessionId,
+                    transferId,
+                    transportEpoch: 0,
+                    probeId,
+                    FileTransferTransportKind.Tuna,
+                    acked: true,
+                    "test_stale_peer_probe_acked_callback",
+                    scope,
+                    receipt.PeerTransactionGeneration,
+                    receipt.PeerOfferGeneration,
+                    receipt.PeerTunaPathLeaseGeneration,
+                    staleTuple.TransactionGeneration,
+                    staleTuple.OfferGeneration,
+                    staleTuple.LeaseGeneration,
+                    staleTuple.ListenerRunId,
+                    Enum.Parse<RuntimeUnlockPathProbeState>(
+                        before.PathProbeState)));
+                Assert.True(proofProvider.TryGetRuntimeUnlockRouteCommitProof(
+                    sessionId,
+                    transferId,
+                    out var after));
+                Assert.Equal(before, after);
+                Assert.Equal(
+                    beforeScopeReceipt,
+                    GetPrivateField(
+                        transport,
+                        "runtimeUnlockResponderProbeAckScopeReceipt"));
+                var staleTail = ReadOperationalLogTail(staleLogStart);
+                Assert.Contains(
+                    "reason=runtime_unlock_probe_callback_tuple_mismatch",
+                    staleTail,
+                    StringComparison.Ordinal);
+                Assert.DoesNotContain(
+                    "event=runtime_unlock_precommit_responder_peer_probe_handoff_bound;",
+                    staleTail,
+                    StringComparison.Ordinal);
+            }
+
+            if (!includePeerTupleMutations)
+            {
+                return;
+            }
+
+            var stalePeerTuples = new (long TransactionGeneration,
+                long OfferGeneration, long LeaseGeneration)[]
+            {
+                (receipt.PeerTransactionGeneration + 1,
+                    receipt.PeerOfferGeneration,
+                    receipt.PeerTunaPathLeaseGeneration),
+                (receipt.PeerTransactionGeneration,
+                    receipt.PeerOfferGeneration + 1,
+                    receipt.PeerTunaPathLeaseGeneration),
+                (receipt.PeerTransactionGeneration,
+                    receipt.PeerOfferGeneration,
+                    receipt.PeerTunaPathLeaseGeneration + 1),
+            };
+            foreach (var stalePeerTuple in stalePeerTuples)
+            {
+                Assert.True(proofProvider.TryGetRuntimeUnlockRouteCommitProof(
+                    sessionId,
+                    transferId,
+                    out var before));
+                var beforeScopeReceipt = GetPrivateField(
+                    transport,
+                    "runtimeUnlockResponderProbeAckScopeReceipt");
+                Assert.False(proofProvider.NotifyRuntimeUnlockPathProbeResult(
+                    sessionId,
+                    transferId,
+                    transportEpoch: 0,
+                    probeId,
+                    FileTransferTransportKind.Tuna,
+                    acked: true,
+                    "test_stale_peer_probe_acked_peer_tuple",
+                    scope,
+                    stalePeerTuple.TransactionGeneration,
+                    stalePeerTuple.OfferGeneration,
+                    stalePeerTuple.LeaseGeneration,
+                    transactionGeneration,
+                    offerGeneration,
+                    leaseGeneration,
+                    listenerRunId,
+                    Enum.Parse<RuntimeUnlockPathProbeState>(
+                        before.PathProbeState)));
+                Assert.True(proofProvider.TryGetRuntimeUnlockRouteCommitProof(
+                    sessionId,
+                    transferId,
+                    out var after));
+                Assert.Equal(before, after);
+                Assert.Equal(
+                    beforeScopeReceipt,
+                    GetPrivateField(
+                        transport,
+                        "runtimeUnlockResponderProbeAckScopeReceipt"));
+            }
+        }
+
+        void AssertStaleProbeStartedCallbackTupleIgnored()
+        {
+            Assert.True(proofProvider.TryGetRuntimeUnlockRouteCommitProof(
+                sessionId,
+                transferId,
+                out var before));
+            var beforeScopeReceipt = GetPrivateField(
+                transport,
+                "runtimeUnlockResponderProbeAckScopeReceipt");
+            var staleLogStart = GetOperationalLogLength();
+            Assert.False(proofProvider.NotifyRuntimeUnlockPathProbeStarted(
+                sessionId,
+                transferId,
+                transportEpoch: 0,
+                probeId,
+                FileTransferTransportKind.Tuna,
+                "test_stale_peer_probe_started_callback",
+                scope,
+                receipt.PeerTransactionGeneration,
+                receipt.PeerOfferGeneration,
+                receipt.PeerTunaPathLeaseGeneration,
+                transactionGeneration,
+                offerGeneration + 1,
+                leaseGeneration,
+                listenerRunId,
+                Enum.Parse<RuntimeUnlockPathProbeState>(
+                    before.PathProbeState)));
+            Assert.True(proofProvider.TryGetRuntimeUnlockRouteCommitProof(
+                sessionId,
+                transferId,
+                out var after));
+            Assert.Equal(before, after);
+            Assert.Equal(
+                beforeScopeReceipt,
+                GetPrivateField(
+                    transport,
+                    "runtimeUnlockResponderProbeAckScopeReceipt"));
+            var staleTail = ReadOperationalLogTail(staleLogStart);
+            Assert.Contains(
+                "reason=runtime_unlock_probe_callback_tuple_mismatch",
+                staleTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_precommit_probe_started;",
+                staleTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_precommit_responder_peer_probe_handoff_bound;",
+                staleTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=filetransfer_data_session_availability_broadcast;",
+                staleTail,
+                StringComparison.Ordinal);
+        }
+
+        void NotifyExactProbeAck(string reason)
+        {
+            Assert.True(proofProvider.TryGetRuntimeUnlockRouteCommitProof(
+                sessionId,
+                transferId,
+                out var before));
+            Assert.True(proofProvider.NotifyRuntimeUnlockPathProbeResult(
+                    sessionId,
+                    transferId,
+                    transportEpoch: 0,
+                    probeId,
+                    FileTransferTransportKind.Tuna,
+                    acked: true,
+                    reason,
+                    scope,
+                    receipt.PeerTransactionGeneration,
+                    receipt.PeerOfferGeneration,
+                    receipt.PeerTunaPathLeaseGeneration,
+                    transactionGeneration,
+                    offerGeneration,
+                    leaseGeneration,
+                    listenerRunId,
+                    Enum.Parse<RuntimeUnlockPathProbeState>(
+                        before.PathProbeState)));
+        }
+
+        void NotifyExactProbeStarted(string reason)
+        {
+            Assert.True(proofProvider.TryGetRuntimeUnlockRouteCommitProof(
+                sessionId,
+                transferId,
+                out var before));
+            Assert.True(proofProvider.NotifyRuntimeUnlockPathProbeStarted(
+                sessionId,
+                transferId,
+                transportEpoch: 0,
+                probeId,
+                FileTransferTransportKind.Tuna,
+                reason,
+                scope,
+                receipt.PeerTransactionGeneration,
+                receipt.PeerOfferGeneration,
+                receipt.PeerTunaPathLeaseGeneration,
+                transactionGeneration,
+                offerGeneration,
+                leaseGeneration,
+                listenerRunId,
+                Enum.Parse<RuntimeUnlockPathProbeState>(
+                    before.PathProbeState)));
+        }
+
+        RuntimeUnlockPeerPreCommitAnswerAcceptanceDecision peerDecision;
+        object retainedHold;
+        var waitingLaunchGeneration = 0L;
+        var completionAlreadyApplied = false;
+        var logStart = GetOperationalLogLength();
+        if (string.Equals(arrivalOrder, "ack_first", StringComparison.Ordinal))
+        {
+            retainedHold = RecordSemanticAck();
+            InvokePrivateMethod(
+                transport,
+                "RequestFileTransferTunaActivationHandoffWithResponderPeerProbe",
+                sessionId,
+                NknAccelerationLaneKind.File,
+                "test_ack_first_waiting_launch",
+                null);
+            peerDecision = observer
+                .ObserveRuntimeUnlockPeerPreCommitAnswerAcceptance(receipt);
+        }
+        else if (string.Equals(
+                     arrivalOrder,
+                     "probe_first",
+                     StringComparison.Ordinal))
+        {
+            peerDecision = observer
+                .ObserveRuntimeUnlockPeerPreCommitAnswerAcceptance(receipt);
+            NotifyExactProbeStarted("test_probe_first_started");
+            retainedHold = RecordSemanticAck();
+        }
+        else if (string.Equals(
+                     arrivalOrder,
+                     "probe_ack_before_peer_receipt",
+                     StringComparison.Ordinal))
+        {
+            retainedHold = RecordSemanticAck();
+            InvokePrivateMethod(
+                transport,
+                "RequestFileTransferTunaActivationHandoffWithResponderPeerProbe",
+                sessionId,
+                NknAccelerationLaneKind.File,
+                "test_probe_ack_before_peer_receipt_waiting_launch",
+                null);
+            waitingLaunchGeneration = Assert.IsType<long>(
+                retainedHold.GetType()
+                    .GetProperty("LaunchGeneration")!
+                    .GetValue(GetPrivateField(
+                        transport,
+                        "runtimeUnlockResponderAnswerProbeConvergence")));
+            Assert.True(waitingLaunchGeneration > 0);
+            NotifyExactProbeStarted(
+                "test_probe_ack_before_peer_receipt_started");
+            AssertStaleProbeAckCallbackTuplesIgnored(
+                includePeerTupleMutations: false);
+            NotifyExactProbeAck(
+                "test_probe_ack_before_peer_receipt_acked");
+            Assert.DoesNotContain(
+                "event=runtime_unlock_precommit_responder_peer_probe_handoff_bound;",
+                ReadOperationalLogTail(logStart),
+                StringComparison.Ordinal);
+            peerDecision = observer
+                .ObserveRuntimeUnlockPeerPreCommitAnswerAcceptance(receipt);
+            completionAlreadyApplied = true;
+        }
+        else
+        {
+            RuntimeUnlockPeerPreCommitAnswerAcceptanceDecision?
+                concurrentPeerDecision = null;
+            object? concurrentHold = null;
+            await Task.WhenAll(
+                Task.Run(() =>
+                {
+                    concurrentPeerDecision = observer
+                        .ObserveRuntimeUnlockPeerPreCommitAnswerAcceptance(
+                            receipt);
+                }),
+                Task.Run(() => concurrentHold = RecordSemanticAck()));
+            peerDecision = Assert.IsType<
+                RuntimeUnlockPeerPreCommitAnswerAcceptanceDecision>(
+                concurrentPeerDecision);
+            Assert.NotNull(concurrentHold);
+            retainedHold = concurrentHold!;
+            InvokePrivateMethod(
+                transport,
+                "RequestFileTransferTunaActivationHandoffWithResponderPeerProbe",
+                sessionId,
+                NknAccelerationLaneKind.File,
+                "test_concurrent_waiting_launch",
+                null);
+        }
+
+        Assert.Equal(
+            completionAlreadyApplied
+                ? RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Accepted
+                : RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Held,
+            peerDecision.Status);
+        var exactDuplicate = observer
+            .ObserveRuntimeUnlockPeerPreCommitAnswerAcceptance(receipt);
+        Assert.Equal(
+            completionAlreadyApplied
+                ? RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Idempotent
+                : RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Held,
+            exactDuplicate.Status);
+        foreach (var mutation in new[]
+        {
+            receipt with { ReceivedUtcMs = receipt.ReceivedUtcMs + 1 },
+            receipt with { ProbeAckSentUtcMs = receipt.ProbeAckSentUtcMs + 1 },
+            receipt with { ProbeId = $"{receipt.ProbeId}-mutated" },
+            receipt with
+            {
+                PeerOfferGeneration = receipt.PeerOfferGeneration + 1,
+            },
+            receipt with
+            {
+                ReceiveScope = receipt.ReceiveScope with
+                {
+                    Admission = receipt.ReceiveScope.Admission with
+                    {
+                        AdmissionGeneration = receipt.ReceiveScope.Admission
+                            .AdmissionGeneration + 1,
+                    },
+                },
+            },
+        })
+        {
+            var rejected = observer
+                .ObserveRuntimeUnlockPeerPreCommitAnswerAcceptance(mutation);
+            Assert.Equal(
+                RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Rejected,
+                rejected.Status);
+            Assert.Equal(
+                "runtime_unlock_peer_precommit_answer_acceptance_tuple_mutation",
+                rejected.Reason);
+        }
+
+        Assert.True(Assert.IsType<bool>(semanticAckMatcher.Invoke(
+            null,
+            [
+                retainedHold,
+                ack,
+                answerAckMessageId,
+                sourceFingerprint,
+                answerAckFrameFingerprint,
+                NknAccelerationLaneKind.File,
+            ])));
+        TransportAccelerationAnswerAckPayload MutateAck(
+            string mutatedSessionId,
+            long mutatedPayerDecisionId)
+            => new()
+            {
+                SessionId = mutatedSessionId,
+                Accepted = ack.Accepted,
+                SupportedLanes = [.. ack.SupportedLanes],
+                SentAtUnixMs = ack.SentAtUnixMs,
+                ExpiresAtUnixMs = ack.ExpiresAtUnixMs,
+                Nonce = ack.Nonce,
+                SidecarProtocolVersion = ack.SidecarProtocolVersion,
+                PayerDecisionId = mutatedPayerDecisionId,
+            };
+        foreach (var mutation in new object?[][]
+        {
+            [ack, answerAckMessageId, sourceFingerprint,
+                new string('e', 64), NknAccelerationLaneKind.File],
+            [MutateAck(sessionId, payerDecisionId + 1),
+                answerAckMessageId, sourceFingerprint,
+                answerAckFrameFingerprint, NknAccelerationLaneKind.File],
+            [MutateAck($"{sessionId}-mutated", payerDecisionId),
+                answerAckMessageId, sourceFingerprint,
+                answerAckFrameFingerprint, NknAccelerationLaneKind.File],
+            [ack, answerAckMessageId, sourceFingerprint,
+                answerAckFrameFingerprint, NknAccelerationLaneKind.None],
+        })
+        {
+            Assert.False(Assert.IsType<bool>(semanticAckMatcher.Invoke(
+                null,
+                [retainedHold, .. mutation])));
+        }
+        var combinedIdentityMutation = new TransportAccelerationAnswerAckPayload
+        {
+            SessionId = ack.SessionId,
+            Accepted = ack.Accepted,
+            SupportedLanes = [.. ack.SupportedLanes],
+            SentAtUnixMs = ack.SentAtUnixMs,
+            ExpiresAtUnixMs = ack.ExpiresAtUnixMs,
+            Nonce = $"{ack.Nonce}-mutated",
+            SidecarProtocolVersion = ack.SidecarProtocolVersion,
+            PayerDecisionId = ack.PayerDecisionId,
+        };
+        const string combinedMutatedMessageId =
+            "responder-answer-ack-message-mutated";
+        Assert.True(Assert.IsType<bool>(semanticAckLineageMatcher.Invoke(
+            null,
+            [
+                retainedHold,
+                combinedIdentityMutation,
+                combinedMutatedMessageId,
+            ])));
+        Assert.False(Assert.IsType<bool>(semanticAckMatcher.Invoke(
+            null,
+            [
+                retainedHold,
+                combinedIdentityMutation,
+                combinedMutatedMessageId,
+                sourceFingerprint,
+                new string('f', 64),
+                NknAccelerationLaneKind.File,
+            ])));
+
+        var preAckLog = ReadOperationalLogTail(logStart);
+        Assert.Contains(
+            "event=runtime_unlock_responder_answer_probe_convergence_decided; status=Held; decision_status=Held;",
+            preAckLog,
+            StringComparison.Ordinal);
+        if (!completionAlreadyApplied)
+        {
+            Assert.DoesNotContain(
+                "event=runtime_unlock_precommit_responder_peer_probe_handoff_bound;",
+                preAckLog,
+                StringComparison.Ordinal);
+        }
+        Assert.DoesNotContain(
+            "event=filetransfer_data_session_availability_broadcast;",
+            preAckLog,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=runtime_unlock_retry_dispatch_install_receipt_issued;",
+            preAckLog,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=runtime_unlock_retry_dispatch_install_committed;",
+            preAckLog,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=runtime_unlock_retry_dispatch_install_confirmed;",
+            preAckLog,
+            StringComparison.Ordinal);
+        if (!completionAlreadyApplied)
+        {
+            Assert.DoesNotContain(
+                "source=typed_peer_precommit_answer_acceptance",
+                preAckLog,
+                StringComparison.Ordinal);
+        }
+        if (!completionAlreadyApplied)
+        {
+            AssertStaleProbeStartedCallbackTupleIgnored();
+        }
+        if (!completionAlreadyApplied &&
+            !string.Equals(
+                arrivalOrder,
+                "probe_first",
+                StringComparison.Ordinal))
+        {
+            waitingLaunchGeneration = Assert.IsType<long>(
+                retainedHold.GetType()
+                    .GetProperty("LaunchGeneration")!
+                    .GetValue(GetPrivateField(
+                        transport,
+                        "runtimeUnlockResponderAnswerProbeConvergence")));
+            Assert.True(waitingLaunchGeneration > 0);
+            NotifyExactProbeStarted("test_waiting_launch_started");
+        }
+
+        if (!completionAlreadyApplied)
+        {
+            var beforeAck = ReadOperationalLogTail(logStart);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_precommit_responder_peer_probe_handoff_bound;",
+                beforeAck,
+                StringComparison.Ordinal);
+            AssertStaleProbeAckCallbackTuplesIgnored(
+                includePeerTupleMutations: true);
+            NotifyExactProbeAck("test_exact_peer_probe_acked");
+        }
+
+        var tail = ReadOperationalLogTail(logStart);
+        var acceptedIndex = tail.IndexOf(
+            "event=runtime_unlock_responder_answer_probe_convergence_decided; status=Accepted;",
+            StringComparison.Ordinal);
+        var adoptingIndex = tail.IndexOf(
+            "launch_role=ResponderAdoptingAckedPeerProbe",
+            acceptedIndex,
+            StringComparison.Ordinal);
+        var boundIndex = tail.IndexOf(
+            "event=runtime_unlock_precommit_responder_peer_probe_handoff_bound; status=Accepted;",
+            adoptingIndex,
+            StringComparison.Ordinal);
+        Assert.True(acceptedIndex >= 0, tail);
+        Assert.True(adoptingIndex > acceptedIndex, tail);
+        Assert.True(boundIndex > adoptingIndex, tail);
+        Assert.Contains("substate=Complete", tail, StringComparison.Ordinal);
+        Assert.Contains("probe_state=Acked", tail, StringComparison.Ordinal);
+        Assert.Contains("received_transport=tuna", tail, StringComparison.Ordinal);
+        var boundLog = tail
+            .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+            .Single(line => line.Contains(
+                "event=runtime_unlock_precommit_responder_peer_probe_handoff_bound; status=Accepted;",
+                StringComparison.Ordinal));
+        foreach (var requiredField in new[]
+        {
+            "received_transport",
+            "received_utc_ms",
+            "probe_ack_sent_utc_ms",
+            "peer_runtime_owner_session_id",
+            "peer_runtime_owner_transfer_id",
+            "peer_runtime_owner_direction",
+            "peer_runtime_owner_route",
+            "peer_runtime_owner_route_token",
+            "peer_runtime_owner_protocol_version",
+            "peer_runtime_owner_live_route_epoch",
+            "peer_runtime_generation",
+            "peer_runtime_owner_terminal_generation",
+            "peer_route_publication_session_id",
+            "peer_route_publication_transfer_id",
+            "peer_route_publication_direction",
+            "peer_route_publication_route",
+            "peer_route_publication_route_token",
+            "peer_route_publication_protocol_version",
+            "peer_route_publication_live_route_epoch",
+            "peer_route_publication_runtime_generation",
+            "peer_route_publication_terminal_generation",
+            "peer_route_publication_leg_generation",
+            "peer_route_publication_commit_generation",
+            "peer_route_publication_generation",
+            "admission_generation",
+            "peer_admission_generation",
+            "peer_terminal_generation",
+            "peer_leg_generation",
+            "peer_transport_epoch",
+            "peer_bridge_recovery_generation",
+            "peer_checkpoint_request_id",
+            "peer_checkpoint_generation",
+            "peer_data_session_identity",
+            "peer_data_session_generation",
+        })
+        {
+            Assert.Contains(
+                $"{requiredField}=",
+                boundLog,
+                StringComparison.Ordinal);
+        }
+        Assert.Contains(
+            $"admission_generation={scope.Admission.AdmissionGeneration}",
+            tail,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"peer_admission_generation={scope.Admission.AdmissionGeneration}",
+            tail,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=filetransfer_fallback_tail_yield_release_reserved;",
+            tail,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=filetransfer_fallback_tail_yield_release_consumed;",
+            tail,
+            StringComparison.Ordinal);
+
+        Assert.True(proofProvider.TryGetRuntimeUnlockRouteCommitProof(
+            sessionId,
+            transferId,
+            out var proof));
+        Assert.NotNull(
+            proof.ResponderPeerProbeRouteTransitionObservation);
+        Assert.True(proof.LaunchGeneration > 0);
+        if (!string.Equals(
+                arrivalOrder,
+                "probe_first",
+                StringComparison.Ordinal))
+        {
+            Assert.Equal(waitingLaunchGeneration, proof.LaunchGeneration);
+        }
+        var completedHold = GetPrivateField(
+            transport,
+            "runtimeUnlockResponderAnswerProbeConvergence");
+        Assert.True(Assert.IsType<bool>(semanticAckLineageMatcher.Invoke(
+            null,
+            [
+                completedHold,
+                combinedIdentityMutation,
+                combinedMutatedMessageId,
+            ])));
+        Assert.False(Assert.IsType<bool>(semanticAckMatcher.Invoke(
+            null,
+            [
+                completedHold,
+                combinedIdentityMutation,
+                combinedMutatedMessageId,
+                sourceFingerprint,
+                new string('f', 64),
+                NknAccelerationLaneKind.File,
+            ])));
+
+        var completedDuplicate = observer
+            .ObserveRuntimeUnlockPeerPreCommitAnswerAcceptance(receipt);
+        Assert.Equal(
+            RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Idempotent,
+            completedDuplicate.Status);
+        NotifyExactProbeAck("test_exact_peer_probe_acked_duplicate");
+        Assert.True(proofProvider.TryGetRuntimeUnlockRouteCommitProof(
+            sessionId,
+            transferId,
+            out var duplicateProof));
+        Assert.Equal(proof.PathProbeAckedUtcMs, duplicateProof.PathProbeAckedUtcMs);
+        Assert.Equal(proof.LaunchGeneration, duplicateProof.LaunchGeneration);
+        Assert.Equal(
+            1,
+            Regex.Matches(
+                ReadOperationalLogTail(logStart),
+                "event=runtime_unlock_precommit_responder_peer_probe_handoff_bound; status=Accepted;")
+                .Count);
+        proofProvider.NotifyRuntimeUnlockRouteCommitResult(
+            sessionId,
+            transferId,
+            FileTransferDirection.Inbound,
+            transactionGeneration,
+            offerGeneration,
+            accepted: true,
+            "test_responder_route_committed");
+        var postCommitDuplicate = observer
+            .ObserveRuntimeUnlockPeerPreCommitAnswerAcceptance(receipt);
+        Assert.Equal(
+            RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Rejected,
+            postCommitDuplicate.Status);
+        var postCommitTail = ReadOperationalLogTail(logStart);
+        Assert.Contains(
+            "decision_status=Invalidated; substate=Invalidated;",
+            postCommitTail,
+            StringComparison.Ordinal);
+        Assert.Equal(
+            1,
+            Regex.Matches(
+                postCommitTail,
+                "event=runtime_unlock_precommit_responder_peer_probe_handoff_bound; status=Accepted;")
+                .Count);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockResponderPeerProbe")]
+    public void RuntimeUnlockResponderPeerProbe_AckScopeReceiptRequiresExactCurrentPeerScope()
+    {
+        const string sessionId = "session-responder-ack-scope";
+        const string transferId = "transfer-responder-ack-scope";
+        const string listenerRunId = "peer-offer-dialer-ack-scope";
+        const string probeId = "probe-responder-ack-scope";
+        const long ackedUtcMs = 1234;
+        var scope = CreateRuntimeUnlockResponderPeerReceiveScopeForTests(
+            sessionId,
+            transferId);
+        var current = new RuntimeUnlockTransactionSnapshot(
+            sessionId,
+            transferId,
+            TransactionGeneration: 3,
+            OfferGeneration: 5,
+            RuntimeUnlockTransactionState.RouteCommitPending,
+            CreatedUtcMs: 1,
+            UpdatedUtcMs: 2,
+            DeadlineUtcMs: 10_000,
+            ListenerReady: true,
+            ListenerUnavailable: false,
+            ObservedSend: true,
+            ObservedLane: "peer_answer",
+            PeerReceived: true,
+            AnswerReceived: true,
+            probeId,
+            RuntimeUnlockPathProbeState.Acked,
+            FileTransferTransportKind.Tuna,
+            ackedUtcMs,
+            PathProbeFailureReason: null,
+            RouteCommitPending: true,
+            RouteCommitted: false,
+            FailureReason: null,
+            RetiredReason: null,
+            TunaPathLeaseGeneration: 7,
+            RuntimeUnlockTunaPathLeaseState.ListenerReady,
+            listenerRunId,
+            TunaPathLeaseCurrent: true,
+            TunaPathLeaseFailureReason: null);
+        var peerReceipt = new
+            RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt(
+                sessionId,
+                transferId,
+                FileTransferDirection.Inbound,
+                scope.Admission,
+                PeerTransactionGeneration: 11,
+                PeerOfferGeneration: 13,
+                PeerTunaPathLeaseGeneration: 17,
+                probeId,
+                new string('a', 64),
+                FileTransferTransportKind.Tuna,
+                ReceivedUtcMs: 100,
+                ProbeAckSentUtcMs: 101,
+                scope.DataSessionGeneration,
+                scope);
+        var transportType = typeof(NknSignalingTransport);
+        var receiptType = transportType.GetNestedType(
+            "RuntimeUnlockResponderProbeAckScopeReceipt",
+            BindingFlags.NonPublic)!;
+        var matcher = transportType.GetMethod(
+            "RuntimeUnlockResponderProbeAckScopeReceiptMatches",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        object CreateReceipt(
+            RuntimeUnlockPeerPreCommitAnswerAcceptanceScope receiveScope,
+            long peerTransactionGeneration = 11,
+            long peerOfferGeneration = 13,
+            long peerTunaPathLeaseGeneration = 17)
+            => Activator.CreateInstance(
+                receiptType,
+                sessionId,
+                transferId,
+                current.TransactionGeneration,
+                current.OfferGeneration,
+                current.TunaPathLeaseGeneration,
+                listenerRunId,
+                peerTransactionGeneration,
+                peerOfferGeneration,
+                peerTunaPathLeaseGeneration,
+                probeId,
+                ackedUtcMs,
+                receiveScope)!;
+
+        Assert.True(Assert.IsType<bool>(matcher.Invoke(
+            null,
+            [CreateReceipt(scope), current, peerReceipt])));
+        Assert.False(Assert.IsType<bool>(matcher.Invoke(
+            null,
+            [CreateReceipt(scope, peerTransactionGeneration: 12),
+                current, peerReceipt])));
+        Assert.False(Assert.IsType<bool>(matcher.Invoke(
+            null,
+            [CreateReceipt(scope, peerOfferGeneration: 14),
+                current, peerReceipt])));
+        Assert.False(Assert.IsType<bool>(matcher.Invoke(
+            null,
+            [CreateReceipt(scope, peerTunaPathLeaseGeneration: 18),
+                current, peerReceipt])));
+        foreach (var mutatedScope in new
+            RuntimeUnlockPeerPreCommitAnswerAcceptanceScope[]
+        {
+            default,
+            scope with
+            {
+                RuntimeOwner = scope.RuntimeOwner with
+                {
+                    RuntimeGeneration =
+                        scope.RuntimeOwner.RuntimeGeneration + 1,
+                },
+            },
+            scope with
+            {
+                RoutePublication = scope.RoutePublication with
+                {
+                    PublicationGeneration =
+                        scope.RoutePublication.PublicationGeneration + 1,
+                },
+            },
+            scope with
+            {
+                Admission = scope.Admission with
+                {
+                    AdmissionGeneration =
+                        scope.Admission.AdmissionGeneration + 1,
+                },
+            },
+            scope with { TerminalGeneration = scope.TerminalGeneration + 1 },
+            scope with { LegGeneration = scope.LegGeneration + 1 },
+            scope with { TransportEpoch = scope.TransportEpoch + 1 },
+            scope with
+            {
+                BridgeRecoveryGeneration =
+                    scope.BridgeRecoveryGeneration + 1,
+            },
+            scope with
+            {
+                CheckpointRequestId = $"{scope.CheckpointRequestId}-mutated",
+            },
+            scope with
+            {
+                CheckpointGeneration = scope.CheckpointGeneration + 1,
+            },
+            scope with
+            {
+                DataSessionIdentity =
+                    $"{scope.DataSessionIdentity}-mutated",
+            },
+            scope with
+            {
+                DataSessionGeneration = scope.DataSessionGeneration + 1,
+            },
+        })
+        {
+            Assert.False(Assert.IsType<bool>(matcher.Invoke(
+                null,
+                [CreateReceipt(mutatedScope), current, peerReceipt])));
+        }
     }
 
     [Fact]
@@ -18486,7 +19639,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     FileTransferRoute.FileTunaV4,
                     FileTransferProtocol.ProtocolVersionV4,
                     FileTransferTransportHandoffKind.NormalToTunaActivation,
-                    FileTransferTransportKind.Tuna);
+                    FileTransferTransportKind.Tuna,
+                    CreateRuntimeUnlockResponderPeerReceiveScopeForTests(
+                        sessionId,
+                        matchingTransferId));
             var snapshot = new RuntimeUnlockRouteCommitSnapshot(
                 sessionId,
                 matchingTransferId,
@@ -20678,9 +21834,13 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public void RuntimeUnlockResponderPeerProbe_AnswerAckTimeoutWinsBeforeTypedPeerReceipt()
+    public async Task RuntimeUnlockResponderPeerProbe_AnswerAckTimeoutWinsBeforeTypedPeerReceipt()
     {
         FakeNknClient.ResetNetwork();
+        var previousAnswerAckTimeout =
+            NknSignalingTransport.AccelerationAnswerAckTimeoutOverrideForTests;
+        NknSignalingTransport.AccelerationAnswerAckTimeoutOverrideForTests =
+            TimeSpan.FromMilliseconds(100);
         try
         {
             var client = new FakeNknClient("host.runtime-unlock-peer-receipt-timeout.address");
@@ -20688,24 +21848,30 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 client,
                 NknTransportOptions.Load(),
                 new NknIdentity("host-runtime-unlock-peer-receipt-timeout-id", client.Address));
+            var nowUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var answerDeadlineUtcMs = nowUtcMs + 60_000;
+            const long pendingGeneration = 9;
+            const long payerDecisionId = 11;
+            const string nonce = "peer-receipt-timeout-nonce";
+            const string answerMessageId = "peer-receipt-timeout-answer";
             var transaction = new RuntimeUnlockTransactionSnapshot(
                 SessionId: "session-peer-receipt-timeout",
                 TransferId: "transfer-peer-receipt-timeout",
                 TransactionGeneration: 3,
                 OfferGeneration: 7,
                 State: RuntimeUnlockTransactionState.RouteCommitPending,
-                CreatedUtcMs: 1,
-                UpdatedUtcMs: 2,
-                DeadlineUtcMs: 1000,
+                CreatedUtcMs: nowUtcMs - 100,
+                UpdatedUtcMs: nowUtcMs,
+                DeadlineUtcMs: answerDeadlineUtcMs,
                 ListenerReady: true,
                 ListenerUnavailable: false,
                 ObservedSend: true,
                 ObservedLane: "peer_answer",
                 PeerReceived: true,
                 AnswerReceived: true,
-                PathProbeId: "probe-peer-receipt-timeout",
-                PathProbeState: RuntimeUnlockPathProbeState.Started,
-                PathProbeTransport: FileTransferTransportKind.Tuna,
+                PathProbeId: null,
+                PathProbeState: RuntimeUnlockPathProbeState.None,
+                PathProbeTransport: FileTransferTransportKind.Unknown,
                 PathProbeAckedUtcMs: 0,
                 PathProbeFailureReason: null,
                 RouteCommitPending: true,
@@ -20718,34 +21884,215 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 TunaPathLeaseCurrent: true,
                 TunaPathLeaseFailureReason: null);
             SetPrivateField(transport, "runtimeUnlockTransactionState", transaction);
-            SetPrivateField(transport, "runtimeUnlockAnswerAckTimeoutSessionId", transaction.SessionId);
-            SetPrivateField(transport, "runtimeUnlockAnswerAckTimeoutTransactionGeneration", transaction.TransactionGeneration);
-            SetPrivateField(transport, "runtimeUnlockAnswerAckTimeoutOfferGeneration", transaction.OfferGeneration);
-            SetPrivateField(transport, "runtimeUnlockAnswerAckTimeoutPendingGeneration", 9L);
+            SetPrivateField(
+                transport,
+                "runtimeUnlockTunaPathLeaseState",
+                new RuntimeUnlockTunaPathLeaseSnapshot(
+                    transaction.SessionId,
+                    transaction.TransferId,
+                    transaction.TransactionGeneration,
+                    transaction.OfferGeneration,
+                    transaction.TunaPathLeaseGeneration,
+                    transaction.TunaPathLeaseListenerRunId,
+                    payerDecisionId,
+                    RuntimeUnlockTunaPathLeaseState.ListenerReady,
+                    CreatedUtcMs: nowUtcMs - 100,
+                    UpdatedUtcMs: nowUtcMs,
+                    DeadlineUtcMs: answerDeadlineUtcMs,
+                    FailureReason: null,
+                    RetiredReason: null));
+            SetPrivateField(
+                transport,
+                "pendingAccelerationAnswerAckSessionId",
+                transaction.SessionId);
+            SetPrivateField(
+                transport,
+                "pendingAccelerationAnswerAckNonce",
+                nonce);
+            SetPrivateField(
+                transport,
+                "pendingAccelerationAnswerAckTrigger",
+                "runtime_unlock");
+            SetPrivateField(
+                transport,
+                "pendingAccelerationAnswerAckLanes",
+                NknAccelerationLaneKind.File);
+            SetPrivateField(
+                transport,
+                "pendingAccelerationAnswerAckPayerDecisionId",
+                payerDecisionId);
+            SetPrivateField(
+                transport,
+                "pendingAccelerationAnswerAckGeneration",
+                pendingGeneration);
+            var transportType = typeof(NknSignalingTransport);
+            var authorityModeType = transportType.GetNestedType(
+                "RuntimeUnlockOfferAuthorityMode",
+                BindingFlags.NonPublic)!;
+            var authorityMode = Enum.Parse(
+                authorityModeType,
+                "InitialActivation");
+            SetPrivateField(
+                transport,
+                "pendingAccelerationAnswerAckAuthorityMode",
+                authorityMode);
+            var replyTargetType = transportType.GetNestedType(
+                "AccelerationReplyTargetEvidence",
+                BindingFlags.NonPublic)!;
+            var replyTarget = Activator.CreateInstance(
+                replyTargetType,
+                "peer.runtime-unlock-peer-receipt-timeout.address",
+                new string('d', 64),
+                "peer-receipt-timeout-offer",
+                transaction.SessionId,
+                nonce,
+                payerDecisionId,
+                pendingGeneration,
+                "answer")!;
+            var answerEnvelope = new Envelope(
+                Version: 1,
+                Code: "000000",
+                MessageId: answerMessageId,
+                MsgType.TransportAccelerationAnswer,
+                Payload: [],
+                UnixTimeMs: nowUtcMs,
+                ReplyTo: null);
+            var replyShadowType = transportType.GetNestedType(
+                "PendingAccelerationReplyShadow",
+                BindingFlags.NonPublic)!;
+            var replyShadow = Activator.CreateInstance(
+                replyShadowType,
+                answerEnvelope,
+                replyTarget,
+                transaction.SessionId,
+                nonce,
+                payerDecisionId,
+                pendingGeneration,
+                authorityMode,
+                answerDeadlineUtcMs,
+                1L,
+                "answer",
+                new TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously))!;
+            SetPrivateField(
+                transport,
+                "pendingAccelerationAnswerReplyShadow",
+                replyShadow);
+            var ack = new TransportAccelerationAnswerAckPayload
+            {
+                SessionId = transaction.SessionId,
+                Accepted = true,
+                SupportedLanes = ["file"],
+                SentAtUnixMs = nowUtcMs,
+                ExpiresAtUnixMs = answerDeadlineUtcMs,
+                Nonce = nonce,
+                SidecarProtocolVersion = 1,
+                PayerDecisionId = payerDecisionId,
+            };
+            var recordAckMethod = transportType.GetMethod(
+                "TryRecordRuntimeUnlockResponderSemanticAnswerAckUnsafe",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+            object?[] recordArguments =
+            [
+                ack,
+                "peer-receipt-timeout-answer-ack",
+                new string('a', 64),
+                new string('b', 64),
+                NknAccelerationLaneKind.File,
+                authorityMode,
+                pendingGeneration,
+                null,
+                null,
+            ];
+            var accelerationGate = Assert.IsType<object>(
+                GetPrivateField(transport, "accelerationGate"));
+            lock (accelerationGate)
+            {
+                Assert.True(Assert.IsType<bool>(
+                    recordAckMethod.Invoke(transport, recordArguments)));
+            }
 
+            var logStart = GetOperationalLogLength();
+            InvokePrivateMethod(
+                transport,
+                "ScheduleAccelerationAnswerAckTimeoutForReply",
+                transaction.SessionId,
+                nonce,
+                payerDecisionId,
+                pendingGeneration,
+                replyShadow);
+            InvokePrivateMethod(
+                transport,
+                "ClearPendingAccelerationAnswerAckLocked");
+            await WaitUntilAsync(
+                () => string.Equals(
+                    GetPrivateField(
+                            transport,
+                            "runtimeUnlockResponderAnswerProbeConvergence")
+                        .GetType()
+                        .GetProperty("State")!
+                        .GetValue(GetPrivateField(
+                            transport,
+                            "runtimeUnlockResponderAnswerProbeConvergence"))?
+                        .ToString(),
+                    "Invalidated",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(5));
+
+            var scope = CreateRuntimeUnlockResponderPeerReceiveScopeForTests(
+                transaction.SessionId,
+                transaction.TransferId!);
             var receipt = new RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt(
                 transaction.SessionId,
                 transaction.TransferId!,
                 FileTransferDirection.Inbound,
-                default,
+                scope.Admission,
                 11,
                 13,
-                17,
-                transaction.PathProbeId!,
+                transaction.TunaPathLeaseGeneration,
+                "probe-peer-receipt-timeout",
                 new string('a', 64),
                 FileTransferTransportKind.Tuna,
                 100,
                 101,
-                19);
+                scope.DataSessionGeneration,
+                scope);
             var decision = ((IRuntimeUnlockPeerPreCommitAnswerAcceptanceObserver)transport)
                 .ObserveRuntimeUnlockPeerPreCommitAnswerAcceptance(receipt);
 
             Assert.Equal(RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Rejected, decision.Status);
-            Assert.Equal("runtime_unlock_peer_precommit_answer_ack_timeout_won", decision.Reason);
+            Assert.Equal("runtime_unlock_answer_ack_timeout", decision.Reason);
             Assert.Equal(0, decision.LaunchGeneration);
+            var invalidatedHold = GetPrivateField(
+                transport,
+                "runtimeUnlockResponderAnswerProbeConvergence");
+            object?[] lateRecordArguments = [.. recordArguments];
+            Assert.False(Assert.IsType<bool>(recordAckMethod.Invoke(
+                transport,
+                lateRecordArguments)));
+            Assert.Same(
+                invalidatedHold,
+                GetPrivateField(
+                    transport,
+                    "runtimeUnlockResponderAnswerProbeConvergence"));
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=runtime_unlock_responder_answer_probe_convergence_decided; status=Invalidated; decision_status=Invalidated; substate=Invalidated;",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "decision_reason=runtime_unlock_answer_ack_timeout",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_precommit_responder_peer_probe_handoff_bound; status=Accepted;",
+                logTail,
+                StringComparison.Ordinal);
         }
         finally
         {
+            NknSignalingTransport.AccelerationAnswerAckTimeoutOverrideForTests =
+                previousAnswerAckTimeout;
             FakeNknClient.ResetNetwork();
         }
     }
@@ -27637,6 +28984,74 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
         Assert.NotNull(property);
         return Assert.IsType<T>(property!.GetValue(target));
+    }
+
+    private static RuntimeUnlockPeerPreCommitAnswerAcceptanceScope
+        CreateRuntimeUnlockResponderPeerReceiveScopeForTests(
+            string sessionId,
+            string transferId,
+            FileTransferDirection direction = FileTransferDirection.Inbound)
+    {
+        var route = FileTransferRouteResolver.Resolve(
+            FileTransferRoute.PostTunaFallbackV6);
+        var owner = new RuntimeOwnerToken(
+            sessionId,
+            transferId,
+            direction,
+            route.Route,
+            route.TelemetryToken,
+            route.ProtocolVersion,
+            LiveRouteEpoch: 2,
+            RuntimeGeneration: 3,
+            TerminalGeneration: 0,
+            RuntimeFamily: "post_tuna_fallback_v6",
+            CreatedReason: "runtime_unlock_responder_peer_probe_test");
+        var publication = new RoutePublicationToken(
+            sessionId,
+            transferId,
+            direction,
+            owner,
+            route.Route,
+            route.TelemetryToken,
+            route.ProtocolVersion,
+            LiveRouteEpoch: 2,
+            RuntimeGeneration: 3,
+            TerminalGeneration: 0,
+            LegGeneration: 4,
+            RouteCommitGeneration: null,
+            TargetRoute: FileTransferRoute.FileTunaV4,
+            TargetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+            TargetTransport: FileTransferTransportKind.Tuna,
+            PublicationGeneration: 5,
+            ActionKind: FileTransferCoordinatorActionKind.RoutePublication,
+            Reason: "runtime_unlock_responder_peer_probe_test");
+        var admission = new RuntimeUnlockAdmissionToken(
+            sessionId,
+            transferId,
+            direction,
+            owner,
+            route.Route,
+            route.TelemetryToken,
+            route.ProtocolVersion,
+            LiveRouteEpoch: 2,
+            RuntimeGeneration: 3,
+            TerminalGeneration: 0,
+            LegGeneration: 4,
+            AdmissionGeneration: 6,
+            Reason: "runtime_unlock_responder_peer_probe_test",
+            FallbackSurvivalState: RuntimeUnlockFallbackSurvivalState.Empty);
+        return new RuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
+            owner,
+            publication,
+            TerminalGeneration: 0,
+            LegGeneration: 4,
+            TransportEpoch: 6,
+            BridgeRecoveryGeneration: 0,
+            CheckpointRequestId: "(none)",
+            CheckpointGeneration: 0,
+            DataSessionIdentity: "runtime-unlock-responder-peer-probe-data-session",
+            DataSessionGeneration: 7,
+            Admission: admission);
     }
 
     private static object GetRuntimeUnlockOfferAuthorityModeForTests(string name)

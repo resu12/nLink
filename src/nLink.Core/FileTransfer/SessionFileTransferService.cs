@@ -3444,17 +3444,27 @@ public sealed partial class SessionFileTransferService :
                             responderObservation,
                             availability.Reason);
                     }
+                    else if (availability.IsAvailable !=
+                             dataSession.IsAvailable)
+                    {
+                        var currentAuthority = inbound.CoordinatorPersistentState
+                            .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
+                            .CurrentAuthority;
+                        LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
+                            inbound,
+                            responderObservation,
+                            currentAuthority,
+                            null,
+                            "Rejected",
+                            "data_session_availability_stale");
+                    }
                     else
                     {
-                        var invalidationReason =
-                            availability.IsAvailable == dataSession.IsAvailable
-                                ? "data_session_unavailable"
-                                : "data_session_availability_stale";
                         var invalidated = FileTransferCoordinator
                             .InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoff(
                                 CreateCoordinatorStateLocked(inbound),
                                 responderObservation,
-                                invalidationReason);
+                                "data_session_unavailable");
                         inbound.CoordinatorPersistentState =
                             invalidated.State.PersistentState;
                         LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(

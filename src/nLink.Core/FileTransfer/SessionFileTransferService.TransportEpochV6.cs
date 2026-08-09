@@ -937,14 +937,32 @@ public sealed partial class SessionFileTransferService
                 }
             }
 
-            proofProvider.NotifyRuntimeUnlockPathProbeResult(
-                sessionId,
-                transferId,
-                transportEpoch: 0,
-                probeId,
-                FileTransferTransportKind.Tuna,
-                acked: false,
-                "precommit_probe_send_failed");
+            if (!proofProvider.NotifyRuntimeUnlockPathProbeResult(
+                    sessionId,
+                    transferId,
+                    transportEpoch: 0,
+                    probeId,
+                    FileTransferTransportKind.Tuna,
+                    acked: false,
+                    "precommit_probe_send_failed",
+                    currentReceiveScope: default,
+                    callbackTransactionGeneration:
+                        frame.TransactionGeneration,
+                    callbackOfferGeneration: frame.OfferGeneration,
+                    callbackTunaPathLeaseGeneration:
+                        frame.TunaPathLeaseGeneration,
+                    expectedLocalTransactionGeneration:
+                        frame.TransactionGeneration,
+                    expectedLocalOfferGeneration: frame.OfferGeneration,
+                    expectedLocalTunaPathLeaseGeneration:
+                        frame.TunaPathLeaseGeneration,
+                    expectedLocalTunaPathLeaseListenerRunId:
+                        snapshot.TunaPathLeaseListenerRunId,
+                    expectedLocalPathProbeState:
+                        RuntimeUnlockPathProbeState.Started))
+            {
+                return;
+            }
             LogRuntimeUnlockPreCommitProbeFailedForLaunch(
                 direction,
                 transferId,
@@ -1108,14 +1126,28 @@ public sealed partial class SessionFileTransferService
             }
         }
 
-        proofProvider.NotifyRuntimeUnlockPathProbeResult(
-            sessionId,
-            transferId,
-            transportEpoch: 0,
-            probeId,
-            FileTransferTransportKind.Tuna,
-            acked: false,
-            "precommit_probe_timeout");
+        if (!proofProvider.NotifyRuntimeUnlockPathProbeResult(
+                sessionId,
+                transferId,
+                transportEpoch: 0,
+                probeId,
+                FileTransferTransportKind.Tuna,
+                acked: false,
+                "precommit_probe_timeout",
+                currentReceiveScope: default,
+                callbackTransactionGeneration: transactionGeneration,
+                callbackOfferGeneration: offerGeneration,
+                callbackTunaPathLeaseGeneration: leaseGeneration,
+                expectedLocalTransactionGeneration: transactionGeneration,
+                expectedLocalOfferGeneration: offerGeneration,
+                expectedLocalTunaPathLeaseGeneration: leaseGeneration,
+                expectedLocalTunaPathLeaseListenerRunId:
+                    snapshot.TunaPathLeaseListenerRunId,
+                expectedLocalPathProbeState:
+                    RuntimeUnlockPathProbeState.Started))
+        {
+            return;
+        }
         LogRuntimeUnlockPreCommitProbeFailedForLaunch(
             direction,
             transferId,
@@ -2050,6 +2082,8 @@ public sealed partial class SessionFileTransferService
                 }
 
                 var peerAcceptanceHandled = false;
+                RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt?
+                    retainedPeerAcceptanceReceipt = null;
                 if (transport is IRuntimeUnlockPeerPreCommitAnswerAcceptanceObserver acceptanceObserver)
                 {
                     if (!TryCreateRuntimeUnlockPeerPreCommitAnswerAcceptanceReceiptLocked(
@@ -2071,11 +2105,12 @@ public sealed partial class SessionFileTransferService
                         return;
                     }
 
+                    retainedPeerAcceptanceReceipt = acceptanceReceipt;
                     var acceptanceDecision =
                         acceptanceObserver.ObserveRuntimeUnlockPeerPreCommitAnswerAcceptance(acceptanceReceipt);
                     LocalOperationalLog.Info(
                         "FileTransferService",
-                        $"event=runtime_unlock_peer_precommit_answer_acceptance_observed; status={acceptanceDecision.Status}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; peer_transaction_generation={probe.TransactionGeneration}; peer_offer_generation={probe.OfferGeneration}; peer_tuna_path_lease_generation={probe.TunaPathLeaseGeneration}; local_transaction_generation={acceptanceDecision.LocalTransactionGeneration}; local_offer_generation={acceptanceDecision.LocalOfferGeneration}; local_tuna_path_lease_generation={acceptanceDecision.LocalTunaPathLeaseGeneration}; pending_answer_ack_generation={acceptanceDecision.PendingAnswerAckGeneration}; launch_generation={acceptanceDecision.LaunchGeneration}; probe_id={FormatProtocolLogValue(probe.ProbeId ?? "(none)")}; probe_frame_fingerprint={FormatProtocolLogValue(acceptanceReceipt.ProbeFrameFingerprint)}; decision_reason={FormatProtocolLogValue(acceptanceDecision.Reason)}");
+                        $"event=runtime_unlock_peer_precommit_answer_acceptance_observed; status={acceptanceDecision.Status}; decision_status={acceptanceDecision.Status}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; peer_transaction_generation={probe.TransactionGeneration}; peer_offer_generation={probe.OfferGeneration}; peer_tuna_path_lease_generation={probe.TunaPathLeaseGeneration}; local_transaction_generation={acceptanceDecision.LocalTransactionGeneration}; local_offer_generation={acceptanceDecision.LocalOfferGeneration}; local_tuna_path_lease_generation={acceptanceDecision.LocalTunaPathLeaseGeneration}; pending_answer_ack_generation={acceptanceDecision.PendingAnswerAckGeneration}; launch_generation={acceptanceDecision.LaunchGeneration}; probe_id={FormatProtocolLogValue(probe.ProbeId ?? "(none)")}; probe_frame_fingerprint={FormatProtocolLogValue(acceptanceReceipt.ProbeFrameFingerprint)}; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}; admission_generation={acceptanceReceipt.ReceiveScope.Admission.AdmissionGeneration}; peer_admission_generation={acceptanceReceipt.ReceiveScope.Admission.AdmissionGeneration}; peer_runtime_generation={acceptanceReceipt.ReceiveScope.RuntimeOwner.RuntimeGeneration}; peer_route_publication_generation={acceptanceReceipt.ReceiveScope.RoutePublication.PublicationGeneration}; peer_terminal_generation={acceptanceReceipt.ReceiveScope.TerminalGeneration}; peer_leg_generation={acceptanceReceipt.ReceiveScope.LegGeneration}; peer_transport_epoch={acceptanceReceipt.ReceiveScope.TransportEpoch}; peer_bridge_recovery_generation={acceptanceReceipt.ReceiveScope.BridgeRecoveryGeneration}; peer_checkpoint_request_id={FormatProtocolLogValue(acceptanceReceipt.ReceiveScope.CheckpointRequestId)}; peer_checkpoint_generation={acceptanceReceipt.ReceiveScope.CheckpointGeneration}; peer_data_session_identity={FormatProtocolLogValue(acceptanceReceipt.ReceiveScope.DataSessionIdentity)}; peer_data_session_generation={acceptanceReceipt.ReceiveScope.DataSessionGeneration}; decision_reason={FormatProtocolLogValue(acceptanceDecision.Reason)}");
                     if (acceptanceDecision.Status == RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Rejected)
                     {
                         return;
@@ -2093,13 +2128,51 @@ public sealed partial class SessionFileTransferService
                         transferId,
                         ack.ProbeId))
                 {
-                    proofProvider.NotifyRuntimeUnlockPathProbeStarted(
-                        sessionId,
-                        transferId,
-                        transportEpoch: 0,
-                        ack.ProbeId!,
-                        FileTransferTransportKind.Tuna,
-                        "precommit_probe_received");
+                    if (retainedPeerAcceptanceReceipt is { } peerReceipt)
+                    {
+                        if (!proofProvider.TryGetRuntimeUnlockRouteCommitProof(
+                                sessionId,
+                                transferId,
+                                out var localProbeSnapshot) ||
+                            localProbeSnapshot.TunaPathLeaseGeneration <= 0 ||
+                            string.IsNullOrWhiteSpace(
+                                localProbeSnapshot
+                                    .TunaPathLeaseListenerRunId) ||
+                            !Enum.TryParse<RuntimeUnlockPathProbeState>(
+                                localProbeSnapshot.PathProbeState,
+                                ignoreCase: true,
+                                out var expectedLocalProbeState) ||
+                            !proofProvider.NotifyRuntimeUnlockPathProbeStarted(
+                                sessionId,
+                                transferId,
+                                transportEpoch: 0,
+                                ack.ProbeId!,
+                                FileTransferTransportKind.Tuna,
+                                "precommit_probe_received",
+                                peerReceipt.ReceiveScope,
+                                peerReceipt.PeerTransactionGeneration,
+                                peerReceipt.PeerOfferGeneration,
+                                peerReceipt.PeerTunaPathLeaseGeneration,
+                                localProbeSnapshot.TransactionGeneration,
+                                localProbeSnapshot.OfferGeneration,
+                                localProbeSnapshot.TunaPathLeaseGeneration,
+                                localProbeSnapshot
+                                    .TunaPathLeaseListenerRunId,
+                                expectedLocalProbeState))
+                        {
+                            return;
+                        }
+                    }
+                    else if (!proofProvider.NotifyRuntimeUnlockPathProbeStarted(
+                                 sessionId,
+                                 transferId,
+                                 transportEpoch: 0,
+                                 ack.ProbeId!,
+                                 FileTransferTransportKind.Tuna,
+                                 "precommit_probe_received"))
+                    {
+                        return;
+                    }
                 }
                 else
                 {
@@ -2145,6 +2218,7 @@ public sealed partial class SessionFileTransferService
 
         RuntimeUnlockAdmissionToken currentAdmission;
         long dataSessionGeneration;
+        RuntimeUnlockPeerPreCommitAnswerAcceptanceScope receiveScope;
         lock (gate)
         {
             if (direction == FileTransferDirection.Outbound &&
@@ -2152,12 +2226,20 @@ public sealed partial class SessionFileTransferService
                 outboundTransfer is { IsTerminal: false } outbound &&
                 ReferenceEquals(outbound.DataSession, dataSession) &&
                 outbound.RuntimeUnlockAdmissionToken is { IsDefault: false } outboundAdmission &&
-                outboundAdmission == attempted &&
-                FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(
-                    CreateCoordinatorStateLocked(outbound),
-                    outboundAdmission,
-                    out reason))
+                outboundAdmission == attempted)
             {
+                var state = CreateCoordinatorStateLocked(outbound);
+                if (!FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(
+                        state,
+                        outboundAdmission,
+                        out reason) ||
+                    !TryCreateRuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
+                        state,
+                        out receiveScope))
+                {
+                    return false;
+                }
+
                 currentAdmission = outboundAdmission;
                 dataSessionGeneration = outbound.DataSessionGeneration;
             }
@@ -2166,12 +2248,20 @@ public sealed partial class SessionFileTransferService
                      inboundTransfer is { IsTerminal: false } inbound &&
                      ReferenceEquals(inbound.DataSession, dataSession) &&
                      inbound.RuntimeUnlockAdmissionToken is { IsDefault: false } inboundAdmission &&
-                     inboundAdmission == attempted &&
-                     FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(
-                         CreateCoordinatorStateLocked(inbound),
-                         inboundAdmission,
-                         out reason))
+                     inboundAdmission == attempted)
             {
+                var state = CreateCoordinatorStateLocked(inbound);
+                if (!FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(
+                        state,
+                        inboundAdmission,
+                        out reason) ||
+                    !TryCreateRuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
+                        state,
+                        out receiveScope))
+                {
+                    return false;
+                }
+
                 currentAdmission = inboundAdmission;
                 dataSessionGeneration = inbound.DataSessionGeneration;
             }
@@ -2208,9 +2298,42 @@ public sealed partial class SessionFileTransferService
             receivedTransportKind,
             receivedUtcMs,
             probeAckSentUtcMs,
-            dataSessionGeneration);
+            dataSessionGeneration,
+            receiveScope);
         reason = "runtime_unlock_peer_precommit_answer_acceptance_current";
         return true;
+    }
+
+    private static bool
+        TryCreateRuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
+            FileTransferCoordinatorState state,
+            out RuntimeUnlockPeerPreCommitAnswerAcceptanceScope scope)
+    {
+        scope = default;
+        if (state.CurrentRuntimeOwner is not { } owner ||
+            state.CurrentRoutePublicationToken is not { } publication ||
+            state.CurrentRuntimeUnlockAdmission is not
+                { IsDefault: false } admission ||
+            state.CurrentLeg is not { } leg ||
+            string.IsNullOrWhiteSpace(state.CurrentDataSessionIdentity) ||
+            state.CurrentDataSessionGeneration <= 0)
+        {
+            return false;
+        }
+
+        scope = new RuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
+            owner,
+            publication,
+            state.TerminalGeneration,
+            leg.Generation,
+            leg.TransportEpochId,
+            leg.BridgeRecoveryGeneration,
+            leg.CheckpointRequestId ?? "(none)",
+            leg.CheckpointGeneration,
+            state.CurrentDataSessionIdentity,
+            state.CurrentDataSessionGeneration,
+            admission);
+        return !scope.IsDefault;
     }
 
     private bool HasCurrentRuntimeUnlockPreCommitProbeAdmissionLocked(
@@ -2763,17 +2886,113 @@ public sealed partial class SessionFileTransferService
         }
 
         var ackReason = NormalizeReason(ack.Reason);
-        var isPeerCommitConfirmation = IsRuntimeUnlockPreCommitProbeCommitConfirmationReason(ackReason);
-        var commitReason = string.Equals(ackReason, RuntimeUnlockPreCommitProbeCommitConfirmedReason, StringComparison.Ordinal)
-            ? RuntimeUnlockPreCommitProbeCommitConfirmedReason
-            : string.Equals(ackReason, RuntimeUnlockPreCommitProbeCommitConfirmedReplyReason, StringComparison.Ordinal)
-                ? RuntimeUnlockPreCommitProbeCommitConfirmedReplyReason
-                : RuntimeUnlockPreCommitProbeAcceptedReason;
+        var isPeerCommitConfirmation =
+            IsRuntimeUnlockPreCommitProbeCommitConfirmationReason(ackReason);
+        var commitReason = string.Equals(
+            ackReason,
+            RuntimeUnlockPreCommitProbeCommitConfirmedReason,
+            StringComparison.Ordinal)
+                ? RuntimeUnlockPreCommitProbeCommitConfirmedReason
+                : string.Equals(
+                    ackReason,
+                    RuntimeUnlockPreCommitProbeCommitConfirmedReplyReason,
+                    StringComparison.Ordinal)
+                    ? RuntimeUnlockPreCommitProbeCommitConfirmedReplyReason
+                    : RuntimeUnlockPreCommitProbeAcceptedReason;
+        if (isPeerCommitConfirmation &&
+            !IsRuntimeUnlockPendingPeerPreCommitProbeMatchLocked(
+                direction,
+                sessionId,
+                transferId,
+                ack))
+        {
+            RuntimeUnlockAdmissionToken? latestAdmissionToken;
+            lock (gate)
+            {
+                _ = TryGetCurrentRuntimeUnlockAdmissionTokenForDirectionLocked(
+                    direction,
+                    sessionId,
+                    transferId,
+                    out latestAdmissionToken);
+            }
+
+            const string peerTupleRejectionReason =
+                "runtime_unlock_precommit_probe_ack_peer_tuple_not_current";
+            LogRuntimeUnlockPreCommitProbeAckAuthorityRejected(
+                direction,
+                transferId,
+                sessionId,
+                ack,
+                attemptedAdmissionToken: null,
+                currentAdmissionToken: latestAdmissionToken,
+                decisionReason: peerTupleRejectionReason);
+            LogRuntimeUnlockPreCommitProbeIgnored(
+                direction,
+                transferId,
+                sessionId,
+                ack,
+                receivedTransportKind,
+                peerTupleRejectionReason);
+            return;
+        }
+
+        if (!proofProvider.TryGetRuntimeUnlockRouteCommitProof(
+                sessionId,
+                transferId,
+                out var callbackSnapshot) ||
+            (!isPeerCommitConfirmation &&
+             (callbackSnapshot.TransactionGeneration !=
+                  ack.TransactionGeneration ||
+              callbackSnapshot.OfferGeneration != ack.OfferGeneration ||
+              callbackSnapshot.TunaPathLeaseGeneration !=
+                  ack.TunaPathLeaseGeneration)) ||
+            (callbackSnapshot.TunaPathLeaseGeneration > 0 &&
+             string.IsNullOrWhiteSpace(
+                 callbackSnapshot.TunaPathLeaseListenerRunId)) ||
+            !Enum.TryParse<RuntimeUnlockPathProbeState>(
+                callbackSnapshot.PathProbeState,
+                ignoreCase: true,
+                out var expectedLocalPathProbeState))
+        {
+            RuntimeUnlockAdmissionToken? latestAdmissionToken;
+            lock (gate)
+            {
+                _ = TryGetCurrentRuntimeUnlockAdmissionTokenForDirectionLocked(
+                    direction,
+                    sessionId,
+                    transferId,
+                    out latestAdmissionToken);
+            }
+
+            const string callbackTupleRejectionReason =
+                "runtime_unlock_precommit_probe_ack_callback_tuple_not_current";
+            LogRuntimeUnlockPreCommitProbeAckAuthorityRejected(
+                direction,
+                transferId,
+                sessionId,
+                ack,
+                attemptedAdmissionToken: null,
+                currentAdmissionToken: latestAdmissionToken,
+                decisionReason: callbackTupleRejectionReason);
+            LogRuntimeUnlockPreCommitProbeIgnored(
+                direction,
+                transferId,
+                sessionId,
+                ack,
+                receivedTransportKind,
+                callbackTupleRejectionReason);
+            return;
+        }
+
+        var expectedTunaPathLeaseListenerRunId =
+            callbackSnapshot.TunaPathLeaseListenerRunId;
 
         RuntimeUnlockAdmissionToken? currentAdmissionToken;
         bool authorized;
         string ackAuthorizationRejectionReason;
         long currentRouteTransitionLaunchGeneration = 0;
+        RuntimeUnlockPeerPreCommitAnswerAcceptanceScope currentReceiveScope =
+            default;
         lock (gate)
         {
             if (outboundSparseReceiveAuthority is { } requiredReceiveAuthority &&
@@ -2850,6 +3069,29 @@ public sealed partial class SessionFileTransferService
                 currentRouteTransitionLaunchGeneration =
                     activation.LaunchGeneration;
             }
+
+            if (authorized &&
+                direction == FileTransferDirection.Inbound)
+            {
+                if (IsInboundLifecycleMessageMatchLocked(
+                        sessionId,
+                        transferId) &&
+                    inboundTransfer is { IsTerminal: false } currentInbound &&
+                    dataSession is not null &&
+                    ReferenceEquals(currentInbound.DataSession, dataSession) &&
+                    TryCreateRuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
+                        CreateCoordinatorStateLocked(currentInbound),
+                        out var capturedReceiveScope))
+                {
+                    currentReceiveScope = capturedReceiveScope;
+                }
+                else
+                {
+                    authorized = false;
+                    ackAuthorizationRejectionReason =
+                        "runtime_unlock_precommit_probe_ack_receive_scope_not_current";
+                }
+            }
         }
 
         if (!authorized)
@@ -2897,14 +3139,27 @@ public sealed partial class SessionFileTransferService
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=runtime_unlock_tuna_probe_ack_received; transport=tuna; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(ack.ProbeId ?? "(none)")}; accepted=0; reason={FormatProtocolLogValue(NormalizeReason(ack.Reason) ?? "precommit_probe_rejected")}");
-            proofProvider.NotifyRuntimeUnlockPathProbeResult(
-                sessionId,
-                transferId,
-                transportEpoch: 0,
-                ack.ProbeId!,
-                FileTransferTransportKind.Tuna,
-                acked: false,
-                NormalizeReason(ack.Reason) ?? "precommit_probe_rejected");
+            if (!proofProvider.NotifyRuntimeUnlockPathProbeResult(
+                    sessionId,
+                    transferId,
+                    transportEpoch: 0,
+                    ack.ProbeId!,
+                    FileTransferTransportKind.Tuna,
+                    acked: false,
+                    NormalizeReason(ack.Reason) ??
+                        "precommit_probe_rejected",
+                    currentReceiveScope,
+                    ack.TransactionGeneration,
+                    ack.OfferGeneration,
+                    ack.TunaPathLeaseGeneration,
+                    callbackSnapshot.TransactionGeneration,
+                    callbackSnapshot.OfferGeneration,
+                    callbackSnapshot.TunaPathLeaseGeneration,
+                    expectedTunaPathLeaseListenerRunId,
+                    expectedLocalPathProbeState))
+            {
+                return;
+            }
             LogRuntimeUnlockPreCommitProbeFailed(
                 direction,
                 transferId,
@@ -2926,19 +3181,53 @@ public sealed partial class SessionFileTransferService
             "FileTransferService",
             $"event=runtime_unlock_tuna_probe_ack_received; transport=tuna; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(ack.ProbeId ?? "(none)")}; accepted=1; reason={FormatProtocolLogValue(commitReason)}");
 
-        if (isPeerCommitConfirmation)
+        if (!proofProvider.NotifyRuntimeUnlockPathProbeResult(
+                sessionId,
+                transferId,
+                transportEpoch: 0,
+                ack.ProbeId!,
+                FileTransferTransportKind.Tuna,
+                acked: true,
+                commitReason,
+                currentReceiveScope,
+                ack.TransactionGeneration,
+                ack.OfferGeneration,
+                ack.TunaPathLeaseGeneration,
+                callbackSnapshot.TransactionGeneration,
+                callbackSnapshot.OfferGeneration,
+                callbackSnapshot.TunaPathLeaseGeneration,
+                expectedTunaPathLeaseListenerRunId,
+                expectedLocalPathProbeState))
         {
-            ClearRuntimeUnlockPendingPeerPreCommitProbeLocked(direction, sessionId, transferId, ack);
+            RuntimeUnlockAdmissionToken? latestAdmissionToken;
+            lock (gate)
+            {
+                _ = TryGetCurrentRuntimeUnlockAdmissionTokenForDirectionLocked(
+                    direction,
+                    sessionId,
+                    transferId,
+                    out latestAdmissionToken);
+            }
+
+            LogRuntimeUnlockPreCommitProbeAckAuthorityRejected(
+                direction,
+                transferId,
+                sessionId,
+                ack,
+                currentAdmissionToken,
+                latestAdmissionToken,
+                "runtime_unlock_precommit_probe_ack_callback_tuple_replaced");
+            return;
         }
 
-        proofProvider.NotifyRuntimeUnlockPathProbeResult(
-            sessionId,
-            transferId,
-            transportEpoch: 0,
-            ack.ProbeId!,
-            FileTransferTransportKind.Tuna,
-            acked: true,
-            commitReason);
+        if (isPeerCommitConfirmation)
+        {
+            ClearRuntimeUnlockPendingPeerPreCommitProbeLocked(
+                direction,
+                sessionId,
+                transferId,
+                ack);
+        }
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=runtime_unlock_precommit_probe_acked; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; launch_generation={currentRouteTransitionLaunchGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(ack.ProbeId ?? "(none)")}; probe_state=Acked; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}");
@@ -2946,14 +3235,26 @@ public sealed partial class SessionFileTransferService
         {
             if (dataSession is not IFileTransferRuntimeUnlockTunaProbeSender)
             {
-                proofProvider.NotifyRuntimeUnlockPathProbeResult(
-                    sessionId,
-                    transferId,
-                    transportEpoch: 0,
-                    ack.ProbeId!,
-                    FileTransferTransportKind.Tuna,
-                    acked: false,
-                    "runtime_unlock_tuna_probe_sender_unavailable");
+                if (!proofProvider.NotifyRuntimeUnlockPathProbeResult(
+                        sessionId,
+                        transferId,
+                        transportEpoch: 0,
+                        ack.ProbeId!,
+                        FileTransferTransportKind.Tuna,
+                        acked: false,
+                        "runtime_unlock_tuna_probe_sender_unavailable",
+                        currentReceiveScope,
+                        ack.TransactionGeneration,
+                        ack.OfferGeneration,
+                        ack.TunaPathLeaseGeneration,
+                        callbackSnapshot.TransactionGeneration,
+                        callbackSnapshot.OfferGeneration,
+                        callbackSnapshot.TunaPathLeaseGeneration,
+                        expectedTunaPathLeaseListenerRunId,
+                        RuntimeUnlockPathProbeState.Acked))
+                {
+                    return;
+                }
                 LogRuntimeUnlockPreCommitProbeFailed(
                     direction,
                     transferId,
@@ -3107,14 +3408,26 @@ public sealed partial class SessionFileTransferService
                     return;
                 }
 
-                proofProvider.NotifyRuntimeUnlockPathProbeResult(
-                    sessionId,
-                    transferId,
-                    transportEpoch: 0,
-                    ack.ProbeId!,
-                    FileTransferTransportKind.Tuna,
-                    acked: false,
-                    "runtime_unlock_paired_commit_confirmation_send_failed");
+                if (!proofProvider.NotifyRuntimeUnlockPathProbeResult(
+                        sessionId,
+                        transferId,
+                        transportEpoch: 0,
+                        ack.ProbeId!,
+                        FileTransferTransportKind.Tuna,
+                        acked: false,
+                        "runtime_unlock_paired_commit_confirmation_send_failed",
+                        currentReceiveScope,
+                        ack.TransactionGeneration,
+                        ack.OfferGeneration,
+                        ack.TunaPathLeaseGeneration,
+                        callbackSnapshot.TransactionGeneration,
+                        callbackSnapshot.OfferGeneration,
+                        callbackSnapshot.TunaPathLeaseGeneration,
+                        expectedTunaPathLeaseListenerRunId,
+                        RuntimeUnlockPathProbeState.Acked))
+                {
+                    return;
+                }
                 MarkRuntimeUnlockPreCommitProbeFailedFallbackResumedLocked(
                     direction,
                     sessionId,
@@ -3486,14 +3799,28 @@ public sealed partial class SessionFileTransferService
             }
         }
 
-        proofProvider.NotifyRuntimeUnlockPathProbeResult(
-            sessionId,
-            transferId,
-            transportEpoch: 0,
-            probeId,
-            FileTransferTransportKind.Tuna,
-            acked: false,
-            "runtime_unlock_paired_commit_timeout");
+        if (!proofProvider.NotifyRuntimeUnlockPathProbeResult(
+                sessionId,
+                transferId,
+                transportEpoch: 0,
+                probeId,
+                FileTransferTransportKind.Tuna,
+                acked: false,
+                "runtime_unlock_paired_commit_timeout",
+                currentReceiveScope: default,
+                callbackTransactionGeneration: transactionGeneration,
+                callbackOfferGeneration: offerGeneration,
+                callbackTunaPathLeaseGeneration: leaseGeneration,
+                expectedLocalTransactionGeneration: transactionGeneration,
+                expectedLocalOfferGeneration: offerGeneration,
+                expectedLocalTunaPathLeaseGeneration: leaseGeneration,
+                expectedLocalTunaPathLeaseListenerRunId:
+                    snapshot.TunaPathLeaseListenerRunId,
+                expectedLocalPathProbeState:
+                    RuntimeUnlockPathProbeState.Acked))
+        {
+            return;
+        }
         MarkRuntimeUnlockPreCommitProbeFailedFallbackResumedLocked(
             direction,
             sessionId,

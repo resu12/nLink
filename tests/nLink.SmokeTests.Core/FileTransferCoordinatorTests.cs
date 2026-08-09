@@ -18198,6 +18198,22 @@ public sealed class FileTransferCoordinatorTests
             admission);
         var pending = Assert.IsType<RuntimeUnlockPendingPreCommitProbeRequest>(
             pendingDecision.State.CurrentRuntimeUnlockPendingPreCommitProbe);
+        var peerScopeState = pendingDecision.State;
+        var peerScopeLeg = Assert.IsType<FileTransferLeg>(
+            peerScopeState.CurrentLeg);
+        var peerReceiveScope =
+            new RuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
+                peerScopeState.CurrentRuntimeOwner!.Value,
+                peerScopeState.CurrentRoutePublicationToken!.Value,
+                peerScopeState.TerminalGeneration,
+                peerScopeLeg.Generation,
+                peerScopeLeg.TransportEpochId,
+                peerScopeLeg.BridgeRecoveryGeneration,
+                peerScopeLeg.CheckpointRequestId ?? "(none)",
+                peerScopeLeg.CheckpointGeneration,
+                peerScopeState.CurrentDataSessionIdentity!,
+                peerScopeState.CurrentDataSessionGeneration,
+                admission);
         var observation =
             new RuntimeUnlockResponderPeerProbeRouteTransitionObservation(
                 pending.SessionId,
@@ -18221,7 +18237,8 @@ public sealed class FileTransferCoordinatorTests
                 FileTransferRoute.FileTunaV4,
                 FileTransferProtocol.ProtocolVersionV4,
                 FileTransferTransportHandoffKind.NormalToTunaActivation,
-                FileTransferTransportKind.Tuna);
+                FileTransferTransportKind.Tuna,
+                peerReceiveScope);
         var bound = FileTransferCoordinator
             .BindRuntimeUnlockResponderPeerProbeRouteTransitionHandoff(
                 pendingDecision.State,
@@ -18297,6 +18314,25 @@ public sealed class FileTransferCoordinatorTests
                 observation with
                 {
                     TargetRoute = FileTransferRoute.PostTunaFallbackV6,
+                },
+                observation with
+                {
+                    PeerReceiveScope = peerReceiveScope with
+                    {
+                        Admission = admission with
+                        {
+                            AdmissionGeneration =
+                                admission.AdmissionGeneration + 1,
+                        },
+                    },
+                },
+                observation with
+                {
+                    PeerReceiveScope = peerReceiveScope with
+                    {
+                        DataSessionGeneration =
+                            peerReceiveScope.DataSessionGeneration + 1,
+                    },
                 },
             };
         foreach (var mutation in observationMutations)

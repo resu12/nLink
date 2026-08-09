@@ -263,6 +263,18 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public ConcurrentQueue<FileTransferRouteCompletedNotification> RouteCompletionNotifications { get; } = [];
         public ConcurrentQueue<FileTransferRouteHintNotification> ObservedRouteHints { get; } = [];
         public ConcurrentQueue<string> RuntimeUnlockProbeEvents { get; } = [];
+        internal ConcurrentQueue<RuntimeUnlockPeerPreCommitAnswerAcceptanceScope>
+            RuntimeUnlockProbeResultScopes { get; } = [];
+        internal ConcurrentQueue<(
+            long CallbackTransactionGeneration,
+            long CallbackOfferGeneration,
+            long CallbackTunaPathLeaseGeneration,
+            long ExpectedLocalTransactionGeneration,
+            long ExpectedLocalOfferGeneration,
+            long ExpectedLocalTunaPathLeaseGeneration,
+            string? ExpectedLocalTunaPathLeaseListenerRunId,
+            RuntimeUnlockPathProbeState? ExpectedLocalPathProbeState)>
+            RuntimeUnlockProbeResultTuples { get; } = [];
         public ConcurrentQueue<string> RuntimeUnlockRouteCommitResults { get; } = [];
         internal RuntimeUnlockRouteCommitSnapshot? RuntimeUnlockRouteCommitSnapshot { get; set; }
         internal FileTransferInitialTunaReadinessEvidence? InitialTunaReadinessEvidence { get; set; }
@@ -979,13 +991,22 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             }
         }
 
-        void IRuntimeUnlockRouteCommitProofProvider.NotifyRuntimeUnlockPathProbeStarted(
+        bool IRuntimeUnlockRouteCommitProofProvider.NotifyRuntimeUnlockPathProbeStarted(
             string sessionId,
             string transferId,
             long transportEpoch,
             string probeId,
             FileTransferTransportKind targetTransport,
-            string reason)
+            string reason,
+            RuntimeUnlockPeerPreCommitAnswerAcceptanceScope currentReceiveScope,
+            long callbackTransactionGeneration,
+            long callbackOfferGeneration,
+            long callbackTunaPathLeaseGeneration,
+            long expectedLocalTransactionGeneration,
+            long expectedLocalOfferGeneration,
+            long expectedLocalTunaPathLeaseGeneration,
+            string? expectedLocalTunaPathLeaseListenerRunId,
+            RuntimeUnlockPathProbeState? expectedLocalPathProbeState)
         {
             RuntimeUnlockProbeEvents.Enqueue($"started:{probeId}:{reason}");
             if (RuntimeUnlockRouteCommitSnapshot is { } snapshot)
@@ -999,18 +1020,39 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                     PathProbeFailureReason = null,
                 };
             }
+
+            return true;
         }
 
-        void IRuntimeUnlockRouteCommitProofProvider.NotifyRuntimeUnlockPathProbeResult(
+        bool IRuntimeUnlockRouteCommitProofProvider.NotifyRuntimeUnlockPathProbeResult(
             string sessionId,
             string transferId,
             long transportEpoch,
             string probeId,
             FileTransferTransportKind targetTransport,
             bool acked,
-            string reason)
+            string reason,
+            RuntimeUnlockPeerPreCommitAnswerAcceptanceScope currentReceiveScope,
+            long callbackTransactionGeneration,
+            long callbackOfferGeneration,
+            long callbackTunaPathLeaseGeneration,
+            long expectedLocalTransactionGeneration,
+            long expectedLocalOfferGeneration,
+            long expectedLocalTunaPathLeaseGeneration,
+            string? expectedLocalTunaPathLeaseListenerRunId,
+            RuntimeUnlockPathProbeState? expectedLocalPathProbeState)
         {
             RuntimeUnlockProbeEvents.Enqueue($"{(acked ? "acked" : "failed")}:{probeId}:{reason}");
+            RuntimeUnlockProbeResultScopes.Enqueue(currentReceiveScope);
+            RuntimeUnlockProbeResultTuples.Enqueue((
+                callbackTransactionGeneration,
+                callbackOfferGeneration,
+                callbackTunaPathLeaseGeneration,
+                expectedLocalTransactionGeneration,
+                expectedLocalOfferGeneration,
+                expectedLocalTunaPathLeaseGeneration,
+                expectedLocalTunaPathLeaseListenerRunId,
+                expectedLocalPathProbeState));
             if (RuntimeUnlockRouteCommitSnapshot is { } snapshot)
             {
                 RuntimeUnlockRouteCommitSnapshot = snapshot with
@@ -1027,6 +1069,8 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                         : RuntimeUnlockTransactionState.Failed.ToString(),
                 };
             }
+
+            return true;
         }
 
         bool IRuntimeUnlockRouteCommitProofProvider.TryGetRuntimeUnlockRouteCommitProof(

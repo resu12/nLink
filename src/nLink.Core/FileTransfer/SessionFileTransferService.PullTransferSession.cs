@@ -2111,13 +2111,17 @@ public sealed partial class SessionFileTransferService
             new RuntimeUnlockAdmissionDecision(
                 RuntimeUnlockAdmissionStatus.RejectedStaleOwner,
                 "runtime_unlock_admission_missing");
+        _ = TryCreateRuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
+            CreateCoordinatorStateLocked(context),
+            out var admissionScope);
         LogRuntimeUnlockAdmissionDecision(
             FileTransferDirection.Outbound,
             context.TransferId,
             context.SessionId,
             source,
             reason,
-            admission);
+            admission,
+            admissionScope);
         return admission;
     }
 
@@ -2156,13 +2160,17 @@ public sealed partial class SessionFileTransferService
             new RuntimeUnlockAdmissionDecision(
                 RuntimeUnlockAdmissionStatus.RejectedStaleOwner,
                 "runtime_unlock_admission_missing");
+        _ = TryCreateRuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
+            CreateCoordinatorStateLocked(context),
+            out var admissionScope);
         LogRuntimeUnlockAdmissionDecision(
             FileTransferDirection.Inbound,
             context.TransferId,
             context.SessionId,
             source,
             reason,
-            admission);
+            admission,
+            admissionScope);
         return admission;
     }
 
@@ -2425,13 +2433,17 @@ public sealed partial class SessionFileTransferService
             token.TerminalGeneration,
             token.LegGeneration,
             token.FallbackSurvivalState);
+        _ = TryCreateRuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
+            CreateCoordinatorStateLocked(context),
+            out var admissionScope);
         LogRuntimeUnlockAdmissionDecision(
             FileTransferDirection.Outbound,
             context.TransferId,
             context.SessionId,
             source,
             reason,
-            admission);
+            admission,
+            admissionScope);
         return true;
     }
 
@@ -2610,32 +2622,86 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        var admission = RequestRuntimeUnlockAdmissionLocked(
-            context,
-            "responder_peer_probe_route_transition_handoff",
-            reason);
-        if (!admission.Granted || admission.AdmissionToken is null)
+        var admissionState = CreateCoordinatorStateLocked(context);
+        if (!TryCreateRuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
+                admissionState,
+                out var currentReceiveScope) ||
+            currentReceiveScope != observation.PeerReceiveScope)
         {
-            MarkInboundRuntimeUnlockWaitingForFallbackSurvivalLocked(
-                context,
-                reason,
-                FormatRuntimeUnlockFallbackAdmissionRejection(
-                    FileTransferDirection.Inbound,
-                    admission));
             LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
                 context,
                 observation,
                 null,
                 null,
                 "Rejected",
-                admission.Reason);
-            return true;
+                "runtime_unlock_responder_peer_probe_receive_scope_mismatch");
+            return false;
         }
 
-        GrantInboundRuntimeUnlockActivationWindowLocked(
+        var capturedAdmission = observation.PeerReceiveScope.Admission;
+        var admissionRejectionReason =
+            "runtime_unlock_responder_peer_probe_receive_scope_mismatch";
+        if (capturedAdmission.IsDefault ||
+            context.RuntimeUnlockAdmissionToken is not
+                { IsDefault: false } currentAdmission ||
+            currentAdmission != capturedAdmission ||
+            admissionState.CurrentRuntimeUnlockAdmission != capturedAdmission ||
+            !FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(
+                admissionState,
+                capturedAdmission,
+                out admissionRejectionReason))
+        {
+            LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
+                context,
+                observation,
+                null,
+                null,
+                "Rejected",
+                capturedAdmission.IsDefault ||
+                context.RuntimeUnlockAdmissionToken != capturedAdmission ||
+                admissionState.CurrentRuntimeUnlockAdmission != capturedAdmission
+                    ? "runtime_unlock_responder_peer_probe_receive_scope_mismatch"
+                    : admissionRejectionReason);
+            return false;
+        }
+
+        var handoffPreflightRejectionReason =
+            "runtime_unlock_responder_peer_probe_handoff_not_current";
+        if (!RuntimeUnlockResponderPeerProbeSnapshotMatchesObservation(
+                snapshot,
+                observation,
+                out var snapshotObservationRejectionReason) ||
+            !FileTransferCoordinator
+                .TryPrevalidateRuntimeUnlockResponderPeerProbeRouteTransitionObservation(
+                    admissionState,
+                    observation,
+                    capturedAdmission,
+                    out _,
+                    out handoffPreflightRejectionReason))
+        {
+            LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
+                context,
+                observation,
+                null,
+                null,
+                "Rejected",
+                snapshotObservationRejectionReason ??
+                handoffPreflightRejectionReason);
+            return false;
+        }
+
+        var admission = RuntimeUnlockAdmissionDecisionFromToken(
             context,
-            admission,
+            capturedAdmission,
             reason);
+        if (!context.RuntimeUnlockActivationWindowGranted)
+        {
+            GrantInboundRuntimeUnlockActivationWindowLocked(
+                context,
+                admission,
+                reason);
+        }
+
         if (!TryCaptureRuntimeUnlockPreCommitAuthoritiesLocked(
                 context,
                 snapshot,
@@ -2704,6 +2770,66 @@ public sealed partial class SessionFileTransferService
             snapshot,
             reason,
             out _);
+    }
+
+    private static bool
+        RuntimeUnlockResponderPeerProbeSnapshotMatchesObservation(
+            RuntimeUnlockRouteCommitSnapshot snapshot,
+            RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation,
+            out string? rejectionReason)
+    {
+        rejectionReason = null;
+        if (!string.Equals(
+                snapshot.SessionId,
+                observation.SessionId,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                snapshot.TransferId,
+                observation.TransferId,
+                StringComparison.Ordinal) ||
+            snapshot.TransactionGeneration !=
+                observation.TransactionGeneration ||
+            snapshot.OfferGeneration != observation.OfferGeneration ||
+            snapshot.LaunchGeneration != observation.LaunchGeneration ||
+            !snapshot.PeerVisibleProof ||
+            !snapshot.PeerReceived ||
+            !snapshot.AnswerReceived ||
+            !snapshot.TunaPathLeaseRequired ||
+            !snapshot.TunaPathLeaseCurrent ||
+            snapshot.TunaPathLeaseGeneration !=
+                observation.TunaPathLeaseGeneration ||
+            !string.Equals(
+                snapshot.TunaPathLeaseListenerRunId,
+                observation.TunaPathLeaseListenerRunId,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                snapshot.PathProbeId,
+                observation.ProbeId,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                snapshot.PathProbeState,
+                RuntimeUnlockPathProbeState.Acked.ToString(),
+                StringComparison.Ordinal) ||
+            snapshot.PathProbeTransport != observation.ProbeTransport ||
+            snapshot.PathProbeAckedUtcMs != observation.ProbeAckedUtcMs ||
+            !string.IsNullOrWhiteSpace(snapshot.PathProbeFailureReason) ||
+            !string.Equals(
+                snapshot.TunaPathLeaseState,
+                RuntimeUnlockTunaPathLeaseState.ListenerReady.ToString(),
+                StringComparison.Ordinal) ||
+            !string.IsNullOrWhiteSpace(
+                snapshot.TunaPathLeaseFailureReason) ||
+            snapshot.TargetRoute != observation.TargetRoute ||
+            snapshot.ProtocolVersion != observation.TargetProtocolVersion ||
+            snapshot.HandoffKind != observation.HandoffKind ||
+            snapshot.TargetTransport != observation.TargetTransport)
+        {
+            rejectionReason =
+                "runtime_unlock_responder_peer_probe_snapshot_observation_mismatch";
+            return false;
+        }
+
+        return true;
     }
 
     private bool
@@ -3214,7 +3340,8 @@ public sealed partial class SessionFileTransferService
         string sessionId,
         string source,
         string reason,
-        RuntimeUnlockAdmissionDecision admission)
+        RuntimeUnlockAdmissionDecision admission,
+        RuntimeUnlockPeerPreCommitAnswerAcceptanceScope currentScope = default)
     {
         var eventName = admission.Granted
             ? "filetransfer_runtime_unlock_admission_granted"
@@ -3223,7 +3350,7 @@ public sealed partial class SessionFileTransferService
         var tokenGeneration = admission.AdmissionToken?.AdmissionGeneration ?? 0;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event={eventName}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; source={FormatProtocolLogValue(source)}; reason={FormatProtocolLogValue(reason)}; admission_generation={tokenGeneration}; admission_reason={FormatProtocolLogValue(admission.Reason)}; route={FormatProtocolLogValue(FormatRuntimeUnlockAdmissionRouteToken(admission.CurrentRoute))}; protocol_version={admission.CurrentProtocolVersion}; live_route_epoch={admission.CurrentLiveRouteEpoch}; runtime_generation={admission.CurrentRuntimeGeneration}; terminal_generation={admission.CurrentTerminalGeneration}; leg_generation={admission.CurrentLegGeneration}; fallback_active={(survival.FallbackActive ? 1 : 0)}; fallback_current={(survival.FallbackCurrent ? 1 : 0)}; fallback_terminalized={(survival.FallbackTerminalized ? 1 : 0)}; checkpoint_delivery_recovery_pending={(survival.CheckpointDeliveryRecoveryPending ? 1 : 0)}; state_refresh_send_in_flight={(survival.StateRefreshSendInFlight ? 1 : 0)}; deferred_state_refresh_pending={(survival.DeferredStateRefreshPending ? 1 : 0)}; proof_replay_pending={(survival.ProofReplayPending ? 1 : 0)}; control_plane_pressure_pending={(survival.ControlPlanePressurePending ? 1 : 0)}; bridge_recovery_pending={(survival.BridgeRecoveryPending ? 1 : 0)}; fallback_tail_repair_pending={(survival.FallbackTailRepairPending ? 1 : 0)}; paired_fallback_yield_granted={(survival.PairedFallbackYieldGranted ? 1 : 0)}");
+            $"event={eventName}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; source={FormatProtocolLogValue(source)}; reason={FormatProtocolLogValue(reason)}; admission_generation={tokenGeneration}; admission_reason={FormatProtocolLogValue(admission.Reason)}; route={FormatProtocolLogValue(FormatRuntimeUnlockAdmissionRouteToken(admission.CurrentRoute))}; protocol_version={admission.CurrentProtocolVersion}; live_route_epoch={admission.CurrentLiveRouteEpoch}; runtime_generation={admission.CurrentRuntimeGeneration}; terminal_generation={admission.CurrentTerminalGeneration}; leg_generation={admission.CurrentLegGeneration}; runtime_owner_session_id={FormatProtocolLogValue(currentScope.RuntimeOwner.SessionId ?? "(none)")}; runtime_owner_transfer_id={FormatProtocolLogValue(currentScope.RuntimeOwner.TransferId ?? "(none)")}; runtime_owner_direction={currentScope.RuntimeOwner.Direction.ToString().ToLowerInvariant()}; runtime_owner_route={currentScope.RuntimeOwner.Route.ToString().ToLowerInvariant()}; runtime_owner_route_token={FormatProtocolLogValue(currentScope.RuntimeOwner.RouteToken ?? "(none)")}; runtime_owner_protocol_version={currentScope.RuntimeOwner.ProtocolVersion}; runtime_owner_live_route_epoch={currentScope.RuntimeOwner.LiveRouteEpoch}; runtime_owner_runtime_generation={currentScope.RuntimeOwner.RuntimeGeneration}; runtime_owner_terminal_generation={currentScope.RuntimeOwner.TerminalGeneration}; route_publication_session_id={FormatProtocolLogValue(currentScope.RoutePublication.SessionId ?? "(none)")}; route_publication_transfer_id={FormatProtocolLogValue(currentScope.RoutePublication.TransferId ?? "(none)")}; route_publication_direction={currentScope.RoutePublication.Direction.ToString().ToLowerInvariant()}; route_publication_route={currentScope.RoutePublication.Route.ToString().ToLowerInvariant()}; route_publication_route_token={FormatProtocolLogValue(currentScope.RoutePublication.RouteToken ?? "(none)")}; route_publication_protocol_version={currentScope.RoutePublication.ProtocolVersion}; route_publication_live_route_epoch={currentScope.RoutePublication.LiveRouteEpoch}; route_publication_runtime_generation={currentScope.RoutePublication.RuntimeGeneration}; route_publication_terminal_generation={currentScope.RoutePublication.TerminalGeneration}; route_publication_leg_generation={currentScope.RoutePublication.LegGeneration}; route_publication_commit_generation={currentScope.RoutePublication.RouteCommitGeneration ?? 0}; route_publication_generation={currentScope.RoutePublication.PublicationGeneration}; transport_epoch={currentScope.TransportEpoch}; bridge_recovery_generation={currentScope.BridgeRecoveryGeneration}; checkpoint_request_id={FormatProtocolLogValue(currentScope.CheckpointRequestId ?? "(none)")}; checkpoint_generation={currentScope.CheckpointGeneration}; data_session_identity={FormatProtocolLogValue(currentScope.DataSessionIdentity ?? "(none)")}; data_session_generation={currentScope.DataSessionGeneration}; fallback_active={(survival.FallbackActive ? 1 : 0)}; fallback_current={(survival.FallbackCurrent ? 1 : 0)}; fallback_terminalized={(survival.FallbackTerminalized ? 1 : 0)}; checkpoint_delivery_recovery_pending={(survival.CheckpointDeliveryRecoveryPending ? 1 : 0)}; state_refresh_send_in_flight={(survival.StateRefreshSendInFlight ? 1 : 0)}; deferred_state_refresh_pending={(survival.DeferredStateRefreshPending ? 1 : 0)}; proof_replay_pending={(survival.ProofReplayPending ? 1 : 0)}; control_plane_pressure_pending={(survival.ControlPlanePressurePending ? 1 : 0)}; bridge_recovery_pending={(survival.BridgeRecoveryPending ? 1 : 0)}; fallback_tail_repair_pending={(survival.FallbackTailRepairPending ? 1 : 0)}; paired_fallback_yield_granted={(survival.PairedFallbackYieldGranted ? 1 : 0)}");
     }
 
     private static string FormatRuntimeUnlockAdmissionRouteToken(FileTransferRoute route)

@@ -26685,12 +26685,11 @@ internal static class FileTransferCoordinator
            left.TransactionGeneration == right.TransactionGeneration &&
            left.OfferGeneration == right.OfferGeneration;
 
-    private static bool
-        TryValidateRuntimeUnlockResponderPeerProbeRouteTransitionObservation(
+    internal static bool
+        TryPrevalidateRuntimeUnlockResponderPeerProbeRouteTransitionObservation(
             FileTransferCoordinatorState state,
             RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation,
             RuntimeUnlockAdmissionToken admission,
-            RuntimeUnlockPendingPreCommitProbeRequest pendingPreCommitProbe,
             out FileTransferFallbackTailYieldOperation operation,
             out string rejectionReason)
     {
@@ -26713,6 +26712,27 @@ internal static class FileTransferCoordinator
         {
             rejectionReason =
                 "runtime_unlock_responder_peer_probe_observation_invalid";
+            return false;
+        }
+
+        var handoffSubstate = state.PersistentState
+            .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff;
+        if (handoffSubstate.LastInvalidatedObservation is
+                { } invalidatedObservation &&
+            IsSameRuntimeUnlockResponderPeerProbeLogicalTransaction(
+                invalidatedObservation,
+                observation))
+        {
+            rejectionReason =
+                "runtime_unlock_responder_peer_probe_handoff_scope_replaced";
+            return false;
+        }
+
+        if (handoffSubstate.CurrentAuthority is { } retainedAuthority &&
+            retainedAuthority.Observation != observation)
+        {
+            rejectionReason =
+                "runtime_unlock_responder_peer_probe_handoff_tuple_mutation";
             return false;
         }
 
@@ -26740,29 +26760,39 @@ internal static class FileTransferCoordinator
             return false;
         }
 
-        if (state.CurrentRuntimeUnlockAdmission != admission ||
-            state.CurrentRuntimeUnlockPendingPreCommitProbe !=
-                pendingPreCommitProbe ||
-            admission.RuntimeOwner != owner ||
-            pendingPreCommitProbe.RuntimeOwner != owner ||
-            pendingPreCommitProbe.AdmissionToken != admission ||
-            pendingPreCommitProbe.TransactionGeneration !=
-                observation.TransactionGeneration ||
-            pendingPreCommitProbe.OfferGeneration !=
-                observation.OfferGeneration ||
-            pendingPreCommitProbe.TunaPathLeaseGeneration !=
-                observation.TunaPathLeaseGeneration ||
+        var peerScope = observation.PeerReceiveScope;
+        if (peerScope.IsDefault ||
+            peerScope.Admission != admission ||
+            peerScope.Admission != state.CurrentRuntimeUnlockAdmission ||
+            peerScope.RuntimeOwner != owner ||
+            peerScope.RoutePublication != publication ||
+            peerScope.TerminalGeneration != state.TerminalGeneration ||
+            peerScope.LegGeneration != leg.Generation ||
+            peerScope.TransportEpoch != leg.TransportEpochId ||
+            peerScope.BridgeRecoveryGeneration !=
+                leg.BridgeRecoveryGeneration ||
             !string.Equals(
-                pendingPreCommitProbe.TunaPathLeaseListenerRunId,
-                observation.TunaPathLeaseListenerRunId,
+                peerScope.CheckpointRequestId,
+                leg.CheckpointRequestId ?? "(none)",
                 StringComparison.Ordinal) ||
+            peerScope.CheckpointGeneration != leg.CheckpointGeneration ||
+            !string.Equals(
+                peerScope.DataSessionIdentity,
+                state.CurrentDataSessionIdentity,
+                StringComparison.Ordinal) ||
+            peerScope.DataSessionGeneration !=
+                state.CurrentDataSessionGeneration)
+        {
+            rejectionReason =
+                "runtime_unlock_responder_peer_probe_receive_scope_mismatch";
+            return false;
+        }
+
+        if (state.CurrentRuntimeUnlockAdmission != admission ||
+            admission.RuntimeOwner != owner ||
             !IsRuntimeUnlockAdmissionTokenCurrent(
                 state,
                 admission,
-                out rejectionReason) ||
-            !IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(
-                state,
-                pendingPreCommitProbe,
                 out rejectionReason))
         {
             if (string.Equals(rejectionReason, "accepted", StringComparison.Ordinal))
@@ -26775,25 +26805,21 @@ internal static class FileTransferCoordinator
         }
 
         var fallbackTail = state.PersistentState.FallbackTailYield;
+        var pairScopeRejectionReason =
+            "runtime_unlock_responder_peer_probe_pair_scope_invalid";
         if (fallbackTail.CurrentOperation is not { } current ||
-            current.PairingState is
-                FileTransferFallbackTailYieldPairingState.ReleaseReserved or
-                FileTransferFallbackTailYieldPairingState.ReleaseConsumed or
-                FileTransferFallbackTailYieldPairingState.Invalidated ||
+            current.PairingState !=
+                FileTransferFallbackTailYieldPairingState.Paired ||
+            current.PairedRelease is not { IsDefault: false } ||
             fallbackTail.CurrentReservation is not null ||
             fallbackTail.LastConsumedReservation is not null ||
             fallbackTail.LastConsumingInstallReceipt is not null ||
             !IsFallbackTailYieldScopeCurrent(
                 state,
                 GetEffectiveFallbackTailYieldScope(current),
-                out rejectionReason))
+                out pairScopeRejectionReason))
         {
-            if (string.Equals(rejectionReason, "accepted", StringComparison.Ordinal))
-            {
-                rejectionReason =
-                    "runtime_unlock_responder_peer_probe_pair_scope_invalid";
-            }
-
+            rejectionReason = pairScopeRejectionReason;
             return false;
         }
 
@@ -26816,6 +26842,60 @@ internal static class FileTransferCoordinator
         }
 
         operation = current;
+        return true;
+    }
+
+    private static bool
+        TryValidateRuntimeUnlockResponderPeerProbeRouteTransitionObservation(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation,
+            RuntimeUnlockAdmissionToken admission,
+            RuntimeUnlockPendingPreCommitProbeRequest pendingPreCommitProbe,
+            out FileTransferFallbackTailYieldOperation operation,
+            out string rejectionReason)
+    {
+        if (!TryPrevalidateRuntimeUnlockResponderPeerProbeRouteTransitionObservation(
+                state,
+                observation,
+                admission,
+                out operation,
+                out rejectionReason))
+        {
+            return false;
+        }
+
+        if (state.CurrentRuntimeUnlockPendingPreCommitProbe !=
+                pendingPreCommitProbe ||
+            pendingPreCommitProbe.RuntimeOwner !=
+                state.CurrentRuntimeOwner ||
+            pendingPreCommitProbe.AdmissionToken != admission ||
+            pendingPreCommitProbe.TransactionGeneration !=
+                observation.TransactionGeneration ||
+            pendingPreCommitProbe.OfferGeneration !=
+                observation.OfferGeneration ||
+            pendingPreCommitProbe.TunaPathLeaseGeneration !=
+                observation.TunaPathLeaseGeneration ||
+            !string.Equals(
+                pendingPreCommitProbe.TunaPathLeaseListenerRunId,
+                observation.TunaPathLeaseListenerRunId,
+                StringComparison.Ordinal) ||
+            !IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(
+                state,
+                pendingPreCommitProbe,
+                out rejectionReason))
+        {
+            if (string.Equals(
+                    rejectionReason,
+                    "accepted",
+                    StringComparison.Ordinal))
+            {
+                rejectionReason =
+                    "runtime_unlock_responder_peer_probe_precommit_scope_mismatch";
+            }
+
+            return false;
+        }
+
         return true;
     }
 

@@ -741,7 +741,8 @@ internal sealed record RuntimeUnlockResponderPeerProbeRouteTransitionObservation
     FileTransferRoute TargetRoute,
     int TargetProtocolVersion,
     FileTransferTransportHandoffKind HandoffKind,
-    FileTransferTransportKind TargetTransport)
+    FileTransferTransportKind TargetTransport,
+    RuntimeUnlockPeerPreCommitAnswerAcceptanceScope PeerReceiveScope = default)
 {
     public bool IsDefault =>
         string.IsNullOrWhiteSpace(SessionId) ||
@@ -769,7 +770,8 @@ internal sealed record RuntimeUnlockResponderPeerProbeRouteTransitionObservation
         TargetProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
         HandoffKind !=
             FileTransferTransportHandoffKind.NormalToTunaActivation ||
-        TargetTransport != FileTransferTransportKind.Tuna;
+        TargetTransport != FileTransferTransportKind.Tuna ||
+        PeerReceiveScope.IsDefault;
 }
 
 internal sealed record PostTunaFallbackHandoffEvidence(
@@ -959,22 +961,42 @@ internal sealed record PostTunaFallbackPeerProofFrameIdentity(
 
 internal interface IRuntimeUnlockRouteCommitProofProvider
 {
-    void NotifyRuntimeUnlockPathProbeStarted(
+    bool NotifyRuntimeUnlockPathProbeStarted(
         string sessionId,
         string transferId,
         long transportEpoch,
         string probeId,
         FileTransferTransportKind targetTransport,
-        string reason);
+        string reason,
+        RuntimeUnlockPeerPreCommitAnswerAcceptanceScope currentReceiveScope =
+            default,
+        long callbackTransactionGeneration = 0,
+        long callbackOfferGeneration = 0,
+        long callbackTunaPathLeaseGeneration = -1,
+        long expectedLocalTransactionGeneration = 0,
+        long expectedLocalOfferGeneration = 0,
+        long expectedLocalTunaPathLeaseGeneration = -1,
+        string? expectedLocalTunaPathLeaseListenerRunId = null,
+        RuntimeUnlockPathProbeState? expectedLocalPathProbeState = null);
 
-    void NotifyRuntimeUnlockPathProbeResult(
+    bool NotifyRuntimeUnlockPathProbeResult(
         string sessionId,
         string transferId,
         long transportEpoch,
         string probeId,
         FileTransferTransportKind targetTransport,
         bool acked,
-        string reason);
+        string reason,
+        RuntimeUnlockPeerPreCommitAnswerAcceptanceScope currentReceiveScope =
+            default,
+        long callbackTransactionGeneration = 0,
+        long callbackOfferGeneration = 0,
+        long callbackTunaPathLeaseGeneration = -1,
+        long expectedLocalTransactionGeneration = 0,
+        long expectedLocalOfferGeneration = 0,
+        long expectedLocalTunaPathLeaseGeneration = -1,
+        string? expectedLocalTunaPathLeaseListenerRunId = null,
+        RuntimeUnlockPathProbeState? expectedLocalPathProbeState = null);
 
     bool TryGetRuntimeUnlockRouteCommitProof(
         string sessionId,
@@ -997,6 +1019,31 @@ internal enum RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus
     Accepted = 1,
     Idempotent = 2,
     Rejected = 3,
+    Held = 4,
+}
+
+internal readonly record struct RuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
+    RuntimeOwnerToken RuntimeOwner,
+    RoutePublicationToken RoutePublication,
+    int TerminalGeneration,
+    int LegGeneration,
+    long TransportEpoch,
+    int BridgeRecoveryGeneration,
+    string CheckpointRequestId,
+    int CheckpointGeneration,
+    string DataSessionIdentity,
+    long DataSessionGeneration,
+    RuntimeUnlockAdmissionToken Admission = default)
+{
+    public bool IsDefault =>
+        RuntimeOwner.IsDefault ||
+        RoutePublication.IsDefault ||
+        Admission.IsDefault ||
+        LegGeneration <= 0 ||
+        TransportEpoch <= 0 ||
+        string.IsNullOrWhiteSpace(CheckpointRequestId) ||
+        string.IsNullOrWhiteSpace(DataSessionIdentity) ||
+        DataSessionGeneration <= 0;
 }
 
 internal sealed record RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt(
@@ -1012,7 +1059,8 @@ internal sealed record RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt(
     FileTransferTransportKind ReceivedTransport,
     long ReceivedUtcMs,
     long ProbeAckSentUtcMs,
-    long DataSessionGeneration);
+    long DataSessionGeneration,
+    RuntimeUnlockPeerPreCommitAnswerAcceptanceScope ReceiveScope = default);
 
 internal sealed record RuntimeUnlockPeerPreCommitAnswerAcceptanceDecision(
     RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt Receipt,
