@@ -1901,8 +1901,40 @@ public sealed partial class NknSignalingTransport
                 targetTransport,
                 "handoff_broadcast",
                 normalizedReason);
-            session.RequestHandoff(normalizedReason, handoffKind, targetTransport, runtimeUnlockPreCommitProbeSnapshot);
+            session.RequestHandoff(
+                normalizedReason,
+                handoffKind,
+                targetTransport,
+                FilterRuntimeUnlockResponderObservationForSession(
+                    runtimeUnlockPreCommitProbeSnapshot,
+                    session));
         }
+    }
+
+    private static RuntimeUnlockRouteCommitSnapshot?
+        FilterRuntimeUnlockResponderObservationForSession(
+            RuntimeUnlockRouteCommitSnapshot? snapshot,
+            TransportFileTransferDataSession session)
+    {
+        if (snapshot?.ResponderPeerProbeRouteTransitionObservation is not
+            { } observation)
+        {
+            return snapshot;
+        }
+
+        return string.Equals(
+                   observation.SessionId,
+                   session.SessionId,
+                   StringComparison.Ordinal) &&
+               string.Equals(
+                   observation.TransferId,
+                   session.TransferId,
+                   StringComparison.Ordinal)
+            ? snapshot
+            : snapshot with
+            {
+                ResponderPeerProbeRouteTransitionObservation = null,
+            };
     }
 
     private static bool ShouldPersistPendingFileTransferV6Handoff(
@@ -1983,7 +2015,9 @@ public sealed partial class NknSignalingTransport
             intent.Reason,
             intent.HandoffKind,
             intent.TargetTransport,
-            intent.RuntimeUnlockPreCommitProbeSnapshot);
+            FilterRuntimeUnlockResponderObservationForSession(
+                intent.RuntimeUnlockPreCommitProbeSnapshot,
+                session));
 
         return true;
     }

@@ -22934,6 +22934,382 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "RuntimeUnlockResponderPeerProbe")]
+    public async Task RuntimeUnlockResponderPeerProbeAvailability_UsesLiveInboundFallbackContextWithoutSecondPhase2Release()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId =
+            "transfer_runtime_unlock_responder_peer_probe_inbound_handoff";
+        var sessionId = $"session_{transferId}";
+        var context = CreatePostTunaFallbackV6InboundContext(transferId);
+        SetPrivateProperty(context, "V4LastStateDurableHighestChunkIndex", 99);
+        var leg = Assert.IsType<FileTransferLeg>(
+            GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        SeedPairedFallbackTailYieldForTest(context, leg);
+        var dataSession = Assert.IsAssignableFrom<IFileTransferDataSession>(
+            GetPrivatePropertyValue(context, "DataSession"));
+
+        const long transactionGeneration = 12;
+        const long offerGeneration = 19;
+        const long leaseGeneration = 23;
+        const long launchGeneration = 29;
+        const string listenerRunId = "listener-responder-inbound-handoff";
+        const string probeId = "probe-responder-inbound-handoff";
+        var observation =
+            new RuntimeUnlockResponderPeerProbeRouteTransitionObservation(
+                sessionId,
+                transferId,
+                transactionGeneration,
+                offerGeneration,
+                PendingAnswerAckGeneration: 7,
+                PayerDecisionId: 11,
+                launchGeneration,
+                Lanes: "file",
+                AnswerAcceptanceSource: "SemanticAnswerAck",
+                AckMessageId: "answer-ack-responder-inbound-handoff",
+                AckSourceFingerprint: new string('a', 64),
+                PeerProbeFrameFingerprint: new string('b', 64),
+                leaseGeneration,
+                listenerRunId,
+                probeId,
+                RuntimeUnlockPathProbeState.Acked,
+                FileTransferTransportKind.Tuna,
+                ProbeAckedUtcMs:
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                FileTransferRoute.FileTunaV4,
+                FileTransferProtocol.ProtocolVersionV4,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna);
+        var snapshot = new RuntimeUnlockRouteCommitSnapshot(
+            sessionId,
+            transferId,
+            transactionGeneration,
+            offerGeneration,
+            PeerVisibleProof: true,
+            PeerReceived: true,
+            AnswerReceived: true,
+            FileTransferRoute.FileTunaV4,
+            FileTransferProtocol.ProtocolVersionV4,
+            FileTransferTransportHandoffKind.NormalToTunaActivation,
+            FileTransferTransportKind.Tuna,
+            RuntimeUnlockTransactionState.RouteCommitPending.ToString(),
+            "responder_peer_probe_inbound_handoff",
+            probeId,
+            RuntimeUnlockPathProbeState.Acked.ToString(),
+            FileTransferTransportKind.Tuna,
+            observation.ProbeAckedUtcMs,
+            PathProbeFailureReason: null,
+            TunaPathLeaseRequired: true,
+            leaseGeneration,
+            RuntimeUnlockTunaPathLeaseState.ListenerReady.ToString(),
+            listenerRunId,
+            TunaPathLeaseCurrent: true,
+            TunaPathLeaseFailureReason: null,
+            launchGeneration,
+            observation);
+        using var transport = new LoopbackFileTransferTransport(sessionId)
+        {
+            RuntimeUnlockRouteCommitSnapshot = snapshot,
+        };
+        service.AttachTransport(transport);
+        SetPrivateProperty(context, "DataSession", dataSession);
+        SetPrivateProperty(context, "DataSessionGeneration", 1L);
+        serviceType
+            .GetField(
+                "inboundTransfer",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        Assert.Same(
+            context,
+            serviceType
+                .GetField(
+                    "inboundTransfer",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(service));
+        Assert.Same(
+            dataSession,
+            GetPrivatePropertyValue(context, "DataSession"));
+        Assert.Equal(
+            sessionId,
+            GetPrivateProperty<string>(context, "SessionId"));
+        Assert.Equal(
+            transferId,
+            GetPrivateProperty<string>(context, "TransferId"));
+        Assert.False(GetPrivateProperty<bool>(context, "IsTerminal"));
+
+        var availabilityHandler = serviceType.GetMethod(
+            "HandleDataSessionAvailabilityChangedAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var unavailableLogStart = GetOperationalLogLength();
+        await Assert.IsAssignableFrom<Task>(availabilityHandler.Invoke(
+            service,
+            [
+                dataSession,
+                new FileTransferDataSessionAvailabilityChangedEventArgs(
+                    isAvailable: false,
+                    reason: "responder_peer_probe_unavailable_callback",
+                    requiresResumeRequest: false,
+                    FileTransferTransportHandoffKind.NormalToTunaActivation,
+                    FileTransferTransportKind.Tuna,
+                    snapshot),
+            ]));
+        var unavailableLog = ReadOperationalLogTail(unavailableLogStart);
+        Assert.Contains(
+            "event=filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided; status=Rejected;",
+            unavailableLog,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(
+            "decision_reason=data_session_availability_stale",
+            unavailableLog,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=filetransfer_route_transition_prepared;",
+            unavailableLog,
+            StringComparison.Ordinal);
+        Assert.Null(
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                    context,
+                    "CoordinatorPersistentState")
+                .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
+                .CurrentAuthority);
+
+        SetPrivateProperty(
+            context,
+            "ReceiverSparseChunksWritten",
+            new System.Collections.BitArray(256));
+        using var sparseWrite = new BlockingSparseWriteStream();
+        var sparseChunkBytes = new byte[21 * 1024];
+        var sparseBatch = new FileTransferChunkBatchFrameV6
+        {
+            SessionId = sessionId,
+            TransferId = transferId,
+            TransportEpoch = leg.TransportEpochId,
+            StartChunkIndex = 100,
+            ChunkCount = 1,
+            DataSegments = [sparseChunkBytes],
+        };
+        IReadOnlyList<(int ChunkIndex, byte[] ChunkBytes)> sparseChunks =
+            [(100, sparseChunkBytes)];
+        var sparseWriteTask = Assert.IsAssignableFrom<Task>(serviceType
+            .GetMethod(
+                "HandleInboundV6SparseChunkBatchAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    context,
+                    sparseBatch,
+                    sparseChunks,
+                    sparseWrite,
+                    FileTransferTransportKind.RegularNkn,
+                    null,
+                ])!);
+        await sparseWrite.WaitForWriteStartedAsync();
+        var pendingSparseWrites = Assert.IsType<HashSet<int>>(
+            GetPrivatePropertyValue(
+                context,
+                "ReceiverSparseChunksPendingWrite"));
+        Assert.Contains(100, pendingSparseWrites);
+        var logStart = GetOperationalLogLength();
+        await Assert.IsAssignableFrom<Task>(availabilityHandler.Invoke(
+            service,
+            [
+                dataSession,
+                new FileTransferDataSessionAvailabilityChangedEventArgs(
+                    isAvailable: true,
+                    reason: "responder_peer_probe_inbound_handoff",
+                    requiresResumeRequest: false,
+                    FileTransferTransportHandoffKind.NormalToTunaActivation,
+                    FileTransferTransportKind.Tuna,
+                    snapshot),
+            ]));
+
+        var immediateLog = ReadOperationalLogTail(logStart);
+        Assert.True(
+            immediateLog.Contains(
+                "event=filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided;",
+                StringComparison.Ordinal),
+            immediateLog);
+        Assert.Contains("status=Held", immediateLog, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=filetransfer_route_transition_prepared;",
+            immediateLog,
+            StringComparison.Ordinal);
+        var heldPersistent =
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                context,
+                "CoordinatorPersistentState");
+        Assert.Equal(
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Held,
+            heldPersistent.RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
+                .LastStatus);
+        Assert.NotNull(
+            heldPersistent.RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
+                .CurrentAuthority);
+
+        var heldState = CreateCoordinatorStateForTest(context);
+        var checkpoint = Assert.IsType<
+            FileTransferRouteTransitionDurableCheckpoint>(serviceType
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(method =>
+                method.Name ==
+                    "CreateInboundFileTransferRouteTransitionCheckpoint" &&
+                method.GetParameters()[0].ParameterType == context.GetType())
+            .Invoke(
+                null,
+                [
+                    context,
+                    heldState.CurrentRuntimeOwner!.Value,
+                    heldState.CurrentRoutePublicationToken!.Value,
+                    heldState.CurrentLeg!,
+                ]));
+        var heldAdmission = GetPrivateProperty<RuntimeUnlockAdmissionToken>(
+            context,
+            "RuntimeUnlockAdmissionToken");
+        var heldPending = GetPrivateProperty<
+            RuntimeUnlockPendingPreCommitProbeRequest>(
+            context,
+            "RuntimeUnlockPendingPreCommitProbe");
+        var heldAuthority = Assert.IsType<
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority>(
+            heldPersistent.RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
+                .CurrentAuthority);
+        var heldRelease = Assert.IsType<
+            FileTransferFallbackTailPairedReleaseReceipt>(
+            heldPersistent.FallbackTailYield.CurrentOperation!.Value
+                .PairedRelease);
+        var heldBoundary = new FileTransferTunaActivationTransitionProofBoundary(
+            heldAdmission,
+            heldPending,
+            RuntimeUnlockTransaction.CreateRouteCommitProof(
+                snapshot,
+                heldAdmission),
+            snapshot.LaunchGeneration,
+            EffectiveRetryInstallReceipt: null,
+            heldRelease,
+            heldAuthority);
+        var heldRequest = new FileTransferRouteTransitionPrepareRequest(
+            FileTransferRouteTransitionKind.PostTunaFallbackV6ToTunaV4,
+            heldState.CurrentRuntimeOwner.Value,
+            heldState.CurrentRoutePublicationToken.Value,
+            SourceRouteCommit: null,
+            FileTransferRoute.PostTunaFallbackV6,
+            FileTransferProtocol.ProtocolVersionV6,
+            FileTransferTransportKind.RegularNkn,
+            heldBoundary,
+            checkpoint,
+            FileTransferRoute.FileTunaV4,
+            FileTransferProtocol.ProtocolVersionV4,
+            FileTransferTransportKind.Tuna,
+            FileTransferTransportHandoffKind.NormalToTunaActivation,
+            PredecessorTransitionAuthorityId: null,
+            "responder_peer_probe_owner_work_cleared");
+        Assert.False(
+            heldRequest.DurableCheckpoint.IsDefault,
+            $"checkpoint default: owner={checkpoint.SourceRuntimeOwner.IsDefault}; " +
+            $"publication={checkpoint.SourceRoutePublication.IsDefault}; " +
+            $"terminal={checkpoint.SourceTerminalGeneration}; " +
+            $"leg={checkpoint.SourceLegGeneration}; " +
+            $"transport={checkpoint.SourceTransportEpoch}; " +
+            $"bridge={checkpoint.SourceBridgeRecoveryGeneration}; " +
+            $"data_session={checkpoint.DataSessionGeneration}; " +
+            $"state_epoch={checkpoint.StateEpoch}; " +
+            $"contiguous={checkpoint.ContiguousCommittedChunkIndex}; " +
+            $"durable={checkpoint.DurableHighestChunkIndex}; " +
+            $"chunks={checkpoint.ChunkCount}; " +
+            $"generation={checkpoint.CheckpointGeneration}");
+        Assert.Equal(100, checkpoint.ContiguousCommittedChunkIndex);
+        Assert.Equal(99, checkpoint.DurableHighestChunkIndex);
+        Assert.False(
+            heldRequest.ProofBoundary.IsDefault,
+            $"proof boundary default: admission={heldAdmission.IsDefault}; " +
+            $"pending={heldPending.IsDefault}; " +
+            $"accepted_admission_match=" +
+            $"{heldBoundary.AcceptedLaunchBoundary.AdmissionToken == heldAdmission}; " +
+            $"launch={heldBoundary.LaunchGeneration}; " +
+            $"paired_release={heldRelease.IsDefault}; " +
+            $"responder_authority={heldAuthority.IsDefault}");
+
+        sparseWrite.ReleaseWrites();
+        await sparseWriteTask.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Empty(pendingSparseWrites);
+        var persistent = GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+            context,
+            "CoordinatorPersistentState");
+        Assert.Null(persistent.FallbackTailYield.CurrentReservation);
+        Assert.Null(persistent.FallbackTailYield.LastConsumedReservation);
+        Assert.Null(persistent.FallbackTailYield.LastConsumingInstallReceipt);
+        Assert.Null(persistent.RuntimeUnlockRetryLifecycle.PendingAttempt);
+        Assert.Null(persistent.RuntimeUnlockRetryLifecycle.InstalledAttempt);
+        Assert.Null(persistent.RuntimeUnlockRetryLifecycle.LastTerminalAttempt);
+        var operation =
+            persistent.FileTransferRouteTransition.CurrentOperation ??
+            persistent.FileTransferRouteTransition.LastTerminalOperation;
+        if (operation is { } retainedOperation)
+        {
+            var activation = Assert.IsType<
+                FileTransferTunaActivationTransitionProofBoundary>(
+                retainedOperation.Authority.ProofBoundary);
+            Assert.Null(activation.EffectiveRetryInstallReceipt);
+            Assert.NotNull(activation.FallbackTailPairedReleaseReceipt);
+            Assert.NotNull(activation.ResponderPeerProbeHandoffAuthority);
+        }
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains(
+            "event=filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided; status=Held;",
+            log,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(
+            "event=filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided; direction=inbound;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "event=filetransfer_route_transition_prepared;",
+            log,
+            StringComparison.Ordinal);
+        const string recheckDecisionMarker =
+            "event=filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided; status=Idempotent;";
+        var recheckDecisionIndex = log.IndexOf(
+            recheckDecisionMarker,
+            StringComparison.Ordinal);
+        var preparedIndex = log.IndexOf(
+            "event=filetransfer_route_transition_prepared;",
+            StringComparison.Ordinal);
+        Assert.True(
+            recheckDecisionIndex >= 0 && preparedIndex > recheckDecisionIndex,
+            log);
+        Assert.Equal(1, CountOccurrences(log, recheckDecisionMarker));
+        var recheckDecisionLine = log
+            .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+            .Single(line => line.Contains(
+                recheckDecisionMarker,
+                StringComparison.Ordinal));
+        Assert.Contains(
+            "transition_authority_id=(none); transition_generation=0;",
+            recheckDecisionLine,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "responder_handoff_authority_id=(none)",
+            recheckDecisionLine,
+            StringComparison.Ordinal);
+        Assert.Contains("activation_authority_mode=responder", log, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "responder_handoff_authority_id=(none)",
+            log.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                .Single(line => line.Contains(
+                    "event=filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided; status=Held;",
+                    StringComparison.OrdinalIgnoreCase)),
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided; direction=outbound;",
+            log,
+            StringComparison.Ordinal);
+
+    }
+
+    [Fact]
     public void PostTunaFallbackV6TailReconciliation_TriggersAfterRepeatedZeroCreditRefreshesWithoutFailures()
     {
         var serviceType = typeof(SessionFileTransferService);
@@ -29204,6 +29580,77 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         }
 
         return count;
+    }
+
+    private sealed class BlockingSparseWriteStream : Stream
+    {
+        private readonly MemoryStream inner = new();
+        private readonly TaskCompletionSource writeStarted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource releaseWrites =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override bool CanRead => true;
+
+        public override bool CanSeek => true;
+
+        public override bool CanWrite => true;
+
+        public override long Length => inner.Length;
+
+        public override long Position
+        {
+            get => inner.Position;
+            set => inner.Position = value;
+        }
+
+        public Task WaitForWriteStartedAsync()
+            => writeStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        public void ReleaseWrites()
+            => releaseWrites.TrySetResult();
+
+        public override void Flush()
+            => inner.Flush();
+
+        public override int Read(byte[] buffer, int offset, int count)
+            => inner.Read(buffer, offset, count);
+
+        public override long Seek(long offset, SeekOrigin origin)
+            => inner.Seek(offset, origin);
+
+        public override void SetLength(long value)
+            => inner.SetLength(value);
+
+        public override void Write(byte[] buffer, int offset, int count)
+            => inner.Write(buffer, offset, count);
+
+        public override ValueTask WriteAsync(
+            ReadOnlyMemory<byte> buffer,
+            CancellationToken cancellationToken = default)
+            => new(WriteAsyncCore(buffer, cancellationToken));
+
+        private async Task WriteAsyncCore(
+            ReadOnlyMemory<byte> buffer,
+            CancellationToken cancellationToken)
+        {
+            writeStarted.TrySetResult();
+            await releaseWrites.Task
+                .WaitAsync(cancellationToken)
+                .ConfigureAwait(false);
+            inner.Write(buffer.Span);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                releaseWrites.TrySetResult();
+                inner.Dispose();
+            }
+
+            base.Dispose(disposing);
+        }
     }
 
     private sealed class PeerPreCommitAnswerAcceptanceTransport(string sessionId)

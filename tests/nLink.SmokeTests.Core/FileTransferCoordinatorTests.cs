@@ -18117,6 +18117,438 @@ public sealed class FileTransferCoordinatorTests
 
     [Fact]
     [Trait("FileTransferCoordinatorSuite", "FileTransferRouteTransition")]
+    public void FileTransferRouteTransition_InboundResponderAckedProbeUsesPairedReceiptWithoutPhase2Release()
+    {
+        var fallback = FileTransferRouteResolver.Resolve(
+            FileTransferRoute.PostTunaFallbackV6);
+        var state = ActiveFallbackStateWithoutCheckpoint(
+            FileTransferDirection.Inbound);
+        var owner = state.CurrentRuntimeOwner!.Value;
+        var leg = state.CurrentLeg!;
+        var publication = FileTransferCoordinator.AuthorizeAction(
+            state,
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "test",
+                Reason: "responder_handoff_publication",
+                RuntimeOwner: owner,
+                Route: fallback.Route,
+                ProtocolVersion: fallback.ProtocolVersion,
+                LiveRouteEpoch: leg.LiveRouteEpochId,
+                LegGeneration: leg.Generation,
+                RuntimeGeneration: owner.RuntimeGeneration,
+                TerminalGeneration: state.TerminalGeneration,
+                TargetRoute: fallback.Route,
+                TargetProtocolVersion: fallback.ProtocolVersion,
+                TargetTransport: FileTransferTransportKind.RegularNkn));
+        Assert.True(publication.Accepted);
+        state = publication.State with
+        {
+            CurrentDataSessionIdentity = "responder-handoff-data-session",
+            CurrentDataSessionGeneration = 23,
+        };
+        var yielded = MarkFallbackTailQuiescent(
+            state,
+            fallback,
+            state.CurrentLeg!.TransportEpochId,
+            committedChunk: 5,
+            highestObservedChunk: 5);
+        var tailYield = Assert.IsType<FallbackTailYieldDecision>(
+            yielded.FallbackTailYieldDecision);
+        var local = FileTransferCoordinator.CreateFallbackTailLocalProofReceipt(
+            yielded.State,
+            tailYield,
+            "responder-local-proof",
+            new string('a', 64),
+            40_000);
+        var localApplied =
+            FileTransferCoordinator.ApplyFallbackTailLocalProofReceipt(
+                yielded.State,
+                local);
+        var peer = FileTransferCoordinator.CreateFallbackTailPeerProofReceipt(
+            localApplied.State,
+            CreateCoordinatorFallbackTailPeerProof(
+                localApplied.State,
+                tailYield),
+            "responder-peer-proof",
+            40_001);
+        var paired =
+            FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(
+                localApplied.State,
+                peer);
+        Assert.True(paired.Accepted, paired.Reason);
+        var pairedRelease =
+            Assert.IsType<FileTransferFallbackTailPairedReleaseReceipt>(
+                paired.PairedRelease);
+        var fallbackTail = FileTransferCoordinator.GetFallbackTailYieldSubstate(
+            paired.State);
+        Assert.Equal(
+            FileTransferFallbackTailYieldPairingState.Paired,
+            fallbackTail.CurrentOperation!.Value.PairingState);
+        Assert.Null(fallbackTail.CurrentReservation);
+        Assert.Null(fallbackTail.LastConsumedReservation);
+        Assert.Null(fallbackTail.LastConsumingInstallReceipt);
+        var admitted = RequestRuntimeUnlockAdmission(
+            paired.State,
+            paired.State.CurrentRuntimeOwner);
+        var admission = Assert.IsType<RuntimeUnlockAdmissionToken>(
+            admitted.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken);
+        var pendingDecision = RecordPendingPreCommitProbe(
+            admitted.State,
+            admission);
+        var pending = Assert.IsType<RuntimeUnlockPendingPreCommitProbeRequest>(
+            pendingDecision.State.CurrentRuntimeUnlockPendingPreCommitProbe);
+        var observation =
+            new RuntimeUnlockResponderPeerProbeRouteTransitionObservation(
+                pending.SessionId,
+                pending.TransferId,
+                pending.TransactionGeneration,
+                pending.OfferGeneration,
+                PendingAnswerAckGeneration: 5,
+                PayerDecisionId: 7,
+                LaunchGeneration: 31,
+                Lanes: "file",
+                AnswerAcceptanceSource: "SemanticAnswerAck",
+                AckMessageId: "answer-ack-message",
+                AckSourceFingerprint: new string('b', 64),
+                PeerProbeFrameFingerprint: new string('c', 64),
+                pending.TunaPathLeaseGeneration,
+                pending.TunaPathLeaseListenerRunId,
+                ProbeId: "probe-responder-fallback-v6-to-tuna",
+                RuntimeUnlockPathProbeState.Acked,
+                FileTransferTransportKind.Tuna,
+                ProbeAckedUtcMs: 40_100,
+                FileTransferRoute.FileTunaV4,
+                FileTransferProtocol.ProtocolVersionV4,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna);
+        var bound = FileTransferCoordinator
+            .BindRuntimeUnlockResponderPeerProbeRouteTransitionHandoff(
+                pendingDecision.State,
+                observation,
+                admission,
+                pending);
+        Assert.Equal(
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Accepted,
+            bound.Status);
+        var responderAuthority = Assert.IsType<
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority>(
+            bound.Authority);
+        var duplicate = FileTransferCoordinator
+            .BindRuntimeUnlockResponderPeerProbeRouteTransitionHandoff(
+                bound.State,
+                observation,
+                admission,
+                pending);
+        Assert.Equal(
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Idempotent,
+            duplicate.Status);
+        Assert.Equal(responderAuthority, duplicate.Authority);
+
+        var observationMutations =
+            new RuntimeUnlockResponderPeerProbeRouteTransitionObservation[]
+            {
+                observation with
+                {
+                    PendingAnswerAckGeneration =
+                        observation.PendingAnswerAckGeneration + 1,
+                },
+                observation with
+                {
+                    PayerDecisionId = observation.PayerDecisionId + 1,
+                },
+                observation with
+                {
+                    LaunchGeneration = observation.LaunchGeneration + 1,
+                },
+                observation with { Lanes = "file,screen" },
+                observation with { AnswerAcceptanceSource = "RawAnswerAck" },
+                observation with { AckMessageId = "mutated-answer-ack-message" },
+                observation with
+                {
+                    AckSourceFingerprint = new string('d', 64),
+                },
+                observation with
+                {
+                    PeerProbeFrameFingerprint = new string('e', 64),
+                },
+                observation with
+                {
+                    TunaPathLeaseGeneration =
+                        observation.TunaPathLeaseGeneration + 1,
+                },
+                observation with
+                {
+                    TunaPathLeaseListenerRunId = "mutated-listener-run",
+                },
+                observation with { ProbeId = "mutated-probe" },
+                observation with
+                {
+                    ProbeState = RuntimeUnlockPathProbeState.Started,
+                },
+                observation with
+                {
+                    ProbeTransport = FileTransferTransportKind.RegularNkn,
+                },
+                observation with
+                {
+                    ProbeAckedUtcMs = observation.ProbeAckedUtcMs + 1,
+                },
+                observation with
+                {
+                    TargetRoute = FileTransferRoute.PostTunaFallbackV6,
+                },
+            };
+        foreach (var mutation in observationMutations)
+        {
+            var mutatedBound = FileTransferCoordinator
+                .BindRuntimeUnlockResponderPeerProbeRouteTransitionHandoff(
+                    bound.State,
+                    mutation,
+                    admission,
+                    pending);
+            Assert.Equal(
+                RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
+                    .Rejected,
+                mutatedBound.Status);
+            Assert.Equal(responderAuthority, mutatedBound.Authority);
+        }
+
+        FileTransferCoordinatorState MutatePairScope(
+            Func<FileTransferFallbackTailYieldScope,
+                FileTransferFallbackTailYieldScope> mutate)
+        {
+            var currentFallback = bound.State.PersistentState.FallbackTailYield;
+            var currentOperation = currentFallback.CurrentOperation!.Value;
+            return bound.State with
+            {
+                PersistentState = bound.State.PersistentState with
+                {
+                    FallbackTailYield = currentFallback with
+                    {
+                        CurrentOperation = currentOperation with
+                        {
+                            Scope = mutate(currentOperation.Scope),
+                        },
+                    },
+                },
+            };
+        }
+
+        var currentPair = bound.State.PersistentState.FallbackTailYield;
+        var currentPairOperation = currentPair.CurrentOperation!.Value;
+        var mutationPublication =
+            bound.State.CurrentRoutePublicationToken!.Value;
+        var scopeMutations = new FileTransferCoordinatorState[]
+        {
+            bound.State with { Direction = FileTransferDirection.Outbound },
+            bound.State with { IsTerminal = true },
+            bound.State with
+            {
+                RouteSelection = FileTransferRouteResolver.Resolve(
+                    FileTransferRoute.FileTunaV4),
+            },
+            bound.State with
+            {
+                CurrentRoutePublicationToken = mutationPublication with
+                {
+                    PublicationGeneration =
+                        mutationPublication.PublicationGeneration + 1,
+                },
+            },
+            bound.State with
+            {
+                CurrentRuntimeUnlockAdmission = admission with
+                {
+                    AdmissionGeneration = admission.AdmissionGeneration + 1,
+                },
+            },
+            bound.State with
+            {
+                PersistentState = bound.State.PersistentState with
+                {
+                    FallbackTailYield = currentPair with
+                    {
+                        CurrentOperation = currentPairOperation with
+                        {
+                            PairingState =
+                                FileTransferFallbackTailYieldPairingState
+                                    .PeerProofObserved,
+                            PairedRelease = null,
+                        },
+                    },
+                },
+            },
+            MutatePairScope(scope => scope with
+            {
+                LegGeneration = scope.LegGeneration + 1,
+            }),
+            MutatePairScope(scope => scope with
+            {
+                TransportEpoch = scope.TransportEpoch + 1,
+            }),
+            MutatePairScope(scope => scope with
+            {
+                BridgeRecoveryGeneration = scope.BridgeRecoveryGeneration + 1,
+            }),
+            MutatePairScope(scope => scope with
+            {
+                CheckpointRequestIdSnapshot =
+                    $"{scope.CheckpointRequestIdSnapshot}-mutated",
+            }),
+        };
+        foreach (var mutation in scopeMutations)
+        {
+            var invalidatedScope = FileTransferCoordinator
+                .BindRuntimeUnlockResponderPeerProbeRouteTransitionHandoff(
+                    mutation,
+                    observation,
+                    admission,
+                    pending);
+            Assert.Equal(
+                RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
+                    .Invalidated,
+                invalidatedScope.Status);
+            Assert.Null(invalidatedScope.Authority);
+        }
+
+        var unavailable = FileTransferCoordinator
+            .InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoff(
+                bound.State,
+                observation,
+                "data_session_unavailable");
+        Assert.Equal(
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Invalidated,
+            unavailable.Status);
+        Assert.Null(unavailable.Authority);
+        Assert.Null(
+            unavailable.State.PersistentState
+                .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
+                .CurrentAuthority);
+        var unavailableReplay = FileTransferCoordinator
+            .BindRuntimeUnlockResponderPeerProbeRouteTransitionHandoff(
+                unavailable.State,
+                observation,
+                admission,
+                pending);
+        Assert.Equal(
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Accepted,
+            unavailableReplay.Status);
+        Assert.True(
+            unavailableReplay.Authority!.Value.AuthorityGeneration >
+            responderAuthority.AuthorityGeneration);
+
+        var staleScope = bound.State with
+        {
+            CurrentDataSessionGeneration =
+                bound.State.CurrentDataSessionGeneration + 1,
+        };
+        var invalidated = FileTransferCoordinator
+            .BindRuntimeUnlockResponderPeerProbeRouteTransitionHandoff(
+                staleScope,
+                observation,
+                admission,
+                pending);
+        Assert.Equal(
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Invalidated,
+            invalidated.Status);
+        Assert.Null(invalidated.Authority);
+        var staleReplay = FileTransferCoordinator
+            .BindRuntimeUnlockResponderPeerProbeRouteTransitionHandoff(
+                invalidated.State,
+                observation,
+                admission,
+                pending);
+        Assert.Equal(
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Invalidated,
+            staleReplay.Status);
+        Assert.Null(staleReplay.Authority);
+
+        var transaction = BuildCommitReadyRuntimeUnlockTransaction(
+            bound.State,
+            pending.TransactionGeneration,
+            pending.OfferGeneration,
+            observation.ProbeId);
+        var finalProof = WithCurrentTunaLease(
+            RuntimeUnlockTransaction.CreateRouteCommitProof(
+                transaction,
+                "responder_fallback_v6_to_tuna_commit",
+                admission),
+            pending.TunaPathLeaseGeneration,
+            pending.TunaPathLeaseListenerRunId!);
+        var currentOwner = bound.State.CurrentRuntimeOwner!.Value;
+        var currentPublication = bound.State.CurrentRoutePublicationToken!.Value;
+        var currentLeg = bound.State.CurrentLeg!;
+        var checkpoint = new FileTransferRouteTransitionDurableCheckpoint(
+            currentOwner,
+            currentPublication,
+            bound.State.TerminalGeneration,
+            currentLeg.Generation,
+            currentLeg.TransportEpochId,
+            currentLeg.BridgeRecoveryGeneration,
+            bound.State.CurrentDataSessionGeneration,
+            StateEpoch: 5,
+            ContiguousCommittedChunkIndex: 6,
+            DurableHighestChunkIndex: 7,
+            ChunkCount: 128,
+            CheckpointGeneration: 3);
+        var request = new FileTransferRouteTransitionPrepareRequest(
+            FileTransferRouteTransitionKind.PostTunaFallbackV6ToTunaV4,
+            currentOwner,
+            currentPublication,
+            SourceRouteCommit: null,
+            FileTransferRoute.PostTunaFallbackV6,
+            FileTransferProtocol.ProtocolVersionV6,
+            FileTransferTransportKind.RegularNkn,
+            new FileTransferTunaActivationTransitionProofBoundary(
+                admission,
+                pending,
+                finalProof,
+                observation.LaunchGeneration,
+                EffectiveRetryInstallReceipt: null,
+                pairedRelease,
+                responderAuthority),
+            checkpoint,
+            FileTransferRoute.FileTunaV4,
+            FileTransferProtocol.ProtocolVersionV4,
+            FileTransferTransportKind.Tuna,
+            FileTransferTransportHandoffKind.NormalToTunaActivation,
+            PredecessorTransitionAuthorityId: null,
+            "responder_fallback_v6_to_tuna_transition_test");
+        var committed = CommitEmptyFileTransferRouteTransitionForTest(
+            bound.State,
+            request,
+            finalProof);
+        Assert.Equal(FileTransferRoute.FileTunaV4, committed.State.RouteSelection.Route);
+        Assert.Null(
+            FileTransferCoordinator.GetFallbackTailYieldSubstate(committed.State)
+                .LastConsumedReservation);
+        var unavailableAfterCommit = FileTransferCoordinator
+            .InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoff(
+                committed.State,
+                observation,
+                "data_session_unavailable_after_commit");
+        Assert.Equal(
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Invalidated,
+            unavailableAfterCommit.Status);
+        Assert.Null(unavailableAfterCommit.Authority);
+        Assert.Equal(
+            FileTransferRoute.FileTunaV4,
+            unavailableAfterCommit.State.RouteSelection.Route);
+        var staleAvailableAfterCommit = FileTransferCoordinator
+            .BindRuntimeUnlockResponderPeerProbeRouteTransitionHandoff(
+                unavailableAfterCommit.State,
+                observation,
+                admission,
+                pending);
+        Assert.Equal(
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Invalidated,
+            staleAvailableAfterCommit.Status);
+        Assert.Null(staleAvailableAfterCommit.Authority);
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "FileTransferRouteTransition")]
     public void FileTransferRouteTransition_InstalledPressureRequiresExactApplyReceipt()
     {
         var setup = CreateRegularV4ToTunaRouteTransitionSetup();
@@ -19307,13 +19739,17 @@ public sealed class FileTransferCoordinatorTests
             reauthorization);
     }
 
-    private static FileTransferCoordinatorState ActiveFallbackStateWithoutCheckpoint()
+    private static FileTransferCoordinatorState ActiveFallbackStateWithoutCheckpoint(
+        FileTransferDirection direction = FileTransferDirection.Outbound)
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
         var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
         var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
         var state = FallBack(
-            ActivateTuna(StartRegular(regular).State, tuna, committedChunk: 5).State,
+            ActivateTuna(
+                StartRegular(regular, direction).State,
+                tuna,
+                committedChunk: 5).State,
             fallback,
             committedChunk: 5,
             transportEpoch: 2).State;

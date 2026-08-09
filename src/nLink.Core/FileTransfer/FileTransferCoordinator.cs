@@ -228,6 +228,81 @@ internal readonly record struct RuntimeUnlockPendingPreCommitProbeDecision(
     int CurrentLegGeneration,
     RuntimeUnlockPendingPreCommitProbeRequest? PendingRequest);
 
+internal enum RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
+{
+    Accepted = 0,
+    Idempotent = 1,
+    Held = 2,
+    Rejected = 3,
+    Invalidated = 4,
+}
+
+internal readonly record struct
+    RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority(
+        FileTransferAuthorityId AuthorityId,
+        int AuthorityGeneration,
+        RuntimeUnlockResponderPeerProbeRouteTransitionObservation Observation,
+        RuntimeOwnerToken RuntimeOwner,
+        RoutePublicationToken RoutePublication,
+        int TerminalGeneration,
+        int LegGeneration,
+        long TransportEpoch,
+        int BridgeRecoveryGeneration,
+        string CheckpointRequestId,
+        int CheckpointGeneration,
+        string DataSessionIdentity,
+        long DataSessionGeneration,
+        FileTransferFallbackTailPairedReleaseReceipt PairedRelease,
+        RuntimeUnlockAdmissionToken RuntimeUnlockAdmission,
+        RuntimeUnlockPendingPreCommitProbeRequest PendingPreCommitProbe)
+{
+    public bool IsDefault =>
+        AuthorityId.IsDefault ||
+        AuthorityGeneration <= 0 ||
+        Observation.IsDefault ||
+        RuntimeOwner.IsDefault ||
+        RoutePublication.IsDefault ||
+        LegGeneration <= 0 ||
+        TransportEpoch <= 0 ||
+        string.IsNullOrWhiteSpace(CheckpointRequestId) ||
+        string.IsNullOrWhiteSpace(DataSessionIdentity) ||
+        DataSessionGeneration <= 0 ||
+        PairedRelease.IsDefault ||
+        RuntimeUnlockAdmission.IsDefault ||
+        PendingPreCommitProbe.IsDefault;
+}
+
+internal readonly record struct
+    RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
+        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus Status,
+        string Reason,
+        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority?
+            Authority)
+{
+    public FileTransferCoordinatorState State { get; init; } = null!;
+
+    public bool Accepted =>
+        Status is
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Accepted or
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Idempotent;
+}
+
+internal readonly record struct
+    RuntimeUnlockResponderPeerProbeRouteTransitionHandoffSubstate(
+        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority?
+            CurrentAuthority = null,
+        RuntimeUnlockResponderPeerProbeRouteTransitionObservation?
+            LastInvalidatedObservation = null,
+        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus?
+            LastStatus = null,
+        string? LastReason = null,
+        int LastAuthorityGeneration = 0)
+{
+    internal static
+        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffSubstate Empty =>
+        default;
+}
+
 internal readonly record struct RouteCommitToken(
     string SessionId,
     string TransferId,
@@ -936,7 +1011,9 @@ internal sealed record FileTransferTunaActivationTransitionProofBoundary(
     long LaunchGeneration,
     RuntimeUnlockRetryDispatchInstallReceipt? EffectiveRetryInstallReceipt = null,
     FileTransferFallbackTailPairedReleaseReceipt?
-        FallbackTailPairedReleaseReceipt = null)
+        FallbackTailPairedReleaseReceipt = null,
+    RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority?
+        ResponderPeerProbeHandoffAuthority = null)
     : FileTransferRouteTransitionProofBoundary
 {
     internal FallbackTailYieldDecision? FallbackTailYieldDecision =>
@@ -949,7 +1026,11 @@ internal sealed record FileTransferTunaActivationTransitionProofBoundary(
         LaunchGeneration <= 0 ||
         (EffectiveRetryInstallReceipt is { } receipt && receipt.IsDefault) ||
         (FallbackTailPairedReleaseReceipt is { } release &&
-         release.IsDefault);
+         release.IsDefault) ||
+        (ResponderPeerProbeHandoffAuthority is { } responder &&
+         responder.IsDefault) ||
+        (EffectiveRetryInstallReceipt is not null &&
+         ResponderPeerProbeHandoffAuthority is not null);
 }
 
 internal sealed record FileTransferFallbackTransitionProofBoundary(
@@ -2458,7 +2539,9 @@ internal readonly record struct
 
 internal readonly record struct FileTransferCoordinatorPersistentState(
     RegularV4FrontierRepairPressureSubstate RegularV4FrontierRepairPressure = default,
-    FileTransferRouteTransitionSubstate FileTransferRouteTransition = default)
+    FileTransferRouteTransitionSubstate FileTransferRouteTransition = default,
+    RuntimeUnlockResponderPeerProbeRouteTransitionHandoffSubstate
+        RuntimeUnlockResponderPeerProbeRouteTransitionHandoff = default)
 {
     private readonly RuntimeUnlockRetryLifecycleSubstate?
         runtimeUnlockRetryLifecycle;
@@ -6101,6 +6184,9 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         FileTransferRouteTransitionPrepareRequest request)
     {
+        state =
+            InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForScopeReplacement(
+                state);
         var transitionState = state.PersistentState.FileTransferRouteTransition;
         if (transitionState.CurrentOperation is { } current)
         {
@@ -7315,6 +7401,9 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state)
     {
         state = InvalidateFallbackTailYieldForDataSessionReplacement(state);
+        state =
+            InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForScopeReplacement(
+                state);
         var reason = NormalizeReason(coordinatorEvent.Reason);
         if (state.IsTerminal)
         {
@@ -7407,7 +7496,16 @@ internal static class FileTransferCoordinator
             };
         }
 
-        return ForwardFallbackRoutePublicationAuthorityAfterLegMutation(state, decision, reason);
+        decision = ForwardFallbackRoutePublicationAuthorityAfterLegMutation(
+            state,
+            decision,
+            reason);
+        return decision with
+        {
+            State =
+                InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForScopeReplacement(
+                    decision.State),
+        };
     }
 
     internal static FileTransferCoordinatorDecision
@@ -7568,6 +7666,9 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorActionRequest request)
     {
         state = InvalidateFallbackTailYieldForDataSessionReplacement(state);
+        state =
+            InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForScopeReplacement(
+                state);
         if (state.IsTerminal)
         {
             return ActionDecision(
@@ -11694,7 +11795,11 @@ internal static class FileTransferCoordinator
             FileTransferCoordinatorState state,
             FileTransferFallbackTailYieldTransitionStatus status,
             string reason)
-        => new(status, NormalizeReason(reason), state);
+        => new(
+            status,
+            NormalizeReason(reason),
+            InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForScopeReplacement(
+                state));
 
     private static FallbackTailYieldDecision?
         GetCurrentFallbackTailYieldDecision(FileTransferCoordinatorState state)
@@ -26202,6 +26307,635 @@ internal static class FileTransferCoordinator
             AuthorityId = authority.AuthorityId,
         };
 
+    private static FileTransferCoordinatorState
+        InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForScopeReplacement(
+            FileTransferCoordinatorState state)
+    {
+        var substate = state.PersistentState
+            .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff;
+        if (substate.CurrentAuthority is null)
+        {
+            return state;
+        }
+
+        var currentAuthorityValid =
+            substate.CurrentAuthority is { } authority &&
+            TryValidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthorityCurrent(
+                state,
+                authority,
+                out _);
+        if (currentAuthorityValid)
+        {
+            return state;
+        }
+
+        return state with
+        {
+            PersistentState = state.PersistentState with
+            {
+                RuntimeUnlockResponderPeerProbeRouteTransitionHandoff =
+                    substate with
+                    {
+                        CurrentAuthority = null,
+                        LastInvalidatedObservation =
+                            substate.CurrentAuthority?.Observation ??
+                            substate.LastInvalidatedObservation,
+                        LastStatus =
+                            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
+                                .Invalidated,
+                        LastReason =
+                            "runtime_unlock_responder_peer_probe_handoff_scope_replaced",
+                    },
+            },
+        };
+    }
+
+    internal static
+        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision
+        BindRuntimeUnlockResponderPeerProbeRouteTransitionHandoff(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation,
+            RuntimeUnlockAdmissionToken admission,
+            RuntimeUnlockPendingPreCommitProbeRequest pendingPreCommitProbe)
+    {
+        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision Decision(
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus status,
+            string reason,
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority?
+                authority,
+            FileTransferCoordinatorState nextState)
+            => new(status, reason, authority) { State = nextState };
+
+        state =
+            InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForScopeReplacement(
+                state);
+        var substate = state.PersistentState
+            .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff;
+        var retainedObservation = substate.CurrentAuthority?.Observation;
+        if (substate.LastInvalidatedObservation is { } invalidatedObservation &&
+            IsSameRuntimeUnlockResponderPeerProbeLogicalTransaction(
+                invalidatedObservation,
+                observation))
+        {
+            return Decision(
+                RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
+                    .Invalidated,
+                "runtime_unlock_responder_peer_probe_handoff_scope_replaced",
+                null,
+                state);
+        }
+
+        if (retainedObservation is { } retained &&
+            retained != observation)
+        {
+            return Decision(
+                RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
+                    .Rejected,
+                "runtime_unlock_responder_peer_probe_handoff_tuple_mutation",
+                substate.CurrentAuthority,
+                state);
+        }
+
+        if (substate.CurrentAuthority is { } existing &&
+            existing.Observation == observation)
+        {
+            if (TryValidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthorityCurrent(
+                    state,
+                    existing,
+                    out _))
+            {
+                return Decision(
+                    RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
+                        .Idempotent,
+                    "runtime_unlock_responder_peer_probe_handoff_already_current",
+                    existing,
+                    state);
+            }
+
+            var invalidated = state with
+            {
+                PersistentState = state.PersistentState with
+                {
+                    RuntimeUnlockResponderPeerProbeRouteTransitionHandoff =
+                        substate with
+                        {
+                            CurrentAuthority = null,
+                            LastStatus =
+                                RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
+                                    .Invalidated,
+                            LastReason =
+                                "runtime_unlock_responder_peer_probe_handoff_scope_replaced",
+                        },
+                },
+            };
+            return Decision(
+                RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
+                    .Invalidated,
+                "runtime_unlock_responder_peer_probe_handoff_scope_replaced",
+                null,
+                invalidated);
+        }
+
+        if (!TryValidateRuntimeUnlockResponderPeerProbeRouteTransitionObservation(
+                state,
+                observation,
+                admission,
+                pendingPreCommitProbe,
+                out var operation,
+                out var rejectionReason))
+        {
+            var rejected = state with
+            {
+                PersistentState = state.PersistentState with
+                {
+                    RuntimeUnlockResponderPeerProbeRouteTransitionHandoff =
+                        substate with
+                        {
+                            LastStatus =
+                                RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
+                                    .Rejected,
+                            LastReason = rejectionReason,
+                        },
+                },
+            };
+            return Decision(
+                RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
+                    .Rejected,
+                rejectionReason,
+                null,
+                rejected);
+        }
+
+        if (operation.PairingState !=
+                FileTransferFallbackTailYieldPairingState.Paired ||
+            operation.PairedRelease is not { IsDefault: false } pairedRelease)
+        {
+            return Decision(
+                RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Rejected,
+                "runtime_unlock_responder_peer_probe_handoff_pair_not_current",
+                null,
+                state);
+        }
+
+        var scope = GetEffectiveFallbackTailYieldScope(operation);
+        var generation = Math.Max(1, substate.LastAuthorityGeneration + 1);
+        var authority =
+            new RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority(
+                IssueRuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthorityId(
+                    state,
+                    observation,
+                    generation),
+                generation,
+                observation,
+                state.CurrentRuntimeOwner!.Value,
+                state.CurrentRoutePublicationToken!.Value,
+                state.TerminalGeneration,
+                state.CurrentLeg!.Generation,
+                state.CurrentLeg.TransportEpochId,
+                state.CurrentLeg.BridgeRecoveryGeneration,
+                scope.CheckpointRequestIdSnapshot,
+                scope.CheckpointGeneration,
+                state.CurrentDataSessionIdentity!,
+                state.CurrentDataSessionGeneration,
+                pairedRelease,
+                admission,
+                pendingPreCommitProbe);
+        var accepted = state with
+        {
+            PersistentState = state.PersistentState with
+            {
+                RuntimeUnlockResponderPeerProbeRouteTransitionHandoff =
+                    new RuntimeUnlockResponderPeerProbeRouteTransitionHandoffSubstate(
+                        CurrentAuthority: authority,
+                        LastInvalidatedObservation: null,
+                        LastStatus:
+                            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
+                                .Accepted,
+                        LastReason:
+                            "runtime_unlock_responder_peer_probe_handoff_bound",
+                        LastAuthorityGeneration: generation),
+            },
+        };
+        return Decision(
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Accepted,
+            "runtime_unlock_responder_peer_probe_handoff_bound",
+            authority,
+            accepted);
+    }
+
+    internal static
+        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision
+        HoldRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForOwnerWork(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority authority,
+            string reason)
+    {
+        state =
+            InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForScopeReplacement(
+                state);
+        if (!TryValidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthorityCurrent(
+                state,
+                authority,
+                out var rejectionReason))
+        {
+            return new RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
+                RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Invalidated,
+                rejectionReason,
+                null)
+            {
+                State = state,
+            };
+        }
+
+        var normalizedReason = string.IsNullOrWhiteSpace(reason)
+            ? "runtime_unlock_responder_peer_probe_handoff_owner_work_pending"
+            : reason.Trim();
+        var substate = state.PersistentState
+            .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff;
+        var held = state with
+        {
+            PersistentState = state.PersistentState with
+            {
+                RuntimeUnlockResponderPeerProbeRouteTransitionHandoff =
+                    substate with
+                    {
+                        LastStatus =
+                            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
+                                .Held,
+                        LastReason = normalizedReason,
+                    },
+            },
+        };
+        return new RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Held,
+            normalizedReason,
+            authority)
+        {
+            State = held,
+        };
+    }
+
+    internal static
+        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision
+        InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoff(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation,
+            string reason)
+    {
+        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision Decision(
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus status,
+            string decisionReason,
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority?
+                authority,
+            FileTransferCoordinatorState nextState)
+            => new(status, decisionReason, authority) { State = nextState };
+
+        state =
+            InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForScopeReplacement(
+                state);
+        var substate = state.PersistentState
+            .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff;
+        if (!string.Equals(
+                state.SessionId,
+                observation.SessionId,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                state.TransferId,
+                observation.TransferId,
+                StringComparison.Ordinal) ||
+            state.Direction != FileTransferDirection.Inbound)
+        {
+            return Decision(
+                RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
+                    .Rejected,
+                "runtime_unlock_responder_peer_probe_handoff_tuple_mutation",
+                substate.CurrentAuthority,
+                state);
+        }
+
+        if (substate.CurrentAuthority is { } current &&
+            current.Observation != observation)
+        {
+            return Decision(
+                RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
+                    .Rejected,
+                "runtime_unlock_responder_peer_probe_handoff_tuple_mutation",
+                current,
+                state);
+        }
+
+        if (substate.CurrentAuthority is null)
+        {
+            if (substate.LastInvalidatedObservation is
+                    { } invalidatedObservation &&
+                IsSameRuntimeUnlockResponderPeerProbeLogicalTransaction(
+                    invalidatedObservation,
+                    observation))
+            {
+                return Decision(
+                    RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
+                        .Invalidated,
+                    substate.LastReason ??
+                        "runtime_unlock_responder_peer_probe_handoff_scope_replaced",
+                    null,
+                    state);
+            }
+
+            return Decision(
+                RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
+                    .Rejected,
+                string.IsNullOrWhiteSpace(reason)
+                    ? "runtime_unlock_responder_peer_probe_handoff_unavailable"
+                    : reason.Trim(),
+                null,
+                state);
+        }
+
+        var normalizedReason = string.IsNullOrWhiteSpace(reason)
+            ? "runtime_unlock_responder_peer_probe_handoff_invalidated"
+            : reason.Trim();
+        var invalidated = state with
+        {
+            PersistentState = state.PersistentState with
+            {
+                RuntimeUnlockResponderPeerProbeRouteTransitionHandoff =
+                    substate with
+                    {
+                        CurrentAuthority = null,
+                        LastStatus =
+                            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
+                                .Invalidated,
+                        LastReason = normalizedReason,
+                    },
+            },
+        };
+        return Decision(
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Invalidated,
+            normalizedReason,
+            null,
+            invalidated);
+    }
+
+    private static bool
+        IsSameRuntimeUnlockResponderPeerProbeLogicalTransaction(
+            RuntimeUnlockResponderPeerProbeRouteTransitionObservation left,
+            RuntimeUnlockResponderPeerProbeRouteTransitionObservation right)
+        => string.Equals(left.SessionId, right.SessionId, StringComparison.Ordinal) &&
+           string.Equals(left.TransferId, right.TransferId, StringComparison.Ordinal) &&
+           left.TransactionGeneration == right.TransactionGeneration &&
+           left.OfferGeneration == right.OfferGeneration;
+
+    private static bool
+        TryValidateRuntimeUnlockResponderPeerProbeRouteTransitionObservation(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation,
+            RuntimeUnlockAdmissionToken admission,
+            RuntimeUnlockPendingPreCommitProbeRequest pendingPreCommitProbe,
+            out FileTransferFallbackTailYieldOperation operation,
+            out string rejectionReason)
+    {
+        operation = default;
+        rejectionReason = "accepted";
+        if (observation.IsDefault ||
+            observation.ProbeState != RuntimeUnlockPathProbeState.Acked ||
+            observation.ProbeAckedUtcMs <= 0 ||
+            !string.Equals(
+                observation.AnswerAcceptanceSource,
+                "SemanticAnswerAck",
+                StringComparison.Ordinal) ||
+            string.IsNullOrWhiteSpace(observation.AckMessageId) ||
+            string.IsNullOrWhiteSpace(observation.AckSourceFingerprint) ||
+            string.IsNullOrWhiteSpace(observation.PeerProbeFrameFingerprint) ||
+            !string.Equals(
+                observation.Lanes,
+                "file",
+                StringComparison.Ordinal))
+        {
+            rejectionReason =
+                "runtime_unlock_responder_peer_probe_observation_invalid";
+            return false;
+        }
+
+        if (state.IsTerminal ||
+            state.Direction != FileTransferDirection.Inbound ||
+            state.RouteSelection.Route != FileTransferRoute.PostTunaFallbackV6 ||
+            state.RouteSelection.ProtocolVersion !=
+                FileTransferProtocol.ProtocolVersionV6 ||
+            state.CurrentRuntimeOwner is not { } owner ||
+            state.CurrentRoutePublicationToken is not { } publication ||
+            state.CurrentLeg is not { } leg ||
+            string.IsNullOrWhiteSpace(state.CurrentDataSessionIdentity) ||
+            state.CurrentDataSessionGeneration <= 0 ||
+            !string.Equals(
+                state.SessionId,
+                observation.SessionId,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                state.TransferId,
+                observation.TransferId,
+                StringComparison.Ordinal))
+        {
+            rejectionReason =
+                "runtime_unlock_responder_peer_probe_transfer_scope_mismatch";
+            return false;
+        }
+
+        if (state.CurrentRuntimeUnlockAdmission != admission ||
+            state.CurrentRuntimeUnlockPendingPreCommitProbe !=
+                pendingPreCommitProbe ||
+            admission.RuntimeOwner != owner ||
+            pendingPreCommitProbe.RuntimeOwner != owner ||
+            pendingPreCommitProbe.AdmissionToken != admission ||
+            pendingPreCommitProbe.TransactionGeneration !=
+                observation.TransactionGeneration ||
+            pendingPreCommitProbe.OfferGeneration !=
+                observation.OfferGeneration ||
+            pendingPreCommitProbe.TunaPathLeaseGeneration !=
+                observation.TunaPathLeaseGeneration ||
+            !string.Equals(
+                pendingPreCommitProbe.TunaPathLeaseListenerRunId,
+                observation.TunaPathLeaseListenerRunId,
+                StringComparison.Ordinal) ||
+            !IsRuntimeUnlockAdmissionTokenCurrent(
+                state,
+                admission,
+                out rejectionReason) ||
+            !IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(
+                state,
+                pendingPreCommitProbe,
+                out rejectionReason))
+        {
+            if (string.Equals(rejectionReason, "accepted", StringComparison.Ordinal))
+            {
+                rejectionReason =
+                    "runtime_unlock_responder_peer_probe_precommit_scope_mismatch";
+            }
+
+            return false;
+        }
+
+        var fallbackTail = state.PersistentState.FallbackTailYield;
+        if (fallbackTail.CurrentOperation is not { } current ||
+            current.PairingState is
+                FileTransferFallbackTailYieldPairingState.ReleaseReserved or
+                FileTransferFallbackTailYieldPairingState.ReleaseConsumed or
+                FileTransferFallbackTailYieldPairingState.Invalidated ||
+            fallbackTail.CurrentReservation is not null ||
+            fallbackTail.LastConsumedReservation is not null ||
+            fallbackTail.LastConsumingInstallReceipt is not null ||
+            !IsFallbackTailYieldScopeCurrent(
+                state,
+                GetEffectiveFallbackTailYieldScope(current),
+                out rejectionReason))
+        {
+            if (string.Equals(rejectionReason, "accepted", StringComparison.Ordinal))
+            {
+                rejectionReason =
+                    "runtime_unlock_responder_peer_probe_pair_scope_invalid";
+            }
+
+            return false;
+        }
+
+        var scope = GetEffectiveFallbackTailYieldScope(current);
+        if (scope.RuntimeOwner != owner ||
+            scope.RoutePublication != publication ||
+            scope.TerminalGeneration != state.TerminalGeneration ||
+            scope.LegGeneration != leg.Generation ||
+            scope.TransportEpoch != leg.TransportEpochId ||
+            scope.BridgeRecoveryGeneration != leg.BridgeRecoveryGeneration ||
+            !string.Equals(
+                scope.DataSessionIdentity,
+                state.CurrentDataSessionIdentity,
+                StringComparison.Ordinal) ||
+            scope.DataSessionGeneration != state.CurrentDataSessionGeneration)
+        {
+            rejectionReason =
+                "runtime_unlock_responder_peer_probe_pair_scope_mismatch";
+            return false;
+        }
+
+        operation = current;
+        return true;
+    }
+
+    private static bool
+        TryValidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthorityCurrent(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority authority,
+            out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (authority.IsDefault ||
+            state.PersistentState
+                    .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
+                    .CurrentAuthority != authority ||
+            !TryValidateRuntimeUnlockResponderPeerProbeRouteTransitionObservation(
+                state,
+                authority.Observation,
+                authority.RuntimeUnlockAdmission,
+                authority.PendingPreCommitProbe,
+                out var operation,
+                out rejectionReason) ||
+            operation.PairingState !=
+                FileTransferFallbackTailYieldPairingState.Paired ||
+            operation.PairedRelease != authority.PairedRelease ||
+            authority.RuntimeOwner != state.CurrentRuntimeOwner ||
+            authority.RoutePublication != state.CurrentRoutePublicationToken ||
+            authority.TerminalGeneration != state.TerminalGeneration ||
+            authority.LegGeneration != state.CurrentLeg?.Generation ||
+            authority.TransportEpoch != state.CurrentLeg?.TransportEpochId ||
+            authority.BridgeRecoveryGeneration !=
+                state.CurrentLeg?.BridgeRecoveryGeneration ||
+            !string.Equals(
+                authority.DataSessionIdentity,
+                state.CurrentDataSessionIdentity,
+                StringComparison.Ordinal) ||
+            authority.DataSessionGeneration != state.CurrentDataSessionGeneration)
+        {
+            if (string.Equals(rejectionReason, "accepted", StringComparison.Ordinal))
+            {
+                rejectionReason =
+                    "runtime_unlock_responder_peer_probe_handoff_not_current";
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    private static FileTransferAuthorityId
+        IssueRuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthorityId(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation,
+            int generation)
+    {
+        var operation = state.PersistentState.FallbackTailYield.CurrentOperation;
+        var scope = operation is { } current
+            ? GetEffectiveFallbackTailYieldScope(current)
+            : default;
+        var release = operation?.PairedRelease;
+        var canonical = string.Join(
+            "|",
+            FileTransferAuthoritySchema.Current.ToString(
+                CultureInfo.InvariantCulture),
+            "runtime_unlock_responder_peer_probe_handoff",
+            state.SessionId,
+            state.TransferId,
+            state.Direction.ToString(),
+            state.CurrentRuntimeOwner?.RuntimeGeneration.ToString(
+                CultureInfo.InvariantCulture) ?? "0",
+            state.CurrentRoutePublicationToken?.PublicationGeneration.ToString(
+                CultureInfo.InvariantCulture) ?? "0",
+            state.TerminalGeneration.ToString(CultureInfo.InvariantCulture),
+            state.CurrentLeg?.Generation.ToString(CultureInfo.InvariantCulture) ??
+                "0",
+            state.CurrentLeg?.TransportEpochId.ToString(
+                CultureInfo.InvariantCulture) ?? "0",
+            state.CurrentLeg?.BridgeRecoveryGeneration.ToString(
+                CultureInfo.InvariantCulture) ?? "0",
+            scope.CheckpointRequestIdSnapshot ?? "(none)",
+            scope.CheckpointGeneration.ToString(CultureInfo.InvariantCulture),
+            state.CurrentDataSessionIdentity ?? "(none)",
+            state.CurrentDataSessionGeneration.ToString(
+                CultureInfo.InvariantCulture),
+            release?.ReleaseAuthorityId.ToString() ?? "(none)",
+            release?.ReleaseGeneration.ToString(CultureInfo.InvariantCulture) ??
+                "0",
+            release?.PairingGeneration.ToString(CultureInfo.InvariantCulture) ??
+                "0",
+            scope.PairKey ?? "(none)",
+            observation.TransactionGeneration.ToString(
+                CultureInfo.InvariantCulture),
+            observation.OfferGeneration.ToString(CultureInfo.InvariantCulture),
+            observation.PendingAnswerAckGeneration.ToString(
+                CultureInfo.InvariantCulture),
+            observation.PayerDecisionId.ToString(CultureInfo.InvariantCulture),
+            observation.LaunchGeneration.ToString(CultureInfo.InvariantCulture),
+            observation.Lanes,
+            observation.AnswerAcceptanceSource,
+            observation.AckMessageId ?? "(none)",
+            observation.AckSourceFingerprint ?? "(none)",
+            observation.PeerProbeFrameFingerprint ?? "(none)",
+            observation.TunaPathLeaseGeneration.ToString(
+                CultureInfo.InvariantCulture),
+            observation.TunaPathLeaseListenerRunId ?? "(none)",
+            observation.ProbeId,
+            observation.ProbeState.ToString(),
+            observation.ProbeTransport.ToString(),
+            observation.ProbeAckedUtcMs.ToString(CultureInfo.InvariantCulture),
+            observation.TargetRoute.ToString(),
+            observation.TargetProtocolVersion.ToString(
+                CultureInfo.InvariantCulture),
+            observation.HandoffKind.ToString(),
+            observation.TargetTransport.ToString(),
+            generation.ToString(CultureInfo.InvariantCulture));
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
+        return new FileTransferAuthorityId(
+            $"fta{FileTransferAuthoritySchema.Current}-runtime_unlock_responder_peer_probe_handoff-{Convert.ToHexString(hash.AsSpan(0, 12)).ToLowerInvariant()}");
+    }
+
     private static bool TryValidateFileTransferRouteTransitionPrepareRequest(
         FileTransferCoordinatorState state,
         FileTransferRouteTransitionPrepareRequest request,
@@ -26287,42 +27021,89 @@ internal static class FileTransferCoordinator
             FileTransferRouteTransitionKind.PostTunaFallbackV6ToTunaV4)
         {
             if (request.ProofBoundary is not
-                FileTransferTunaActivationTransitionProofBoundary
-                {
-                    EffectiveRetryInstallReceipt: { IsDefault: false } receipt,
-                    FallbackTailPairedReleaseReceipt:
-                    {
-                        IsDefault: false,
-                    } pairedRelease,
-                } ||
-                receipt.Authority.ReleaseKind !=
-                    RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield ||
-                receipt.Authority.ReleaseAuthorityId !=
-                    pairedRelease.ReleaseAuthorityId ||
-                receipt.Authority.ReleaseGeneration !=
-                    pairedRelease.ReleaseGeneration ||
-                !string.Equals(
-                    receipt.Authority.ReleaseOutcome,
-                    pairedRelease.ReleaseOutcome,
-                    StringComparison.Ordinal) ||
-                !TryValidateFileTransferFallbackTunaActivationBoundaryCurrent(
-                    state,
-                    receipt,
-                    pairedRelease,
-                    request.ProofBoundary as
-                        FileTransferTunaActivationTransitionProofBoundary,
-                    out rejectionReason))
+                FileTransferTunaActivationTransitionProofBoundary activation)
             {
-                if (string.Equals(
-                        rejectionReason,
-                        "accepted",
-                        StringComparison.Ordinal))
-                {
-                    rejectionReason =
-                        "filetransfer_route_transition_fallback_release_boundary_invalid";
-                }
-
+                rejectionReason =
+                    "filetransfer_route_transition_fallback_release_boundary_invalid";
                 return false;
+            }
+
+            var initiatorMode =
+                activation.EffectiveRetryInstallReceipt is
+                    { IsDefault: false } &&
+                activation.FallbackTailPairedReleaseReceipt is
+                    { IsDefault: false };
+            var responderMode =
+                activation.EffectiveRetryInstallReceipt is null &&
+                activation.FallbackTailPairedReleaseReceipt is
+                    { IsDefault: false } &&
+                activation.ResponderPeerProbeHandoffAuthority is
+                    { IsDefault: false };
+            if (initiatorMode == responderMode)
+            {
+                rejectionReason =
+                    "filetransfer_route_transition_fallback_authority_mode_invalid";
+                return false;
+            }
+
+            if (initiatorMode)
+            {
+                var receipt = activation.EffectiveRetryInstallReceipt!.Value;
+                var pairedRelease =
+                    activation.FallbackTailPairedReleaseReceipt!.Value;
+                if (activation.ResponderPeerProbeHandoffAuthority is not null ||
+                    receipt.Authority.ReleaseKind !=
+                        RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield ||
+                    receipt.Authority.ReleaseAuthorityId !=
+                        pairedRelease.ReleaseAuthorityId ||
+                    receipt.Authority.ReleaseGeneration !=
+                        pairedRelease.ReleaseGeneration ||
+                    !string.Equals(
+                        receipt.Authority.ReleaseOutcome,
+                        pairedRelease.ReleaseOutcome,
+                        StringComparison.Ordinal) ||
+                    !TryValidateFileTransferFallbackTunaActivationBoundaryCurrent(
+                        state,
+                        receipt,
+                        pairedRelease,
+                        activation,
+                        out rejectionReason))
+                {
+                    if (string.Equals(
+                            rejectionReason,
+                            "accepted",
+                            StringComparison.Ordinal))
+                    {
+                        rejectionReason =
+                            "filetransfer_route_transition_fallback_release_boundary_invalid";
+                    }
+
+                    return false;
+                }
+            }
+            else
+            {
+                var responderAuthority =
+                    activation.ResponderPeerProbeHandoffAuthority!.Value;
+                var pairedRelease =
+                    activation.FallbackTailPairedReleaseReceipt!.Value;
+                if (responderAuthority.PairedRelease != pairedRelease ||
+                    !TryValidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthorityCurrent(
+                        state,
+                        responderAuthority,
+                        out rejectionReason))
+                {
+                    if (string.Equals(
+                            rejectionReason,
+                            "accepted",
+                            StringComparison.Ordinal))
+                    {
+                        rejectionReason =
+                            "filetransfer_route_transition_responder_handoff_boundary_invalid";
+                    }
+
+                    return false;
+                }
             }
         }
 
@@ -27276,17 +28057,44 @@ internal static class FileTransferCoordinator
             FileTransferRouteTransitionKind.PostTunaFallbackV6ToTunaV4)
         {
             var activationRejectionReason = "accepted";
-            if (activation.EffectiveRetryInstallReceipt is not
-                    { IsDefault: false } installReceipt ||
-                activation.FallbackTailPairedReleaseReceipt is not
-                    { IsDefault: false } pairedRelease ||
-                proof != activation.AcceptedLaunchBoundary ||
-                !TryValidateFileTransferFallbackTunaActivationBoundaryCurrent(
-                    state,
-                    installReceipt,
-                    pairedRelease,
-                    activation,
-                    out activationRejectionReason))
+            var initiatorMode =
+                activation.EffectiveRetryInstallReceipt is
+                    { IsDefault: false } &&
+                activation.FallbackTailPairedReleaseReceipt is
+                    { IsDefault: false } &&
+                activation.ResponderPeerProbeHandoffAuthority is null;
+            var responderMode =
+                activation.EffectiveRetryInstallReceipt is null &&
+                activation.FallbackTailPairedReleaseReceipt is
+                    { IsDefault: false } &&
+                activation.ResponderPeerProbeHandoffAuthority is
+                    { IsDefault: false };
+            var validBoundary = proof == activation.AcceptedLaunchBoundary &&
+                initiatorMode != responderMode;
+            if (validBoundary && initiatorMode)
+            {
+                validBoundary =
+                    TryValidateFileTransferFallbackTunaActivationBoundaryCurrent(
+                        state,
+                        activation.EffectiveRetryInstallReceipt!.Value,
+                        activation.FallbackTailPairedReleaseReceipt!.Value,
+                        activation,
+                        out activationRejectionReason);
+            }
+            else if (validBoundary)
+            {
+                var responderAuthority =
+                    activation.ResponderPeerProbeHandoffAuthority!.Value;
+                validBoundary =
+                    responderAuthority.PairedRelease ==
+                        activation.FallbackTailPairedReleaseReceipt!.Value &&
+                    TryValidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthorityCurrent(
+                        state,
+                        responderAuthority,
+                        out activationRejectionReason);
+            }
+
+            if (!validBoundary)
             {
                 rejectionReason = string.Equals(
                     activationRejectionReason,

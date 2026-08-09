@@ -715,7 +715,62 @@ internal sealed record RuntimeUnlockRouteCommitSnapshot(
     string? TunaPathLeaseListenerRunId = null,
     bool TunaPathLeaseCurrent = false,
     string? TunaPathLeaseFailureReason = null,
-    long LaunchGeneration = 0);
+    long LaunchGeneration = 0,
+    RuntimeUnlockResponderPeerProbeRouteTransitionObservation?
+        ResponderPeerProbeRouteTransitionObservation = null);
+
+internal sealed record RuntimeUnlockResponderPeerProbeRouteTransitionObservation(
+    string SessionId,
+    string TransferId,
+    long TransactionGeneration,
+    long OfferGeneration,
+    long PendingAnswerAckGeneration,
+    long PayerDecisionId,
+    long LaunchGeneration,
+    string Lanes,
+    string AnswerAcceptanceSource,
+    string? AckMessageId,
+    string? AckSourceFingerprint,
+    string? PeerProbeFrameFingerprint,
+    long TunaPathLeaseGeneration,
+    string? TunaPathLeaseListenerRunId,
+    string ProbeId,
+    RuntimeUnlockPathProbeState ProbeState,
+    FileTransferTransportKind ProbeTransport,
+    long ProbeAckedUtcMs,
+    FileTransferRoute TargetRoute,
+    int TargetProtocolVersion,
+    FileTransferTransportHandoffKind HandoffKind,
+    FileTransferTransportKind TargetTransport)
+{
+    public bool IsDefault =>
+        string.IsNullOrWhiteSpace(SessionId) ||
+        string.IsNullOrWhiteSpace(TransferId) ||
+        TransactionGeneration <= 0 ||
+        OfferGeneration <= 0 ||
+        PendingAnswerAckGeneration <= 0 ||
+        PayerDecisionId <= 0 ||
+        LaunchGeneration <= 0 ||
+        !string.Equals(Lanes, "file", StringComparison.Ordinal) ||
+        !string.Equals(
+            AnswerAcceptanceSource,
+            "SemanticAnswerAck",
+            StringComparison.Ordinal) ||
+        string.IsNullOrWhiteSpace(AckMessageId) ||
+        string.IsNullOrWhiteSpace(AckSourceFingerprint) ||
+        string.IsNullOrWhiteSpace(PeerProbeFrameFingerprint) ||
+        TunaPathLeaseGeneration <= 0 ||
+        string.IsNullOrWhiteSpace(TunaPathLeaseListenerRunId) ||
+        string.IsNullOrWhiteSpace(ProbeId) ||
+        ProbeState != RuntimeUnlockPathProbeState.Acked ||
+        ProbeTransport != FileTransferTransportKind.Tuna ||
+        ProbeAckedUtcMs <= 0 ||
+        TargetRoute != FileTransferRoute.FileTunaV4 ||
+        TargetProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+        HandoffKind !=
+            FileTransferTransportHandoffKind.NormalToTunaActivation ||
+        TargetTransport != FileTransferTransportKind.Tuna;
+}
 
 internal sealed record PostTunaFallbackHandoffEvidence(
     string SessionId,
@@ -2560,6 +2615,11 @@ public sealed class FileTransferDataSessionAvailabilityChangedEventArgs : EventA
     public FileTransferTransportKind TargetTransport { get; }
 
     internal RuntimeUnlockRouteCommitSnapshot? RuntimeUnlockPreCommitProbeSnapshot { get; }
+
+    internal RuntimeUnlockResponderPeerProbeRouteTransitionObservation?
+        RuntimeUnlockResponderPeerProbeRouteTransitionObservation =>
+        RuntimeUnlockPreCommitProbeSnapshot
+            ?.ResponderPeerProbeRouteTransitionObservation;
 
     internal PostTunaFallbackHandoffEvidence? PostTunaFallbackHandoffEvidence { get; }
 

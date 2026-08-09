@@ -5394,6 +5394,10 @@ public sealed partial class SessionFileTransferService
                     "chunk_batch_committed");
             }
 
+            TryRecheckHeldInboundRuntimeUnlockResponderPeerProbeRouteTransitionAfterOwnerWorkClearedLocked(
+                context,
+                "receiver_sparse_pending_write_cleared");
+
             snapshot = CreateSnapshotLocked();
         }
 

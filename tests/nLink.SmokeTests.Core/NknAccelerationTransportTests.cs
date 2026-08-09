@@ -18410,6 +18410,176 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
     [Fact]
     [Trait("Category", "Smoke")]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockResponderPeerProbe")]
+    public async Task RuntimeUnlockResponderPeerProbeHandoff_BroadcastAndPendingReplayPreserveObservationOnlyForExactTransfer()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient(
+                "host.runtime-unlock.responder-observation-filter.address");
+            var helperClient = new FakeNknClient(
+                "helper.runtime-unlock.responder-observation-filter.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity(
+                    "host-runtime-unlock-responder-observation-filter-id",
+                    hostClient.Address));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity(
+                    "helper-runtime-unlock-responder-observation-filter-id",
+                    helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string matchingTransferId =
+                "transfer_runtime_unlock_responder_observation_matching";
+            const string otherTransferId =
+                "transfer_runtime_unlock_responder_observation_other";
+            var matching = await helper.OpenFileTransferDataSessionAsync(
+                sessionId,
+                matchingTransferId,
+                cts.Token);
+            var other = await helper.OpenFileTransferDataSessionAsync(
+                sessionId,
+                otherTransferId,
+                cts.Token);
+            var matchingEvents =
+                new ConcurrentQueue<
+                    FileTransferDataSessionAvailabilityChangedEventArgs>();
+            var otherEvents =
+                new ConcurrentQueue<
+                    FileTransferDataSessionAvailabilityChangedEventArgs>();
+            matching.AvailabilityChanged += (_, args) =>
+                matchingEvents.Enqueue(args);
+            other.AvailabilityChanged += (_, args) => otherEvents.Enqueue(args);
+
+            var observation =
+                new RuntimeUnlockResponderPeerProbeRouteTransitionObservation(
+                    sessionId,
+                    matchingTransferId,
+                    TransactionGeneration: 13,
+                    OfferGeneration: 17,
+                    PendingAnswerAckGeneration: 19,
+                    PayerDecisionId: 23,
+                    LaunchGeneration: 29,
+                    Lanes: "file",
+                    AnswerAcceptanceSource: "SemanticAnswerAck",
+                    AckMessageId: "answer-ack-observation-filter",
+                    AckSourceFingerprint: new string('a', 64),
+                    PeerProbeFrameFingerprint: new string('b', 64),
+                    TunaPathLeaseGeneration: 31,
+                    TunaPathLeaseListenerRunId:
+                        "listener-run-observation-filter",
+                    ProbeId: "probe-observation-filter",
+                    RuntimeUnlockPathProbeState.Acked,
+                    FileTransferTransportKind.Tuna,
+                    ProbeAckedUtcMs:
+                        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    FileTransferRoute.FileTunaV4,
+                    FileTransferProtocol.ProtocolVersionV4,
+                    FileTransferTransportHandoffKind.NormalToTunaActivation,
+                    FileTransferTransportKind.Tuna);
+            var snapshot = new RuntimeUnlockRouteCommitSnapshot(
+                sessionId,
+                matchingTransferId,
+                observation.TransactionGeneration,
+                observation.OfferGeneration,
+                PeerVisibleProof: true,
+                PeerReceived: true,
+                AnswerReceived: true,
+                FileTransferRoute.FileTunaV4,
+                FileTransferProtocol.ProtocolVersionV4,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                RuntimeUnlockTransactionState.RouteCommitPending.ToString(),
+                "responder_observation_filter",
+                observation.ProbeId,
+                RuntimeUnlockPathProbeState.Acked.ToString(),
+                FileTransferTransportKind.Tuna,
+                observation.ProbeAckedUtcMs,
+                PathProbeFailureReason: null,
+                TunaPathLeaseRequired: true,
+                observation.TunaPathLeaseGeneration,
+                RuntimeUnlockTunaPathLeaseState.ListenerReady.ToString(),
+                observation.TunaPathLeaseListenerRunId,
+                TunaPathLeaseCurrent: true,
+                TunaPathLeaseFailureReason: null,
+                observation.LaunchGeneration,
+                observation);
+
+            InvokePrivateMethod(
+                helper,
+                "RequestFileTransferDataSessionsHandoff",
+                "responder_observation_filter_broadcast",
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                sessionId,
+                snapshot);
+            await WaitUntilAsync(
+                () => matchingEvents.Count == 1 && otherEvents.Count == 1,
+                TimeSpan.FromSeconds(2));
+            var matchingBroadcast = Assert.Single(matchingEvents);
+            var otherBroadcast = Assert.Single(otherEvents);
+            Assert.Equal(
+                observation,
+                matchingBroadcast
+                    .RuntimeUnlockResponderPeerProbeRouteTransitionObservation);
+            Assert.Null(
+                otherBroadcast
+                    .RuntimeUnlockResponderPeerProbeRouteTransitionObservation);
+            Assert.NotNull(otherBroadcast.RuntimeUnlockPreCommitProbeSnapshot);
+
+            matchingEvents.Clear();
+            otherEvents.Clear();
+            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+                helper,
+                "TryRecordPendingFileTransferV6Handoff",
+                sessionId,
+                "responder_observation_filter_pending",
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                "unit_test_pending_replay",
+                snapshot)));
+            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+                helper,
+                "TryReplayPendingFileTransferV6Handoff",
+                matching,
+                "unit_test_matching_replay")));
+            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+                helper,
+                "TryReplayPendingFileTransferV6Handoff",
+                other,
+                "unit_test_other_replay")));
+            await WaitUntilAsync(
+                () => matchingEvents.Count == 1 && otherEvents.Count == 1,
+                TimeSpan.FromSeconds(2));
+            var matchingReplay = Assert.Single(matchingEvents);
+            var otherReplay = Assert.Single(otherEvents);
+            Assert.Equal(
+                observation,
+                matchingReplay
+                    .RuntimeUnlockResponderPeerProbeRouteTransitionObservation);
+            Assert.Null(
+                otherReplay
+                    .RuntimeUnlockResponderPeerProbeRouteTransitionObservation);
+            Assert.NotNull(otherReplay.RuntimeUnlockPreCommitProbeSnapshot);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task TransportAccelerationAnswerAck_RuntimeUnlockTimeoutSchedulesRuntimeUnlockRetry()
     {
         FakeNknClient.ResetNetwork();
