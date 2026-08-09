@@ -24109,8 +24109,9 @@ function Send-ChatMessage {
 
         [void](Wait-Until -TimeoutMs 1000 -PollMs 50 -OnTimeoutMessage 'Window did not become ready for Enter send within 1000 ms.' -Condition {
             try {
+                $chatInput.SetFocus()
                 $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-                if ($focused -and $focused.Current.ProcessId -eq $Window.Current.ProcessId) {
+                if ($focused -and [System.Windows.Automation.Automation]::Compare($focused, $chatInput)) {
                     return $true
                 }
             }

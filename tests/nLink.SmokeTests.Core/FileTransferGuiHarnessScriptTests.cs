@@ -29,6 +29,28 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public void GuiSmoke_EnterSendFocusesExactChatInputBeforeSendingKey()
+    {
+        var repoRoot = FindRepoRoot();
+        var scriptPath = Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1");
+        var scriptText = File.ReadAllText(scriptPath);
+        var functionStart = scriptText.IndexOf("function Send-ChatMessage", StringComparison.Ordinal);
+        Assert.True(functionStart >= 0, "Expected Send-ChatMessage to exist.");
+        var functionEnd = scriptText.IndexOf("function Wait-MessageVisible", functionStart, StringComparison.Ordinal);
+        Assert.True(functionEnd > functionStart, "Expected to locate the end of Send-ChatMessage.");
+
+        var functionBody = scriptText[functionStart..functionEnd];
+        var setFocusIndex = functionBody.IndexOf("$chatInput.SetFocus()", StringComparison.Ordinal);
+        var exactFocusIndex = functionBody.IndexOf("[System.Windows.Automation.Automation]::Compare($focused, $chatInput)", StringComparison.Ordinal);
+        var enterIndex = functionBody.IndexOf("[System.Windows.Forms.SendKeys]::SendWait('{ENTER}')", StringComparison.Ordinal);
+
+        Assert.True(setFocusIndex >= 0, "Expected Enter send to focus Chat.Input explicitly.");
+        Assert.True(exactFocusIndex > setFocusIndex, "Expected exact Chat.Input focus validation after focus acquisition.");
+        Assert.True(enterIndex > exactFocusIndex, "Expected Enter only after exact Chat.Input focus validation.");
+        Assert.DoesNotContain("$focused.Current.ProcessId -eq $Window.Current.ProcessId", functionBody, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void GuiSmoke_NknDirectConnectRequiresCurrentHelperBootstrapBeforeClipboardFallback()
     {
         var repoRoot = FindRepoRoot();
