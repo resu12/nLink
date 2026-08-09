@@ -454,6 +454,7 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             {
                 Assert.Equal(1, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
                 Assert.Equal("fake", manifest.RootElement.GetProperty("executionMode").GetString());
+                Assert.False(manifest.RootElement.GetProperty("validation").GetProperty("currentRuntimeProof").GetBoolean());
                 Assert.Single(manifest.RootElement.GetProperty("scenarioAttempts").EnumerateArray());
             }
             var summaryJsonPath = Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.json");
@@ -632,7 +633,7 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("1", summary[$"{scenario}.runtime_unlock_retry_dispatch_current_listener_adoption_live_projection_missing_unresolved_count"]);
             Assert.Equal("1", summary[$"{scenario}.runtime_unlock_retry_dispatch_current_listener_adoption_restart_expired_unresolved_count"]);
             Assert.Equal("fail", summary[$"{scenario}.runtime_unlock_retry_dispatch_current_listener_adoption_verdict"]);
-            Assert.Equal("route_runtime", summary[$"{scenario}.acceptance_failure_class"]);
+            Assert.Equal("incomplete_proof", summary[$"{scenario}.acceptance_failure_class"]);
             Assert.Equal("route_runtime", summary[$"{scenario}.semantic_failure_domain"]);
 
             using var summaryJson = JsonDocument.Parse(
@@ -672,6 +673,7 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
 
         const string scenario = "regular-v4-live-activation-off-on-off-256mb";
         const string candidate = "runtime_unlock_responder_acked_probe_route_transition_handoff_missing";
+        const string failureVariant = "runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe";
         var repoRoot = FindRepoRoot();
         var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
         var runRoot = Path.Combine(artifactRoot, "phase5-responder-acked-probe-handoff-summary-propagation");
@@ -702,58 +704,405 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_raw_count"]);
             Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count"]);
             Assert.Equal("0", evidence["runtime_unlock_responder_acked_probe_binding_missing_unresolved_count"]);
-            Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_raw_count"]);
-            Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_distinct_count"]);
+            Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_raw_count"]);
+            Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_distinct_count"]);
             Assert.Equal("0", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_recovered_count"]);
-            Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_unresolved_count"]);
+            Assert.Equal("0", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_unresolved_count"]);
+            Assert.Equal("2", evidence["filetransfer_bridge_recovery_execution_payload_hold_missing_raw_count"]);
+            Assert.Equal(failureVariant, evidence["failure_variant"]);
+
+            using (var compact = JsonDocument.Parse(
+                       await File.ReadAllTextAsync(Path.Combine(
+                           runRoot,
+                           scenario,
+                           "filetransfer-retained-compact-summary.json"))))
+            {
+                Assert.Equal("compact", compact.RootElement.GetProperty("retained_analysis_mode").GetString());
+                Assert.Equal(candidate, compact.RootElement.GetProperty("runtime_failure_candidate").GetString());
+                Assert.Equal(failureVariant, compact.RootElement.GetProperty("failure_variant").GetString());
+            }
+
+            using (var diagnostics = JsonDocument.Parse(
+                       await File.ReadAllTextAsync(Path.Combine(
+                           runRoot,
+                           scenario,
+                           "filetransfer-retained-analysis-diagnostics.json"))))
+            {
+                Assert.Equal(0, diagnostics.RootElement.GetProperty("timed_out").GetInt32());
+                Assert.Equal(0, diagnostics.RootElement.GetProperty("exit_code").GetInt32());
+            }
+
+            using (var stageDiagnostics = JsonDocument.Parse(
+                       await File.ReadAllTextAsync(Path.Combine(
+                           runRoot,
+                           scenario,
+                           "filetransfer-retained-analysis-stage-diagnostics.json"))))
+            {
+                Assert.Equal(1, stageDiagnostics.RootElement.GetProperty("compact_requested").GetInt32());
+                Assert.Equal(1, stageDiagnostics.RootElement.GetProperty("compact_mode").GetInt32());
+                Assert.Equal("completed", stageDiagnostics.RootElement.GetProperty("correlator_status").GetString());
+                Assert.True(stageDiagnostics.RootElement.GetProperty("event_count").GetInt64() > 0);
+                Assert.Equal(
+                    stageDiagnostics.RootElement.GetProperty("event_count").GetInt64(),
+                    stageDiagnostics.RootElement.GetProperty("indexed_event_count").GetInt64());
+            }
 
             var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal("1", summary["current_runtime_proof"]);
+            Assert.Equal("pass", summary["manifest_validation_verdict"]);
+            Assert.Equal("pass", summary["provenance_verdict"]);
+            Assert.Equal("pass", summary["cursor_integrity_verdict"]);
+            Assert.Equal("3", summary["writer_evidence_version"]);
+            Assert.Equal("pass", summary["writer_integrity_verdict"]);
+            Assert.Equal("pass", summary["writer_recovery_verdict"]);
+            Assert.Equal("pass", summary["writer_chronology_verdict"]);
             Assert.Equal(candidate, summary["runtime_failure_candidate"]);
+            Assert.Equal(failureVariant, summary["failure_variant"]);
             Assert.Equal("route_runtime", summary["acceptance_failure_class"]);
             Assert.Equal("incomplete", summary["transfer_evidence_status"]);
             Assert.Equal("fail", summary["runtime_correctness_verdict"]);
             Assert.Equal("route_runtime", summary["semantic_failure_domain"]);
-            Assert.Equal("66643", summary["first_proof_chain_failure_sequence"]);
-            Assert.Equal("30114", summary["first_proof_chain_failure_writer_sequence"]);
+            Assert.Equal("85724", summary["first_proof_chain_failure_sequence"]);
+            Assert.Equal("37479", summary["first_proof_chain_failure_writer_sequence"]);
             Assert.Equal("0", summary["runtime_unlock_responder_acked_probe_binding_missing_unresolved_count"]);
-            Assert.Equal("1", summary["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_unresolved_count"]);
+            Assert.Equal("1", summary["runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_unresolved_count"]);
+            Assert.Equal("0", summary["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_unresolved_count"]);
+            Assert.Equal("2", summary["filetransfer_bridge_recovery_execution_payload_hold_missing_raw_count"]);
             Assert.Equal(candidate, summary[$"{scenario}.runtime_failure_candidate"]);
+            Assert.Equal(failureVariant, summary[$"{scenario}.failure_variant"]);
+            Assert.Equal("1", summary[$"{scenario}.current_runtime_proof"]);
             Assert.Equal("route_runtime", summary[$"{scenario}.acceptance_failure_class"]);
             Assert.Equal("incomplete", summary[$"{scenario}.transfer_evidence_status"]);
             Assert.Equal("fail", summary[$"{scenario}.runtime_correctness_verdict"]);
             Assert.Equal("0", summary[$"{scenario}.runtime_unlock_responder_acked_probe_binding_missing_unresolved_count"]);
-            Assert.Equal("1", summary[$"{scenario}.runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_unresolved_count"]);
+            Assert.Equal("1", summary[$"{scenario}.runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_unresolved_count"]);
+            Assert.Equal("2", summary[$"{scenario}.filetransfer_bridge_recovery_execution_payload_hold_missing_raw_count"]);
 
             using var summaryJson = JsonDocument.Parse(
                 await File.ReadAllTextAsync(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.json")));
             var root = summaryJson.RootElement;
             Assert.Equal(candidate, root.GetProperty("runtimeFailureCandidate").GetString());
+            Assert.Equal(failureVariant, root.GetProperty("failureVariant").GetString());
             Assert.Equal("route_runtime", root.GetProperty("acceptanceFailureClass").GetString());
+            Assert.True(root.GetProperty("currentRuntimeProof").GetBoolean());
             Assert.Equal("incomplete", root.GetProperty("transferEvidenceStatus").GetString());
             Assert.Equal("fail", root.GetProperty("runtimeCorrectnessVerdict").GetString());
             Assert.Equal("route_runtime", root.GetProperty("semanticFailureDomain").GetString());
             Assert.Equal(0, root.GetProperty("runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount").GetInt32());
-            Assert.Equal(1, root.GetProperty("runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount").GetInt32());
-            Assert.Equal(1, root.GetProperty("runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRawCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeDistinctCount").GetInt32());
             Assert.Equal(0, root.GetProperty("runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount").GetInt32());
-            Assert.Equal(1, root.GetProperty("runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeUnresolvedCount").GetInt32());
+            Assert.Equal(0, root.GetProperty("runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeUnresolvedCount").GetInt32());
+            Assert.Equal(2, root.GetProperty("fileTransferBridgeRecoveryExecutionPayloadHoldMissingRawCount").GetInt32());
 
             var run = Assert.Single(root.GetProperty("runs").EnumerateArray());
             Assert.Equal(candidate, run.GetProperty("runtimeFailureCandidate").GetString());
+            Assert.Equal(failureVariant, run.GetProperty("failureVariant").GetString());
+            Assert.True(run.GetProperty("currentRuntimeProof").GetBoolean());
             Assert.Equal("route_runtime", run.GetProperty("acceptanceFailureClass").GetString());
             Assert.Equal("incomplete", run.GetProperty("transferEvidenceStatus").GetString());
             Assert.Equal("fail", run.GetProperty("runtimeCorrectnessVerdict").GetString());
             Assert.Equal("route_runtime", run.GetProperty("semanticFailureDomain").GetString());
             Assert.Equal(0, run.GetProperty("runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount").GetInt32());
-            Assert.Equal(1, run.GetProperty("runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount").GetInt32());
-            Assert.Equal(1, run.GetProperty("runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRawCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeDistinctCount").GetInt32());
             Assert.Equal(0, run.GetProperty("runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount").GetInt32());
-            Assert.Equal(1, run.GetProperty("runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeUnresolvedCount").GetInt32());
+            Assert.Equal(0, run.GetProperty("runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeUnresolvedCount").GetInt32());
+            Assert.Equal(2, run.GetProperty("fileTransferBridgeRecoveryExecutionPayloadHoldMissingRawCount").GetInt32());
         }
         finally
         {
             TryDeleteDirectory(artifactRoot);
         }
+    }
+
+    [Fact]
+    public async Task RunFileTransferRouteAcceptance_ConclusiveRouteRuntimeRequiresTrustedCompletedCompactEvidence()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var script = await File.ReadAllTextAsync(
+            Path.Combine(FindRepoRoot(), "tools", "Run-FileTransferRouteAcceptance.ps1"));
+        var incompleteBody = ExtractPowerShellFunctionBody(
+            script,
+            "Test-RouteAcceptanceIncompleteProofRuntimeCandidate",
+            "Test-RouteAcceptanceConclusiveRouteRuntimeCandidate");
+        var candidateBody = ExtractPowerShellFunctionBody(
+            script,
+            "Test-RouteAcceptanceConclusiveRouteRuntimeCandidate",
+            "Test-RouteAcceptanceConclusiveRouteRuntimeEvidence");
+        var evidenceBody = ExtractPowerShellFunctionBody(
+            script,
+            "Test-RouteAcceptanceConclusiveRouteRuntimeEvidence",
+            "Set-RouteAcceptanceResultEvidence");
+        var setEvidenceBody = ExtractPowerShellFunctionBody(
+            script,
+            "Set-RouteAcceptanceResultEvidence",
+            "Complete-RouteAcceptanceRunEvidence");
+        var semanticUnavailableBody = ExtractPowerShellFunctionBody(
+            script,
+            "Test-RouteAcceptanceSemanticAnalysisUnavailableFailure",
+            "Assert-Phase4ScenarioRun");
+        var failureClassBody = ExtractPowerShellFunctionBody(
+            script,
+            "Get-RouteAcceptanceResultFailureClass",
+            "Assert-Phase5ScenarioRun");
+
+        Assert.DoesNotContain("active_file_tuna_v6_evidence", failureClassBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("runtime_unlock_responder_acked_probe_route_transition_handoff_missing',", failureClassBody, StringComparison.Ordinal);
+        Assert.Contains("Test-RouteAcceptanceConclusiveRouteRuntimeEvidence", failureClassBody, StringComparison.Ordinal);
+        Assert.Contains("$selectedRuntimeEvidenceIncomplete", script, StringComparison.Ordinal);
+        Assert.Contains("$runtimeCandidateDtos[0].runtimeCorrectnessVerdict", script, StringComparison.Ordinal);
+
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            $script:RouteAcceptanceExecutionMode = 'live'
+            function Test-RouteAcceptanceIncompleteProofRuntimeCandidate { {{incompleteBody}} }
+            function Test-RouteAcceptanceConclusiveRouteRuntimeCandidate { {{candidateBody}} }
+            function Test-RouteAcceptanceConclusiveRouteRuntimeEvidence { {{evidenceBody}} }
+            function Set-RouteAcceptanceResultEvidence { {{setEvidenceBody}} }
+            function Test-RouteAcceptanceSemanticAnalysisUnavailableFailure { {{semanticUnavailableBody}} }
+            function Get-RouteAcceptanceResultFailureClass { {{failureClassBody}} }
+            function Get-Phase5FailureClass { return 'protocol_or_integrity' }
+            function ConvertTo-RouteAcceptanceInt {
+                param($Value)
+                $parsed = 0L
+                if ([long]::TryParse([string]$Value, [ref]$parsed)) { return $parsed }
+                return 0L
+            }
+            function Get-JsonPropertyValue {
+                param($Object, [string]$Name, $DefaultValue = $null)
+                if ($null -eq $Object) { return $DefaultValue }
+                $property = $Object.PSObject.Properties[$Name]
+                if ($null -eq $property) { return $DefaultValue }
+                return $property.Value
+            }
+            function Read-RouteAcceptanceKeyValueArtifact {
+                param([string]$Path)
+                $report = @{}
+                foreach ($line in Get-Content -LiteralPath $Path) {
+                    $separator = $line.IndexOf('=')
+                    if ($separator -gt 0) { $report[$line.Substring(0, $separator)] = $line.Substring($separator + 1) }
+                }
+                return $report
+            }
+            function Get-RouteAcceptanceReportValue {
+                param($Report, [string]$Name, [string]$DefaultValue = '')
+                if ($Report.ContainsKey($Name)) { return [string]$Report[$Name] }
+                return $DefaultValue
+            }
+            function Add-RouteAcceptanceFailure {
+                param($Result, [string]$Message)
+                [void]$Result.failures.Add($Message)
+            }
+            function Test-Phase4PerformanceFailureLine { param([string]$Line) return $false }
+            function Get-RouteAcceptanceEvidenceSummaryState {
+                return [pscustomobject]@{
+                    ManifestPresent = $true
+                    ManifestPath = 'manifest.json'
+                    ManifestSha256 = 'manifest-sha'
+                    ManifestValidationVerdict = 'pass'
+                    ProvenanceVerdict = 'pass'
+                    ProvenanceFailureReasons = @()
+                    CurrentRuntimeProof = $true
+                    CurrentRuntimeProofReasons = @()
+                }
+            }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-route-runtime-trust-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $candidate = 'filetransfer_bridge_recovery_execution_payload_hold_missing'
+                $compact = [ordered]@{
+                    retained_analysis_mode = 'compact'
+                    first_proof_chain_failure_class = $candidate
+                    first_proof_chain_failure_event = 'filetransfer_v4_sender_failed'
+                    first_proof_chain_failure_reason = 'payload_hold_not_applied'
+                    first_proof_chain_failure_sequence = 92177
+                    first_proof_chain_failure_writer_sequence = 50849
+                    semantic_failure_domain = 'route_runtime'
+                }
+                $compact["${candidate}_raw_count"] = 2
+                $compact["${candidate}_distinct_count"] = 1
+                $compact["${candidate}_recovered_count"] = 0
+                $compact["${candidate}_unresolved_count"] = 1
+                $compact | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $tempRoot 'filetransfer-retained-compact-summary.json')
+                @{ timed_out = 0; exit_code = 0 } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $tempRoot 'filetransfer-retained-analysis-diagnostics.json')
+                @{ compact_requested = 1; compact_mode = 1; correlator_status = 'completed'; event_count = 20; indexed_event_count = 20 } |
+                    ConvertTo-Json | Set-Content -LiteralPath (Join-Path $tempRoot 'filetransfer-retained-analysis-stage-diagnostics.json')
+                @(
+                    "first_proof_chain_failure_class=$candidate",
+                    'first_proof_chain_failure_event=filetransfer_v4_sender_failed',
+                    'first_proof_chain_failure_reason=payload_hold_not_applied',
+                    'first_proof_chain_failure_sequence=92177',
+                    'first_proof_chain_failure_writer_sequence=50849',
+                    'semantic_failure_domain=route_runtime',
+                    "${candidate}_raw_count=2",
+                    "${candidate}_distinct_count=1",
+                    "${candidate}_recovered_count=0",
+                    "${candidate}_unresolved_count=1") |
+                    Set-Content -LiteralPath (Join-Path $tempRoot 'filetransfer-operator-verdict.txt')
+                Set-Content -LiteralPath (Join-Path $tempRoot 'filetransfer-retained-log-slice.log') -Value 'event=evidence'
+
+                function New-TrustResult {
+                    return [pscustomobject]@{
+                        artifactDir = $tempRoot
+                        runtimeFailureCandidate = $candidate
+                        failureVariant = '(none)'
+                        semanticFailureDomain = 'route_runtime'
+                        firstProofChainFailureClass = $candidate
+                        firstProofChainFailureEvent = 'filetransfer_v4_sender_failed'
+                        firstProofChainFailureReason = 'payload_hold_not_applied'
+                        firstProofChainFailureSequence = 92177L
+                        firstProofChainFailureWriterSequence = 50849L
+                        manifestPresent = $false
+                        manifestPath = ''
+                        manifestSha256 = ''
+                        currentRuntimeProof = $false
+                        currentRuntimeProofReasons = @()
+                        manifestValidationVerdict = 'missing'
+                        provenanceVerdict = 'missing'
+                        provenanceFailureReasons = @()
+                        cursorIntegrityVerdict = 'missing'
+                        writerEvidenceVersion = 0L
+                        writerIntegrityVerdict = 'missing'
+                        writerGapCount = 0L
+                        writerDuplicateCount = 0L
+                        writerIdentityMismatchCount = 0L
+                        writerWriteFailureCount = 0L
+                        writerDeferredBatchCount = 0L
+                        writerRecoveredBatchCount = 0L
+                        writerUnresolvedDeferredBatchCount = 0L
+                        writerTerminalFailureCount = 0L
+                        writerRecoveryMismatchCount = 0L
+                        writerChronologyInversionCount = 0L
+                        writerChronologyCollisionCount = 0L
+                        writerDrainMissingCount = 0L
+                        writerRecoveryVerdict = 'missing'
+                        writerChronologyVerdict = 'missing'
+                        completed = $false
+                        transferEvidenceStatus = 'not_started'
+                        runtimeCorrectnessVerdict = 'incomplete_proof'
+                        evidenceClassification = 'incomplete_proof'
+                        guiReportedFailurePhase = 'route_runtime'
+                        guiReportedFailureReason = 'evidence_enrichment_timeout'
+                        guiReportedFailureError = 'evidence_enrichment_timeout'
+                        failures = [System.Collections.Generic.List[string]]::new()
+                    }
+                }
+                $ledger = [pscustomobject]@{
+                    cursorIntegrityVerdict = 'pass'
+                    cursorIntegrityReasons = @()
+                    writerEvidenceVersion = 3L
+                    writerIntegrityVerdict = 'pass'
+                    writerGapCount = 0L
+                    writerDuplicateCount = 0L
+                    writerIdentityMismatchCount = 0L
+                    writerWriteFailureCount = 0L
+                    writerDeferredBatchCount = 0L
+                    writerRecoveredBatchCount = 0L
+                    writerUnresolvedDeferredBatchCount = 0L
+                    writerTerminalFailureCount = 0L
+                    writerRecoveryMismatchCount = 0L
+                    writerChronologyInversionCount = 0L
+                    writerChronologyCollisionCount = 0L
+                    writerDrainMissingCount = 0L
+                    writerRecoveryVerdict = 'pass'
+                    writerChronologyVerdict = 'pass'
+                }
+                $scenarioEvidence = @([pscustomobject]@{ artifactDir = $tempRoot; logLedger = $ledger })
+
+                $trusted = New-TrustResult
+                Set-RouteAcceptanceResultEvidence -Result $trusted -ScenarioEvidence $scenarioEvidence
+                if ($trusted.semanticFailureDomain -ne 'route_runtime' -or
+                    $trusted.runtimeCorrectnessVerdict -ne 'fail' -or
+                    $trusted.transferEvidenceStatus -ne 'incomplete' -or
+                    $trusted.failures.Count -ne 0 -or
+                    -not (Test-RouteAcceptanceConclusiveRouteRuntimeEvidence -Result $trusted)) {
+                    throw "trusted generic payload-hold evidence lost route-runtime precedence: $($trusted | ConvertTo-Json -Depth 5 -Compress)"
+                }
+
+                $variant = 'payload_hold_current_submission_epoch'
+                $compact['failure_variant'] = $variant
+                $compact["${variant}_raw_count"] = 2
+                $compact["${variant}_distinct_count"] = 1
+                $compact["${variant}_recovered_count"] = 0
+                $compact["${variant}_unresolved_count"] = 1
+                $compact | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $tempRoot 'filetransfer-retained-compact-summary.json')
+                Add-Content -LiteralPath (Join-Path $tempRoot 'filetransfer-operator-verdict.txt') -Value @(
+                    "failure_variant=$variant",
+                    "${variant}_raw_count=2",
+                    "${variant}_distinct_count=1",
+                    "${variant}_recovered_count=0",
+                    "${variant}_unresolved_count=1")
+                $trusted.failureVariant = $variant
+                if (-not (Test-RouteAcceptanceConclusiveRouteRuntimeEvidence -Result $trusted)) {
+                    throw 'matching failure-variant quartet was not trusted'
+                }
+                $operatorPath = Join-Path $tempRoot 'filetransfer-operator-verdict.txt'
+                $operatorText = Get-Content -LiteralPath $operatorPath -Raw
+                $operatorText.Replace("${variant}_unresolved_count=1", "${variant}_unresolved_count=0") |
+                    Set-Content -LiteralPath $operatorPath
+                if (Test-RouteAcceptanceConclusiveRouteRuntimeEvidence -Result $trusted) {
+                    throw 'mismatched failure-variant quartet was trusted'
+                }
+                $trusted.failureVariant = '(none)'
+
+                @{ compact_requested = 1; compact_mode = 1; correlator_status = 'completed'; event_count = 20; indexed_event_count = 19 } |
+                    ConvertTo-Json | Set-Content -LiteralPath (Join-Path $tempRoot 'filetransfer-retained-analysis-stage-diagnostics.json')
+
+                $untrustedComplete = New-TrustResult
+                $untrustedComplete.completed = $true
+                $untrustedComplete.guiReportedFailurePhase = ''
+                $untrustedComplete.guiReportedFailureReason = ''
+                $untrustedComplete.guiReportedFailureError = ''
+                Set-RouteAcceptanceResultEvidence -Result $untrustedComplete -ScenarioEvidence $scenarioEvidence
+                if (-not $untrustedComplete.currentRuntimeProof -or
+                    $untrustedComplete.semanticFailureDomain -ne 'route_runtime' -or
+                    $untrustedComplete.transferEvidenceStatus -ne 'complete' -or
+                    $untrustedComplete.runtimeCorrectnessVerdict -ne 'incomplete_proof' -or
+                    $untrustedComplete.evidenceClassification -ne 'incomplete_proof' -or
+                    $untrustedComplete.failures.Count -ne 0 -or
+                    (Test-RouteAcceptanceConclusiveRouteRuntimeEvidence -Result $untrustedComplete) -or
+                    (Get-RouteAcceptanceResultFailureClass -AcceptancePhase phase5 -Result $untrustedComplete) -ne 'incomplete_proof') {
+                    throw "complete transfer trusted only by corrupt compact evidence did not fail closed: $($untrustedComplete | ConvertTo-Json -Depth 5 -Compress)"
+                }
+
+                $unavailableComplete = New-TrustResult
+                $unavailableComplete.completed = $true
+                Set-RouteAcceptanceResultEvidence -Result $unavailableComplete -ScenarioEvidence $scenarioEvidence
+                if (-not $unavailableComplete.currentRuntimeProof -or
+                    $unavailableComplete.semanticFailureDomain -ne 'unavailable' -or
+                    $unavailableComplete.transferEvidenceStatus -ne 'complete' -or
+                    $unavailableComplete.runtimeCorrectnessVerdict -ne 'incomplete_proof' -or
+                    $unavailableComplete.evidenceClassification -ne 'incomplete_proof' -or
+                    $unavailableComplete.failures.Count -ne 1 -or
+                    (Get-RouteAcceptanceResultFailureClass -AcceptancePhase phase5 -Result $unavailableComplete) -ne 'incomplete_proof') {
+                    throw "complete transfer with enrichment timeout did not remain incomplete proof: $($unavailableComplete | ConvertTo-Json -Depth 5 -Compress)"
+                }
+
+                $untrusted = New-TrustResult
+                Set-RouteAcceptanceResultEvidence -Result $untrusted -ScenarioEvidence $scenarioEvidence
+                if ($untrusted.semanticFailureDomain -ne 'unavailable' -or
+                    $untrusted.runtimeCorrectnessVerdict -ne 'incomplete_proof' -or
+                    $untrusted.failures.Count -ne 1 -or
+                    (Test-RouteAcceptanceConclusiveRouteRuntimeEvidence -Result $untrusted)) {
+                    throw "untrusted compact/enrichment evidence did not fail closed: $($untrusted | ConvertTo-Json -Depth 5 -Compress)"
+                }
+                Write-Output 'route-runtime-trust-precedence-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"Route-runtime trust predicate regression failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("route-runtime-trust-precedence-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -808,8 +1157,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
 
             var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
             Assert.Equal(candidate, summary["runtime_failure_candidate"]);
-            Assert.Equal("route_runtime", summary["acceptance_failure_class"]);
-            Assert.Equal("fail", summary["runtime_correctness_verdict"]);
+            Assert.Equal("incomplete_proof", summary["acceptance_failure_class"]);
+            Assert.Equal("incomplete_proof", summary["runtime_correctness_verdict"]);
             Assert.Equal("route_runtime", summary["semantic_failure_domain"]);
             Assert.Equal("7", summary["filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_raw_count"]);
             Assert.Equal("1", summary["filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_unresolved_count"]);
@@ -822,8 +1171,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("1", summary["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_recovered_count"]);
             Assert.Equal("0", summary["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_delivered_peer_response_recheck_unresolved_count"]);
             Assert.Equal(candidate, summary[$"{scenario}.runtime_failure_candidate"]);
-            Assert.Equal("route_runtime", summary[$"{scenario}.acceptance_failure_class"]);
-            Assert.Equal("fail", summary[$"{scenario}.runtime_correctness_verdict"]);
+            Assert.Equal("incomplete_proof", summary[$"{scenario}.acceptance_failure_class"]);
+            Assert.Equal("incomplete_proof", summary[$"{scenario}.runtime_correctness_verdict"]);
             Assert.Equal("route_runtime", summary[$"{scenario}.semantic_failure_domain"]);
             Assert.Equal("1", summary[$"{scenario}.filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_unresolved_count"]);
             Assert.Equal("1", summary[$"{scenario}.filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_unresolved_count"]);
@@ -832,8 +1181,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                 await File.ReadAllTextAsync(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.json")));
             var root = summaryJson.RootElement;
             Assert.Equal(candidate, root.GetProperty("runtimeFailureCandidate").GetString());
-            Assert.Equal("route_runtime", root.GetProperty("acceptanceFailureClass").GetString());
-            Assert.Equal("fail", root.GetProperty("runtimeCorrectnessVerdict").GetString());
+            Assert.Equal("incomplete_proof", root.GetProperty("acceptanceFailureClass").GetString());
+            Assert.Equal("incomplete_proof", root.GetProperty("runtimeCorrectnessVerdict").GetString());
             Assert.Equal("route_runtime", root.GetProperty("semanticFailureDomain").GetString());
             Assert.Equal(7, root.GetProperty("fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRawCount").GetInt32());
             Assert.Equal(1, root.GetProperty("fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount").GetInt32());
@@ -848,8 +1197,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
 
             var run = Assert.Single(root.GetProperty("runs").EnumerateArray());
             Assert.Equal(candidate, run.GetProperty("runtimeFailureCandidate").GetString());
-            Assert.Equal("route_runtime", run.GetProperty("acceptanceFailureClass").GetString());
-            Assert.Equal("fail", run.GetProperty("runtimeCorrectnessVerdict").GetString());
+            Assert.Equal("incomplete_proof", run.GetProperty("acceptanceFailureClass").GetString());
+            Assert.Equal("incomplete_proof", run.GetProperty("runtimeCorrectnessVerdict").GetString());
             Assert.Equal("route_runtime", run.GetProperty("semanticFailureDomain").GetString());
             Assert.Equal(7, run.GetProperty("fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRawCount").GetInt32());
             Assert.Equal(1, run.GetProperty("fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount").GetInt32());
@@ -1349,7 +1698,7 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("1", summary["runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count"]);
             Assert.Equal("fail", summary["runtime_unlock_regular_v4_route_commit_send_drain_verdict"]);
             Assert.Equal(candidate, summary[$"{scenario}.runtime_failure_candidate"]);
-            Assert.Equal("route_runtime", summary[$"{scenario}.acceptance_failure_class"]);
+            Assert.Equal("incomplete_proof", summary[$"{scenario}.acceptance_failure_class"]);
             Assert.Equal("incomplete_proof", summary[$"{scenario}.runtime_correctness_verdict"]);
             Assert.Equal("1315", summary[$"{scenario}.first_proof_chain_failure_writer_sequence"]);
             Assert.Equal("route_runtime", summary[$"{scenario}.semantic_failure_domain"]);
@@ -1373,7 +1722,7 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
 
             var run = Assert.Single(root.GetProperty("runs").EnumerateArray());
             Assert.Equal(candidate, run.GetProperty("runtimeFailureCandidate").GetString());
-            Assert.Equal("route_runtime", run.GetProperty("acceptanceFailureClass").GetString());
+            Assert.Equal("incomplete_proof", run.GetProperty("acceptanceFailureClass").GetString());
             Assert.Equal("incomplete_proof", run.GetProperty("runtimeCorrectnessVerdict").GetString());
             Assert.Equal(1315, run.GetProperty("firstProofChainFailureWriterSequence").GetInt64());
             Assert.Equal("route_runtime", run.GetProperty("semanticFailureDomain").GetString());
@@ -1429,7 +1778,7 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
 
             var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
             Assert.Equal(candidate, summary["runtime_failure_candidate"]);
-            Assert.Equal("fail", summary["runtime_correctness_verdict"]);
+            Assert.Equal("incomplete_proof", summary["runtime_correctness_verdict"]);
             Assert.Equal("filetransfer_fallback_tail_local_yield_blocked", summary["first_proof_chain_failure_event"]);
             Assert.Equal("local_yield_transport_epoch_reauthorization_missing", summary["first_proof_chain_failure_reason"]);
             Assert.Equal("27225", summary["first_proof_chain_failure_sequence"]);
@@ -1441,9 +1790,9 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("0", summary["post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count"]);
             Assert.Equal("1", summary["post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count"]);
             Assert.Equal(candidate, summary[$"{scenario}.runtime_failure_candidate"]);
-            Assert.Equal("route_runtime", summary[$"{scenario}.acceptance_failure_class"]);
+            Assert.Equal("incomplete_proof", summary[$"{scenario}.acceptance_failure_class"]);
             Assert.Equal("incomplete", summary[$"{scenario}.transfer_evidence_status"]);
-            Assert.Equal("fail", summary[$"{scenario}.runtime_correctness_verdict"]);
+            Assert.Equal("incomplete_proof", summary[$"{scenario}.runtime_correctness_verdict"]);
             Assert.Equal("route_runtime", summary[$"{scenario}.semantic_failure_domain"]);
 
             using var summaryJson = JsonDocument.Parse(
@@ -1451,7 +1800,7 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             var root = summaryJson.RootElement;
             Assert.Equal(candidate, root.GetProperty("runtimeFailureCandidate").GetString());
             Assert.Equal("incomplete", root.GetProperty("transferEvidenceStatus").GetString());
-            Assert.Equal("fail", root.GetProperty("runtimeCorrectnessVerdict").GetString());
+            Assert.Equal("incomplete_proof", root.GetProperty("runtimeCorrectnessVerdict").GetString());
             Assert.Equal(13864, root.GetProperty("firstProofChainFailureWriterSequence").GetInt64());
             Assert.Equal("route_runtime", root.GetProperty("semanticFailureDomain").GetString());
             Assert.Equal("fail", root.GetProperty("fallbackTailTransportEpochReauthorizationVerdict").GetString());
@@ -1462,9 +1811,9 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
 
             var run = Assert.Single(root.GetProperty("runs").EnumerateArray());
             Assert.Equal(candidate, run.GetProperty("runtimeFailureCandidate").GetString());
-            Assert.Equal("route_runtime", run.GetProperty("acceptanceFailureClass").GetString());
+            Assert.Equal("incomplete_proof", run.GetProperty("acceptanceFailureClass").GetString());
             Assert.Equal("incomplete", run.GetProperty("transferEvidenceStatus").GetString());
-            Assert.Equal("fail", run.GetProperty("runtimeCorrectnessVerdict").GetString());
+            Assert.Equal("incomplete_proof", run.GetProperty("runtimeCorrectnessVerdict").GetString());
             Assert.Equal(13864, run.GetProperty("firstProofChainFailureWriterSequence").GetInt64());
             Assert.Equal("route_runtime", run.GetProperty("semanticFailureDomain").GetString());
             Assert.Equal("fail", run.GetProperty("fallbackTailTransportEpochReauthorizationVerdict").GetString());
@@ -2613,7 +2962,7 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("FAIL", summary["verdict"]);
             Assert.Equal("FAIL", summary["correctness_verdict"]);
             Assert.Equal("file_tuna_v6", summary["regular-v4-live-activation-off-on-off-256mb.final_route"]);
-            Assert.Equal("route_runtime", summary["regular-v4-live-activation-off-on-off-256mb.acceptance_failure_class"]);
+            Assert.Equal("incomplete_proof", summary["regular-v4-live-activation-off-on-off-256mb.acceptance_failure_class"]);
             var summaryText = File.ReadAllText(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.txt"));
             Assert.Contains("active file_tuna_v6", summaryText, StringComparison.Ordinal);
             Assert.Contains("Tuna GUI runtime failure: phase=fallback_frontier_repair; reason=fallback_frontier_repair_stalled", summaryText, StringComparison.Ordinal);
@@ -2916,7 +3265,7 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("1", summary["runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_unresolved_count"]);
             Assert.Equal("fail", summary["runtime_unlock_post_tuna_fallback_transport_proof_handoff_verdict"]);
             Assert.Equal(candidate, summary[$"{scenario}.runtime_failure_candidate"]);
-            Assert.Equal("route_runtime", summary[$"{scenario}.acceptance_failure_class"]);
+            Assert.Equal("incomplete_proof", summary[$"{scenario}.acceptance_failure_class"]);
             Assert.Equal("incomplete_proof", summary[$"{scenario}.runtime_correctness_verdict"]);
             Assert.Equal("1", summary[$"{scenario}.runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_raw_count"]);
             Assert.Equal("1", summary[$"{scenario}.runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing_distinct_count"]);
@@ -2936,7 +3285,7 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
 
             var run = Assert.Single(root.GetProperty("runs").EnumerateArray());
             Assert.Equal(candidate, run.GetProperty("runtimeFailureCandidate").GetString());
-            Assert.Equal("route_runtime", run.GetProperty("acceptanceFailureClass").GetString());
+            Assert.Equal("incomplete_proof", run.GetProperty("acceptanceFailureClass").GetString());
             Assert.Equal("incomplete_proof", run.GetProperty("runtimeCorrectnessVerdict").GetString());
             Assert.Equal(1, run.GetProperty("runtimeUnlockPostTunaFallbackTransportProofHandoffMissingRawCount").GetInt32());
             Assert.Equal(1, run.GetProperty("runtimeUnlockPostTunaFallbackTransportProofHandoffMissingDistinctCount").GetInt32());

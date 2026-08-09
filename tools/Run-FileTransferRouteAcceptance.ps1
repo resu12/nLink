@@ -573,17 +573,175 @@ function Test-RouteAcceptanceConclusiveRouteRuntimeCandidate {
         [AllowEmptyString()][string]$SemanticFailureDomain
     )
 
-    return $Candidate -in @(
-            'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing',
-            'regular_v4_frontier_tail_repair_state_publication_missing',
-            'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing',
-            'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
-            'runtime_unlock_retry_dispatch_current_listener_adoption_missing',
-            'runtime_unlock_responder_acked_probe_route_transition_handoff_missing') -and
+    return -not [string]::IsNullOrWhiteSpace($Candidate) -and
+        $Candidate -notin @('(none)', 'none') -and
+        -not (Test-RouteAcceptanceIncompleteProofRuntimeCandidate -Candidate $Candidate) -and
         [string]::Equals(
             $SemanticFailureDomain,
             'route_runtime',
             [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-RouteAcceptanceConclusiveRouteRuntimeEvidence {
+    param([Parameter(Mandatory = $true)]$Result)
+
+    if (-not (Test-RouteAcceptanceConclusiveRouteRuntimeCandidate `
+            -Candidate ([string]$Result.runtimeFailureCandidate) `
+            -SemanticFailureDomain ([string]$Result.semanticFailureDomain))) {
+        return $false
+    }
+
+    $writerIntegrityCounts = @(
+        [long]$Result.writerGapCount,
+        [long]$Result.writerDuplicateCount,
+        [long]$Result.writerIdentityMismatchCount,
+        [long]$Result.writerWriteFailureCount,
+        [long]$Result.writerUnresolvedDeferredBatchCount,
+        [long]$Result.writerTerminalFailureCount,
+        [long]$Result.writerRecoveryMismatchCount,
+        [long]$Result.writerChronologyInversionCount,
+        [long]$Result.writerChronologyCollisionCount,
+        [long]$Result.writerDrainMissingCount)
+    if (-not [bool]$Result.currentRuntimeProof -or
+        -not [string]::Equals([string]$Result.manifestValidationVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([string]$Result.provenanceVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([string]$Result.cursorIntegrityVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [long]$Result.writerEvidenceVersion -ne 3 -or
+        -not [string]::Equals([string]$Result.writerIntegrityVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([string]$Result.writerRecoveryVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([string]$Result.writerChronologyVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
+        @($writerIntegrityCounts | Where-Object { $_ -ne 0 }).Count -gt 0) {
+        return $false
+    }
+
+    $artifactDir = [string]$Result.artifactDir
+    if ([string]::IsNullOrWhiteSpace($artifactDir)) {
+        return $false
+    }
+
+    $compactPath = Join-Path $artifactDir 'filetransfer-retained-compact-summary.json'
+    $diagnosticsPath = Join-Path $artifactDir 'filetransfer-retained-analysis-diagnostics.json'
+    $stageDiagnosticsPath = Join-Path $artifactDir 'filetransfer-retained-analysis-stage-diagnostics.json'
+    $operatorPath = Join-Path $artifactDir 'filetransfer-operator-verdict.txt'
+    if (-not (Test-Path -LiteralPath $compactPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $diagnosticsPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $stageDiagnosticsPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $operatorPath -PathType Leaf)) {
+        return $false
+    }
+
+    try {
+        $compact = Get-Content -LiteralPath $compactPath -Raw -ErrorAction Stop |
+            ConvertFrom-Json -ErrorAction Stop
+        $diagnostics = Get-Content -LiteralPath $diagnosticsPath -Raw -ErrorAction Stop |
+            ConvertFrom-Json -ErrorAction Stop
+        $stageDiagnostics = Get-Content -LiteralPath $stageDiagnosticsPath -Raw -ErrorAction Stop |
+            ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        return $false
+    }
+
+    $eventCount = ConvertTo-RouteAcceptanceInt -Value (
+        Get-JsonPropertyValue -Object $stageDiagnostics -Name 'event_count' -DefaultValue '0')
+    $indexedEventCount = ConvertTo-RouteAcceptanceInt -Value (
+        Get-JsonPropertyValue -Object $stageDiagnostics -Name 'indexed_event_count' -DefaultValue '0')
+    if (-not [string]::Equals(
+            [string](Get-JsonPropertyValue -Object $compact -Name 'retained_analysis_mode' -DefaultValue ''),
+            'compact',
+            [System.StringComparison]::OrdinalIgnoreCase) -or
+        (ConvertTo-RouteAcceptanceInt -Value (Get-JsonPropertyValue -Object $diagnostics -Name 'timed_out' -DefaultValue '1')) -ne 0 -or
+        (ConvertTo-RouteAcceptanceInt -Value (Get-JsonPropertyValue -Object $diagnostics -Name 'exit_code' -DefaultValue '-1')) -ne 0 -or
+        (ConvertTo-RouteAcceptanceInt -Value (Get-JsonPropertyValue -Object $stageDiagnostics -Name 'compact_requested' -DefaultValue '0')) -ne 1 -or
+        (ConvertTo-RouteAcceptanceInt -Value (Get-JsonPropertyValue -Object $stageDiagnostics -Name 'compact_mode' -DefaultValue '0')) -ne 1 -or
+        -not [string]::Equals(
+            [string](Get-JsonPropertyValue -Object $stageDiagnostics -Name 'correlator_status' -DefaultValue ''),
+            'completed',
+            [System.StringComparison]::OrdinalIgnoreCase) -or
+        $eventCount -le 0 -or $indexedEventCount -ne $eventCount) {
+        return $false
+    }
+
+    $operator = Read-RouteAcceptanceKeyValueArtifact -Path $operatorPath
+    $candidate = [string]$Result.runtimeFailureCandidate
+    $tupleFields = [ordered]@{
+        first_proof_chain_failure_class = 'firstProofChainFailureClass'
+        first_proof_chain_failure_event = 'firstProofChainFailureEvent'
+        first_proof_chain_failure_reason = 'firstProofChainFailureReason'
+        first_proof_chain_failure_sequence = 'firstProofChainFailureSequence'
+        first_proof_chain_failure_writer_sequence = 'firstProofChainFailureWriterSequence'
+        semantic_failure_domain = 'semanticFailureDomain'
+    }
+    foreach ($fieldName in $tupleFields.Keys) {
+        $resultPropertyName = [string]$tupleFields[$fieldName]
+        $resultValue = [string]$Result.$resultPropertyName
+        $compactValue = [string](Get-JsonPropertyValue -Object $compact -Name $fieldName -DefaultValue '')
+        $operatorValue = Get-RouteAcceptanceReportValue -Report $operator -Name $fieldName -DefaultValue ''
+        if ([string]::IsNullOrWhiteSpace($resultValue) -or
+            $resultValue -in @('(none)', 'none', '0') -or
+            -not [string]::Equals($compactValue, $resultValue, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals($operatorValue, $resultValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+    if (-not [string]::Equals([string]$Result.firstProofChainFailureClass, $candidate, [System.StringComparison]::OrdinalIgnoreCase) -or
+        [long]$Result.firstProofChainFailureSequence -le 0 -or
+        [long]$Result.firstProofChainFailureWriterSequence -le 0) {
+        return $false
+    }
+
+    $quartet = @{}
+    foreach ($suffix in @('raw_count', 'distinct_count', 'recovered_count', 'unresolved_count')) {
+        $fieldName = '{0}_{1}' -f $candidate, $suffix
+        $compactText = [string](Get-JsonPropertyValue -Object $compact -Name $fieldName -DefaultValue '')
+        $operatorText = Get-RouteAcceptanceReportValue -Report $operator -Name $fieldName -DefaultValue ''
+        if ($compactText -notmatch '^[0-9]+$' -or $operatorText -notmatch '^[0-9]+$' -or
+            [long]$compactText -ne [long]$operatorText) {
+            return $false
+        }
+        $quartet[$suffix] = [long]$compactText
+    }
+
+    $aggregateQuartetValid = $quartet.raw_count -gt 0 -and
+        $quartet.distinct_count -gt 0 -and
+        $quartet.unresolved_count -gt 0 -and
+        $quartet.recovered_count -ge 0 -and
+        $quartet.distinct_count -eq ($quartet.recovered_count + $quartet.unresolved_count)
+    if (-not $aggregateQuartetValid) {
+        return $false
+    }
+
+    $failureVariant = [string]$Result.failureVariant
+    if ([string]::IsNullOrWhiteSpace($failureVariant) -or
+        $failureVariant -in @('(none)', 'none')) {
+        return $true
+    }
+    $compactFailureVariant = [string](
+        Get-JsonPropertyValue -Object $compact -Name 'failure_variant' -DefaultValue '')
+    $operatorFailureVariant = Get-RouteAcceptanceReportValue `
+        -Report $operator -Name 'failure_variant' -DefaultValue ''
+    if (-not [string]::Equals($compactFailureVariant, $failureVariant, [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals($operatorFailureVariant, $failureVariant, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+
+    $variantQuartet = @{}
+    foreach ($suffix in @('raw_count', 'distinct_count', 'recovered_count', 'unresolved_count')) {
+        $fieldName = '{0}_{1}' -f $failureVariant, $suffix
+        $compactText = [string](Get-JsonPropertyValue -Object $compact -Name $fieldName -DefaultValue '')
+        $operatorText = Get-RouteAcceptanceReportValue -Report $operator -Name $fieldName -DefaultValue ''
+        if ($compactText -notmatch '^[0-9]+$' -or $operatorText -notmatch '^[0-9]+$' -or
+            [long]$compactText -ne [long]$operatorText) {
+            return $false
+        }
+        $variantQuartet[$suffix] = [long]$compactText
+    }
+    return $variantQuartet.raw_count -gt 0 -and
+        $variantQuartet.distinct_count -gt 0 -and
+        $variantQuartet.unresolved_count -gt 0 -and
+        $variantQuartet.recovered_count -ge 0 -and
+        $variantQuartet.distinct_count -eq
+            ($variantQuartet.recovered_count + $variantQuartet.unresolved_count)
 }
 
 function Set-RouteAcceptanceResultEvidence {
@@ -676,16 +834,34 @@ function Set-RouteAcceptanceResultEvidence {
     $conclusiveRouteRuntimeCandidate = Test-RouteAcceptanceConclusiveRouteRuntimeCandidate `
         -Candidate ([string]$Result.runtimeFailureCandidate) `
         -SemanticFailureDomain ([string]$Result.semanticFailureDomain)
-    if (-not [bool]$Result.currentRuntimeProof -and
-        -not ($script:RouteAcceptanceExecutionMode -eq 'fake' -and $conclusiveRouteRuntimeCandidate)) {
+    $conclusiveRouteRuntimeEvidence = Test-RouteAcceptanceConclusiveRouteRuntimeEvidence -Result $Result
+    $semanticAnalysisUnavailable = Test-RouteAcceptanceSemanticAnalysisUnavailableFailure `
+        -FailurePhase ([string]$Result.guiReportedFailurePhase) `
+        -FailureReason ([string]$Result.guiReportedFailureReason) `
+        -ErrorMessage ([string]$Result.guiReportedFailureError)
+    if ($semanticAnalysisUnavailable -and -not $conclusiveRouteRuntimeEvidence) {
+        $result.semanticFailureDomain = 'unavailable'
+        $semanticUnavailableFailure = "Tuna GUI semantic analysis unavailable: phase={0}; reason={1}; error={2}" -f `
+            ($(if ([string]::IsNullOrWhiteSpace([string]$Result.guiReportedFailurePhase)) { '(unknown)' } else { [string]$Result.guiReportedFailurePhase })),
+            ($(if ([string]::IsNullOrWhiteSpace([string]$Result.guiReportedFailureReason)) { '(unknown)' } else { [string]$Result.guiReportedFailureReason })),
+            ($(if ([string]::IsNullOrWhiteSpace([string]$Result.guiReportedFailureError)) { '(none)' } else { [string]$Result.guiReportedFailureError }))
+        if (@($Result.failures | Where-Object {
+                    [string]::Equals([string]$_, $semanticUnavailableFailure, [System.StringComparison]::Ordinal)
+                }).Count -eq 0) {
+            Add-RouteAcceptanceFailure -Result $Result -Message $semanticUnavailableFailure
+        }
+    }
+    if (-not [bool]$Result.currentRuntimeProof) {
         $Result.runtimeCorrectnessVerdict = 'incomplete_proof'
         $Result.evidenceClassification = 'incomplete_proof'
     }
-    elseif ($conclusiveRouteRuntimeCandidate) {
+    elseif ($conclusiveRouteRuntimeEvidence) {
         $Result.runtimeCorrectnessVerdict = 'fail'
         $Result.evidenceClassification = 'runtime_failure'
     }
-    elseif ((Test-RouteAcceptanceIncompleteProofRuntimeCandidate -Candidate ([string]$Result.runtimeFailureCandidate)) -or
+    elseif ($semanticAnalysisUnavailable -or
+        $conclusiveRouteRuntimeCandidate -or
+        (Test-RouteAcceptanceIncompleteProofRuntimeCandidate -Candidate ([string]$Result.runtimeFailureCandidate)) -or
         -not [string]::Equals([string]$Result.transferEvidenceStatus, 'complete', [System.StringComparison]::OrdinalIgnoreCase)) {
         $Result.runtimeCorrectnessVerdict = 'incomplete_proof'
         $Result.evidenceClassification = 'incomplete_proof'
@@ -844,17 +1020,39 @@ function Complete-RouteAcceptanceRunEvidence {
             }
         )
 
+        $fixtureSynthesizesLiveEvidence =
+            (Test-RouteAcceptanceFakeSyntheticTrustedEvidenceEnabled) -or
+            ($script:RouteAcceptanceExecutionMode -eq 'fake' -and
+                @($effectiveScenarioNames).Count -eq 1 -and
+                (Test-RouteAcceptanceScenarioEnvEnabled `
+                    -ScenarioName ([string]@($effectiveScenarioNames)[0]) `
+                    -Suffix 'RESPONDER_ACKED_PROBE_HANDOFF_SUMMARY_FIXTURE'))
         $finalGitState = Get-RouteAcceptanceEvidenceGitState -RepoRoot $RepoRoot
+        if ($fixtureSynthesizesLiveEvidence) {
+            $finalGitState = [pscustomobject][ordered]@{
+                gitCommitSha = [string]$finalGitState.gitCommitSha
+                dirty = $false
+                normalizedStatus = ''
+                normalizedStatusSha256 = Get-RouteAcceptanceEvidenceTextSha256 -Value ''
+            }
+        }
         $finalSnapshot = New-RouteAcceptanceEvidenceSnapshot `
             -RepoRoot $RepoRoot `
             -PortableExecutablePath $script:RouteAcceptanceEvidenceRuntimePath `
             -HarnessFiles $script:RouteAcceptanceEvidenceHarnessFiles `
             -BridgeDir $script:RouteAcceptanceEvidenceBridgeDir `
             -GitState $finalGitState
+        $manifestExecutionMode = if ($fixtureSynthesizesLiveEvidence) {
+            # The propagation fixture supplies a live-mode manifest input so
+            # the ordinary evidence validator, not a summary/failure-class
+            # bypass, decides whether current-runtime proof is established.
+            'live'
+        }
+        else { $script:RouteAcceptanceExecutionMode }
         $manifest = New-RouteAcceptanceEvidenceManifest `
             -RunId $script:RouteAcceptanceRunId `
             -MatrixMode $MatrixMode `
-            -ExecutionMode $script:RouteAcceptanceExecutionMode `
+            -ExecutionMode $manifestExecutionMode `
             -ArtifactRoot $RunRoot `
             -StartedUtc $script:RouteAcceptanceStartedUtc `
             -FinalizedUtc ([DateTime]::UtcNow) `
@@ -1410,6 +1608,7 @@ function New-RouteAcceptanceRunResult {
         transferEvidenceStatus = 'not_started'
         runtimeCorrectnessVerdict = 'incomplete_proof'
         runtimeFailureCandidate = '(none)'
+        failureVariant = '(none)'
         terminalCompletedBeforeFault = $false
         faultInjected = $false
         faultActionClaimed = $false
@@ -1438,6 +1637,10 @@ function New-RouteAcceptanceRunResult {
         runtimeUnlockResponderPeerProbeBindingMissingDistinctCount = 0
         runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount = 0
         runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount = 0
+        runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRawCount = 0
+        runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeDistinctCount = 0
+        runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRecoveredCount = 0
+        runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeUnresolvedCount = 0
         runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount = 0
         runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount = 0
         runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount = 0
@@ -2233,6 +2436,13 @@ function Test-RouteAcceptanceScenarioEnvEnabled {
 
     $token = ConvertTo-RouteAcceptanceEnvNameToken -Value $ScenarioName
     return Test-RouteAcceptanceEnvEnabled -Name ("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_{0}_{1}" -f $token, $Suffix)
+}
+
+function Test-RouteAcceptanceFakeSyntheticTrustedEvidenceEnabled {
+    return $script:RouteAcceptanceExecutionMode -eq 'fake' -and
+        $AcceptancePhase -eq 'phase5' -and
+        (Test-RouteAcceptanceEnvEnabled `
+            -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_SYNTHETIC_TRUSTED_EVIDENCE')
 }
 
 function Get-RouteAcceptanceRouteChanges {
@@ -3451,6 +3661,10 @@ function Assert-Phase4OperatorVerdict {
     $Result.runtimeUnlockResponderPeerProbeBindingMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_binding_missing_distinct_count' -DefaultValue '0')
     $Result.runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_binding_missing_recovered_count' -DefaultValue '0')
     $Result.runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_binding_missing_unresolved_count' -DefaultValue '0')
+    $Result.runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_raw_count' -DefaultValue '0')
+    $Result.runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_distinct_count' -DefaultValue '0')
+    $Result.runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_recovered_count' -DefaultValue '0')
+    $Result.runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_unresolved_count' -DefaultValue '0')
     $Result.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_raw_count' -DefaultValue '0')
     $Result.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_distinct_count' -DefaultValue '0')
     $Result.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_recovered_count' -DefaultValue '0')
@@ -3634,6 +3848,7 @@ function Assert-Phase4OperatorVerdict {
     $Result.runtimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_verdict' -DefaultValue 'none'
     $Result.firstProofChainFailureEvent = Get-RouteAcceptanceReportValue -Report $operator -Name 'first_proof_chain_failure_event' -DefaultValue '(none)'
     $Result.firstProofChainFailureReason = Get-RouteAcceptanceReportValue -Report $operator -Name 'first_proof_chain_failure_reason' -DefaultValue '(none)'
+    $Result.failureVariant = Get-RouteAcceptanceReportValue -Report $operator -Name 'failure_variant' -DefaultValue '(none)'
     $Result.firstProofChainFailureSequence = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'first_proof_chain_failure_sequence' -DefaultValue '0')
     $Result.firstProofChainFailureWriterSequence = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'first_proof_chain_failure_writer_sequence' -DefaultValue '0')
     $Result.semanticFailureDomain = Get-RouteAcceptanceReportValue -Report $operator -Name 'semantic_failure_domain' -DefaultValue '(none)'
@@ -4030,17 +4245,9 @@ function Assert-Phase4ScenarioRun {
                 $result.guiReportedFailureReason = $failureReason
                 $result.guiReportedFailureError = $errorMessage
                 if (Test-RouteAcceptanceSemanticAnalysisUnavailableFailure -FailurePhase $failurePhase -FailureReason $failureReason -ErrorMessage $errorMessage) {
-                    $retainedRouteRuntimeClassification =
-                        Test-RouteAcceptanceConclusiveRouteRuntimeCandidate `
-                            -Candidate ([string]$result.runtimeFailureCandidate) `
-                            -SemanticFailureDomain ([string]$result.semanticFailureDomain)
-                    if (-not $retainedRouteRuntimeClassification) {
-                        $result.semanticFailureDomain = 'unavailable'
-                        Add-RouteAcceptanceFailure -Result $result -Message ("Tuna GUI semantic analysis unavailable: phase={0}; reason={1}; error={2}" -f `
-                            ($(if ([string]::IsNullOrWhiteSpace($failurePhase)) { '(unknown)' } else { $failurePhase })),
-                            ($(if ([string]::IsNullOrWhiteSpace($failureReason)) { '(unknown)' } else { $failureReason })),
-                            ($(if ([string]::IsNullOrWhiteSpace($errorMessage)) { '(none)' } else { $errorMessage })))
-                    }
+                    # Finalization applies the trust-backed retained-evidence predicate after
+                    # provenance, writer-v3, cursor, and compact-stage evidence are available.
+                    # Keep these raw GUI fields immutable until that decision can fail closed.
                 }
                 else {
                     # Preserve the harness' legacy setup classification until Phase 5 has
@@ -5666,6 +5873,7 @@ function Write-RouteAcceptanceFakePhase4Run {
             }
             Set-Content -LiteralPath $reportPath -Value $reportText -Encoding UTF8
         }
+
     }
 
     if (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RESPONDER_ACKED_PROBE_HANDOFF_SUMMARY_FIXTURE') {
@@ -5679,24 +5887,103 @@ function Write-RouteAcceptanceFakePhase4Run {
             'runtime_unlock_responder_acked_probe_binding_missing_distinct_count=0',
             'runtime_unlock_responder_acked_probe_binding_missing_recovered_count=0',
             'runtime_unlock_responder_acked_probe_binding_missing_unresolved_count=0',
-            'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_raw_count=1',
-            'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_distinct_count=1',
+            'runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_raw_count=1',
+            'runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_distinct_count=1',
+            'runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_recovered_count=0',
+            'runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_unresolved_count=1',
+            'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_raw_count=0',
+            'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_distinct_count=0',
             'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_recovered_count=0',
-            'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_unresolved_count=1',
+            'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_unresolved_count=0',
+            'filetransfer_bridge_recovery_execution_payload_hold_missing_raw_count=2',
+            'filetransfer_bridge_recovery_execution_payload_hold_missing_distinct_count=1',
+            'filetransfer_bridge_recovery_execution_payload_hold_missing_recovered_count=0',
+            'filetransfer_bridge_recovery_execution_payload_hold_missing_unresolved_count=1',
+            'filetransfer_bridge_recovery_execution_payload_hold_verdict=fail',
             'runtime_failure_candidate=runtime_unlock_responder_acked_probe_route_transition_handoff_missing',
             'first_proof_chain_failure_class=runtime_unlock_responder_acked_probe_route_transition_handoff_missing',
-            'first_proof_chain_failure_event=filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided',
-            'first_proof_chain_failure_reason=bound_responder_acked_peer_probe_route_transition_handoff_invalidated_as_transfer_context_replaced',
-            'first_proof_chain_failure_sequence=66643',
+            'failure_variant=runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe',
+            'first_proof_chain_failure_event=runtime_unlock_precommit_probe_acked',
+            'first_proof_chain_failure_reason=answer_ack_before_probe_acked_peer_probe_not_rechecked_into_responder_adopting_launch',
+            'first_proof_chain_failure_sequence=85724',
             'first_proof_chain_failure_source_path=filetransfer-retained-log-slice.log',
-            'first_proof_chain_failure_line_number=66643',
-            'first_proof_chain_failure_writer_sequence=30114',
+            'first_proof_chain_failure_line_number=85724',
+            'first_proof_chain_failure_writer_sequence=37479',
             'semantic_failure_domain=route_runtime'
         )
         foreach ($reportName in @('filetransfer-route-consistency-summary.txt', 'filetransfer-operator-verdict.txt')) {
             $reportPath = Join-Path $ArtifactDir $reportName
             $reportText = Get-Content -LiteralPath $reportPath -Raw
             foreach ($fixtureLine in $responderAckedProbeHandoffFixtureLines) {
+                $separatorIndex = $fixtureLine.IndexOf('=')
+                $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
+                $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
+                if ([regex]::IsMatch($reportText, $fixturePattern)) {
+                    $reportText = [regex]::Replace($reportText, $fixturePattern, $fixtureLine)
+                }
+                else {
+                    $reportText = $reportText.TrimEnd("`r", "`n") + [Environment]::NewLine + $fixtureLine + [Environment]::NewLine
+                }
+            }
+            Set-Content -LiteralPath $reportPath -Value $reportText -Encoding UTF8
+        }
+
+        if ($script:RouteAcceptanceExecutionMode -eq 'fake') {
+            $analysisDiagnosticsPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis-diagnostics.json'
+            $analysisDiagnostics = if (Test-Path -LiteralPath $analysisDiagnosticsPath -PathType Leaf) {
+                Get-Content -LiteralPath $analysisDiagnosticsPath -Raw | ConvertFrom-Json
+            }
+            else { [pscustomobject]@{} }
+            $analysisDiagnostics | Add-Member -NotePropertyName 'timed_out' -NotePropertyValue 0 -Force
+            $analysisDiagnostics | Add-Member -NotePropertyName 'exit_code' -NotePropertyValue 0 -Force
+            $analysisDiagnostics | ConvertTo-Json -Depth 8 |
+                Set-Content -LiteralPath $analysisDiagnosticsPath -Encoding UTF8
+
+            $stageDiagnosticsPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis-stage-diagnostics.json'
+            $stageDiagnostics = if (Test-Path -LiteralPath $stageDiagnosticsPath -PathType Leaf) {
+                Get-Content -LiteralPath $stageDiagnosticsPath -Raw | ConvertFrom-Json
+            }
+            else { [pscustomobject]@{} }
+            $retainedEventCount = [long](Get-RouteAcceptanceEvidenceLineCount `
+                -Path (Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'))
+            if ($retainedEventCount -le 0) { $retainedEventCount = 1L }
+            $trustedStageFields = [ordered]@{
+                compact_requested = 1
+                compact_mode = 1
+                correlator_status = 'completed'
+                event_count = $retainedEventCount
+                indexed_event_count = $retainedEventCount
+            }
+            foreach ($stageField in $trustedStageFields.GetEnumerator()) {
+                $stageDiagnostics | Add-Member -NotePropertyName ([string]$stageField.Key) `
+                    -NotePropertyValue $stageField.Value -Force
+            }
+            $stageDiagnostics | ConvertTo-Json -Depth 8 |
+                Set-Content -LiteralPath $stageDiagnosticsPath -Encoding UTF8
+        }
+    }
+
+    if (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'GENERIC_ROUTE_RUNTIME_PAYLOAD_HOLD_SUMMARY_FIXTURE') {
+        $payloadHoldFixtureLines = @(
+            'filetransfer_bridge_recovery_execution_payload_hold_missing_raw_count=2',
+            'filetransfer_bridge_recovery_execution_payload_hold_missing_distinct_count=1',
+            'filetransfer_bridge_recovery_execution_payload_hold_missing_recovered_count=0',
+            'filetransfer_bridge_recovery_execution_payload_hold_missing_unresolved_count=1',
+            'filetransfer_bridge_recovery_execution_payload_hold_verdict=fail',
+            'runtime_failure_candidate=filetransfer_bridge_recovery_execution_payload_hold_missing',
+            'first_proof_chain_failure_class=filetransfer_bridge_recovery_execution_payload_hold_missing',
+            'first_proof_chain_failure_event=filetransfer_v4_sender_failed',
+            'first_proof_chain_failure_reason=current_post_tuna_fallback_recovery_submission_epoch_transition_treated_as_terminal_sender_failure',
+            'first_proof_chain_failure_sequence=92177',
+            'first_proof_chain_failure_source_path=filetransfer-retained-log-slice.log',
+            'first_proof_chain_failure_line_number=92177',
+            'first_proof_chain_failure_writer_sequence=50849',
+            'semantic_failure_domain=route_runtime'
+        )
+        foreach ($reportName in @('filetransfer-route-consistency-summary.txt', 'filetransfer-operator-verdict.txt')) {
+            $reportPath = Join-Path $ArtifactDir $reportName
+            $reportText = Get-Content -LiteralPath $reportPath -Raw
+            foreach ($fixtureLine in $payloadHoldFixtureLines) {
                 $separatorIndex = $fixtureLine.IndexOf('=')
                 $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
                 $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
@@ -5755,6 +6042,64 @@ function Write-RouteAcceptanceFakePhase4Run {
                 }
             }
             Set-Content -LiteralPath $reportPath -Value $reportText -Encoding UTF8
+        }
+    }
+
+    # Fake propagation fixtures mutate the operator report after retained analysis.
+    # Mirror those exact analyzer fields into the compact artifact so the same
+    # production trust predicate is exercised instead of bypassed in fake mode.
+    $mirrorResponderHandoffCompactFixture =
+        (Test-RouteAcceptanceFakeSyntheticTrustedEvidenceEnabled) -or
+        ($script:RouteAcceptanceExecutionMode -eq 'fake' -and
+            (Test-RouteAcceptanceScenarioEnvEnabled `
+                -ScenarioName $scenarioName `
+                -Suffix 'RESPONDER_ACKED_PROBE_HANDOFF_SUMMARY_FIXTURE'))
+    if ($mirrorResponderHandoffCompactFixture) {
+        $compactSummaryPath = Join-Path $ArtifactDir 'filetransfer-retained-compact-summary.json'
+        $operatorVerdictPath = Join-Path $ArtifactDir 'filetransfer-operator-verdict.txt'
+        if ((Test-Path -LiteralPath $compactSummaryPath -PathType Leaf) -and
+            (Test-Path -LiteralPath $operatorVerdictPath -PathType Leaf)) {
+            $compactSummary = Get-Content -LiteralPath $compactSummaryPath -Raw | ConvertFrom-Json
+            $operatorVerdict = Read-RouteAcceptanceKeyValueArtifact -Path $operatorVerdictPath
+            foreach ($operatorKey in $operatorVerdict.Keys) {
+                $compactSummary | Add-Member -NotePropertyName ([string]$operatorKey) `
+                    -NotePropertyValue ([string]$operatorVerdict[$operatorKey]) -Force
+            }
+            $compactSummary | Add-Member -NotePropertyName 'retained_analysis_mode' `
+                -NotePropertyValue 'compact' -Force
+            $compactSummary | ConvertTo-Json -Depth 16 |
+                Set-Content -LiteralPath $compactSummaryPath -Encoding UTF8
+
+            $analysisDiagnosticsPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis-diagnostics.json'
+            $analysisDiagnostics = if (Test-Path -LiteralPath $analysisDiagnosticsPath -PathType Leaf) {
+                Get-Content -LiteralPath $analysisDiagnosticsPath -Raw | ConvertFrom-Json
+            }
+            else { [pscustomobject]@{} }
+            $analysisDiagnostics | Add-Member -NotePropertyName 'timed_out' -NotePropertyValue 0 -Force
+            $analysisDiagnostics | Add-Member -NotePropertyName 'exit_code' -NotePropertyValue 0 -Force
+            $analysisDiagnostics | ConvertTo-Json -Depth 8 |
+                Set-Content -LiteralPath $analysisDiagnosticsPath -Encoding UTF8
+
+            $stageDiagnosticsPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis-stage-diagnostics.json'
+            $stageDiagnostics = if (Test-Path -LiteralPath $stageDiagnosticsPath -PathType Leaf) {
+                Get-Content -LiteralPath $stageDiagnosticsPath -Raw | ConvertFrom-Json
+            }
+            else { [pscustomobject]@{} }
+            $retainedEventCount = [long](Get-RouteAcceptanceEvidenceLineCount `
+                -Path (Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'))
+            if ($retainedEventCount -le 0) { $retainedEventCount = 1L }
+            foreach ($stageField in ([ordered]@{
+                        compact_requested = 1
+                        compact_mode = 1
+                        correlator_status = 'completed'
+                        event_count = $retainedEventCount
+                        indexed_event_count = $retainedEventCount
+                    }).GetEnumerator()) {
+                $stageDiagnostics | Add-Member -NotePropertyName ([string]$stageField.Key) `
+                    -NotePropertyValue $stageField.Value -Force
+            }
+            $stageDiagnostics | ConvertTo-Json -Depth 8 |
+                Set-Content -LiteralPath $stageDiagnosticsPath -Encoding UTF8
         }
     }
 
@@ -6052,7 +6397,13 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
         }) -join ' '
     $startInfo.WorkingDirectory = (Get-Location).Path
     $startInfo.UseShellExecute = $false
-    if ($script:RouteAcceptanceExecutionMode -eq 'live') {
+    $responderHandoffCompactFixture =
+        $script:RouteAcceptanceExecutionMode -eq 'fake' -and
+        @($script:RouteAcceptanceEvidenceScenarioNames).Count -eq 1 -and
+        (Test-RouteAcceptanceScenarioEnvEnabled `
+            -ScenarioName ([string]@($script:RouteAcceptanceEvidenceScenarioNames)[0]) `
+            -Suffix 'RESPONDER_ACKED_PROBE_HANDOFF_SUMMARY_FIXTURE')
+    if ($script:RouteAcceptanceExecutionMode -eq 'live' -or $responderHandoffCompactFixture) {
         $startInfo.Environment['NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT'] = '1'
     }
     $startInfo.RedirectStandardOutput = $true
@@ -8910,9 +9261,11 @@ function Get-RouteAcceptanceResultFailureClass {
         [Parameter(Mandatory = $true)]$Result
     )
 
-    $conclusiveRouteRuntimeCandidate = Test-RouteAcceptanceConclusiveRouteRuntimeCandidate `
-        -Candidate ([string]$Result.runtimeFailureCandidate) `
-        -SemanticFailureDomain ([string]$Result.semanticFailureDomain)
+    $conclusiveRouteRuntimeEvidence = Test-RouteAcceptanceConclusiveRouteRuntimeEvidence -Result $Result
+    $semanticAnalysisUnavailable = Test-RouteAcceptanceSemanticAnalysisUnavailableFailure `
+        -FailurePhase ([string]$Result.guiReportedFailurePhase) `
+        -FailureReason ([string]$Result.guiReportedFailureReason) `
+        -ErrorMessage ([string]$Result.guiReportedFailureError)
     if ($AcceptancePhase -eq 'phase5' -and $script:RouteAcceptanceExecutionMode -ne 'fake') {
         if (-not [bool]$Result.currentRuntimeProof -or
             -not [string]::Equals([string]$Result.manifestValidationVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
@@ -8920,11 +9273,17 @@ function Get-RouteAcceptanceResultFailureClass {
             return 'incomplete_proof'
         }
 
-        if (-not $conclusiveRouteRuntimeCandidate -and
+        if (-not $conclusiveRouteRuntimeEvidence -and
             -not [string]::Equals([string]$Result.transferEvidenceStatus, 'complete', [System.StringComparison]::OrdinalIgnoreCase)) {
             return 'incomplete_proof'
         }
 
+    }
+
+    if ($AcceptancePhase -eq 'phase5' -and
+        $semanticAnalysisUnavailable -and
+        -not $conclusiveRouteRuntimeEvidence) {
+        return 'incomplete_proof'
     }
 
     if ($AcceptancePhase -eq 'phase5' -and
@@ -8934,16 +9293,19 @@ function Get-RouteAcceptanceResultFailureClass {
         if (Test-RouteAcceptanceIncompleteProofRuntimeCandidate -Candidate ([string]$Result.runtimeFailureCandidate)) {
             return 'incomplete_proof'
         }
-        if ([string]$Result.runtimeFailureCandidate -in @(
-            'active_file_tuna_v6_evidence',
-            'diagnostic_regular_nkn_v6_evidence',
-            'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing',
-            'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing',
-            'runtime_unlock_retry_dispatch_current_listener_adoption_missing',
-            'runtime_unlock_responder_acked_probe_route_transition_handoff_missing',
-            'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing',
-            'runtime_unlock_regular_v4_route_commit_send_drain_missing')) {
+        if ($conclusiveRouteRuntimeEvidence) {
             return 'route_runtime'
+        }
+        if ([string]::Equals(
+                [string]$Result.runtimeCorrectnessVerdict,
+                'incomplete_proof',
+                [System.StringComparison]::OrdinalIgnoreCase)) {
+            return 'incomplete_proof'
+        }
+        if (Test-RouteAcceptanceConclusiveRouteRuntimeCandidate `
+                -Candidate ([string]$Result.runtimeFailureCandidate) `
+                -SemanticFailureDomain ([string]$Result.semanticFailureDomain)) {
+            return 'incomplete_proof'
         }
         return [string]$Result.runtimeFailureCandidate
     }
@@ -9639,6 +10001,7 @@ function New-RouteAcceptanceSummaryRunDto {
         transferEvidenceStatus = [string]$Result.transferEvidenceStatus
         runtimeCorrectnessVerdict = [string]$Result.runtimeCorrectnessVerdict
         runtimeFailureCandidate = [string]$Result.runtimeFailureCandidate
+        failureVariant = [string]$Result.failureVariant
         terminalCompletedBeforeFault = [bool]$Result.terminalCompletedBeforeFault
         faultInjected = [bool]$Result.faultInjectedBeforeTerminal
         faultActionClaimed = [bool]$Result.faultActionClaimed
@@ -9667,6 +10030,10 @@ function New-RouteAcceptanceSummaryRunDto {
         runtimeUnlockResponderPeerProbeBindingMissingDistinctCount = [int]$Result.runtimeUnlockResponderPeerProbeBindingMissingDistinctCount
         runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount = [int]$Result.runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount
         runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount = [int]$Result.runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount
+        runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRawCount = [int]$Result.runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRawCount
+        runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeDistinctCount = [int]$Result.runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeDistinctCount
+        runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRecoveredCount = [int]$Result.runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRecoveredCount
+        runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeUnresolvedCount = [int]$Result.runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeUnresolvedCount
         runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount = [int]$Result.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount
         runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount = [int]$Result.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount
         runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount = [int]$Result.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount
@@ -9996,6 +10363,12 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     else {
         '(none)'
     }
+    $failureVariant = if ($runtimeCandidateDtos.Count -gt 0) {
+        [string]$runtimeCandidateDtos[0].failureVariant
+    }
+    else {
+        '(none)'
+    }
     $acceptanceFailureClass = if ($runtimeCandidateDtos.Count -gt 0) {
         [string]$runtimeCandidateDtos[0].acceptanceFailureClass
     }
@@ -10169,6 +10542,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $runtimeUnlockResponderPeerProbeBindingMissingDistinctCount = 0
     $runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount = 0
     $runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount = 0
+    $runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRawCount = 0
+    $runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeDistinctCount = 0
+    $runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRecoveredCount = 0
+    $runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeUnresolvedCount = 0
     $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount = 0
     $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount = 0
     $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount = 0
@@ -10263,6 +10640,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $runtimeUnlockResponderPeerProbeBindingMissingDistinctCount += [int]$runDto.runtimeUnlockResponderPeerProbeBindingMissingDistinctCount
         $runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount += [int]$runDto.runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount
         $runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount += [int]$runDto.runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount
+        $runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRawCount += [int]$runDto.runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRawCount
+        $runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeDistinctCount += [int]$runDto.runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeDistinctCount
+        $runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRecoveredCount += [int]$runDto.runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRecoveredCount
+        $runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeUnresolvedCount += [int]$runDto.runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeUnresolvedCount
         $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount += [int]$runDto.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount
         $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount += [int]$runDto.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount
         $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount += [int]$runDto.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount
@@ -10819,19 +11200,23 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     }
     $correctnessVerdict = if ($correctnessFailureLines.Count -eq 0 -and $script:RunResults.Count -eq $expectedRunCount) { 'PASS' } else { 'FAIL' }
     $performanceVerdict = if ($performanceFailureLines.Count -eq 0) { 'PASS' } else { 'FAIL' }
-    $conclusiveRouteRuntimeCandidate = Test-RouteAcceptanceConclusiveRouteRuntimeCandidate `
-        -Candidate $runtimeFailureCandidate `
-        -SemanticFailureDomain $semanticFailureDomain
+    $conclusiveRouteRuntimeEvidence = $runtimeCandidateDtos.Count -gt 0 -and
+        (Test-RouteAcceptanceConclusiveRouteRuntimeEvidence -Result $runtimeCandidateDtos[0])
+    $selectedRuntimeEvidenceIncomplete = $runtimeCandidateDtos.Count -gt 0 -and
+        [string]::Equals(
+            [string]$runtimeCandidateDtos[0].runtimeCorrectnessVerdict,
+            'incomplete_proof',
+            [System.StringComparison]::OrdinalIgnoreCase)
     $runtimeCorrectnessVerdict = if ($AcceptancePhase -eq 'phase5' -and
-        -not [bool]$evidence.CurrentRuntimeProof -and
-        -not ($script:RouteAcceptanceExecutionMode -eq 'fake' -and $conclusiveRouteRuntimeCandidate)) {
+        -not [bool]$evidence.CurrentRuntimeProof) {
         'incomplete_proof'
     }
-    elseif ($AcceptancePhase -eq 'phase5' -and $conclusiveRouteRuntimeCandidate) {
+    elseif ($AcceptancePhase -eq 'phase5' -and $conclusiveRouteRuntimeEvidence) {
         'fail'
     }
     elseif ($AcceptancePhase -eq 'phase5' -and
-        ($transferEvidenceStatus -ne 'complete' -or
+        ($selectedRuntimeEvidenceIncomplete -or
+            $transferEvidenceStatus -ne 'complete' -or
             (Test-RouteAcceptanceIncompleteProofRuntimeCandidate -Candidate $runtimeFailureCandidate))) {
         'incomplete_proof'
     }
@@ -10882,6 +11267,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("transfer_evidence_status={0}" -f $transferEvidenceStatus),
         ("runtime_correctness_verdict={0}" -f $runtimeCorrectnessVerdict),
         ("runtime_failure_candidate={0}" -f $runtimeFailureCandidate),
+        ("failure_variant={0}" -f $failureVariant),
         ("acceptance_failure_class={0}" -f $acceptanceFailureClass),
         ("terminal_completed_before_fault={0}" -f ($(if ($terminalCompletedBeforeFault) { 1 } else { 0 }))),
         ("fault_injected={0}" -f ($(if ($faultInjectedBeforeTerminal) { 1 } else { 0 }))),
@@ -10911,6 +11297,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("runtime_unlock_responder_acked_probe_binding_missing_distinct_count={0}" -f $runtimeUnlockResponderPeerProbeBindingMissingDistinctCount),
         ("runtime_unlock_responder_acked_probe_binding_missing_recovered_count={0}" -f $runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount),
         ("runtime_unlock_responder_acked_probe_binding_missing_unresolved_count={0}" -f $runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount),
+        ("runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_raw_count={0}" -f $runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRawCount),
+        ("runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_distinct_count={0}" -f $runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeDistinctCount),
+        ("runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_recovered_count={0}" -f $runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRecoveredCount),
+        ("runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_unresolved_count={0}" -f $runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeUnresolvedCount),
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_raw_count={0}" -f $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount),
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_distinct_count={0}" -f $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount),
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_recovered_count={0}" -f $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount),
@@ -11315,6 +11705,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.transfer_evidence_status={1}" -f $prefix, $result.transferEvidenceStatus)
         $textLines += ("{0}.runtime_correctness_verdict={1}" -f $prefix, $result.runtimeCorrectnessVerdict)
         $textLines += ("{0}.runtime_failure_candidate={1}" -f $prefix, $result.runtimeFailureCandidate)
+        $textLines += ("{0}.failure_variant={1}" -f $prefix, $result.failureVariant)
         $textLines += ("{0}.terminal_completed_before_fault={1}" -f $prefix, ($(if ([bool]$result.terminalCompletedBeforeFault) { 1 } else { 0 })))
         $textLines += ("{0}.fault_injected={1}" -f $prefix, ($(if ([bool]$result.faultInjectedBeforeTerminal) { 1 } else { 0 })))
         $textLines += ("{0}.fault_action_claimed={1}" -f $prefix, ($(if ([bool]$result.faultActionClaimed) { 1 } else { 0 })))
@@ -11343,6 +11734,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.runtime_unlock_responder_acked_probe_binding_missing_distinct_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeBindingMissingDistinctCount)
         $textLines += ("{0}.runtime_unlock_responder_acked_probe_binding_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount)
         $textLines += ("{0}.runtime_unlock_responder_acked_probe_binding_missing_unresolved_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount)
+        $textLines += ("{0}.runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_raw_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRawCount)
+        $textLines += ("{0}.runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_distinct_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeDistinctCount)
+        $textLines += ("{0}.runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_recovered_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRecoveredCount)
+        $textLines += ("{0}.runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_unresolved_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeUnresolvedCount)
         $textLines += ("{0}.runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_raw_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount)
         $textLines += ("{0}.runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_distinct_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount)
         $textLines += ("{0}.runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_recovered_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount)
@@ -11674,6 +12069,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         transferEvidenceStatus = $transferEvidenceStatus
         runtimeCorrectnessVerdict = $runtimeCorrectnessVerdict
         runtimeFailureCandidate = $runtimeFailureCandidate
+        failureVariant = $failureVariant
         acceptanceFailureClass = $acceptanceFailureClass
         terminalCompletedBeforeFault = $terminalCompletedBeforeFault
         faultInjected = $faultInjectedBeforeTerminal
@@ -11703,6 +12099,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         runtimeUnlockResponderPeerProbeBindingMissingDistinctCount = $runtimeUnlockResponderPeerProbeBindingMissingDistinctCount
         runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount = $runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount
         runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount = $runtimeUnlockResponderPeerProbeBindingMissingUnresolvedCount
+        runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRawCount = $runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRawCount
+        runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeDistinctCount = $runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeDistinctCount
+        runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRecoveredCount = $runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeRecoveredCount
+        runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeUnresolvedCount = $runtimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbeUnresolvedCount
         runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount = $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRawCount
         runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount = $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeDistinctCount
         runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount = $runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount
@@ -12338,6 +12738,21 @@ try {
 
         $script:RouteAcceptanceEvidenceRuntimePath = $resolvedExePath
         $script:RouteAcceptanceEvidenceBridgeDir = $resolvedBridgeDir
+        $fixtureSynthesizesLiveEvidence =
+            (Test-RouteAcceptanceFakeSyntheticTrustedEvidenceEnabled) -or
+            ($script:RouteAcceptanceExecutionMode -eq 'fake' -and
+                @($script:RouteAcceptanceEvidenceScenarioNames).Count -eq 1 -and
+                (Test-RouteAcceptanceScenarioEnvEnabled `
+                    -ScenarioName ([string]@($script:RouteAcceptanceEvidenceScenarioNames)[0]) `
+                    -Suffix 'RESPONDER_ACKED_PROBE_HANDOFF_SUMMARY_FIXTURE'))
+        if ($fixtureSynthesizesLiveEvidence) {
+            $script:RouteAcceptanceInitialGitState = [pscustomobject][ordered]@{
+                gitCommitSha = [string]$script:RouteAcceptanceInitialGitState.gitCommitSha
+                dirty = $false
+                normalizedStatus = ''
+                normalizedStatusSha256 = Get-RouteAcceptanceEvidenceTextSha256 -Value ''
+            }
+        }
         $script:RouteAcceptanceInitialEvidenceSnapshot = New-RouteAcceptanceEvidenceSnapshot `
             -RepoRoot $repoRoot `
             -PortableExecutablePath $resolvedExePath `

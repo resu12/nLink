@@ -15,10 +15,10 @@ public sealed class FileTransferPhase5StrictGateTests : FileTransferAcceptancePh
 {
     [Theory]
     [Trait("Category", "Smoke")]
-    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_BRIDGE_LIVENESS_FAIL", "1", "regular-v4-live-activation-off-on-off-256mb", "fallback_control_plane_starvation", "bridge liveness integration verdict is fail")]
+    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_BRIDGE_LIVENESS_FAIL", "1", "regular-v4-live-activation-off-on-off-256mb", "incomplete_proof", "bridge liveness integration verdict is fail")]
     [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_FALLBACK_AUTHORITY_METADATA_MISSING", "1", "regular-v4-live-activation-off-on-off-256mb", "fallback_authority", "fallback leg authority proof verdict is fail")]
     [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_LIVE_SWITCH_OFF_HELPEE_64MB_TRANSPORT_ONLY_LIVE_PROOF", "1", "live-switch-off-helpee-64mb", "live_route_proof", "live route epoch sequence mismatch")]
-    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_ACTIVE_TUNA_V4_64MB_ROUTE", "file_tuna_v6", "active-tuna-v4-64mb", "route_runtime", "active file_tuna_v6")]
+    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_ACTIVE_TUNA_V4_64MB_ROUTE", "file_tuna_v6", "active-tuna-v4-64mb", "incomplete_proof", "active file_tuna_v6")]
     [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_ACTIVE_TUNA_V4_64MB_SHA_FAIL", "1", "active-tuna-v4-64mb", "protocol_or_integrity", "completion/integrity")]
     [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_ACTIVE_TUNA_V4_64MB_WARNING_CAP_EXCESS", "1", "active-tuna-v4-64mb", "warning_policy", "warning cap exceeded")]
     [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_SECOND_TRANSFER_AFTER_REACTIVATION_SECOND_TRANSFER_NOT_STARTED", "1", "second-transfer-after-reactivation", "setup", "second transfer setup failure after reactivation")]
@@ -78,6 +78,10 @@ public sealed class FileTransferPhase5StrictGateTests : FileTransferAcceptancePh
                     livenessTimeoutIndex > currentFallbackRecoveryIndex &&
                     (checkpointAcceptedIndex < 0 || checkpointAcceptedIndex > livenessTimeoutIndex),
                     "Expected the current fallback leg to time out without checkpoint acceptance, making control-plane starvation more specific than the downstream bridge-liveness symptom.");
+            }
+            else if (environmentName.EndsWith("_ACTIVE_TUNA_V4_64MB_ROUTE", StringComparison.Ordinal))
+            {
+                Assert.Equal("active_file_tuna_v6_evidence", summary[$"{scenarioName}.runtime_failure_candidate"]);
             }
         }
         finally
