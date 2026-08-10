@@ -3460,20 +3460,35 @@ public sealed partial class SessionFileTransferService :
                     }
                     else
                     {
-                        var invalidated = FileTransferCoordinator
-                            .InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoff(
-                                CreateCoordinatorStateLocked(inbound),
+                        if (responderObservation.ResponderTransitionMode ==
+                            RuntimeUnlockResponderPeerProbeTransitionMode
+                                .InitialRegularV4)
+                        {
+                            LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
+                                inbound,
                                 responderObservation,
+                                null,
+                                null,
+                                "Invalidated",
                                 "data_session_unavailable");
-                        inbound.CoordinatorPersistentState =
-                            invalidated.State.PersistentState;
-                        LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
-                            inbound,
-                            responderObservation,
-                            invalidated.Authority,
-                            null,
-                            invalidated.Status.ToString(),
-                            invalidated.Reason);
+                        }
+                        else
+                        {
+                            var invalidated = FileTransferCoordinator
+                                .InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoff(
+                                    CreateCoordinatorStateLocked(inbound),
+                                    responderObservation,
+                                    "data_session_unavailable");
+                            inbound.CoordinatorPersistentState =
+                                invalidated.State.PersistentState;
+                            LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
+                                inbound,
+                                responderObservation,
+                                invalidated.Authority,
+                                null,
+                                invalidated.Status.ToString(),
+                                invalidated.Reason);
+                        }
                     }
                 }
                 else
@@ -22429,7 +22444,13 @@ public sealed partial class SessionFileTransferService :
         long OfferGeneration,
         long TunaPathLeaseGeneration,
         string ProbeId,
-        DateTimeOffset CreatedUtc);
+        DateTimeOffset CreatedUtc,
+        RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt?
+            AnswerAcceptanceReceipt = null,
+        RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus?
+            AnswerAcceptanceStatus = null,
+        FileTransferRuntimeUnlockPreCommitProbeAckFrame?
+            CompletedCommitConfirmation = null);
 
     private sealed record OutboundSparsePumpInstall(
         long InstallGeneration,

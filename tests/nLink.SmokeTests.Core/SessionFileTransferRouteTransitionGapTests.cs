@@ -65,10 +65,7 @@ public sealed partial class SessionFileTransferV4SenderTests
                 nextChunkIndex: 4,
                 durableHighestChunkIndex: 3,
                 creditUntilChunkIndexExclusive: 32);
-            SeedCurrentRuntimeOwnerForTest(
-                context,
-                FileTransferDirection.Inbound,
-                reason);
+            SeedInitialRegularV4RuntimeScopeForTest(context, reason);
             SeedRuntimeUnlockAdmissionForTest(
                 context,
                 FileTransferDirection.Inbound,
@@ -235,9 +232,8 @@ public sealed partial class SessionFileTransferV4SenderTests
             nextChunkIndex: 4,
             durableHighestChunkIndex: 20,
             creditUntilChunkIndexExclusive: 32);
-        SeedCurrentRuntimeOwnerForTest(
+        SeedInitialRegularV4RuntimeScopeForTest(
             context,
-            FileTransferDirection.Inbound,
             "test_inbound_durable_checkpoint");
         SeedRuntimeUnlockAdmissionForTest(
             context,
@@ -341,9 +337,8 @@ public sealed partial class SessionFileTransferV4SenderTests
             nextChunkIndex: 4,
             durableHighestChunkIndex: 3,
             creditUntilChunkIndexExclusive: 32);
-        SeedCurrentRuntimeOwnerForTest(
+        SeedInitialRegularV4RuntimeScopeForTest(
             context,
-            FileTransferDirection.Inbound,
             "test_inbound_draining_pause");
         SeedRuntimeUnlockAdmissionForTest(
             context,
@@ -711,6 +706,9 @@ public sealed partial class SessionFileTransferV4SenderTests
             RuntimeUnlockRouteCommitSnapshot snapshot,
             string reason)
     {
+        snapshot = CreateInitialResponderRouteCommitSnapshotForInboundTest(
+            context,
+            snapshot);
         object?[] arguments =
         [
             context,
@@ -746,6 +744,62 @@ public sealed partial class SessionFileTransferV4SenderTests
                     .DrainCommand!.Value
                 : default,
             accepted ? "accepted" : "rejected");
+    }
+
+    private static RuntimeUnlockRouteCommitSnapshot
+        CreateInitialResponderRouteCommitSnapshotForInboundTest(
+            object context,
+            RuntimeUnlockRouteCommitSnapshot snapshot)
+    {
+        var state = CreateCoordinatorStateForTest(context);
+        var leg = Assert.IsType<FileTransferLeg>(state.CurrentLeg);
+        var admission = Assert.IsType<RuntimeUnlockAdmissionToken>(
+            state.CurrentRuntimeUnlockAdmission);
+        var receiveScope =
+            new RuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
+                state.CurrentRuntimeOwner!.Value,
+                state.CurrentRoutePublicationToken!.Value,
+                state.TerminalGeneration,
+                leg.Generation,
+                leg.TransportEpochId,
+                leg.BridgeRecoveryGeneration,
+                leg.CheckpointRequestId ?? "(none)",
+                leg.CheckpointGeneration,
+                state.CurrentDataSessionIdentity!,
+                state.CurrentDataSessionGeneration,
+                admission,
+                RuntimeUnlockResponderPeerProbeTransitionMode
+                    .InitialRegularV4);
+        var observation =
+            new RuntimeUnlockResponderPeerProbeRouteTransitionObservation(
+                snapshot.SessionId,
+                snapshot.TransferId,
+                snapshot.TransactionGeneration,
+                snapshot.OfferGeneration,
+                PendingAnswerAckGeneration: snapshot.OfferGeneration,
+                PayerDecisionId: snapshot.TransactionGeneration,
+                snapshot.LaunchGeneration,
+                Lanes: "file",
+                AnswerAcceptanceSource: "SemanticAnswerAck",
+                AckMessageId:
+                    $"test-answer-ack-{snapshot.TransactionGeneration}-{snapshot.OfferGeneration}",
+                AckSourceFingerprint: new string('a', 64),
+                PeerProbeFrameFingerprint: new string('b', 64),
+                snapshot.TunaPathLeaseGeneration,
+                snapshot.TunaPathLeaseListenerRunId,
+                ProbeId: snapshot.PathProbeId!,
+                RuntimeUnlockPathProbeState.Acked,
+                snapshot.PathProbeTransport,
+                snapshot.PathProbeAckedUtcMs,
+                snapshot.TargetRoute,
+                snapshot.ProtocolVersion,
+                snapshot.HandoffKind,
+                snapshot.TargetTransport,
+                receiveScope);
+        return snapshot with
+        {
+            ResponderPeerProbeRouteTransitionObservation = observation,
+        };
     }
 
     private static bool

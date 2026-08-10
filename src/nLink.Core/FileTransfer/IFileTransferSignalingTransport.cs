@@ -744,6 +744,9 @@ internal sealed record RuntimeUnlockResponderPeerProbeRouteTransitionObservation
     FileTransferTransportKind TargetTransport,
     RuntimeUnlockPeerPreCommitAnswerAcceptanceScope PeerReceiveScope = default)
 {
+    public RuntimeUnlockResponderPeerProbeTransitionMode ResponderTransitionMode =>
+        PeerReceiveScope.ResponderTransitionMode;
+
     public bool IsDefault =>
         string.IsNullOrWhiteSpace(SessionId) ||
         string.IsNullOrWhiteSpace(TransferId) ||
@@ -1022,6 +1025,13 @@ internal enum RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus
     Held = 4,
 }
 
+internal enum RuntimeUnlockResponderPeerProbeTransitionMode
+{
+    None = 0,
+    InitialRegularV4 = 1,
+    PostFallbackV6Paired = 2,
+}
+
 internal readonly record struct RuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
     RuntimeOwnerToken RuntimeOwner,
     RoutePublicationToken RoutePublication,
@@ -1033,17 +1043,90 @@ internal readonly record struct RuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
     int CheckpointGeneration,
     string DataSessionIdentity,
     long DataSessionGeneration,
-    RuntimeUnlockAdmissionToken Admission = default)
+    RuntimeUnlockAdmissionToken Admission = default,
+    RuntimeUnlockResponderPeerProbeTransitionMode ResponderTransitionMode =
+        RuntimeUnlockResponderPeerProbeTransitionMode.PostFallbackV6Paired)
 {
     public bool IsDefault =>
         RuntimeOwner.IsDefault ||
         RoutePublication.IsDefault ||
         Admission.IsDefault ||
+        RoutePublication.RuntimeOwner != RuntimeOwner ||
+        Admission.RuntimeOwner != RuntimeOwner ||
+        RoutePublication.TerminalGeneration != TerminalGeneration ||
+        Admission.TerminalGeneration != TerminalGeneration ||
+        RoutePublication.LegGeneration != LegGeneration ||
+        Admission.LegGeneration != LegGeneration ||
         LegGeneration <= 0 ||
-        TransportEpoch <= 0 ||
-        string.IsNullOrWhiteSpace(CheckpointRequestId) ||
         string.IsNullOrWhiteSpace(DataSessionIdentity) ||
-        DataSessionGeneration <= 0;
+        DataSessionGeneration <= 0 ||
+        !HasValidResponderTransitionModeScope;
+
+    private bool HasValidResponderTransitionModeScope =>
+        ResponderTransitionMode switch
+        {
+            RuntimeUnlockResponderPeerProbeTransitionMode.InitialRegularV4 =>
+                RuntimeOwner.Direction == FileTransferDirection.Inbound &&
+                RuntimeOwner.Route == FileTransferRoute.RegularNknV4Fast &&
+                string.Equals(
+                    RuntimeOwner.RouteToken,
+                    FileTransferRouteResolver.RegularNknV4FastToken,
+                    StringComparison.Ordinal) &&
+                RuntimeOwner.ProtocolVersion ==
+                    FileTransferProtocol.ProtocolVersionV4 &&
+                RuntimeOwner.LiveRouteEpoch == 0 &&
+                RoutePublication.Route == RuntimeOwner.Route &&
+                string.Equals(
+                    RoutePublication.RouteToken,
+                    RuntimeOwner.RouteToken,
+                    StringComparison.Ordinal) &&
+                RoutePublication.ProtocolVersion ==
+                    RuntimeOwner.ProtocolVersion &&
+                RoutePublication.LiveRouteEpoch == 0 &&
+                Admission.Route == RuntimeOwner.Route &&
+                string.Equals(
+                    Admission.RouteToken,
+                    RuntimeOwner.RouteToken,
+                    StringComparison.Ordinal) &&
+                Admission.ProtocolVersion == RuntimeOwner.ProtocolVersion &&
+                Admission.LiveRouteEpoch == 0 &&
+                TransportEpoch == 0 &&
+                BridgeRecoveryGeneration == 0 &&
+                string.Equals(
+                    CheckpointRequestId,
+                    "(none)",
+                    StringComparison.Ordinal) &&
+                CheckpointGeneration == 0,
+            RuntimeUnlockResponderPeerProbeTransitionMode
+                    .PostFallbackV6Paired =>
+                RuntimeOwner.Direction == FileTransferDirection.Inbound &&
+                RuntimeOwner.Route == FileTransferRoute.PostTunaFallbackV6 &&
+                string.Equals(
+                    RuntimeOwner.RouteToken,
+                    FileTransferRouteResolver.PostTunaFallbackV6Token,
+                    StringComparison.Ordinal) &&
+                RuntimeOwner.ProtocolVersion ==
+                    FileTransferProtocol.ProtocolVersionV6 &&
+                RoutePublication.Route == RuntimeOwner.Route &&
+                string.Equals(
+                    RoutePublication.RouteToken,
+                    RuntimeOwner.RouteToken,
+                    StringComparison.Ordinal) &&
+                RoutePublication.ProtocolVersion ==
+                    RuntimeOwner.ProtocolVersion &&
+                RoutePublication.LiveRouteEpoch ==
+                    RuntimeOwner.LiveRouteEpoch &&
+                Admission.Route == RuntimeOwner.Route &&
+                string.Equals(
+                    Admission.RouteToken,
+                    RuntimeOwner.RouteToken,
+                    StringComparison.Ordinal) &&
+                Admission.ProtocolVersion == RuntimeOwner.ProtocolVersion &&
+                Admission.LiveRouteEpoch == RuntimeOwner.LiveRouteEpoch &&
+                TransportEpoch > 0 &&
+                string.IsNullOrWhiteSpace(CheckpointRequestId) is false,
+            _ => false,
+        };
 }
 
 internal sealed record RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt(

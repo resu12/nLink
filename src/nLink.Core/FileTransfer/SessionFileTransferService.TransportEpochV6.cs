@@ -2056,10 +2056,6 @@ public sealed partial class SessionFileTransferService
                         receiveAuthorityCurrent = IsOutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthorityCurrentLocked(
                             requiredReceiveAuthority,
                             out receiveAuthorityRejection);
-                        if (receiveAuthorityCurrent)
-                        {
-                            TrackRuntimeUnlockPeerPreCommitProbeLocked(direction, sessionId, transferId, ack);
-                        }
                     }
 
                     if (!receiveAuthorityCurrent)
@@ -2076,14 +2072,12 @@ public sealed partial class SessionFileTransferService
                         return;
                     }
                 }
-                else
-                {
-                    TrackRuntimeUnlockPeerPreCommitProbeLocked(direction, sessionId, transferId, ack);
-                }
 
                 var peerAcceptanceHandled = false;
                 RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt?
                     retainedPeerAcceptanceReceipt = null;
+                RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus?
+                    retainedPeerAcceptanceStatus = null;
                 if (transport is IRuntimeUnlockPeerPreCommitAnswerAcceptanceObserver acceptanceObserver)
                 {
                     if (!TryCreateRuntimeUnlockPeerPreCommitAnswerAcceptanceReceiptLocked(
@@ -2097,26 +2091,55 @@ public sealed partial class SessionFileTransferService
                             probeReceivedUtcMs,
                             DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                             out var acceptanceReceipt,
+                            out var acceptanceReceiveScope,
                             out var acceptanceReceiptReason))
                     {
                         LocalOperationalLog.Warn(
                             "FileTransferService",
-                            $"event=runtime_unlock_peer_precommit_answer_acceptance_observed; status=Rejected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; peer_transaction_generation={probe.TransactionGeneration}; peer_offer_generation={probe.OfferGeneration}; peer_tuna_path_lease_generation={probe.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(probe.ProbeId ?? "(none)")}; decision_reason={FormatProtocolLogValue(acceptanceReceiptReason)}");
+                            $"event=runtime_unlock_peer_precommit_answer_acceptance_observed; status=Rejected; decision_status=Rejected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; peer_transaction_generation={probe.TransactionGeneration}; peer_offer_generation={probe.OfferGeneration}; peer_tuna_path_lease_generation={probe.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(probe.ProbeId ?? "(none)")}; {FormatRuntimeUnlockPeerPreCommitAnswerAcceptanceScopeForLog(acceptanceReceiveScope)}; decision_reason={FormatProtocolLogValue(acceptanceReceiptReason)}");
                         return;
                     }
 
-                    retainedPeerAcceptanceReceipt = acceptanceReceipt;
                     var acceptanceDecision =
                         acceptanceObserver.ObserveRuntimeUnlockPeerPreCommitAnswerAcceptance(acceptanceReceipt);
+                    var acceptanceDecisionStatusRecognized =
+                        acceptanceDecision.Status is
+                            RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Accepted or
+                            RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Idempotent or
+                            RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Held or
+                            RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Rejected or
+                            RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.NotApplicable;
+                    var acceptanceDecisionReceiptExact =
+                        acceptanceDecision.Receipt == acceptanceReceipt;
+                    var effectiveAcceptanceStatus =
+                        acceptanceDecisionStatusRecognized &&
+                        acceptanceDecisionReceiptExact
+                            ? acceptanceDecision.Status ==
+                                RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus
+                                    .NotApplicable
+                                ? RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus
+                                    .Rejected
+                                : acceptanceDecision.Status
+                            : RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus
+                                .Rejected;
+                    var effectiveAcceptanceReason =
+                        !acceptanceDecisionReceiptExact
+                            ? "runtime_unlock_peer_precommit_answer_acceptance_receipt_mutated"
+                            : !acceptanceDecisionStatusRecognized
+                                ? "runtime_unlock_peer_precommit_answer_acceptance_status_invalid"
+                                : acceptanceDecision.Reason;
                     LocalOperationalLog.Info(
                         "FileTransferService",
-                        $"event=runtime_unlock_peer_precommit_answer_acceptance_observed; status={acceptanceDecision.Status}; decision_status={acceptanceDecision.Status}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; peer_transaction_generation={probe.TransactionGeneration}; peer_offer_generation={probe.OfferGeneration}; peer_tuna_path_lease_generation={probe.TunaPathLeaseGeneration}; local_transaction_generation={acceptanceDecision.LocalTransactionGeneration}; local_offer_generation={acceptanceDecision.LocalOfferGeneration}; local_tuna_path_lease_generation={acceptanceDecision.LocalTunaPathLeaseGeneration}; pending_answer_ack_generation={acceptanceDecision.PendingAnswerAckGeneration}; launch_generation={acceptanceDecision.LaunchGeneration}; probe_id={FormatProtocolLogValue(probe.ProbeId ?? "(none)")}; probe_frame_fingerprint={FormatProtocolLogValue(acceptanceReceipt.ProbeFrameFingerprint)}; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}; admission_generation={acceptanceReceipt.ReceiveScope.Admission.AdmissionGeneration}; peer_admission_generation={acceptanceReceipt.ReceiveScope.Admission.AdmissionGeneration}; peer_runtime_generation={acceptanceReceipt.ReceiveScope.RuntimeOwner.RuntimeGeneration}; peer_route_publication_generation={acceptanceReceipt.ReceiveScope.RoutePublication.PublicationGeneration}; peer_terminal_generation={acceptanceReceipt.ReceiveScope.TerminalGeneration}; peer_leg_generation={acceptanceReceipt.ReceiveScope.LegGeneration}; peer_transport_epoch={acceptanceReceipt.ReceiveScope.TransportEpoch}; peer_bridge_recovery_generation={acceptanceReceipt.ReceiveScope.BridgeRecoveryGeneration}; peer_checkpoint_request_id={FormatProtocolLogValue(acceptanceReceipt.ReceiveScope.CheckpointRequestId)}; peer_checkpoint_generation={acceptanceReceipt.ReceiveScope.CheckpointGeneration}; peer_data_session_identity={FormatProtocolLogValue(acceptanceReceipt.ReceiveScope.DataSessionIdentity)}; peer_data_session_generation={acceptanceReceipt.ReceiveScope.DataSessionGeneration}; decision_reason={FormatProtocolLogValue(acceptanceDecision.Reason)}");
-                    if (acceptanceDecision.Status == RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Rejected)
+                        $"event=runtime_unlock_peer_precommit_answer_acceptance_observed; status={effectiveAcceptanceStatus}; decision_status={effectiveAcceptanceStatus}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; peer_transaction_generation={probe.TransactionGeneration}; peer_offer_generation={probe.OfferGeneration}; peer_tuna_path_lease_generation={probe.TunaPathLeaseGeneration}; local_transaction_generation={acceptanceDecision.LocalTransactionGeneration}; local_offer_generation={acceptanceDecision.LocalOfferGeneration}; local_tuna_path_lease_generation={acceptanceDecision.LocalTunaPathLeaseGeneration}; pending_answer_ack_generation={acceptanceDecision.PendingAnswerAckGeneration}; launch_generation={acceptanceDecision.LaunchGeneration}; probe_id={FormatProtocolLogValue(probe.ProbeId ?? "(none)")}; probe_frame_fingerprint={FormatProtocolLogValue(acceptanceReceipt.ProbeFrameFingerprint)}; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}; {FormatRuntimeUnlockPeerPreCommitAnswerAcceptanceScopeForLog(acceptanceReceipt.ReceiveScope)}; decision_reason={FormatProtocolLogValue(effectiveAcceptanceReason)}");
+                    if (effectiveAcceptanceStatus ==
+                        RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Rejected)
                     {
                         return;
                     }
 
-                    peerAcceptanceHandled = acceptanceDecision.Status is
+                    retainedPeerAcceptanceReceipt = acceptanceReceipt;
+                    retainedPeerAcceptanceStatus = effectiveAcceptanceStatus;
+                    peerAcceptanceHandled = effectiveAcceptanceStatus is
                         RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Accepted or
                         RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Idempotent;
                 }
@@ -2181,6 +2204,14 @@ public sealed partial class SessionFileTransferService
                         $"event=runtime_unlock_precommit_peer_probe_tracked; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(ack.ProbeId ?? "(none)")}; reason=local_probe_already_started");
                 }
 
+                TrackRuntimeUnlockPeerPreCommitProbeLocked(
+                    direction,
+                    sessionId,
+                    transferId,
+                    ack,
+                    retainedPeerAcceptanceReceipt,
+                    retainedPeerAcceptanceStatus);
+
                 LocalOperationalLog.Info(
                     "FileTransferService",
                     $"event=runtime_unlock_precommit_probe_ack_waiting_for_commit_confirmation; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(ack.ProbeId ?? "(none)")}; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}; reason=precommit_probe_ack_sent");
@@ -2205,10 +2236,13 @@ public sealed partial class SessionFileTransferService
         long receivedUtcMs,
         long probeAckSentUtcMs,
         out RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt receipt,
+        out RuntimeUnlockPeerPreCommitAnswerAcceptanceScope receiveScope,
         out string reason)
     {
         receipt = null!;
-        reason = "runtime_unlock_peer_precommit_scope_not_current";
+        receiveScope = default;
+        reason =
+            "runtime_unlock_peer_precommit_answer_acceptance_scope_not_current";
         if (receivedTransportKind != FileTransferTransportKind.Tuna ||
             string.IsNullOrWhiteSpace(probe.ProbeId) ||
             attemptedAdmissionToken is not { IsDefault: false } attempted)
@@ -2218,7 +2252,6 @@ public sealed partial class SessionFileTransferService
 
         RuntimeUnlockAdmissionToken currentAdmission;
         long dataSessionGeneration;
-        RuntimeUnlockPeerPreCommitAnswerAcceptanceScope receiveScope;
         lock (gate)
         {
             if (direction == FileTransferDirection.Outbound &&
@@ -2232,11 +2265,17 @@ public sealed partial class SessionFileTransferService
                 if (!FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(
                         state,
                         outboundAdmission,
-                        out reason) ||
+                        out _) ||
                     !TryCreateRuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
                         state,
-                        out receiveScope))
+                        out receiveScope,
+                        out reason))
                 {
+                    if (string.Equals(reason, "current", StringComparison.Ordinal))
+                    {
+                        reason =
+                            "runtime_unlock_peer_precommit_answer_acceptance_scope_not_current";
+                    }
                     return false;
                 }
 
@@ -2254,11 +2293,17 @@ public sealed partial class SessionFileTransferService
                 if (!FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(
                         state,
                         inboundAdmission,
-                        out reason) ||
+                        out _) ||
                     !TryCreateRuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
                         state,
-                        out receiveScope))
+                        out receiveScope,
+                        out reason))
                 {
+                    if (string.Equals(reason, "current", StringComparison.Ordinal))
+                    {
+                        reason =
+                            "runtime_unlock_peer_precommit_answer_acceptance_scope_not_current";
+                    }
                     return false;
                 }
 
@@ -2308,8 +2353,20 @@ public sealed partial class SessionFileTransferService
         TryCreateRuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
             FileTransferCoordinatorState state,
             out RuntimeUnlockPeerPreCommitAnswerAcceptanceScope scope)
+        => TryCreateRuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
+            state,
+            out scope,
+            out _);
+
+    private static bool
+        TryCreateRuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
+            FileTransferCoordinatorState state,
+            out RuntimeUnlockPeerPreCommitAnswerAcceptanceScope scope,
+            out string reason)
     {
         scope = default;
+        reason =
+            "runtime_unlock_peer_precommit_answer_acceptance_scope_not_current";
         if (state.CurrentRuntimeOwner is not { } owner ||
             state.CurrentRoutePublicationToken is not { } publication ||
             state.CurrentRuntimeUnlockAdmission is not
@@ -2318,6 +2375,30 @@ public sealed partial class SessionFileTransferService
             string.IsNullOrWhiteSpace(state.CurrentDataSessionIdentity) ||
             state.CurrentDataSessionGeneration <= 0)
         {
+            return false;
+        }
+
+        var responderTransitionMode =
+            state.Direction == FileTransferDirection.Inbound &&
+            state.RouteSelection.Route ==
+                FileTransferRoute.RegularNknV4Fast &&
+            state.RouteSelection.ProtocolVersion ==
+                FileTransferProtocol.ProtocolVersionV4
+                ? RuntimeUnlockResponderPeerProbeTransitionMode
+                    .InitialRegularV4
+                : state.Direction == FileTransferDirection.Inbound &&
+                  state.RouteSelection.Route ==
+                      FileTransferRoute.PostTunaFallbackV6 &&
+                  state.RouteSelection.ProtocolVersion ==
+                      FileTransferProtocol.ProtocolVersionV6
+                    ? RuntimeUnlockResponderPeerProbeTransitionMode
+                        .PostFallbackV6Paired
+                    : RuntimeUnlockResponderPeerProbeTransitionMode.None;
+        if (responderTransitionMode ==
+            RuntimeUnlockResponderPeerProbeTransitionMode.None)
+        {
+            reason =
+                "runtime_unlock_peer_precommit_answer_acceptance_scope_mode_invalid";
             return false;
         }
 
@@ -2332,9 +2413,36 @@ public sealed partial class SessionFileTransferService
             leg.CheckpointGeneration,
             state.CurrentDataSessionIdentity,
             state.CurrentDataSessionGeneration,
-            admission);
-        return !scope.IsDefault;
+            admission,
+            responderTransitionMode);
+        if (scope.IsDefault)
+        {
+            reason =
+                "runtime_unlock_peer_precommit_answer_acceptance_scope_mode_invalid";
+            return false;
+        }
+
+        reason = "runtime_unlock_peer_precommit_answer_acceptance_scope_current";
+        return true;
     }
+
+    private static string
+        FormatRuntimeUnlockPeerPreCommitAnswerAcceptanceScopeForLog(
+            RuntimeUnlockPeerPreCommitAnswerAcceptanceScope scope)
+        =>
+            $"responder_transition_mode={FormatRuntimeUnlockResponderPeerProbeTransitionMode(scope.ResponderTransitionMode)}; peer_runtime_owner_session_id={FormatProtocolLogValue(scope.RuntimeOwner.SessionId)}; peer_runtime_owner_transfer_id={FormatProtocolLogValue(scope.RuntimeOwner.TransferId)}; peer_runtime_owner_direction={scope.RuntimeOwner.Direction.ToString().ToLowerInvariant()}; peer_runtime_owner_route={scope.RuntimeOwner.Route.ToString().ToLowerInvariant()}; peer_runtime_owner_route_token={FormatProtocolLogValue(scope.RuntimeOwner.RouteToken)}; peer_runtime_owner_protocol_version={scope.RuntimeOwner.ProtocolVersion}; peer_runtime_owner_live_route_epoch={scope.RuntimeOwner.LiveRouteEpoch}; peer_runtime_generation={scope.RuntimeOwner.RuntimeGeneration}; peer_runtime_owner_terminal_generation={scope.RuntimeOwner.TerminalGeneration}; peer_route_publication_session_id={FormatProtocolLogValue(scope.RoutePublication.SessionId)}; peer_route_publication_transfer_id={FormatProtocolLogValue(scope.RoutePublication.TransferId)}; peer_route_publication_direction={scope.RoutePublication.Direction.ToString().ToLowerInvariant()}; peer_route_publication_route={scope.RoutePublication.Route.ToString().ToLowerInvariant()}; peer_route_publication_route_token={FormatProtocolLogValue(scope.RoutePublication.RouteToken)}; peer_route_publication_protocol_version={scope.RoutePublication.ProtocolVersion}; peer_route_publication_live_route_epoch={scope.RoutePublication.LiveRouteEpoch}; peer_route_publication_runtime_generation={scope.RoutePublication.RuntimeGeneration}; peer_route_publication_terminal_generation={scope.RoutePublication.TerminalGeneration}; peer_route_publication_leg_generation={scope.RoutePublication.LegGeneration}; peer_route_publication_commit_generation={scope.RoutePublication.RouteCommitGeneration ?? 0}; peer_route_publication_generation={scope.RoutePublication.PublicationGeneration}; admission_generation={scope.Admission.AdmissionGeneration}; peer_admission_generation={scope.Admission.AdmissionGeneration}; peer_terminal_generation={scope.TerminalGeneration}; peer_leg_generation={scope.LegGeneration}; peer_transport_epoch={scope.TransportEpoch}; peer_bridge_recovery_generation={scope.BridgeRecoveryGeneration}; peer_checkpoint_request_id={FormatProtocolLogValue(scope.CheckpointRequestId)}; peer_checkpoint_generation={scope.CheckpointGeneration}; peer_data_session_identity={FormatProtocolLogValue(scope.DataSessionIdentity)}; peer_data_session_generation={scope.DataSessionGeneration}";
+
+    private static string FormatRuntimeUnlockResponderPeerProbeTransitionMode(
+        RuntimeUnlockResponderPeerProbeTransitionMode mode)
+        => mode switch
+        {
+            RuntimeUnlockResponderPeerProbeTransitionMode.InitialRegularV4 =>
+                "initial_regular_v4",
+            RuntimeUnlockResponderPeerProbeTransitionMode
+                    .PostFallbackV6Paired =>
+                "post_fallback_v6_paired",
+            _ => "none",
+        };
 
     private bool HasCurrentRuntimeUnlockPreCommitProbeAdmissionLocked(
         FileTransferDirection direction,
@@ -2721,9 +2829,22 @@ public sealed partial class SessionFileTransferService
         FileTransferDirection direction,
         string sessionId,
         string transferId,
-        FileTransferRuntimeUnlockPreCommitProbeAckFrame ack)
+        FileTransferRuntimeUnlockPreCommitProbeAckFrame ack,
+        RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt?
+            answerAcceptanceReceipt,
+        RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus?
+            answerAcceptanceStatus)
     {
-        if (string.IsNullOrWhiteSpace(ack.ProbeId))
+        if (string.IsNullOrWhiteSpace(ack.ProbeId) ||
+            (answerAcceptanceReceipt is null) !=
+                (answerAcceptanceStatus is null) ||
+            (direction == FileTransferDirection.Inbound &&
+             answerAcceptanceReceipt is null) ||
+            answerAcceptanceStatus is { } retainedStatus &&
+            retainedStatus is not (
+                RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Accepted or
+                RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Idempotent or
+                RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Held))
         {
             return;
         }
@@ -2735,7 +2856,9 @@ public sealed partial class SessionFileTransferService
             ack.OfferGeneration,
             ack.TunaPathLeaseGeneration,
             ack.ProbeId,
-            DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow,
+            answerAcceptanceReceipt,
+            answerAcceptanceStatus);
 
         lock (gate)
         {
@@ -2743,7 +2866,10 @@ public sealed partial class SessionFileTransferService
                 IsOutboundLifecycleMessageMatchLocked(sessionId, transferId) &&
                 outboundTransfer is { IsTerminal: false } outbound)
             {
-                outbound.RuntimeUnlockPendingPeerPreCommitProbe = state;
+                outbound.RuntimeUnlockPendingPeerPreCommitProbe =
+                    MergeRuntimeUnlockPendingPeerPreCommitProbe(
+                        outbound.RuntimeUnlockPendingPeerPreCommitProbe,
+                        state);
                 return;
             }
 
@@ -2751,9 +2877,39 @@ public sealed partial class SessionFileTransferService
                 IsInboundLifecycleMessageMatchLocked(sessionId, transferId) &&
                 inboundTransfer is { IsTerminal: false } inbound)
             {
-                inbound.RuntimeUnlockPendingPeerPreCommitProbe = state;
+                inbound.RuntimeUnlockPendingPeerPreCommitProbe =
+                    MergeRuntimeUnlockPendingPeerPreCommitProbe(
+                        inbound.RuntimeUnlockPendingPeerPreCommitProbe,
+                        state);
             }
         }
+    }
+
+    private static RuntimeUnlockPeerPreCommitProbeState
+        MergeRuntimeUnlockPendingPeerPreCommitProbe(
+            RuntimeUnlockPeerPreCommitProbeState? current,
+            RuntimeUnlockPeerPreCommitProbeState candidate)
+    {
+        if (current is null ||
+            current.TransactionGeneration != candidate.TransactionGeneration ||
+            current.OfferGeneration != candidate.OfferGeneration ||
+            current.TunaPathLeaseGeneration !=
+                candidate.TunaPathLeaseGeneration ||
+            !string.Equals(
+                current.ProbeId,
+                candidate.ProbeId,
+                StringComparison.Ordinal))
+        {
+            return candidate;
+        }
+
+        if (current.AnswerAcceptanceReceipt is null &&
+            candidate.AnswerAcceptanceReceipt is not null)
+        {
+            return candidate;
+        }
+
+        return current;
     }
 
     private bool IsRuntimeUnlockPendingPeerPreCommitProbeMatchLocked(
@@ -2768,6 +2924,9 @@ public sealed partial class SessionFileTransferService
         }
 
         RuntimeUnlockPeerPreCommitProbeState? pending = null;
+        var currentReceiveScope =
+            default(RuntimeUnlockPeerPreCommitAnswerAcceptanceScope);
+        var currentReceiveScopeAvailable = false;
         lock (gate)
         {
             if (direction == FileTransferDirection.Outbound &&
@@ -2781,23 +2940,165 @@ public sealed partial class SessionFileTransferService
                      inboundTransfer is { IsTerminal: false } inbound)
             {
                 pending = inbound.RuntimeUnlockPendingPeerPreCommitProbe;
+                currentReceiveScopeAvailable =
+                    TryCreateRuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
+                        CreateCoordinatorStateLocked(inbound),
+                        out currentReceiveScope);
             }
         }
 
-        return pending is not null &&
-               pending.TransactionGeneration == frame.TransactionGeneration &&
-               pending.OfferGeneration == frame.OfferGeneration &&
-               pending.TunaPathLeaseGeneration == frame.TunaPathLeaseGeneration &&
-               string.Equals(pending.ProbeId, frame.ProbeId, StringComparison.Ordinal);
+        if (pending is null ||
+            pending.TransactionGeneration != frame.TransactionGeneration ||
+            pending.OfferGeneration != frame.OfferGeneration ||
+            pending.TunaPathLeaseGeneration != frame.TunaPathLeaseGeneration ||
+            !string.Equals(
+                pending.ProbeId,
+                frame.ProbeId,
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (pending.CompletedCommitConfirmation is { } completedConfirmation)
+        {
+            if (frame is not
+                    FileTransferRuntimeUnlockPreCommitProbeAckFrame
+                        candidateConfirmation ||
+                candidateConfirmation != completedConfirmation)
+            {
+                return false;
+            }
+        }
+
+        if (direction != FileTransferDirection.Inbound)
+        {
+            return true;
+        }
+
+        var retainedAcceptanceStatusCurrent =
+            pending.AnswerAcceptanceStatus is
+                RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Accepted or
+                RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Idempotent or
+                RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Held;
+        return currentReceiveScopeAvailable &&
+               pending.AnswerAcceptanceReceipt is { } receipt &&
+               retainedAcceptanceStatusCurrent &&
+               !receipt.ReceiveScope.IsDefault &&
+               receipt.Direction == direction &&
+               string.Equals(
+                   receipt.SessionId,
+                   sessionId,
+                   StringComparison.Ordinal) &&
+               string.Equals(
+                   receipt.TransferId,
+                   transferId,
+                   StringComparison.Ordinal) &&
+               receipt.PeerTransactionGeneration ==
+                   frame.TransactionGeneration &&
+               receipt.PeerOfferGeneration == frame.OfferGeneration &&
+               receipt.PeerTunaPathLeaseGeneration ==
+                   frame.TunaPathLeaseGeneration &&
+               string.Equals(
+                   receipt.ProbeId,
+                   frame.ProbeId,
+                   StringComparison.Ordinal) &&
+               receipt.ReceivedTransport == FileTransferTransportKind.Tuna &&
+               receipt.ReceivedUtcMs > 0 &&
+               receipt.ProbeAckSentUtcMs >= receipt.ReceivedUtcMs &&
+               receipt.ProbeFrameFingerprint is { Length: 64 } &&
+               receipt.AdmissionToken == currentReceiveScope.Admission &&
+               receipt.ReceiveScope == currentReceiveScope &&
+               receipt.DataSessionGeneration ==
+                   currentReceiveScope.DataSessionGeneration;
     }
 
-    private void ClearRuntimeUnlockPendingPeerPreCommitProbeLocked(
+    private bool
+        TryClassifyRuntimeUnlockCompletedPeerPreCommitProbeConfirmationLocked(
+            FileTransferDirection direction,
+            string sessionId,
+            string transferId,
+            FileTransferRuntimeUnlockPreCommitProbeAckFrame confirmation,
+            IFileTransferDataSession? dataSession,
+            out bool exactConfirmation,
+            out bool receiveSourceAndScopeCurrent)
+    {
+        exactConfirmation = false;
+        receiveSourceAndScopeCurrent = false;
+        lock (gate)
+        {
+            if (direction == FileTransferDirection.Outbound &&
+                IsOutboundLifecycleMessageMatchLocked(sessionId, transferId) &&
+                outboundTransfer is { IsTerminal: false } outbound &&
+                outbound.RuntimeUnlockPendingPeerPreCommitProbe is
+                    {
+                        CompletedCommitConfirmation: { } outboundCompleted,
+                    } outboundPending &&
+                outboundPending.TransactionGeneration ==
+                    confirmation.TransactionGeneration &&
+                outboundPending.OfferGeneration ==
+                    confirmation.OfferGeneration &&
+                outboundPending.TunaPathLeaseGeneration ==
+                    confirmation.TunaPathLeaseGeneration &&
+                string.Equals(
+                    outboundPending.ProbeId,
+                    confirmation.ProbeId,
+                    StringComparison.Ordinal))
+            {
+                exactConfirmation = outboundCompleted == confirmation;
+                receiveSourceAndScopeCurrent =
+                    exactConfirmation &&
+                    dataSession is not null &&
+                    ReferenceEquals(outbound.DataSession, dataSession) &&
+                    IsRuntimeUnlockPendingPeerPreCommitProbeMatchLocked(
+                        direction,
+                        sessionId,
+                        transferId,
+                        confirmation);
+                return true;
+            }
+
+            if (direction == FileTransferDirection.Inbound &&
+                IsInboundLifecycleMessageMatchLocked(sessionId, transferId) &&
+                inboundTransfer is { IsTerminal: false } inbound &&
+                inbound.RuntimeUnlockPendingPeerPreCommitProbe is
+                    {
+                        CompletedCommitConfirmation: { } inboundCompleted,
+                    } inboundPending &&
+                inboundPending.TransactionGeneration ==
+                    confirmation.TransactionGeneration &&
+                inboundPending.OfferGeneration ==
+                    confirmation.OfferGeneration &&
+                inboundPending.TunaPathLeaseGeneration ==
+                    confirmation.TunaPathLeaseGeneration &&
+                string.Equals(
+                    inboundPending.ProbeId,
+                    confirmation.ProbeId,
+                    StringComparison.Ordinal))
+            {
+                exactConfirmation = inboundCompleted == confirmation;
+                receiveSourceAndScopeCurrent =
+                    exactConfirmation &&
+                    dataSession is not null &&
+                    ReferenceEquals(inbound.DataSession, dataSession) &&
+                    IsRuntimeUnlockPendingPeerPreCommitProbeMatchLocked(
+                        direction,
+                        sessionId,
+                        transferId,
+                        confirmation);
+                return true;
+            }
+
+            return false;
+        }
+    }
+
+    private void CompleteRuntimeUnlockPendingPeerPreCommitProbeLocked(
         FileTransferDirection direction,
         string sessionId,
         string transferId,
-        FileTransferRuntimeUnlockPreCommitProbeFrameBase frame)
+        FileTransferRuntimeUnlockPreCommitProbeAckFrame confirmation)
     {
-        if (string.IsNullOrWhiteSpace(frame.ProbeId))
+        if (string.IsNullOrWhiteSpace(confirmation.ProbeId))
         {
             return;
         }
@@ -2808,12 +3109,16 @@ public sealed partial class SessionFileTransferService
                 IsOutboundLifecycleMessageMatchLocked(sessionId, transferId) &&
                 outboundTransfer is { IsTerminal: false } outbound &&
                 outbound.RuntimeUnlockPendingPeerPreCommitProbe is { } outboundPending &&
-                outboundPending.TransactionGeneration == frame.TransactionGeneration &&
-                outboundPending.OfferGeneration == frame.OfferGeneration &&
-                outboundPending.TunaPathLeaseGeneration == frame.TunaPathLeaseGeneration &&
-                string.Equals(outboundPending.ProbeId, frame.ProbeId, StringComparison.Ordinal))
+                outboundPending.TransactionGeneration == confirmation.TransactionGeneration &&
+                outboundPending.OfferGeneration == confirmation.OfferGeneration &&
+                outboundPending.TunaPathLeaseGeneration == confirmation.TunaPathLeaseGeneration &&
+                string.Equals(outboundPending.ProbeId, confirmation.ProbeId, StringComparison.Ordinal))
             {
-                outbound.RuntimeUnlockPendingPeerPreCommitProbe = null;
+                outbound.RuntimeUnlockPendingPeerPreCommitProbe =
+                    outboundPending with
+                    {
+                        CompletedCommitConfirmation = confirmation,
+                    };
                 return;
             }
 
@@ -2821,12 +3126,16 @@ public sealed partial class SessionFileTransferService
                 IsInboundLifecycleMessageMatchLocked(sessionId, transferId) &&
                 inboundTransfer is { IsTerminal: false } inbound &&
                 inbound.RuntimeUnlockPendingPeerPreCommitProbe is { } inboundPending &&
-                inboundPending.TransactionGeneration == frame.TransactionGeneration &&
-                inboundPending.OfferGeneration == frame.OfferGeneration &&
-                inboundPending.TunaPathLeaseGeneration == frame.TunaPathLeaseGeneration &&
-                string.Equals(inboundPending.ProbeId, frame.ProbeId, StringComparison.Ordinal))
+                inboundPending.TransactionGeneration == confirmation.TransactionGeneration &&
+                inboundPending.OfferGeneration == confirmation.OfferGeneration &&
+                inboundPending.TunaPathLeaseGeneration == confirmation.TunaPathLeaseGeneration &&
+                string.Equals(inboundPending.ProbeId, confirmation.ProbeId, StringComparison.Ordinal))
             {
-                inbound.RuntimeUnlockPendingPeerPreCommitProbe = null;
+                inbound.RuntimeUnlockPendingPeerPreCommitProbe =
+                    inboundPending with
+                    {
+                        CompletedCommitConfirmation = confirmation,
+                    };
             }
         }
     }
@@ -2847,6 +3156,59 @@ public sealed partial class SessionFileTransferService
             ack,
             receivedTransportKind,
             "core_handler_invoked");
+
+        if (TryClassifyRuntimeUnlockCompletedPeerPreCommitProbeConfirmationLocked(
+                direction,
+                sessionId,
+                transferId,
+                ack,
+                dataSession,
+                out var exactCompletedConfirmation,
+                out var completedConfirmationReceiveSourceAndScopeCurrent))
+        {
+            if (exactCompletedConfirmation &&
+                completedConfirmationReceiveSourceAndScopeCurrent &&
+                receivedTransportKind == FileTransferTransportKind.Tuna)
+            {
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=runtime_unlock_precommit_probe_commit_confirmation_idempotent; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(ack.ProbeId ?? "(none)")}; decision_status=Idempotent; decision_reason=runtime_unlock_precommit_probe_commit_confirmation_already_applied");
+                return;
+            }
+
+            RuntimeUnlockAdmissionToken? latestAdmissionToken;
+            lock (gate)
+            {
+                _ = TryGetCurrentRuntimeUnlockAdmissionTokenForDirectionLocked(
+                    direction,
+                    sessionId,
+                    transferId,
+                    out latestAdmissionToken);
+            }
+
+            var completedConfirmationRejectionReason =
+                !exactCompletedConfirmation
+                    ? "runtime_unlock_precommit_probe_commit_confirmation_semantic_mutation"
+                    : receivedTransportKind != FileTransferTransportKind.Tuna
+                        ? "not_tuna_transport"
+                        : "runtime_unlock_precommit_probe_ack_receive_scope_not_current";
+            LogRuntimeUnlockPreCommitProbeAckAuthorityRejected(
+                direction,
+                transferId,
+                sessionId,
+                ack,
+                attemptedAdmissionToken: null,
+                currentAdmissionToken: latestAdmissionToken,
+                decisionReason: completedConfirmationRejectionReason);
+            LogRuntimeUnlockPreCommitProbeIgnored(
+                direction,
+                transferId,
+                sessionId,
+                ack,
+                receivedTransportKind,
+                completedConfirmationRejectionReason);
+            return;
+        }
 
         if (!TryValidateRuntimeUnlockPreCommitProbeFrame(
                 sessionId,
@@ -3081,7 +3443,13 @@ public sealed partial class SessionFileTransferService
                     ReferenceEquals(currentInbound.DataSession, dataSession) &&
                     TryCreateRuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
                         CreateCoordinatorStateLocked(currentInbound),
-                        out var capturedReceiveScope))
+                        out var capturedReceiveScope) &&
+                    (!isPeerCommitConfirmation ||
+                     IsRuntimeUnlockPendingPeerPreCommitProbeMatchLocked(
+                         direction,
+                         sessionId,
+                         transferId,
+                         ack)))
                 {
                     currentReceiveScope = capturedReceiveScope;
                 }
@@ -3222,7 +3590,7 @@ public sealed partial class SessionFileTransferService
 
         if (isPeerCommitConfirmation)
         {
-            ClearRuntimeUnlockPendingPeerPreCommitProbeLocked(
+            CompleteRuntimeUnlockPendingPeerPreCommitProbeLocked(
                 direction,
                 sessionId,
                 transferId,
@@ -3936,10 +4304,28 @@ public sealed partial class SessionFileTransferService
         }
 
         if (frame is FileTransferRuntimeUnlockPreCommitProbeAckFrame ackFrame &&
-            IsRuntimeUnlockPreCommitProbeCommitConfirmationReason(ackFrame.Reason) &&
-            IsRuntimeUnlockPendingPeerPreCommitProbeMatchLocked(direction, sessionId, transferId, frame))
+            IsRuntimeUnlockPreCommitProbeCommitConfirmationReason(
+                ackFrame.Reason))
         {
-            return true;
+            if (!ackFrame.Accepted)
+            {
+                reason =
+                    "runtime_unlock_precommit_probe_commit_confirmation_semantic_mutation";
+                return false;
+            }
+
+            if (IsRuntimeUnlockPendingPeerPreCommitProbeMatchLocked(
+                    direction,
+                    sessionId,
+                    transferId,
+                    frame))
+            {
+                return true;
+            }
+
+            reason =
+                "runtime_unlock_precommit_probe_ack_peer_acceptance_not_current";
+            return false;
         }
 
         if (transport is not IRuntimeUnlockRouteCommitProofProvider proofProvider ||

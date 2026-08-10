@@ -2593,6 +2593,189 @@ public sealed partial class SessionFileTransferService
             RuntimeUnlockRouteCommitSnapshot snapshot,
             RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation,
             string reason)
+        => observation.ResponderTransitionMode switch
+        {
+            RuntimeUnlockResponderPeerProbeTransitionMode.InitialRegularV4 =>
+                TryHandleInboundRuntimeUnlockInitialResponderPeerProbeRouteTransitionHandoffLocked(
+                    context,
+                    dataSession,
+                    snapshot,
+                    observation,
+                    reason),
+            RuntimeUnlockResponderPeerProbeTransitionMode
+                    .PostFallbackV6Paired =>
+                TryHandleInboundRuntimeUnlockPostFallbackResponderPeerProbeRouteTransitionHandoffLocked(
+                    context,
+                    dataSession,
+                    snapshot,
+                    observation,
+                    reason),
+            _ => RejectInboundRuntimeUnlockResponderPeerProbeTransitionMode(
+                context,
+                observation),
+        };
+
+    private static bool RejectInboundRuntimeUnlockResponderPeerProbeTransitionMode(
+        InboundTransferContext context,
+        RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation)
+    {
+        LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
+            context,
+            observation,
+            null,
+            null,
+            "Rejected",
+            "runtime_unlock_responder_peer_probe_transition_mode_invalid");
+        return false;
+    }
+
+    private bool
+        TryHandleInboundRuntimeUnlockInitialResponderPeerProbeRouteTransitionHandoffLocked(
+            InboundTransferContext context,
+            IFileTransferDataSession dataSession,
+            RuntimeUnlockRouteCommitSnapshot snapshot,
+            RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation,
+            string reason)
+    {
+        var rejectionReason =
+            "runtime_unlock_initial_responder_peer_probe_handoff_not_current";
+        if (!ReferenceEquals(inboundTransfer, context) ||
+            context.IsTerminal ||
+            !ReferenceEquals(context.DataSession, dataSession) ||
+            snapshot.ResponderPeerProbeRouteTransitionObservation != observation ||
+            !TryValidateRuntimeUnlockPreCommitProbeSnapshotForContext(
+                snapshot,
+                context.SessionId,
+                context.TransferId,
+                out rejectionReason) ||
+            !IsRuntimeUnlockSamePathProbeAcked(snapshot) ||
+            !context.RouteRuntime.UsesRegularNknV4FastRuntime ||
+            context.NegotiatedDataProtocolVersion !=
+                FileTransferProtocol.ProtocolVersionV4)
+        {
+            LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
+                context,
+                observation,
+                null,
+                null,
+                "Rejected",
+                context.IsTerminal ? "terminal_context" : rejectionReason);
+            return false;
+        }
+
+        var state = CreateCoordinatorStateLocked(context);
+        if (!TryCreateRuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
+                state,
+                out var currentReceiveScope) ||
+            currentReceiveScope != observation.PeerReceiveScope)
+        {
+            LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
+                context,
+                observation,
+                null,
+                null,
+                "Rejected",
+                "runtime_unlock_initial_responder_peer_probe_receive_scope_mismatch");
+            return false;
+        }
+
+        var capturedAdmission = observation.PeerReceiveScope.Admission;
+        string? snapshotRejectionReason = null;
+        if (capturedAdmission.IsDefault ||
+            context.RuntimeUnlockAdmissionToken is not
+                { IsDefault: false } currentAdmission ||
+            currentAdmission != capturedAdmission ||
+            state.CurrentRuntimeUnlockAdmission != capturedAdmission ||
+            !FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(
+                state,
+                capturedAdmission,
+                out rejectionReason) ||
+            !RuntimeUnlockResponderPeerProbeSnapshotMatchesObservation(
+                snapshot,
+                observation,
+                out snapshotRejectionReason) ||
+            !FileTransferCoordinator
+                .TryPrevalidateRuntimeUnlockInitialResponderPeerProbeRouteTransitionObservation(
+                    state,
+                    observation,
+                    capturedAdmission,
+                    out rejectionReason))
+        {
+            LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
+                context,
+                observation,
+                null,
+                null,
+                "Rejected",
+                snapshotRejectionReason ??
+                (string.Equals(rejectionReason, "current", StringComparison.Ordinal)
+                    ? "runtime_unlock_initial_responder_peer_probe_handoff_not_current"
+                    : rejectionReason));
+            return false;
+        }
+
+        if (!TryCaptureRuntimeUnlockPreCommitAuthoritiesLocked(
+                context,
+                snapshot,
+                out _,
+                out _))
+        {
+            LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
+                context,
+                observation,
+                null,
+                null,
+                "Rejected",
+                "runtime_unlock_initial_responder_peer_probe_precommit_authority_missing");
+            return false;
+        }
+
+        var admission = RuntimeUnlockAdmissionDecisionFromToken(
+            context,
+            capturedAdmission,
+            reason);
+        if (!context.RuntimeUnlockActivationWindowGranted)
+        {
+            GrantInboundRuntimeUnlockActivationWindowLocked(
+                context,
+                admission,
+                reason);
+        }
+
+        if (context.ReceiverSparseChunksPendingWrite.Count != 0 ||
+            context.PendingChunks.Count != 0)
+        {
+            LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
+                context,
+                observation,
+                null,
+                null,
+                "Held",
+                "runtime_unlock_initial_responder_peer_probe_owner_work_pending");
+            return true;
+        }
+
+        LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
+            context,
+            observation,
+            null,
+            null,
+            "Accepted",
+            "runtime_unlock_initial_responder_peer_probe_handoff_current");
+        return TryPrepareInboundRegularV4ToTunaRouteTransitionLocked(
+            context,
+            snapshot,
+            reason,
+            out _);
+    }
+
+    private bool
+        TryHandleInboundRuntimeUnlockPostFallbackResponderPeerProbeRouteTransitionHandoffLocked(
+            InboundTransferContext context,
+            IFileTransferDataSession dataSession,
+            RuntimeUnlockRouteCommitSnapshot snapshot,
+            RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation,
+            string reason)
     {
         var snapshotRejectionReason =
             "responder_peer_probe_handoff_not_current";
@@ -2837,6 +3020,32 @@ public sealed partial class SessionFileTransferService
             InboundTransferContext context,
             string reason)
     {
+        if (ReferenceEquals(inboundTransfer, context) &&
+            !context.IsTerminal &&
+            context.ReceiverSparseChunksPendingWrite.Count == 0 &&
+            context.PendingChunks.Count == 0 &&
+            context.DataSession is { IsAvailable: true } initialDataSession &&
+            transport is IRuntimeUnlockRouteCommitProofProvider
+                initialProofProvider &&
+            initialProofProvider.TryGetRuntimeUnlockRouteCommitProof(
+                context.SessionId,
+                context.TransferId,
+                out var initialSnapshot) &&
+            initialSnapshot.ResponderPeerProbeRouteTransitionObservation is
+            {
+                ResponderTransitionMode:
+                    RuntimeUnlockResponderPeerProbeTransitionMode
+                        .InitialRegularV4,
+            } initialObservation)
+        {
+            return TryHandleInboundRuntimeUnlockInitialResponderPeerProbeRouteTransitionHandoffLocked(
+                context,
+                initialDataSession,
+                initialSnapshot,
+                initialObservation,
+                reason);
+        }
+
         var handoff = context.CoordinatorPersistentState
             .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff;
         if (!ReferenceEquals(inboundTransfer, context) ||
@@ -2911,6 +3120,16 @@ public sealed partial class SessionFileTransferService
         var scope = pair is { } operation
             ? operation.Scope
             : default;
+        var responderTransitionMode =
+            FormatRuntimeUnlockResponderPeerProbeTransitionMode(
+                observation.ResponderTransitionMode);
+        var activationAuthorityMode =
+            observation.ResponderTransitionMode ==
+                RuntimeUnlockResponderPeerProbeTransitionMode.InitialRegularV4
+                ? "initial_responder"
+                : responderAuthority is null
+                    ? "none"
+                    : "responder";
         LogInboundRuntimeUnlockPreCommitProbeLaunchHandoffDecision(
             context,
             observation,
@@ -2919,7 +3138,7 @@ public sealed partial class SessionFileTransferService
             decisionReason);
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided; status={FormatProtocolLogValue(status)}; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(decisionReason)}; direction=inbound; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; transaction_generation={observation.TransactionGeneration}; offer_generation={observation.OfferGeneration}; pending_answer_ack_generation={observation.PendingAnswerAckGeneration}; payer_decision_id={observation.PayerDecisionId}; launch_generation={observation.LaunchGeneration}; tuna_path_lease_generation={observation.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={FormatProtocolLogValue(observation.TunaPathLeaseListenerRunId ?? "(none)")}; lanes={FormatProtocolLogValue(observation.Lanes)}; answer_acceptance_source={FormatProtocolLogValue(observation.AnswerAcceptanceSource)}; ack_message_id={FormatProtocolLogValue(observation.AckMessageId ?? "(none)")}; ack_source_fingerprint={FormatProtocolLogValue(observation.AckSourceFingerprint ?? "(none)")}; peer_probe_frame_fingerprint={FormatProtocolLogValue(observation.PeerProbeFrameFingerprint ?? "(none)")}; probe_id={FormatProtocolLogValue(observation.ProbeId)}; probe_state={observation.ProbeState.ToString().ToLowerInvariant()}; probe_transport={FormatFileTransferTransportKind(observation.ProbeTransport)}; probe_acked_utc_ms={observation.ProbeAckedUtcMs}; fallback_yield_authority_id={FormatProtocolLogValue(release?.ReleaseAuthorityId.ToString() ?? "(none)")}; fallback_yield_generation={release?.ReleaseGeneration ?? 0}; pairing_generation={release?.PairingGeneration ?? 0}; pair_key={FormatProtocolLogValue(scope.PairKey ?? "(none)")}; pair_state={FormatProtocolLogValue(pair?.PairingState.ToString() ?? "None")}; local_yield_authority_id={FormatProtocolLogValue(release?.LocalProof.Decision.AuthorityId.ToString() ?? "(none)")}; local_yield_generation={release?.LocalProof.Decision.YieldGeneration ?? 0}; local_proof_identity={FormatProtocolLogValue(release?.LocalProof.ProofIdentity ?? "(none)")}; local_frame_fingerprint={FormatProtocolLogValue(release?.LocalProof.FrameFingerprint ?? "(none)")}; peer_yield_authority_id={FormatProtocolLogValue(release?.PeerProof.Proof.AuthorityId.ToString() ?? "(none)")}; peer_yield_generation={release?.PeerProof.Proof.YieldGeneration ?? 0}; peer_observation_identity={FormatProtocolLogValue(release?.PeerProof.ObservationIdentity ?? "(none)")}; peer_frame_fingerprint={FormatProtocolLogValue(release?.PeerProof.Proof.FrameFingerprint ?? "(none)")}; peer_owner_key={FormatProtocolLogValue(release?.PeerProof.Proof.OwnerKey ?? "(none)")}; peer_pair_key={FormatProtocolLogValue(release?.PeerProof.Proof.PairKey ?? "(none)")}; responder_handoff_authority_id={FormatProtocolLogValue(responderAuthority?.AuthorityId.ToString() ?? "(none)")}; responder_handoff_generation={responderAuthority?.AuthorityGeneration ?? 0}; admission_generation={context.RuntimeUnlockAdmissionToken?.AdmissionGeneration ?? 0}; pending_precommit_generation={context.RuntimeUnlockPendingPreCommitProbe?.PendingGeneration ?? 0}; transition_authority_id={FormatProtocolLogValue(transitionAuthority?.AuthorityId.ToString() ?? "(none)")}; transition_generation={transitionAuthority?.TransitionGeneration ?? 0}; activation_authority_mode={FormatProtocolLogValue(responderAuthority is null ? "none" : "responder")}; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}; runtime_generation={owner?.RuntimeGeneration ?? 0}; route_publication_generation={publication?.PublicationGeneration ?? 0}; route_commit_generation={publication?.RouteCommitGeneration ?? 0}; terminal_generation={context.TerminalGeneration}; leg_generation={leg?.Generation ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(scope.CheckpointRequestIdSnapshot ?? "(none)")}; checkpoint_generation={scope.CheckpointGeneration}; data_session_identity={FormatProtocolLogValue(CreateReceiveRecoveryDataSessionIdentity(context.TransferId, context.DataSession, context.DataSessionGeneration))}; data_session_generation={context.DataSessionGeneration}; target_route={FormatProtocolLogValue(FileTransferRouteResolver.FileTunaV4Token)}; target_protocol_version={FileTransferProtocol.ProtocolVersionV4}; target_transport={FormatFileTransferTransportKind(FileTransferTransportKind.Tuna)}");
+            $"event=filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided; status={FormatProtocolLogValue(status)}; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(decisionReason)}; direction=inbound; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; transaction_generation={observation.TransactionGeneration}; offer_generation={observation.OfferGeneration}; pending_answer_ack_generation={observation.PendingAnswerAckGeneration}; payer_decision_id={observation.PayerDecisionId}; launch_generation={observation.LaunchGeneration}; responder_transition_mode={responderTransitionMode}; tuna_path_lease_generation={observation.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={FormatProtocolLogValue(observation.TunaPathLeaseListenerRunId ?? "(none)")}; lanes={FormatProtocolLogValue(observation.Lanes)}; answer_acceptance_source={FormatProtocolLogValue(observation.AnswerAcceptanceSource)}; ack_message_id={FormatProtocolLogValue(observation.AckMessageId ?? "(none)")}; ack_source_fingerprint={FormatProtocolLogValue(observation.AckSourceFingerprint ?? "(none)")}; peer_probe_frame_fingerprint={FormatProtocolLogValue(observation.PeerProbeFrameFingerprint ?? "(none)")}; probe_id={FormatProtocolLogValue(observation.ProbeId)}; probe_state={observation.ProbeState.ToString().ToLowerInvariant()}; probe_transport={FormatFileTransferTransportKind(observation.ProbeTransport)}; probe_acked_utc_ms={observation.ProbeAckedUtcMs}; fallback_yield_authority_id={FormatProtocolLogValue(release?.ReleaseAuthorityId.ToString() ?? "(none)")}; fallback_yield_generation={release?.ReleaseGeneration ?? 0}; pairing_generation={release?.PairingGeneration ?? 0}; pair_key={FormatProtocolLogValue(scope.PairKey ?? "(none)")}; pair_state={FormatProtocolLogValue(pair?.PairingState.ToString() ?? "None")}; local_yield_authority_id={FormatProtocolLogValue(release?.LocalProof.Decision.AuthorityId.ToString() ?? "(none)")}; local_yield_generation={release?.LocalProof.Decision.YieldGeneration ?? 0}; local_proof_identity={FormatProtocolLogValue(release?.LocalProof.ProofIdentity ?? "(none)")}; local_frame_fingerprint={FormatProtocolLogValue(release?.LocalProof.FrameFingerprint ?? "(none)")}; peer_yield_authority_id={FormatProtocolLogValue(release?.PeerProof.Proof.AuthorityId.ToString() ?? "(none)")}; peer_yield_generation={release?.PeerProof.Proof.YieldGeneration ?? 0}; peer_observation_identity={FormatProtocolLogValue(release?.PeerProof.ObservationIdentity ?? "(none)")}; peer_frame_fingerprint={FormatProtocolLogValue(release?.PeerProof.Proof.FrameFingerprint ?? "(none)")}; peer_owner_key={FormatProtocolLogValue(release?.PeerProof.Proof.OwnerKey ?? "(none)")}; peer_pair_key={FormatProtocolLogValue(release?.PeerProof.Proof.PairKey ?? "(none)")}; responder_handoff_authority_id={FormatProtocolLogValue(responderAuthority?.AuthorityId.ToString() ?? "(none)")}; responder_handoff_generation={responderAuthority?.AuthorityGeneration ?? 0}; admission_generation={context.RuntimeUnlockAdmissionToken?.AdmissionGeneration ?? 0}; pending_precommit_generation={context.RuntimeUnlockPendingPreCommitProbe?.PendingGeneration ?? 0}; transition_authority_id={FormatProtocolLogValue(transitionAuthority?.AuthorityId.ToString() ?? "(none)")}; transition_generation={transitionAuthority?.TransitionGeneration ?? 0}; activation_authority_mode={FormatProtocolLogValue(activationAuthorityMode)}; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}; runtime_generation={owner?.RuntimeGeneration ?? 0}; route_publication_generation={publication?.PublicationGeneration ?? 0}; route_commit_generation={publication?.RouteCommitGeneration ?? 0}; terminal_generation={context.TerminalGeneration}; leg_generation={leg?.Generation ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(scope.CheckpointRequestIdSnapshot ?? "(none)")}; checkpoint_generation={scope.CheckpointGeneration}; data_session_identity={FormatProtocolLogValue(CreateReceiveRecoveryDataSessionIdentity(context.TransferId, context.DataSession, context.DataSessionGeneration))}; data_session_generation={context.DataSessionGeneration}; target_route={FormatProtocolLogValue(FileTransferRouteResolver.FileTunaV4Token)}; target_protocol_version={FileTransferProtocol.ProtocolVersionV4}; target_transport={FormatFileTransferTransportKind(FileTransferTransportKind.Tuna)}");
     }
 
     private static void
@@ -2936,7 +3155,7 @@ public sealed partial class SessionFileTransferService
             decisionReason);
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided; status={FormatProtocolLogValue(status)}; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(decisionReason)}; direction=inbound; session_id={FormatProtocolLogValue(observation.SessionId)}; transfer_id={FormatProtocolLogValue(observation.TransferId ?? dataSession.TransferId)}; transaction_generation={observation.TransactionGeneration}; offer_generation={observation.OfferGeneration}; pending_answer_ack_generation={observation.PendingAnswerAckGeneration}; payer_decision_id={observation.PayerDecisionId}; launch_generation={observation.LaunchGeneration}; tuna_path_lease_generation={observation.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={FormatProtocolLogValue(observation.TunaPathLeaseListenerRunId ?? "(none)")}; lanes={FormatProtocolLogValue(observation.Lanes)}; answer_acceptance_source={FormatProtocolLogValue(observation.AnswerAcceptanceSource)}; ack_message_id={FormatProtocolLogValue(observation.AckMessageId ?? "(none)")}; ack_source_fingerprint={FormatProtocolLogValue(observation.AckSourceFingerprint ?? "(none)")}; peer_probe_frame_fingerprint={FormatProtocolLogValue(observation.PeerProbeFrameFingerprint ?? "(none)")}; probe_id={FormatProtocolLogValue(observation.ProbeId)}; probe_state={observation.ProbeState.ToString().ToLowerInvariant()}; probe_transport={FormatFileTransferTransportKind(observation.ProbeTransport)}; probe_acked_utc_ms={observation.ProbeAckedUtcMs}; fallback_yield_authority_id=(none); fallback_yield_generation=0; pairing_generation=0; pair_key=(none); pair_state=None; responder_handoff_authority_id=(none); responder_handoff_generation=0; admission_generation=0; pending_precommit_generation=0; transition_authority_id=(none); transition_generation=0; activation_authority_mode=none; route=(none); protocol_version=0; live_route_epoch=0; runtime_generation=0; route_publication_generation=0; route_commit_generation=0; terminal_generation=0; leg_generation=0; transport_epoch=0; bridge_recovery_generation=0; checkpoint_request_id=(none); checkpoint_generation=0; data_session_identity=(none); data_session_generation=0; target_route={FormatProtocolLogValue(FileTransferRouteResolver.FileTunaV4Token)}; target_protocol_version={FileTransferProtocol.ProtocolVersionV4}; target_transport={FormatFileTransferTransportKind(FileTransferTransportKind.Tuna)}");
+            $"event=filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided; status={FormatProtocolLogValue(status)}; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(decisionReason)}; direction=inbound; session_id={FormatProtocolLogValue(observation.SessionId)}; transfer_id={FormatProtocolLogValue(observation.TransferId ?? dataSession.TransferId)}; transaction_generation={observation.TransactionGeneration}; offer_generation={observation.OfferGeneration}; pending_answer_ack_generation={observation.PendingAnswerAckGeneration}; payer_decision_id={observation.PayerDecisionId}; launch_generation={observation.LaunchGeneration}; responder_transition_mode={FormatRuntimeUnlockResponderPeerProbeTransitionMode(observation.ResponderTransitionMode)}; tuna_path_lease_generation={observation.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={FormatProtocolLogValue(observation.TunaPathLeaseListenerRunId ?? "(none)")}; lanes={FormatProtocolLogValue(observation.Lanes)}; answer_acceptance_source={FormatProtocolLogValue(observation.AnswerAcceptanceSource)}; ack_message_id={FormatProtocolLogValue(observation.AckMessageId ?? "(none)")}; ack_source_fingerprint={FormatProtocolLogValue(observation.AckSourceFingerprint ?? "(none)")}; peer_probe_frame_fingerprint={FormatProtocolLogValue(observation.PeerProbeFrameFingerprint ?? "(none)")}; probe_id={FormatProtocolLogValue(observation.ProbeId)}; probe_state={observation.ProbeState.ToString().ToLowerInvariant()}; probe_transport={FormatFileTransferTransportKind(observation.ProbeTransport)}; probe_acked_utc_ms={observation.ProbeAckedUtcMs}; fallback_yield_authority_id=(none); fallback_yield_generation=0; pairing_generation=0; pair_key=(none); pair_state=None; responder_handoff_authority_id=(none); responder_handoff_generation=0; admission_generation=0; pending_precommit_generation=0; transition_authority_id=(none); transition_generation=0; activation_authority_mode=none; route=(none); protocol_version=0; live_route_epoch=0; runtime_generation=0; route_publication_generation=0; route_commit_generation=0; terminal_generation=0; leg_generation=0; transport_epoch=0; bridge_recovery_generation=0; checkpoint_request_id=(none); checkpoint_generation=0; data_session_identity=(none); data_session_generation=0; target_route={FormatProtocolLogValue(FileTransferRouteResolver.FileTunaV4Token)}; target_protocol_version={FileTransferProtocol.ProtocolVersionV4}; target_transport={FormatFileTransferTransportKind(FileTransferTransportKind.Tuna)}");
     }
 
     private static void
@@ -2953,7 +3172,7 @@ public sealed partial class SessionFileTransferService
         var admission = context.RuntimeUnlockAdmissionToken;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided; direction=inbound; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; transaction_generation={observation.TransactionGeneration}; offer_generation={observation.OfferGeneration}; tuna_path_lease_generation={observation.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={FormatProtocolLogValue(observation.TunaPathLeaseListenerRunId ?? "(none)")}; launch_generation={observation.LaunchGeneration}; status={FormatProtocolLogValue(status)}; drain_generation={transitionAuthority?.TransitionGeneration ?? 0}; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}; runtime_generation={owner?.RuntimeGeneration ?? 0}; terminal_generation={context.TerminalGeneration}; leg_generation={leg?.Generation ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; bridge_decision_generation={context.CurrentBridgeRecoveryDecision?.BridgeDecisionGeneration ?? 0}; route_publication_generation={publication?.PublicationGeneration ?? 0}; route_commit_generation={publication?.RouteCommitGeneration ?? 0}; data_session_generation={context.DataSessionGeneration}; admission_generation={admission?.AdmissionGeneration ?? 0}; target_route={FormatProtocolLogValue(FileTransferRouteResolver.FileTunaV4Token)}; target_protocol_version={FileTransferProtocol.ProtocolVersionV4}; target_transport={FormatFileTransferTransportKind(FileTransferTransportKind.Tuna)}; handoff_kind={FormatFileTransferTransportHandoffKind(FileTransferTransportHandoffKind.NormalToTunaActivation)}; decision_reason={FormatProtocolLogValue(decisionReason)}");
+            $"event=filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided; direction=inbound; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; transaction_generation={observation.TransactionGeneration}; offer_generation={observation.OfferGeneration}; responder_transition_mode={FormatRuntimeUnlockResponderPeerProbeTransitionMode(observation.ResponderTransitionMode)}; tuna_path_lease_generation={observation.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={FormatProtocolLogValue(observation.TunaPathLeaseListenerRunId ?? "(none)")}; launch_generation={observation.LaunchGeneration}; status={FormatProtocolLogValue(status)}; drain_generation={transitionAuthority?.TransitionGeneration ?? 0}; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}; runtime_generation={owner?.RuntimeGeneration ?? 0}; terminal_generation={context.TerminalGeneration}; leg_generation={leg?.Generation ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; bridge_decision_generation={context.CurrentBridgeRecoveryDecision?.BridgeDecisionGeneration ?? 0}; route_publication_generation={publication?.PublicationGeneration ?? 0}; route_commit_generation={publication?.RouteCommitGeneration ?? 0}; data_session_generation={context.DataSessionGeneration}; admission_generation={admission?.AdmissionGeneration ?? 0}; target_route={FormatProtocolLogValue(FileTransferRouteResolver.FileTunaV4Token)}; target_protocol_version={FileTransferProtocol.ProtocolVersionV4}; target_transport={FormatFileTransferTransportKind(FileTransferTransportKind.Tuna)}; handoff_kind={FormatFileTransferTransportHandoffKind(FileTransferTransportHandoffKind.NormalToTunaActivation)}; decision_reason={FormatProtocolLogValue(decisionReason)}");
     }
 
     private static void

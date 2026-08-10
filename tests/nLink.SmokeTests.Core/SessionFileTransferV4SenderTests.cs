@@ -5343,6 +5343,91 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         return leg;
     }
 
+    private static FileTransferLeg SeedInitialRegularV4RuntimeScopeForTest(
+        object context,
+        string reason)
+    {
+        var routeSelection = GetPrivateProperty<FileTransferRouteSelection>(
+            context,
+            "RouteSelection");
+        Assert.Equal(FileTransferRoute.RegularNknV4Fast, routeSelection.Route);
+        Assert.Equal(
+            FileTransferProtocol.ProtocolVersionV4,
+            routeSelection.ProtocolVersion);
+        var sessionId = GetPrivateProperty<string>(context, "SessionId");
+        var transferId = GetPrivateProperty<string>(context, "TransferId");
+        SetPrivateProperty(context, "CurrentLiveRouteEpoch", null);
+        SetPrivateProperty(context, "LastLiveRouteEpochId", 0);
+
+        var leg = new FileTransferLeg
+        {
+            LegId = "test-leg:initial-regular-v4",
+            Generation = 1,
+            RouteSelection = routeSelection,
+            ProtocolVersion = routeSelection.ProtocolVersion,
+            LiveRouteEpochId = 0,
+            TransportEpochId = 0,
+            StartedUtc = DateTimeOffset.UtcNow,
+            State = FileTransferLegState.Active,
+            StartCommittedChunkIndex = 0,
+            ProvenCommittedChunkIndex = 0,
+            ProvenHighestObservedChunkIndex = 0,
+            BridgeRecoveryGeneration = 0,
+            CanSendData = true,
+        };
+        SetPrivateProperty(context, "CurrentTransferLeg", leg);
+        SetPrivateProperty(context, "LastTransferLegGeneration", leg.Generation);
+        SetPrivateProperty(
+            context,
+            "HighestBufferedChunkIndex",
+            Math.Max(
+                -1,
+                GetPrivateProperty<int>(context, "NextChunkIndex") - 1));
+        var history = GetPrivateProperty<List<FileTransferLeg>>(
+            context,
+            "TransferLegHistory");
+        history.Add(leg);
+
+        var owner = CreateRuntimeOwner(
+            sessionId,
+            transferId,
+            routeSelection,
+            liveRouteEpoch: 0,
+            runtimeGeneration: 1,
+            reason: reason,
+            direction: FileTransferDirection.Inbound);
+        SetPrivateProperty(context, "CurrentRuntimeOwner", owner);
+        SetPrivateProperty(context, "LastRuntimeOwnerGeneration", 1);
+        const int publicationGeneration = 1;
+        SetPrivateProperty(
+            context,
+            "CurrentRoutePublicationToken",
+            new RoutePublicationToken(
+                sessionId,
+                transferId,
+                FileTransferDirection.Inbound,
+                owner,
+                routeSelection.Route,
+                routeSelection.TelemetryToken,
+                routeSelection.ProtocolVersion,
+                0,
+                owner.RuntimeGeneration,
+                owner.TerminalGeneration,
+                leg.Generation,
+                null,
+                routeSelection.Route,
+                routeSelection.ProtocolVersion,
+                FileTransferTransportKind.RegularNkn,
+                publicationGeneration,
+                FileTransferCoordinatorActionKind.RoutePublication,
+                reason));
+        SetPrivateProperty(
+            context,
+            "LastRoutePublicationGeneration",
+            publicationGeneration);
+        return leg;
+    }
+
     private static RuntimeUnlockAdmissionToken SeedRuntimeUnlockAdmissionForTest(
         object context,
         FileTransferDirection direction,
@@ -5352,7 +5437,9 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var sessionId = GetPrivateProperty<string>(context, "SessionId");
         var transferId = GetPrivateProperty<string>(context, "TransferId");
         var owner = (RuntimeOwnerToken)GetPrivatePropertyValue(context, "CurrentRuntimeOwner")!;
-        var currentEpoch = (LiveRouteEpoch)GetPrivatePropertyValue(context, "CurrentLiveRouteEpoch")!;
+        var currentEpoch =
+            GetPrivatePropertyValue(context, "CurrentLiveRouteEpoch") as
+                LiveRouteEpoch;
         var leg = (FileTransferLeg)GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         var admissionGeneration = Math.Max(
             1,
@@ -5365,7 +5452,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             routeSelection.Route,
             routeSelection.TelemetryToken,
             routeSelection.ProtocolVersion,
-            currentEpoch.EpochId,
+            currentEpoch?.EpochId ?? owner.LiveRouteEpoch,
             owner.RuntimeGeneration,
             owner.TerminalGeneration,
             leg.Generation,
@@ -21764,7 +21851,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var serviceType = typeof(SessionFileTransferService);
         const string transferId = "transfer_runtime_unlock_precommit_crossed_probe";
         var sessionId = $"session_{transferId}";
-        using var transport = new LoopbackFileTransferTransport(sessionId)
+        using var transport = new PeerPreCommitAnswerAcceptanceTransport(
+            sessionId)
         {
             RuntimeUnlockRouteCommitSnapshot = new RuntimeUnlockRouteCommitSnapshot(
                 sessionId,
@@ -21792,10 +21880,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         };
         service.AttachTransport(transport);
         var context = CreateRegularNknV4InboundContext(transferId);
-        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "test_local_probe_started");
-        SeedRuntimeUnlockAdmissionForTest(
+        SeedInitialRegularV4RuntimeScopeForTest(
             context,
-            FileTransferDirection.Inbound,
             "test_local_probe_started");
         serviceType
             .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -21845,6 +21931,43 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             Reason = "precommit_probe_commit_confirmed",
             SentUnixTimeMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
         };
+
+        var pendingBeforeSemanticMutation = Assert.IsAssignableFrom<object>(
+            GetPrivatePropertyValue(
+                context,
+                "RuntimeUnlockPendingPeerPreCommitProbe"));
+        var proofBeforeSemanticMutation =
+            transport.RuntimeUnlockRouteCommitSnapshot;
+        var semanticMutationLogStart = GetOperationalLogLength();
+        var handledSemanticMutation = await (Task<bool>)serviceType
+            .GetMethod(
+                "TryHandleRuntimeUnlockPreCommitProbeDataFrameAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Inbound,
+                    commitConfirmation with { Accepted = false },
+                    FileTransferTransportKind.Tuna,
+                    dataSession,
+                ])!;
+
+        Assert.True(handledSemanticMutation);
+        Assert.Equal(
+            pendingBeforeSemanticMutation,
+            GetPrivatePropertyValue(
+                context,
+                "RuntimeUnlockPendingPeerPreCommitProbe"));
+        Assert.Equal(
+            proofBeforeSemanticMutation,
+            transport.RuntimeUnlockRouteCommitSnapshot);
+        Assert.Empty(transport.RuntimeUnlockProbeEvents);
+        Assert.Contains(
+            "decision_reason=runtime_unlock_precommit_probe_commit_confirmation_semantic_mutation",
+            ReadOperationalLogTail(semanticMutationLogStart),
+            StringComparison.Ordinal);
 
         using var staleDataSession = new RecordingDataSession(
             sessionId,
@@ -21946,6 +22069,299 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             forwardedTuple.ExpectedLocalPathProbeState);
         Assert.Empty(transport.RuntimeUnlockRouteCommitResults);
 
+        var completedPeerConfirmation = Assert.IsAssignableFrom<object>(
+            GetPrivatePropertyValue(
+                context,
+                "RuntimeUnlockPendingPeerPreCommitProbe"));
+        Assert.Equal(
+            commitConfirmation,
+            GetPrivatePropertyValue(
+                completedPeerConfirmation,
+                "CompletedCommitConfirmation"));
+        var probeEventCountAfterConfirmation =
+            transport.RuntimeUnlockProbeEvents.Count;
+        var probeResultScopeCountAfterConfirmation =
+            transport.RuntimeUnlockProbeResultScopes.Count;
+        var routeCommitResultCountAfterConfirmation =
+            transport.RuntimeUnlockRouteCommitResults.Count;
+        var sentFrameCountAfterConfirmation = dataSession.SentFrames.Count;
+        var coordinatorAfterConfirmation =
+            CreateCoordinatorStateForTest(context);
+        var proofAfterConfirmation =
+            transport.RuntimeUnlockRouteCommitSnapshot;
+        var duplicateConfirmationLogStart = GetOperationalLogLength();
+        var handledDuplicateConfirmation = await (Task<bool>)serviceType
+            .GetMethod(
+                "TryHandleRuntimeUnlockPreCommitProbeDataFrameAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Inbound,
+                    commitConfirmation,
+                    FileTransferTransportKind.Tuna,
+                    dataSession,
+                ])!;
+
+        Assert.True(handledDuplicateConfirmation);
+        Assert.Equal(
+            completedPeerConfirmation,
+            GetPrivatePropertyValue(
+                context,
+                "RuntimeUnlockPendingPeerPreCommitProbe"));
+        Assert.Equal(
+            probeEventCountAfterConfirmation,
+            transport.RuntimeUnlockProbeEvents.Count);
+        Assert.Equal(
+            probeResultScopeCountAfterConfirmation,
+            transport.RuntimeUnlockProbeResultScopes.Count);
+        Assert.Equal(
+            proofAfterConfirmation,
+            transport.RuntimeUnlockRouteCommitSnapshot);
+        Assert.Equal(
+            coordinatorAfterConfirmation.PersistentState,
+            CreateCoordinatorStateForTest(context).PersistentState);
+        var duplicateConfirmationLog =
+            ReadOperationalLogTail(duplicateConfirmationLogStart);
+        Assert.Contains(
+            "event=runtime_unlock_precommit_probe_commit_confirmation_idempotent;",
+            duplicateConfirmationLog,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=runtime_unlock_precommit_probe_acked;",
+            duplicateConfirmationLog,
+            StringComparison.Ordinal);
+
+        var nonTunaDuplicateConfirmationLogStart =
+            GetOperationalLogLength();
+        var handledNonTunaDuplicateConfirmation =
+            await (Task<bool>)serviceType
+                .GetMethod(
+                    "TryHandleRuntimeUnlockPreCommitProbeDataFrameAsync",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(
+                    service,
+                    [
+                        sessionId,
+                        transferId,
+                        FileTransferDirection.Inbound,
+                        commitConfirmation,
+                        FileTransferTransportKind.RegularNkn,
+                        dataSession,
+                    ])!;
+
+        Assert.True(handledNonTunaDuplicateConfirmation);
+        Assert.Equal(
+            completedPeerConfirmation,
+            GetPrivatePropertyValue(
+                context,
+                "RuntimeUnlockPendingPeerPreCommitProbe"));
+        Assert.Equal(
+            probeEventCountAfterConfirmation,
+            transport.RuntimeUnlockProbeEvents.Count);
+        Assert.Equal(
+            probeResultScopeCountAfterConfirmation,
+            transport.RuntimeUnlockProbeResultScopes.Count);
+        Assert.Equal(
+            routeCommitResultCountAfterConfirmation,
+            transport.RuntimeUnlockRouteCommitResults.Count);
+        Assert.Equal(
+            sentFrameCountAfterConfirmation,
+            dataSession.SentFrames.Count);
+        Assert.Equal(
+            proofAfterConfirmation,
+            transport.RuntimeUnlockRouteCommitSnapshot);
+        Assert.Equal(
+            coordinatorAfterConfirmation.PersistentState,
+            CreateCoordinatorStateForTest(context).PersistentState);
+        var nonTunaDuplicateConfirmationLog =
+            ReadOperationalLogTail(nonTunaDuplicateConfirmationLogStart);
+        Assert.Contains(
+            "decision_reason=not_tuna_transport",
+            nonTunaDuplicateConfirmationLog,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=runtime_unlock_precommit_probe_commit_confirmation_idempotent;",
+            nonTunaDuplicateConfirmationLog,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=runtime_unlock_tuna_probe_ack_received;",
+            nonTunaDuplicateConfirmationLog,
+            StringComparison.Ordinal);
+
+        var staleDuplicateConfirmationLogStart = GetOperationalLogLength();
+        var handledStaleDuplicateConfirmation = await (Task<bool>)serviceType
+            .GetMethod(
+                "TryHandleRuntimeUnlockPreCommitProbeDataFrameAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Inbound,
+                    commitConfirmation,
+                    FileTransferTransportKind.Tuna,
+                    staleDataSession,
+                ])!;
+
+        Assert.True(handledStaleDuplicateConfirmation);
+        Assert.Equal(
+            completedPeerConfirmation,
+            GetPrivatePropertyValue(
+                context,
+                "RuntimeUnlockPendingPeerPreCommitProbe"));
+        Assert.Equal(
+            probeEventCountAfterConfirmation,
+            transport.RuntimeUnlockProbeEvents.Count);
+        Assert.Equal(
+            probeResultScopeCountAfterConfirmation,
+            transport.RuntimeUnlockProbeResultScopes.Count);
+        Assert.Equal(
+            sentFrameCountAfterConfirmation,
+            dataSession.SentFrames.Count);
+        Assert.Empty(staleDataSession.SentFrames);
+        Assert.Equal(
+            proofAfterConfirmation,
+            transport.RuntimeUnlockRouteCommitSnapshot);
+        Assert.Equal(
+            coordinatorAfterConfirmation.PersistentState,
+            CreateCoordinatorStateForTest(context).PersistentState);
+        var staleDuplicateConfirmationLog =
+            ReadOperationalLogTail(staleDuplicateConfirmationLogStart);
+        Assert.Contains(
+            "decision_reason=runtime_unlock_precommit_probe_ack_receive_scope_not_current",
+            staleDuplicateConfirmationLog,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=runtime_unlock_precommit_probe_commit_confirmation_idempotent;",
+            staleDuplicateConfirmationLog,
+            StringComparison.Ordinal);
+
+        var mutatedConfirmationLogStart = GetOperationalLogLength();
+        var handledMutatedConfirmation = await (Task<bool>)serviceType
+            .GetMethod(
+                "TryHandleRuntimeUnlockPreCommitProbeDataFrameAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Inbound,
+                    commitConfirmation with
+                    {
+                        SentUnixTimeMilliseconds =
+                            commitConfirmation.SentUnixTimeMilliseconds + 1,
+                    },
+                    FileTransferTransportKind.Tuna,
+                    dataSession,
+                ])!;
+
+        Assert.True(handledMutatedConfirmation);
+        Assert.Equal(
+            completedPeerConfirmation,
+            GetPrivatePropertyValue(
+                context,
+                "RuntimeUnlockPendingPeerPreCommitProbe"));
+        Assert.Equal(
+            probeEventCountAfterConfirmation,
+            transport.RuntimeUnlockProbeEvents.Count);
+        Assert.Equal(
+            probeResultScopeCountAfterConfirmation,
+            transport.RuntimeUnlockProbeResultScopes.Count);
+        Assert.Equal(
+            sentFrameCountAfterConfirmation,
+            dataSession.SentFrames.Count);
+        Assert.Equal(
+            proofAfterConfirmation,
+            transport.RuntimeUnlockRouteCommitSnapshot);
+        Assert.Equal(
+            coordinatorAfterConfirmation.PersistentState,
+            CreateCoordinatorStateForTest(context).PersistentState);
+        var mutatedConfirmationLog =
+            ReadOperationalLogTail(mutatedConfirmationLogStart);
+        Assert.Contains(
+            "decision_reason=runtime_unlock_precommit_probe_commit_confirmation_semantic_mutation",
+            mutatedConfirmationLog,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=runtime_unlock_precommit_probe_commit_confirmation_idempotent;",
+            mutatedConfirmationLog,
+            StringComparison.Ordinal);
+
+        transport.RuntimeUnlockRouteCommitSnapshot =
+            Assert.IsType<RuntimeUnlockRouteCommitSnapshot>(
+                transport.RuntimeUnlockRouteCommitSnapshot) with
+            {
+                TransactionGeneration = peerProbe.TransactionGeneration,
+                OfferGeneration = peerProbe.OfferGeneration,
+                TunaPathLeaseGeneration = peerProbe.TunaPathLeaseGeneration,
+                PathProbeId = peerProbe.ProbeId,
+            };
+        var collidingProofBeforeReasonMutation =
+            transport.RuntimeUnlockRouteCommitSnapshot;
+        var reasonMutationLogStart = GetOperationalLogLength();
+        var handledReasonMutation = await (Task<bool>)serviceType
+            .GetMethod(
+                "TryHandleRuntimeUnlockPreCommitProbeDataFrameAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Inbound,
+                    commitConfirmation with
+                    {
+                        Reason = "precommit_probe_received",
+                    },
+                    FileTransferTransportKind.Tuna,
+                    dataSession,
+                ])!;
+
+        Assert.True(handledReasonMutation);
+        Assert.Equal(
+            completedPeerConfirmation,
+            GetPrivatePropertyValue(
+                context,
+                "RuntimeUnlockPendingPeerPreCommitProbe"));
+        Assert.Equal(
+            probeEventCountAfterConfirmation,
+            transport.RuntimeUnlockProbeEvents.Count);
+        Assert.Equal(
+            probeResultScopeCountAfterConfirmation,
+            transport.RuntimeUnlockProbeResultScopes.Count);
+        Assert.Equal(
+            sentFrameCountAfterConfirmation,
+            dataSession.SentFrames.Count);
+        Assert.Equal(
+            collidingProofBeforeReasonMutation,
+            transport.RuntimeUnlockRouteCommitSnapshot);
+        Assert.Equal(
+            coordinatorAfterConfirmation.PersistentState,
+            CreateCoordinatorStateForTest(context).PersistentState);
+        var reasonMutationLog =
+            ReadOperationalLogTail(reasonMutationLogStart);
+        Assert.Contains(
+            "decision_reason=runtime_unlock_precommit_probe_commit_confirmation_semantic_mutation",
+            reasonMutationLog,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=runtime_unlock_precommit_probe_acked;",
+            reasonMutationLog,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=runtime_unlock_paired_commit_started;",
+            reasonMutationLog,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=runtime_unlock_precommit_probe_commit_confirmation_idempotent;",
+            reasonMutationLog,
+            StringComparison.Ordinal);
+
         var log = ReadOperationalLogTail(logStart);
         Assert.Contains("event=runtime_unlock_precommit_peer_probe_tracked; direction=inbound;", log, StringComparison.Ordinal);
         Assert.Contains("event=runtime_unlock_tuna_probe_received; transport=tuna; direction=inbound;", log, StringComparison.Ordinal);
@@ -21954,7 +22370,10 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Contains("event=runtime_unlock_precommit_probe_ack_sent; direction=inbound;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_runtime_unlock_callback_rejected; direction=inbound;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("rejection_reason=runtime_unlock_admission_missing", log, StringComparison.Ordinal);
-        Assert.DoesNotContain("admission_generation=0", log, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "current_admission_generation=0",
+            log,
+            StringComparison.Ordinal);
         Assert.DoesNotContain("reason=probe_id_mismatch", log, StringComparison.Ordinal);
     }
 
@@ -22028,6 +22447,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "RuntimeUnlockResponderPeerProbe")]
     public async Task RuntimeUnlockPrecommitResponderRoutePromotion_PublishesTypedAnswerAcceptanceAfterAckSend()
     {
         using var service = new SessionFileTransferService();
@@ -22037,7 +22457,9 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         using var transport = new PeerPreCommitAnswerAcceptanceTransport(sessionId);
         service.AttachTransport(transport);
         var context = CreateRegularNknV4InboundContext(transferId);
-        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "test_typed_answer_acceptance");
+        SeedInitialRegularV4RuntimeScopeForTest(
+            context,
+            "test_typed_answer_acceptance");
         var dataSession = new RecordingDataSession(sessionId, transferId);
         SetPrivateProperty(context, "DataSession", dataSession);
         SetPrivateProperty(context, "DataSessionGeneration", 3L);
@@ -22060,6 +22482,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             SentUnixTimeMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
         };
 
+        var logStart = GetOperationalLogLength();
         var handled = await (Task<bool>)serviceType
             .GetMethod("TryHandleRuntimeUnlockPreCommitProbeDataFrameAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(
@@ -22091,7 +22514,334 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Equal(64, receipt.ProbeFrameFingerprint.Length);
         Assert.True(receipt.ProbeAckSentUtcMs >= receipt.ReceivedUtcMs);
         Assert.False(receipt.AdmissionToken.IsDefault);
+        Assert.Equal(receipt.AdmissionToken, receipt.ReceiveScope.Admission);
+        Assert.False(receipt.ReceiveScope.IsDefault);
+        Assert.Equal(
+            RuntimeUnlockResponderPeerProbeTransitionMode.InitialRegularV4,
+            receipt.ReceiveScope.ResponderTransitionMode);
+        Assert.Equal(
+            FileTransferRoute.RegularNknV4Fast,
+            receipt.ReceiveScope.RuntimeOwner.Route);
+        Assert.Equal(
+            FileTransferRouteResolver.RegularNknV4FastToken,
+            receipt.ReceiveScope.RuntimeOwner.RouteToken);
+        Assert.Equal(
+            FileTransferProtocol.ProtocolVersionV4,
+            receipt.ReceiveScope.RuntimeOwner.ProtocolVersion);
+        Assert.Equal(0, receipt.ReceiveScope.RuntimeOwner.LiveRouteEpoch);
+        Assert.Equal(
+            receipt.ReceiveScope.RuntimeOwner,
+            receipt.ReceiveScope.RoutePublication.RuntimeOwner);
+        Assert.Equal(
+            FileTransferRoute.RegularNknV4Fast,
+            receipt.ReceiveScope.RoutePublication.Route);
+        Assert.Equal(
+            FileTransferProtocol.ProtocolVersionV4,
+            receipt.ReceiveScope.RoutePublication.ProtocolVersion);
+        Assert.Equal(0, receipt.ReceiveScope.RoutePublication.LiveRouteEpoch);
+        Assert.Equal(0, receipt.ReceiveScope.TransportEpoch);
+        Assert.Equal(0, receipt.ReceiveScope.BridgeRecoveryGeneration);
+        Assert.Equal("(none)", receipt.ReceiveScope.CheckpointRequestId);
+        Assert.Equal(0, receipt.ReceiveScope.CheckpointGeneration);
+        Assert.False(string.IsNullOrWhiteSpace(
+            receipt.ReceiveScope.DataSessionIdentity));
+        Assert.Equal(3, receipt.ReceiveScope.DataSessionGeneration);
         Assert.Empty(transport.RuntimeUnlockProbeEvents);
+
+        var log = ReadOperationalLogTail(logStart);
+        var ackSentIndex = log.IndexOf(
+            "event=runtime_unlock_precommit_probe_ack_sent; direction=inbound;",
+            StringComparison.Ordinal);
+        var observedIndex = log.IndexOf(
+            "event=runtime_unlock_peer_precommit_answer_acceptance_observed; status=Accepted;",
+            StringComparison.Ordinal);
+        Assert.True(ackSentIndex >= 0, log);
+        Assert.True(observedIndex > ackSentIndex, log);
+        Assert.Equal(
+            1,
+            System.Text.RegularExpressions.Regex.Matches(
+                log,
+                "event=runtime_unlock_peer_precommit_answer_acceptance_observed;")
+                .Count);
+        var observed = log
+            .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+            .Single(line => line.Contains(
+                "event=runtime_unlock_peer_precommit_answer_acceptance_observed;",
+                StringComparison.Ordinal));
+        Assert.Contains(
+            "responder_transition_mode=initial_regular_v4",
+            observed,
+            StringComparison.Ordinal);
+        Assert.Contains("peer_transport_epoch=0", observed, StringComparison.Ordinal);
+        Assert.Contains(
+            "peer_bridge_recovery_generation=0",
+            observed,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "peer_checkpoint_request_id=(none)",
+            observed,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "peer_checkpoint_generation=0",
+            observed,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "decision_reason=current",
+            observed,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=filetransfer_data_session_availability_broadcast;",
+            log,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=filetransfer_route_transition_prepared;",
+            log,
+            StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("FileTransferRuntimeSuite", "RuntimeUnlockResponderPeerProbe")]
+    public async Task RuntimeUnlockResponderPeerProbeRejectedAcceptance_CommitConfirmationHasNoEffect(
+        bool mutateDecisionReceipt)
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        var variant = mutateDecisionReceipt
+            ? "mutated_receipt"
+            : "rejected_scope";
+        var transferId =
+            $"transfer_runtime_unlock_peer_probe_{variant}_confirmation";
+        var sessionId = $"session_{transferId}";
+        const long transactionGeneration = 31;
+        const long offerGeneration = 37;
+        const long leaseGeneration = 41;
+        const string probeId =
+            "runtime-unlock-precommit:31:37:rejected-acceptance";
+        using var transport = new PeerPreCommitAnswerAcceptanceTransport(
+            sessionId,
+            mutateDecisionReceipt)
+        {
+            RuntimeUnlockRouteCommitSnapshot =
+                new RuntimeUnlockRouteCommitSnapshot(
+                    sessionId,
+                    transferId,
+                    transactionGeneration,
+                    offerGeneration,
+                    PeerVisibleProof: true,
+                    PeerReceived: true,
+                    AnswerReceived: true,
+                    FileTransferRoute.FileTunaV4,
+                    FileTransferProtocol.ProtocolVersionV4,
+                    FileTransferTransportHandoffKind.NormalToTunaActivation,
+                    FileTransferTransportKind.Tuna,
+                    RuntimeUnlockTransactionState.AnswerReceived.ToString(),
+                    $"test_{variant}_confirmation",
+                    PathProbeId: probeId,
+                    PathProbeState:
+                        RuntimeUnlockPathProbeState.Started.ToString(),
+                    PathProbeTransport: FileTransferTransportKind.Tuna,
+                    TunaPathLeaseRequired: true,
+                    TunaPathLeaseGeneration: leaseGeneration,
+                    TunaPathLeaseState:
+                        RuntimeUnlockTunaPathLeaseState.ListenerReady.ToString(),
+                    TunaPathLeaseListenerRunId:
+                        $"listener-{variant}-confirmation",
+                    TunaPathLeaseCurrent: true),
+        };
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4InboundContext(transferId);
+        if (mutateDecisionReceipt)
+        {
+            SeedInitialRegularV4RuntimeScopeForTest(
+                context,
+                $"test_{variant}_confirmation");
+        }
+        else
+        {
+            SeedCurrentRuntimeOwnerForTest(
+                context,
+                FileTransferDirection.Inbound,
+                $"test_{variant}_confirmation");
+        }
+
+        var dataSession = new RecordingDataSession(sessionId, transferId);
+        SetPrivateProperty(context, "DataSession", dataSession);
+        SetPrivateProperty(context, "DataSessionGeneration", 3L);
+        serviceType
+            .GetField(
+                "inboundTransfer",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        var peerProbe = new FileTransferRuntimeUnlockPreCommitProbeFrame
+        {
+            SessionId = sessionId,
+            TransferId = transferId,
+            TransactionGeneration = transactionGeneration,
+            OfferGeneration = offerGeneration,
+            TunaPathLeaseGeneration = leaseGeneration,
+            ProbeId = probeId,
+            TargetRoute = FileTransferRouteResolver.FileTunaV4Token,
+            TargetProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+            TargetTransport = "tuna",
+            HandoffKind = "normal_to_tuna_activation",
+            SentUnixTimeMilliseconds =
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+        };
+
+        var probeLogStart = GetOperationalLogLength();
+        var handledProbe = await (Task<bool>)serviceType
+            .GetMethod(
+                "TryHandleRuntimeUnlockPreCommitProbeDataFrameAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Inbound,
+                    peerProbe,
+                    FileTransferTransportKind.Tuna,
+                    dataSession,
+                ])!;
+
+        Assert.True(handledProbe);
+        var sentAck = Assert.IsType<
+            FileTransferRuntimeUnlockPreCommitProbeAckFrame>(
+                Assert.Single(dataSession.SentFrames));
+        Assert.True(sentAck.Accepted);
+        Assert.Null(GetPrivatePropertyValue(
+            context,
+            "RuntimeUnlockPendingPeerPreCommitProbe"));
+        Assert.Equal(mutateDecisionReceipt ? 1 : 0, transport.ObservationCount);
+        var probeLog = ReadOperationalLogTail(probeLogStart);
+        Assert.Contains(
+            "event=runtime_unlock_peer_precommit_answer_acceptance_observed; status=Rejected;",
+            probeLog,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            mutateDecisionReceipt
+                ? "decision_reason=runtime_unlock_peer_precommit_answer_acceptance_receipt_mutated"
+                : "decision_reason=runtime_unlock_peer_precommit_answer_acceptance_scope_mode_invalid",
+            probeLog,
+            StringComparison.Ordinal);
+
+        var stateBeforeConfirmation = CreateCoordinatorStateForTest(context);
+        var routeBeforeConfirmation = GetPrivateProperty<
+            FileTransferRouteSelection>(context, "RouteSelection");
+        var proofBeforeConfirmation = transport.RuntimeUnlockRouteCommitSnapshot;
+        var activationBeforeConfirmation = GetPrivateProperty<bool>(
+            context,
+            "RuntimeUnlockActivationWindowGranted");
+        var activationReasonBeforeConfirmation = GetPrivatePropertyValue(
+            context,
+            "RuntimeUnlockActivationWindowReason");
+        var activationUtcBeforeConfirmation = GetPrivatePropertyValue(
+            context,
+            "RuntimeUnlockActivationWindowGrantedUtc");
+        var bytesBeforeConfirmation = GetPrivateProperty<long>(
+            context,
+            "BytesTransferred");
+        var chunksBeforeConfirmation = GetPrivateProperty<int>(
+            context,
+            "ChunksTransferred");
+        var nextChunkBeforeConfirmation = GetPrivateProperty<int>(
+            context,
+            "NextChunkIndex");
+        var confirmation = sentAck with
+        {
+            Reason = "precommit_probe_commit_confirmed",
+            SentUnixTimeMilliseconds =
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+        };
+
+        var confirmationLogStart = GetOperationalLogLength();
+        var handledConfirmation = await (Task<bool>)serviceType
+            .GetMethod(
+                "TryHandleRuntimeUnlockPreCommitProbeDataFrameAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Inbound,
+                    confirmation,
+                    FileTransferTransportKind.Tuna,
+                    dataSession,
+                ])!;
+
+        Assert.True(handledConfirmation);
+        var stateAfterConfirmation = CreateCoordinatorStateForTest(context);
+        Assert.Null(GetPrivatePropertyValue(
+            context,
+            "RuntimeUnlockPendingPeerPreCommitProbe"));
+        Assert.Equal(
+            stateBeforeConfirmation.PersistentState,
+            stateAfterConfirmation.PersistentState);
+        Assert.Equal(
+            stateBeforeConfirmation.CurrentRuntimeOwner,
+            stateAfterConfirmation.CurrentRuntimeOwner);
+        Assert.Equal(
+            stateBeforeConfirmation.CurrentRoutePublicationToken,
+            stateAfterConfirmation.CurrentRoutePublicationToken);
+        Assert.Equal(
+            routeBeforeConfirmation,
+            GetPrivateProperty<FileTransferRouteSelection>(
+                context,
+                "RouteSelection"));
+        Assert.Equal(
+            proofBeforeConfirmation,
+            transport.RuntimeUnlockRouteCommitSnapshot);
+        Assert.Equal(
+            activationBeforeConfirmation,
+            GetPrivateProperty<bool>(
+                context,
+                "RuntimeUnlockActivationWindowGranted"));
+        Assert.Equal(
+            activationReasonBeforeConfirmation,
+            GetPrivatePropertyValue(
+                context,
+                "RuntimeUnlockActivationWindowReason"));
+        Assert.Equal(
+            activationUtcBeforeConfirmation,
+            GetPrivatePropertyValue(
+                context,
+                "RuntimeUnlockActivationWindowGrantedUtc"));
+        Assert.Equal(
+            bytesBeforeConfirmation,
+            GetPrivateProperty<long>(context, "BytesTransferred"));
+        Assert.Equal(
+            chunksBeforeConfirmation,
+            GetPrivateProperty<int>(context, "ChunksTransferred"));
+        Assert.Equal(
+            nextChunkBeforeConfirmation,
+            GetPrivateProperty<int>(context, "NextChunkIndex"));
+        Assert.Empty(transport.RuntimeUnlockProbeEvents);
+        Assert.Empty(transport.RuntimeUnlockProbeResultScopes);
+        Assert.Empty(transport.RuntimeUnlockRouteCommitResults);
+        var confirmationLog = ReadOperationalLogTail(confirmationLogStart);
+        Assert.Contains(
+            "decision_reason=runtime_unlock_precommit_probe_ack_peer_acceptance_not_current",
+            confirmationLog,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=runtime_unlock_precommit_probe_acked;",
+            confirmationLog,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=filetransfer_data_session_availability_broadcast;",
+            confirmationLog,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=filetransfer_route_transition_prepared;",
+            confirmationLog,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=filetransfer_route_transitioned;",
+            confirmationLog,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -23071,6 +23821,249 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.DoesNotContain("event=filetransfer_runtime_unlock_route_commit_rejected; direction=inbound;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=runtime_unlock_precommit_probe_started; direction=inbound;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=runtime_unlock_precommit_probe_sent; direction=inbound;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RuntimeUnlockResponderPeerProbe")]
+    public async Task RuntimeUnlockResponderPeerProbeAvailability_InitialRegularV4UsesGenericTransitionWithoutFallbackAuthority()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId =
+            "transfer_runtime_unlock_initial_responder_peer_probe";
+        var sessionId = $"session_{transferId}";
+        const long transactionGeneration = 12;
+        const long offerGeneration = 19;
+        const long leaseGeneration = 23;
+        const long launchGeneration = 29;
+        const string listenerRunId =
+            "listener-initial-responder-peer-probe";
+        const string probeId = "probe-initial-responder-peer-probe";
+        using var transport = new LoopbackFileTransferTransport(sessionId)
+        {
+            RuntimeUnlockRouteCommitSnapshot =
+                new RuntimeUnlockRouteCommitSnapshot(
+                    sessionId,
+                    transferId,
+                    transactionGeneration,
+                    offerGeneration,
+                    PeerVisibleProof: true,
+                    PeerReceived: true,
+                    AnswerReceived: true,
+                    FileTransferRoute.FileTunaV4,
+                    FileTransferProtocol.ProtocolVersionV4,
+                    FileTransferTransportHandoffKind.NormalToTunaActivation,
+                    FileTransferTransportKind.Tuna,
+                    RuntimeUnlockTransactionState.AnswerReceived.ToString(),
+                    "initial_responder_waiting_for_peer_probe",
+                    TunaPathLeaseRequired: true,
+                    TunaPathLeaseGeneration: leaseGeneration,
+                    TunaPathLeaseState:
+                        RuntimeUnlockTunaPathLeaseState.ListenerReady.ToString(),
+                    TunaPathLeaseListenerRunId: listenerRunId,
+                    TunaPathLeaseCurrent: true,
+                    LaunchGeneration: launchGeneration),
+        };
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4InboundContext(transferId);
+        SeedInitialRegularV4RuntimeScopeForTest(
+            context,
+            "test_initial_responder_peer_probe");
+        var dataSession = new RecordingDataSession(sessionId, transferId);
+        SetPrivateProperty(context, "DataSession", dataSession);
+        SetPrivateProperty(context, "DataSessionGeneration", 1L);
+        serviceType
+            .GetField(
+                "inboundTransfer",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        Assert.True(Assert.IsType<bool>(serviceType
+            .GetMethod(
+                "TryPromoteInboundRegularNknV4ToFileTunaV4Locked",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    context,
+                    "test_initial_responder_waiting",
+                    FileTransferTransportHandoffKind.NormalToTunaActivation,
+                    FileTransferTransportKind.Tuna,
+                ])));
+        Assert.Null(
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                    context,
+                    "CoordinatorPersistentState")
+                .FileTransferRouteTransition.CurrentOperation);
+        Assert.False(GetPrivateProperty<bool>(
+            context,
+            "RuntimeUnlockActivationWindowGranted"));
+
+        var state = CreateCoordinatorStateForTest(context);
+        var leg = Assert.IsType<FileTransferLeg>(state.CurrentLeg);
+        Assert.Equal(0, leg.TransportEpochId);
+        Assert.Equal(0, leg.BridgeRecoveryGeneration);
+        var scopeFactory = serviceType
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(method =>
+                method.Name ==
+                    "TryCreateRuntimeUnlockPeerPreCommitAnswerAcceptanceScope" &&
+                method.GetParameters().Length == 3);
+        object?[] scopeArguments =
+        [
+            state,
+            default(RuntimeUnlockPeerPreCommitAnswerAcceptanceScope),
+            null,
+        ];
+        Assert.True(Assert.IsType<bool>(
+            scopeFactory.Invoke(null, scopeArguments)));
+        var receiveScope = Assert.IsType<
+            RuntimeUnlockPeerPreCommitAnswerAcceptanceScope>(
+                scopeArguments[1]);
+        Assert.Equal(
+            "runtime_unlock_peer_precommit_answer_acceptance_scope_current",
+            Assert.IsType<string>(scopeArguments[2]));
+        Assert.False(receiveScope.IsDefault);
+        Assert.Equal(
+            RuntimeUnlockResponderPeerProbeTransitionMode.InitialRegularV4,
+            receiveScope.ResponderTransitionMode);
+        leg.TransportEpochId = 1;
+        object?[] invalidModeArguments =
+        [
+            state,
+            default(RuntimeUnlockPeerPreCommitAnswerAcceptanceScope),
+            null,
+        ];
+        Assert.False(Assert.IsType<bool>(
+            scopeFactory.Invoke(null, invalidModeArguments)));
+        Assert.Equal(
+            "runtime_unlock_peer_precommit_answer_acceptance_scope_mode_invalid",
+            Assert.IsType<string>(invalidModeArguments[2]));
+        leg.TransportEpochId = 0;
+        object?[] staleScopeArguments =
+        [
+            state with { CurrentRuntimeOwner = null },
+            default(RuntimeUnlockPeerPreCommitAnswerAcceptanceScope),
+            null,
+        ];
+        Assert.False(Assert.IsType<bool>(
+            scopeFactory.Invoke(null, staleScopeArguments)));
+        Assert.Equal(
+            "runtime_unlock_peer_precommit_answer_acceptance_scope_not_current",
+            Assert.IsType<string>(staleScopeArguments[2]));
+        var observation =
+            new RuntimeUnlockResponderPeerProbeRouteTransitionObservation(
+                sessionId,
+                transferId,
+                transactionGeneration,
+                offerGeneration,
+                PendingAnswerAckGeneration: 7,
+                PayerDecisionId: 11,
+                launchGeneration,
+                Lanes: "file",
+                AnswerAcceptanceSource: "SemanticAnswerAck",
+                AckMessageId: "answer-ack-initial-responder-peer-probe",
+                AckSourceFingerprint: new string('a', 64),
+                PeerProbeFrameFingerprint: new string('b', 64),
+                leaseGeneration,
+                listenerRunId,
+                probeId,
+                RuntimeUnlockPathProbeState.Acked,
+                FileTransferTransportKind.Tuna,
+                ProbeAckedUtcMs:
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                FileTransferRoute.FileTunaV4,
+                FileTransferProtocol.ProtocolVersionV4,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                receiveScope);
+        var snapshot = transport.RuntimeUnlockRouteCommitSnapshot! with
+        {
+            TransactionState =
+                RuntimeUnlockTransactionState.RouteCommitPending.ToString(),
+            PathProbeId = probeId,
+            PathProbeState = RuntimeUnlockPathProbeState.Acked.ToString(),
+            PathProbeTransport = FileTransferTransportKind.Tuna,
+            PathProbeAckedUtcMs = observation.ProbeAckedUtcMs,
+            LaunchGeneration = launchGeneration,
+            ResponderPeerProbeRouteTransitionObservation = observation,
+        };
+        transport.RuntimeUnlockRouteCommitSnapshot = snapshot;
+
+        var logStart = GetOperationalLogLength();
+        await Assert.IsAssignableFrom<Task>(serviceType
+            .GetMethod(
+                "HandleDataSessionAvailabilityChangedAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    dataSession,
+                    new FileTransferDataSessionAvailabilityChangedEventArgs(
+                        isAvailable: true,
+                        reason: "initial_responder_peer_probe_acked",
+                        requiresResumeRequest: false,
+                        FileTransferTransportHandoffKind
+                            .NormalToTunaActivation,
+                        FileTransferTransportKind.Tuna,
+                        snapshot),
+                ]));
+
+        var log = ReadOperationalLogTail(logStart);
+        var handoff = log
+            .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+            .Single(line => line.Contains(
+                "event=filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided; status=Accepted;",
+                StringComparison.Ordinal));
+        Assert.Contains(
+            "responder_transition_mode=initial_regular_v4",
+            handoff,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "activation_authority_mode=initial_responder",
+            handoff,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "responder_handoff_authority_id=(none)",
+            handoff,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "transition_authority_id=(none)",
+            handoff,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "event=filetransfer_route_transition_prepared;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "transition_kind=RegularV4ToTunaV4",
+            log,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=filetransfer_fallback_tail_yield_release_reserved;",
+            log,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=runtime_unlock_retry_dispatch_install_receipt_issued;",
+            log,
+            StringComparison.Ordinal);
+        var operation = Assert.IsType<FileTransferRouteTransitionOperation>(
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                    context,
+                    "CoordinatorPersistentState")
+                .FileTransferRouteTransition.CurrentOperation);
+        Assert.Equal(
+            FileTransferRouteTransitionKind.RegularV4ToTunaV4,
+            operation.Authority.Kind);
+        var activation = Assert.IsType<
+            FileTransferTunaActivationTransitionProofBoundary>(
+                operation.Authority.ProofBoundary);
+        Assert.Equal(
+            observation,
+            activation.InitialResponderPeerProbeObservation);
+        Assert.Null(activation.EffectiveRetryInstallReceipt);
+        Assert.Null(activation.FallbackTailPairedReleaseReceipt);
+        Assert.Null(activation.ResponderPeerProbeHandoffAuthority);
     }
 
     private static async Task
@@ -30260,19 +31253,38 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         }
     }
 
-    private sealed class PeerPreCommitAnswerAcceptanceTransport(string sessionId)
-        : LoopbackFileTransferTransport(sessionId),
+    private sealed class PeerPreCommitAnswerAcceptanceTransport
+        : LoopbackFileTransferTransport,
           IRuntimeUnlockPeerPreCommitAnswerAcceptanceObserver
     {
+        private readonly bool mutateDecisionReceipt;
+
+        public PeerPreCommitAnswerAcceptanceTransport(
+            string sessionId,
+            bool mutateDecisionReceipt = false)
+            : base(sessionId)
+        {
+            this.mutateDecisionReceipt = mutateDecisionReceipt;
+        }
+
         public RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt? AnswerAcceptanceReceipt { get; private set; }
+
+        public int ObservationCount { get; private set; }
 
         public RuntimeUnlockPeerPreCommitAnswerAcceptanceDecision
             ObserveRuntimeUnlockPeerPreCommitAnswerAcceptance(
                 RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt receipt)
         {
+            ObservationCount++;
             AnswerAcceptanceReceipt = receipt;
             return new RuntimeUnlockPeerPreCommitAnswerAcceptanceDecision(
-                receipt,
+                mutateDecisionReceipt
+                    ? receipt with
+                    {
+                        PeerOfferGeneration =
+                            receipt.PeerOfferGeneration + 1,
+                    }
+                    : receipt,
                 RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Accepted,
                 "test_typed_answer_acceptance_bound",
                 LocalTransactionGeneration: 1,

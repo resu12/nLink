@@ -375,7 +375,9 @@ public sealed partial class SessionFileTransferV4SenderTests
         typeof(SessionFileTransferService)
             .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
-        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "pressure_route_commit_rejected");
+        SeedInitialRegularV4RuntimeScopeForTest(
+            context,
+            "pressure_route_commit_rejected");
         SeedRuntimeUnlockAdmissionForTest(context, FileTransferDirection.Inbound, "pressure_route_commit_rejected");
         _ = CreateInboundState(service, context, "frontier_stall_repair_due", forceMissingRange: true);
         var originalOwner = GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner");
@@ -444,7 +446,9 @@ public sealed partial class SessionFileTransferV4SenderTests
         typeof(SessionFileTransferService)
             .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
-        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "pressure_route_commit_proof_rejected");
+        SeedInitialRegularV4RuntimeScopeForTest(
+            context,
+            "pressure_route_commit_proof_rejected");
         SeedRuntimeUnlockAdmissionForTest(context, FileTransferDirection.Inbound, "pressure_route_commit_proof_rejected");
         _ = CreateInboundState(service, context, "frontier_stall_repair_due", forceMissingRange: true);
         var installedBinding = GetPrivatePropertyValue(
@@ -488,9 +492,8 @@ public sealed partial class SessionFileTransferV4SenderTests
         typeof(SessionFileTransferService)
             .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
-        SeedCurrentRuntimeOwnerForTest(
+        SeedInitialRegularV4RuntimeScopeForTest(
             context,
-            FileTransferDirection.Inbound,
             "pressure_route_commit");
         var originalOwner = GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner");
         SeedRuntimeUnlockAdmissionForTest(context, FileTransferDirection.Inbound, "pressure_route_commit");
@@ -1170,6 +1173,17 @@ public sealed partial class SessionFileTransferV4SenderTests
             .GetValue(service)!;
         lock (serviceGate)
         {
+            var attachedTransport = Assert.IsType<LoopbackFileTransferTransport>(
+                typeof(SessionFileTransferService)
+                    .GetField(
+                        "transport",
+                        BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .GetValue(service));
+            attachedTransport.RuntimeUnlockRouteCommitSnapshot =
+                CreateInitialResponderRouteCommitSnapshotForInboundTest(
+                    context,
+                    Assert.IsType<RuntimeUnlockRouteCommitSnapshot>(
+                        attachedTransport.RuntimeUnlockRouteCommitSnapshot));
             var prepared = Assert.IsType<bool>(
                 typeof(SessionFileTransferService)
                     .GetMethod(

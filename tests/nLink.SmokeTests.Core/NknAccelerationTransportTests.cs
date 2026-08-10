@@ -18485,14 +18485,16 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
     }
 
     [Theory]
-    [InlineData("ack_first")]
-    [InlineData("probe_first")]
-    [InlineData("concurrent")]
-    [InlineData("probe_ack_before_peer_receipt")]
+    [InlineData("ack_first", false)]
+    [InlineData("probe_first", false)]
+    [InlineData("concurrent", false)]
+    [InlineData("probe_ack_before_peer_receipt", false)]
+    [InlineData("ack_first", true)]
     [Trait("Category", "Smoke")]
     [Trait("FileTransferInfraSuite", "RuntimeUnlockResponderPeerProbe")]
     public async Task RuntimeUnlockResponderAnswerProbeConvergence_ExactHalvesBindOnlyAfterAckedProbe(
-        string arrivalOrder)
+        string arrivalOrder,
+        bool initialRegularV4)
     {
         FakeNknClient.ResetNetwork();
         const string sessionId = "session-responder-answer-probe-convergence";
@@ -18515,7 +18517,15 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         var peerProbeFrameFingerprint = new string('c', 64);
         var scope = CreateRuntimeUnlockResponderPeerReceiveScopeForTests(
             sessionId,
-            transferId);
+            transferId,
+            initialRegularV4: initialRegularV4);
+        Assert.Equal(
+            initialRegularV4
+                ? RuntimeUnlockResponderPeerProbeTransitionMode
+                    .InitialRegularV4
+                : RuntimeUnlockResponderPeerProbeTransitionMode
+                    .PostFallbackV6Paired,
+            scope.ResponderTransitionMode);
         var receipt = new RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt(
             sessionId,
             transferId,
@@ -19066,10 +19076,36 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 ? RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Idempotent
                 : RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Held,
             exactDuplicate.Status);
+        var retransmittedReceipt = receipt with
+        {
+            ReceivedUtcMs = receipt.ReceivedUtcMs + 10,
+            ProbeAckSentUtcMs = receipt.ProbeAckSentUtcMs + 10,
+        };
+        var retransmittedDecision = observer
+            .ObserveRuntimeUnlockPeerPreCommitAnswerAcceptance(
+                retransmittedReceipt);
+        Assert.Equal(
+            completionAlreadyApplied
+                ? RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Idempotent
+                : RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Held,
+            retransmittedDecision.Status);
+        var retainedAfterRetransmission = GetPrivateField(
+            transport,
+            "runtimeUnlockResponderAnswerProbeConvergence");
+        Assert.Equal(
+            receipt,
+            Assert.IsType<
+                RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt>(
+                    retainedAfterRetransmission.GetType()
+                        .GetProperty("PeerReceipt")!
+                        .GetValue(retainedAfterRetransmission)));
         foreach (var mutation in new[]
         {
-            receipt with { ReceivedUtcMs = receipt.ReceivedUtcMs + 1 },
-            receipt with { ProbeAckSentUtcMs = receipt.ProbeAckSentUtcMs + 1 },
+            receipt with
+            {
+                ReceivedUtcMs = 0,
+                ProbeAckSentUtcMs = 0,
+            },
             receipt with { ProbeId = $"{receipt.ProbeId}-mutated" },
             receipt with
             {
@@ -19084,6 +19120,17 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                         AdmissionGeneration = receipt.ReceiveScope.Admission
                             .AdmissionGeneration + 1,
                     },
+                },
+            },
+            receipt with
+            {
+                ReceiveScope = receipt.ReceiveScope with
+                {
+                    ResponderTransitionMode = initialRegularV4
+                        ? RuntimeUnlockResponderPeerProbeTransitionMode
+                            .PostFallbackV6Paired
+                        : RuntimeUnlockResponderPeerProbeTransitionMode
+                            .InitialRegularV4,
                 },
             },
         })
@@ -19256,6 +19303,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         Assert.Contains("substate=Complete", tail, StringComparison.Ordinal);
         Assert.Contains("probe_state=Acked", tail, StringComparison.Ordinal);
         Assert.Contains("received_transport=tuna", tail, StringComparison.Ordinal);
+        Assert.Contains(
+            $"responder_transition_mode={(initialRegularV4 ? "initial_regular_v4" : "post_fallback_v6_paired")}",
+            tail,
+            StringComparison.Ordinal);
         var boundLog = tail
             .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
             .Single(line => line.Contains(
@@ -28990,10 +29041,14 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         CreateRuntimeUnlockResponderPeerReceiveScopeForTests(
             string sessionId,
             string transferId,
-            FileTransferDirection direction = FileTransferDirection.Inbound)
+            FileTransferDirection direction = FileTransferDirection.Inbound,
+            bool initialRegularV4 = false)
     {
         var route = FileTransferRouteResolver.Resolve(
-            FileTransferRoute.PostTunaFallbackV6);
+            initialRegularV4
+                ? FileTransferRoute.RegularNknV4Fast
+                : FileTransferRoute.PostTunaFallbackV6);
+        var liveRouteEpoch = initialRegularV4 ? 0 : 2;
         var owner = new RuntimeOwnerToken(
             sessionId,
             transferId,
@@ -29001,10 +29056,12 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             route.Route,
             route.TelemetryToken,
             route.ProtocolVersion,
-            LiveRouteEpoch: 2,
+            LiveRouteEpoch: liveRouteEpoch,
             RuntimeGeneration: 3,
             TerminalGeneration: 0,
-            RuntimeFamily: "post_tuna_fallback_v6",
+            RuntimeFamily: initialRegularV4
+                ? "regular_nkn_v4_fast"
+                : "post_tuna_fallback_v6",
             CreatedReason: "runtime_unlock_responder_peer_probe_test");
         var publication = new RoutePublicationToken(
             sessionId,
@@ -29014,7 +29071,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             route.Route,
             route.TelemetryToken,
             route.ProtocolVersion,
-            LiveRouteEpoch: 2,
+            LiveRouteEpoch: liveRouteEpoch,
             RuntimeGeneration: 3,
             TerminalGeneration: 0,
             LegGeneration: 4,
@@ -29033,7 +29090,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             route.Route,
             route.TelemetryToken,
             route.ProtocolVersion,
-            LiveRouteEpoch: 2,
+            LiveRouteEpoch: liveRouteEpoch,
             RuntimeGeneration: 3,
             TerminalGeneration: 0,
             LegGeneration: 4,
@@ -29045,13 +29102,18 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             publication,
             TerminalGeneration: 0,
             LegGeneration: 4,
-            TransportEpoch: 6,
+            TransportEpoch: initialRegularV4 ? 0 : 6,
             BridgeRecoveryGeneration: 0,
             CheckpointRequestId: "(none)",
             CheckpointGeneration: 0,
             DataSessionIdentity: "runtime-unlock-responder-peer-probe-data-session",
             DataSessionGeneration: 7,
-            Admission: admission);
+            Admission: admission,
+            ResponderTransitionMode: initialRegularV4
+                ? RuntimeUnlockResponderPeerProbeTransitionMode
+                    .InitialRegularV4
+                : RuntimeUnlockResponderPeerProbeTransitionMode
+                    .PostFallbackV6Paired);
     }
 
     private static object GetRuntimeUnlockOfferAuthorityModeForTests(string name)
