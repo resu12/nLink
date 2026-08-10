@@ -703,6 +703,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             var evidence = ReadArtifactReport(Path.Combine(runRoot, scenario), "filetransfer-operator-verdict.txt");
             Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_raw_count"]);
             Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count"]);
+            Assert.Equal("0", evidence["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_unresolved_count"]);
+            Assert.Equal("none", evidence["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_verdict"]);
             Assert.Equal("0", evidence["runtime_unlock_responder_acked_probe_binding_missing_unresolved_count"]);
             Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_raw_count"]);
             Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_distinct_count"]);
@@ -809,6 +811,97 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal(0, run.GetProperty("runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeRecoveredCount").GetInt32());
             Assert.Equal(0, run.GetProperty("runtimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbeUnresolvedCount").GetInt32());
             Assert.Equal(2, run.GetProperty("fileTransferBridgeRecoveryExecutionPayloadHoldMissingRawCount").GetInt32());
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
+    public async Task RunFileTransferRouteAcceptance_InitialResponderPeerAcceptanceScopeVariantReachesTrustedRoot()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string scenario = "regular-v4-live-activation-off-on-off-256mb";
+        const string candidate = "runtime_unlock_responder_acked_probe_route_transition_handoff_missing";
+        const string failureVariant = "runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected";
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-initial-responder-peer-scope-summary-propagation");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-initial-responder-peer-scope-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_RESPONDER_INITIAL_PEER_ACCEPTANCE_SCOPE_REJECTED_SUMMARY_FIXTURE"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_SHA_FAIL"] = "1";
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ScenarioName", scenario,
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.True(
+                File.Exists(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.txt")),
+                $"Expected initial responder scope summary propagation output.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+
+            var evidence = ReadArtifactReport(Path.Combine(runRoot, scenario), "filetransfer-operator-verdict.txt");
+            Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count"]);
+            Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_raw_count"]);
+            Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_distinct_count"]);
+            Assert.Equal("0", evidence["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_recovered_count"]);
+            Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_unresolved_count"]);
+            Assert.Equal("fail", evidence["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_verdict"]);
+            Assert.Equal("0", evidence["runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_unresolved_count"]);
+            Assert.Equal(failureVariant, evidence["failure_variant"]);
+            Assert.Equal("runtime_unlock_peer_precommit_answer_acceptance_observed", evidence["first_proof_chain_failure_event"]);
+            Assert.Equal("20396", evidence["first_proof_chain_failure_sequence"]);
+            Assert.Equal("7493", evidence["first_proof_chain_failure_writer_sequence"]);
+
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal("1", summary["current_runtime_proof"]);
+            Assert.Equal("pass", summary["manifest_validation_verdict"]);
+            Assert.Equal("pass", summary["provenance_verdict"]);
+            Assert.Equal("pass", summary["cursor_integrity_verdict"]);
+            Assert.Equal("3", summary["writer_evidence_version"]);
+            Assert.Equal("pass", summary["writer_integrity_verdict"]);
+            Assert.Equal("pass", summary["writer_recovery_verdict"]);
+            Assert.Equal("pass", summary["writer_chronology_verdict"]);
+            Assert.Equal(candidate, summary["runtime_failure_candidate"]);
+            Assert.Equal(failureVariant, summary["failure_variant"]);
+            Assert.Equal("route_runtime", summary["acceptance_failure_class"]);
+            Assert.Equal("fail", summary["runtime_correctness_verdict"]);
+            Assert.Equal("1", summary["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_unresolved_count"]);
+            Assert.Equal("fail", summary["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_verdict"]);
+            Assert.Equal("1", summary[$"{scenario}.runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_unresolved_count"]);
+            Assert.Equal("fail", summary[$"{scenario}.runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_verdict"]);
+
+            using var summaryJson = JsonDocument.Parse(
+                await File.ReadAllTextAsync(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.json")));
+            var root = summaryJson.RootElement;
+            Assert.Equal(candidate, root.GetProperty("runtimeFailureCandidate").GetString());
+            Assert.Equal(failureVariant, root.GetProperty("failureVariant").GetString());
+            Assert.Equal("route_runtime", root.GetProperty("acceptanceFailureClass").GetString());
+            Assert.True(root.GetProperty("currentRuntimeProof").GetBoolean());
+            Assert.Equal("fail", root.GetProperty("runtimeCorrectnessVerdict").GetString());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedUnresolvedCount").GetInt32());
+            Assert.Equal("fail", root.GetProperty("runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedVerdict").GetString());
+
+            var run = Assert.Single(root.GetProperty("runs").EnumerateArray());
+            Assert.Equal(failureVariant, run.GetProperty("failureVariant").GetString());
+            Assert.Equal("route_runtime", run.GetProperty("acceptanceFailureClass").GetString());
+            Assert.Equal(1, run.GetProperty("runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedUnresolvedCount").GetInt32());
+            Assert.Equal("fail", run.GetProperty("runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedVerdict").GetString());
         }
         finally
         {

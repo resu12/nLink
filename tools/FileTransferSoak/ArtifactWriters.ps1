@@ -16874,6 +16874,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingRecoveredCount),
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount),
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_verdict={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffVerdict),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_raw_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRawCount),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedDistinctCount),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRecoveredCount),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedUnresolvedCount),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_verdict={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedVerdict),
         ("runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_raw_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeAckBeforeProbeAdoptionRecheckMissingRawCount),
         ("runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeAckBeforeProbeAdoptionRecheckMissingDistinctCount),
         ("runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeAckBeforeProbeAdoptionRecheckMissingRecoveredCount),
@@ -45347,6 +45352,424 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
         return $true
     }
 
+    function Test-ResponderInitialAdmissionScopeShape {
+        param($Admission)
+
+        if ((Get-ResponderProbeField -Event $Admission -Names @('direction')) -ine 'inbound' -or
+            (Get-ResponderProbeField -Event $Admission -Names @('source')) -ne 'precommit_probe_received' -or
+            (Get-ResponderProbeField -Event $Admission -Names @('route')) -ine 'regular_nkn_v4_fast' -or
+            (Get-ResponderProbeField -Event $Admission -Names @('protocol_version')) -ne '4') {
+            return $false
+        }
+        foreach ($names in @(
+                @('admission_generation'),
+                @('runtime_generation'),
+                @('route_publication_runtime_generation'),
+                @('route_publication_leg_generation'),
+                @('route_publication_generation'),
+                @('leg_generation'),
+                @('data_session_generation'))) {
+            if ((Get-ResponderProbeField -Event $Admission -Names $names) -notmatch '^[1-9][0-9]*$') {
+                return $false
+            }
+        }
+        foreach ($names in @(
+                @('live_route_epoch'),
+                @('terminal_generation'),
+                @('runtime_owner_live_route_epoch'),
+                @('runtime_owner_terminal_generation'),
+                @('route_publication_live_route_epoch'),
+                @('route_publication_terminal_generation'),
+                @('route_publication_commit_generation', 'route_commit_generation'),
+                @('transport_epoch'),
+                @('bridge_recovery_generation'),
+                @('checkpoint_generation'))) {
+            if ((Get-ResponderProbeField -Event $Admission -Names $names) -ne '0') {
+                return $false
+            }
+        }
+        foreach ($identity in @(
+                [pscustomobject]@{ Names = @('runtime_owner_session_id'); Expected = (Get-ResponderProbeField -Event $Admission -Names @('session_id')) },
+                [pscustomobject]@{ Names = @('runtime_owner_transfer_id'); Expected = (Get-ResponderProbeField -Event $Admission -Names @('transfer_id')) },
+                [pscustomobject]@{ Names = @('runtime_owner_direction'); Expected = 'inbound' },
+                [pscustomobject]@{ Names = @('runtime_owner_route_token'); Expected = 'regular_nkn_v4_fast' },
+                [pscustomobject]@{ Names = @('runtime_owner_protocol_version'); Expected = '4' },
+                [pscustomobject]@{ Names = @('route_publication_session_id'); Expected = (Get-ResponderProbeField -Event $Admission -Names @('session_id')) },
+                [pscustomobject]@{ Names = @('route_publication_transfer_id'); Expected = (Get-ResponderProbeField -Event $Admission -Names @('transfer_id')) },
+                [pscustomobject]@{ Names = @('route_publication_direction'); Expected = 'inbound' },
+                [pscustomobject]@{ Names = @('route_publication_route_token'); Expected = 'regular_nkn_v4_fast' },
+                [pscustomobject]@{ Names = @('route_publication_protocol_version'); Expected = '4' },
+                [pscustomobject]@{ Names = @('route_publication_runtime_generation'); Expected = (Get-ResponderProbeField -Event $Admission -Names @('runtime_generation')) },
+                [pscustomobject]@{ Names = @('route_publication_leg_generation'); Expected = (Get-ResponderProbeField -Event $Admission -Names @('leg_generation')) })) {
+            $observed = Get-ResponderProbeField -Event $Admission -Names $identity.Names
+            if ([string]::IsNullOrWhiteSpace($observed) -or
+                -not [string]::Equals($observed, $identity.Expected, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace((Get-ResponderProbeField -Event $Admission -Names @('runtime_owner_route'))) -or
+            [string]::IsNullOrWhiteSpace((Get-ResponderProbeField -Event $Admission -Names @('route_publication_route'))) -or
+            (Get-ResponderProbeField -Event $Admission -Names @('runtime_owner_route')) -ne
+                (Get-ResponderProbeField -Event $Admission -Names @('route_publication_route')) -or
+            (Get-ResponderOptionalScopeField -Event $Admission -Names @('checkpoint_request_id')) -ne '(none)' -or
+            (Get-ResponderOptionalScopeField -Event $Admission -Names @('data_session_identity')) -in @('(missing)', '(none)')) {
+            return $false
+        }
+        return $true
+    }
+
+    function Test-ResponderInitialRouteScopeMatch {
+        param($Admission, $RouteSnapshot)
+
+        if ((Get-ResponderProbeField -Event $RouteSnapshot -Names @('direction')) -ine 'inbound' -or
+            (Get-ResponderProbeField -Event $RouteSnapshot -Names @('route')) -ine 'regular_nkn_v4_fast' -or
+            (Get-ResponderProbeField -Event $RouteSnapshot -Names @('protocol_version')) -ne '4') {
+            return $false
+        }
+        foreach ($names in @(
+                @('session_id'),
+                @('transfer_id'),
+                @('live_route_epoch'),
+                @('runtime_generation'),
+                @('route_publication_generation'),
+                @('terminal_generation'),
+                @('leg_generation'))) {
+            if (-not (Test-ResponderProbeFieldEqual -Left $Admission -Right $RouteSnapshot -Names $names)) {
+                return $false
+            }
+        }
+        if ((Get-ResponderProbeField -Event $Admission -Names @(
+                    'route_publication_commit_generation',
+                    'route_commit_generation')) -ne
+                (Get-ResponderProbeField -Event $RouteSnapshot -Names @('route_commit_generation'))) {
+            return $false
+        }
+        return $true
+    }
+
+    function Test-ResponderInitialPeerTupleMatch {
+        param($Boundary, $Candidate, [switch]$IgnoreWriter)
+
+        foreach ($fieldPair in @(
+                [pscustomobject]@{ Boundary = @('log_writer_id'); Candidate = @('log_writer_id') },
+                [pscustomobject]@{ Boundary = @('session_id'); Candidate = @('session_id') },
+                [pscustomobject]@{ Boundary = @('transfer_id'); Candidate = @('transfer_id') },
+                [pscustomobject]@{ Boundary = @('peer_transaction_generation', 'transaction_generation'); Candidate = @('peer_transaction_generation', 'transaction_generation') },
+                [pscustomobject]@{ Boundary = @('peer_offer_generation', 'offer_generation'); Candidate = @('peer_offer_generation', 'offer_generation') },
+                [pscustomobject]@{ Boundary = @('peer_tuna_path_lease_generation', 'tuna_path_lease_generation'); Candidate = @('peer_tuna_path_lease_generation', 'tuna_path_lease_generation') },
+                [pscustomobject]@{ Boundary = @('probe_id', 'path_probe_id'); Candidate = @('probe_id', 'path_probe_id') })) {
+            if ($IgnoreWriter -and $fieldPair.Boundary -contains 'log_writer_id') {
+                continue
+            }
+            $leftValue = Get-ResponderProbeField -Event $Boundary -Names $fieldPair.Boundary
+            $rightValue = Get-ResponderProbeField -Event $Candidate -Names $fieldPair.Candidate
+            if ([string]::IsNullOrWhiteSpace($leftValue) -or
+                [string]::IsNullOrWhiteSpace($rightValue) -or
+                -not [string]::Equals($leftValue, $rightValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    function Get-ResponderInitialAdoptingLaunchSemanticKey {
+        param($Launch)
+
+        return ((@(
+            (Get-ResponderProbeField -Event $Launch -Names @('log_writer_id')),
+            (Get-ResponderProbeField -Event $Launch -Names @('session_id')),
+            (Get-ResponderProbeField -Event $Launch -Names @('transfer_id')),
+            (Get-ResponderProbeField -Event $Launch -Names @('transaction_generation')),
+            (Get-ResponderProbeField -Event $Launch -Names @('offer_generation')),
+            (Get-ResponderProbeField -Event $Launch -Names @('launch_generation')),
+            (Get-ResponderProbeField -Event $Launch -Names @(
+                    'tuna_path_lease_generation',
+                    'path_lease_generation')),
+            (Get-ResponderProbeField -Event $Launch -Names @(
+                    'tuna_path_lease_listener_run_id',
+                    'path_lease_listener_run_id')),
+            (Get-ResponderProbeField -Event $Launch -Names @('probe_id', 'path_probe_id')),
+            (Get-ResponderProbeField -Event $Launch -Names @('launch_role')),
+            (Get-ResponderProbeField -Event $Launch -Names @('probe_state', 'path_probe_state'))
+        )) -join '|').ToLowerInvariant()
+    }
+
+    function Get-ResponderInitialProbeAckSemanticKey {
+        param($ProbeAck)
+
+        return ((@(
+            (Get-ResponderProbeField -Event $ProbeAck -Names @('log_writer_id')),
+            (Get-ResponderProbeField -Event $ProbeAck -Names @('session_id')),
+            (Get-ResponderOptionalScopeField -Event $ProbeAck -Names @('transfer_id')),
+            (Get-ResponderProbeField -Event $ProbeAck -Names @('direction')),
+            (Get-ResponderProbeField -Event $ProbeAck -Names @('transaction_generation')),
+            (Get-ResponderProbeField -Event $ProbeAck -Names @('offer_generation')),
+            (Get-ResponderProbeField -Event $ProbeAck -Names @(
+                    'tuna_path_lease_generation',
+                    'path_lease_generation')),
+            (Get-ResponderOptionalScopeField -Event $ProbeAck -Names @(
+                    'tuna_path_lease_listener_run_id',
+                    'path_lease_listener_run_id')),
+            (Get-ResponderProbeField -Event $ProbeAck -Names @('probe_id', 'path_probe_id')),
+            (Get-ResponderProbeField -Event $ProbeAck -Names @('probe_state', 'path_probe_state')),
+            (Get-ResponderProbeField -Event $ProbeAck -Names @(
+                    'probe_transport',
+                    'path_probe_transport',
+                    'received_transport')),
+            (Get-ResponderOptionalScopeField -Event $ProbeAck -Names @(
+                    'probe_acked_utc_ms',
+                    'path_probe_acked_utc_ms')),
+            (Get-ResponderOptionalScopeField -Event $ProbeAck -Names @(
+                    'peer_probe_frame_fingerprint'))
+        )) -join '|').ToLowerInvariant()
+    }
+
+    function Get-ResponderInitialProbeIngressSemanticKey {
+        param($Event)
+
+        [object[]]$names = @(
+            @('log_writer_id'), @('session_id'), @('transfer_id'), @('direction'),
+            @('transaction_generation', 'peer_transaction_generation'),
+            @('offer_generation', 'peer_offer_generation'),
+            @('tuna_path_lease_generation', 'peer_tuna_path_lease_generation', 'path_lease_generation'),
+            @('probe_id', 'path_probe_id'), @('transport'), @('intended_transport'),
+            @('actual_transport'), @('delivery_transport'), @('received_transport'),
+            @('target_transport'), @('delivery_result'), @('accepted'), @('reason', 'decision_reason'),
+            @('route'), @('protocol_version'), @('live_route_epoch'), @('runtime_generation'),
+            @('route_publication_generation'), @('route_commit_generation'), @('terminal_generation'),
+            @('leg_generation'), @('transport_epoch'), @('bridge_recovery_generation'),
+            @('checkpoint_request_id'), @('checkpoint_generation'), @('data_session_identity'),
+            @('data_session_generation'))
+        return ((@($Event.EventName) + @($names | ForEach-Object {
+            Get-ResponderOptionalScopeField -Event $Event -Names $_
+        })) -join '|').ToLowerInvariant()
+    }
+
+    function Get-ResponderInitialPeerReceiptSemanticKey {
+        param($Receipt)
+
+        [string[]]$parts = (Get-ResponderPeerReceiptSemanticKey -Receipt $Receipt).Split('|')
+        $status = Get-ResponderProbeField -Event $Receipt -Names @('status', 'decision_status')
+        if ($parts.Count -gt 4 -and $status -in @('Held', 'Idempotent')) {
+            $parts[4] = 'held'
+        }
+        return ((@($parts -join '|') + @(
+            (Get-ResponderOptionalScopeField -Event $Receipt -Names @('local_transaction_generation')),
+            (Get-ResponderOptionalScopeField -Event $Receipt -Names @('local_offer_generation')),
+            (Get-ResponderOptionalScopeField -Event $Receipt -Names @('local_tuna_path_lease_generation')),
+            (Get-ResponderOptionalScopeField -Event $Receipt -Names @('pending_answer_ack_generation')),
+            (Get-ResponderOptionalScopeField -Event $Receipt -Names @('launch_generation')),
+            (Get-ResponderOptionalScopeField -Event $Receipt -Names @('responder_transition_mode')),
+            (Get-ResponderOptionalScopeField -Event $Receipt -Names @('decision_reason', 'reason'))
+        )) -join '|').ToLowerInvariant()
+    }
+
+    function Get-ResponderInitialConvergenceSemanticKey {
+        param($Decision)
+
+        [string[]]$parts = (Get-ResponderConvergenceSemanticKey -Decision $Decision).Split('|')
+        $status = Get-ResponderProbeField -Event $Decision -Names @('status', 'decision_status')
+        $substate = Get-ResponderProbeField -Event $Decision -Names @('substate', 'state')
+        if ($parts.Count -gt 1 -and
+            $substate -in @('AwaitingPeerProbe', 'AwaitingProbeAck') -and
+            $status -in @('Held', 'Idempotent')) {
+            $parts[0] = 'held'
+        }
+        elseif ($parts.Count -gt 1 -and $substate -eq 'Complete' -and
+            $status -in @('Accepted', 'Idempotent')) {
+            $parts[0] = 'accepted'
+        }
+        return $parts -join '|'
+    }
+
+    function Test-ResponderInitialProbeLogicalLineageMatch {
+        param($Anchor, $Candidate)
+
+        if ((Get-ResponderProbeField -Event $Anchor -Names @('log_writer_id')) -ne
+                (Get-ResponderProbeField -Event $Candidate -Names @('log_writer_id'))) {
+            return $false
+        }
+        $anchorProbe = Get-ResponderProbeField -Event $Anchor -Names @('probe_id', 'path_probe_id')
+        $candidateProbe = Get-ResponderProbeField -Event $Candidate -Names @('probe_id', 'path_probe_id')
+        if ($anchorProbe -notin @('', '(none)', 'none') -and
+            $candidateProbe -notin @('', '(none)', 'none') -and
+            $anchorProbe -eq $candidateProbe) {
+            return $true
+        }
+        if ((Get-ResponderProbeField -Event $Anchor -Names @('session_id')) -ne
+                (Get-ResponderProbeField -Event $Candidate -Names @('session_id'))) {
+            return $false
+        }
+        foreach ($names in @(
+                @('peer_transaction_generation', 'transaction_generation'),
+                @('peer_offer_generation', 'offer_generation'),
+                @('peer_tuna_path_lease_generation', 'tuna_path_lease_generation', 'path_lease_generation'))) {
+            $anchorValue = Get-ResponderProbeField -Event $Anchor -Names $names
+            $candidateValue = Get-ResponderProbeField -Event $Candidate -Names $names
+            if ($anchorValue -notmatch '^[1-9][0-9]*$' -or $anchorValue -ne $candidateValue) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    function Test-ResponderInitialConvergenceLogicalLineageMatch {
+        param($Anchor, $Candidate)
+
+        if ((Get-ResponderProbeField -Event $Anchor -Names @('log_writer_id')) -ne
+                (Get-ResponderProbeField -Event $Candidate -Names @('log_writer_id'))) {
+            return $false
+        }
+        $anchorAckMessage = Get-ResponderProbeField `
+            -Event $Anchor `
+            -Names @('ack_message_id', 'answer_ack_message_id', 'msg_id')
+        $candidateAckMessage = Get-ResponderProbeField `
+            -Event $Candidate `
+            -Names @('ack_message_id', 'answer_ack_message_id', 'msg_id')
+        if ($anchorAckMessage -notin @('', '(none)', 'none') -and
+            $candidateAckMessage -notin @('', '(none)', 'none') -and
+            $anchorAckMessage -eq $candidateAckMessage) {
+            return $true
+        }
+        $anchorProbe = Get-ResponderProbeField -Event $Anchor -Names @('probe_id', 'path_probe_id')
+        $candidateProbe = Get-ResponderProbeField -Event $Candidate -Names @('probe_id', 'path_probe_id')
+        if ($anchorProbe -notin @('', '(none)', 'none') -and
+            $candidateProbe -notin @('', '(none)', 'none') -and
+            $anchorProbe -eq $candidateProbe) {
+            return $true
+        }
+        if ((Get-ResponderProbeField -Event $Anchor -Names @('session_id')) -ne
+                (Get-ResponderProbeField -Event $Candidate -Names @('session_id'))) {
+            return $false
+        }
+        $localTupleMatches = $true
+        foreach ($names in @(@('transaction_generation'), @('offer_generation'))) {
+            $anchorValue = Get-ResponderProbeField -Event $Anchor -Names $names
+            $candidateValue = Get-ResponderProbeField -Event $Candidate -Names $names
+            if ($anchorValue -notmatch '^[1-9][0-9]*$' -or $anchorValue -ne $candidateValue) {
+                $localTupleMatches = $false
+                break
+            }
+        }
+        if ($localTupleMatches) {
+            return $true
+        }
+        $pendingGeneration = Get-ResponderProbeField `
+            -Event $Anchor `
+            -Names @('pending_answer_ack_generation')
+        return $pendingGeneration -match '^[1-9][0-9]*$' -and
+            $pendingGeneration -eq (Get-ResponderProbeField `
+                -Event $Candidate `
+                -Names @('pending_answer_ack_generation')) -and
+            (Get-ResponderProbeField -Event $Anchor -Names @('payer_decision_id')) -eq
+                (Get-ResponderProbeField -Event $Candidate -Names @('payer_decision_id'))
+    }
+
+    function Test-ResponderInitialAdmissionPropagation {
+        param($Admission, $Candidate, [string]$Prefix = '')
+
+        foreach ($fieldPair in @(
+                [pscustomobject]@{ Admission = @('admission_generation'); Candidate = @("${Prefix}admission_generation", 'admission_generation') },
+                [pscustomobject]@{ Admission = @('runtime_generation'); Candidate = @("${Prefix}runtime_generation", 'runtime_generation') },
+                [pscustomobject]@{ Admission = @('route_publication_generation'); Candidate = @("${Prefix}route_publication_generation", 'route_publication_generation') },
+                [pscustomobject]@{ Admission = @('route_publication_commit_generation', 'route_commit_generation'); Candidate = @("${Prefix}route_commit_generation", 'route_commit_generation', 'route_publication_commit_generation') },
+                [pscustomobject]@{ Admission = @('terminal_generation'); Candidate = @("${Prefix}terminal_generation", 'terminal_generation') },
+                [pscustomobject]@{ Admission = @('leg_generation'); Candidate = @("${Prefix}leg_generation", 'leg_generation') },
+                [pscustomobject]@{ Admission = @('transport_epoch'); Candidate = @("${Prefix}transport_epoch", 'transport_epoch') },
+                [pscustomobject]@{ Admission = @('bridge_recovery_generation'); Candidate = @("${Prefix}bridge_recovery_generation", 'bridge_recovery_generation') },
+                [pscustomobject]@{ Admission = @('checkpoint_request_id'); Candidate = @("${Prefix}checkpoint_request_id", 'checkpoint_request_id') },
+                [pscustomobject]@{ Admission = @('checkpoint_generation'); Candidate = @("${Prefix}checkpoint_generation", 'checkpoint_generation') },
+                [pscustomobject]@{ Admission = @('data_session_identity'); Candidate = @("${Prefix}data_session_identity", 'data_session_identity') },
+                [pscustomobject]@{ Admission = @('data_session_generation'); Candidate = @("${Prefix}data_session_generation", 'data_session_generation') })) {
+            $admissionValue = Get-ResponderOptionalScopeField -Event $Admission -Names $fieldPair.Admission
+            $candidateValue = Get-ResponderOptionalScopeField -Event $Candidate -Names $fieldPair.Candidate
+            if ($admissionValue -eq '(missing)' -or
+                $candidateValue -eq '(missing)' -or
+                -not [string]::Equals($admissionValue, $candidateValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    function Test-ResponderInitialPeerScopeMatch {
+        param($Admission, $Candidate)
+
+        if ((Get-ResponderProbeField -Event $Candidate -Names @('responder_transition_mode')) -ne
+                'initial_regular_v4') {
+            return $false
+        }
+        foreach ($fieldPair in @(
+                [pscustomobject]@{ Admission = @('admission_generation'); Candidate = @('peer_admission_generation', 'admission_generation') },
+                [pscustomobject]@{ Admission = @('runtime_owner_session_id'); Candidate = @('peer_runtime_owner_session_id') },
+                [pscustomobject]@{ Admission = @('runtime_owner_transfer_id'); Candidate = @('peer_runtime_owner_transfer_id') },
+                [pscustomobject]@{ Admission = @('runtime_owner_direction'); Candidate = @('peer_runtime_owner_direction') },
+                [pscustomobject]@{ Admission = @('runtime_owner_route'); Candidate = @('peer_runtime_owner_route') },
+                [pscustomobject]@{ Admission = @('runtime_owner_route_token'); Candidate = @('peer_runtime_owner_route_token') },
+                [pscustomobject]@{ Admission = @('runtime_owner_protocol_version'); Candidate = @('peer_runtime_owner_protocol_version') },
+                [pscustomobject]@{ Admission = @('runtime_owner_live_route_epoch'); Candidate = @('peer_runtime_owner_live_route_epoch') },
+                [pscustomobject]@{ Admission = @('runtime_generation'); Candidate = @('peer_runtime_generation') },
+                [pscustomobject]@{ Admission = @('runtime_owner_terminal_generation'); Candidate = @('peer_runtime_owner_terminal_generation') },
+                [pscustomobject]@{ Admission = @('route_publication_session_id'); Candidate = @('peer_route_publication_session_id') },
+                [pscustomobject]@{ Admission = @('route_publication_transfer_id'); Candidate = @('peer_route_publication_transfer_id') },
+                [pscustomobject]@{ Admission = @('route_publication_direction'); Candidate = @('peer_route_publication_direction') },
+                [pscustomobject]@{ Admission = @('route_publication_route'); Candidate = @('peer_route_publication_route') },
+                [pscustomobject]@{ Admission = @('route_publication_route_token'); Candidate = @('peer_route_publication_route_token') },
+                [pscustomobject]@{ Admission = @('route_publication_protocol_version'); Candidate = @('peer_route_publication_protocol_version') },
+                [pscustomobject]@{ Admission = @('route_publication_live_route_epoch'); Candidate = @('peer_route_publication_live_route_epoch') },
+                [pscustomobject]@{ Admission = @('route_publication_runtime_generation'); Candidate = @('peer_route_publication_runtime_generation') },
+                [pscustomobject]@{ Admission = @('route_publication_terminal_generation'); Candidate = @('peer_route_publication_terminal_generation') },
+                [pscustomobject]@{ Admission = @('route_publication_leg_generation'); Candidate = @('peer_route_publication_leg_generation') },
+                [pscustomobject]@{ Admission = @('route_publication_commit_generation'); Candidate = @('peer_route_publication_commit_generation') },
+                [pscustomobject]@{ Admission = @('route_publication_generation'); Candidate = @('peer_route_publication_generation') },
+                [pscustomobject]@{ Admission = @('terminal_generation'); Candidate = @('peer_terminal_generation') },
+                [pscustomobject]@{ Admission = @('leg_generation'); Candidate = @('peer_leg_generation') },
+                [pscustomobject]@{ Admission = @('transport_epoch'); Candidate = @('peer_transport_epoch') },
+                [pscustomobject]@{ Admission = @('bridge_recovery_generation'); Candidate = @('peer_bridge_recovery_generation') },
+                [pscustomobject]@{ Admission = @('checkpoint_request_id'); Candidate = @('peer_checkpoint_request_id') },
+                [pscustomobject]@{ Admission = @('checkpoint_generation'); Candidate = @('peer_checkpoint_generation') },
+                [pscustomobject]@{ Admission = @('data_session_identity'); Candidate = @('peer_data_session_identity') },
+                [pscustomobject]@{ Admission = @('data_session_generation'); Candidate = @('peer_data_session_generation') })) {
+            $admissionValue = Get-ResponderOptionalScopeField -Event $Admission -Names $fieldPair.Admission
+            $candidateValue = Get-ResponderOptionalScopeField -Event $Candidate -Names $fieldPair.Candidate
+            if ($admissionValue -eq '(missing)' -or
+                $candidateValue -eq '(missing)' -or
+                -not [string]::Equals($admissionValue, $candidateValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    function Test-ResponderInitialSourceScopeMatch {
+        param($Admission, $Candidate)
+
+        foreach ($fieldPair in @(
+                [pscustomobject]@{ Admission = @('route'); Candidate = @('source_route') },
+                [pscustomobject]@{ Admission = @('protocol_version'); Candidate = @('source_protocol_version') },
+                [pscustomobject]@{ Admission = @('live_route_epoch'); Candidate = @('source_live_route_epoch') },
+                [pscustomobject]@{ Admission = @('runtime_generation'); Candidate = @('source_runtime_generation') },
+                [pscustomobject]@{ Admission = @('route_publication_generation'); Candidate = @('source_route_publication_generation') },
+                [pscustomobject]@{ Admission = @('route_publication_commit_generation', 'route_commit_generation'); Candidate = @('source_route_commit_generation') },
+                [pscustomobject]@{ Admission = @('terminal_generation'); Candidate = @('source_terminal_generation') },
+                [pscustomobject]@{ Admission = @('leg_generation'); Candidate = @('source_leg_generation') },
+                [pscustomobject]@{ Admission = @('transport_epoch'); Candidate = @('source_transport_epoch') },
+                [pscustomobject]@{ Admission = @('bridge_recovery_generation'); Candidate = @('source_bridge_recovery_generation') },
+                [pscustomobject]@{ Admission = @('checkpoint_request_id'); Candidate = @('source_checkpoint_request_id', 'checkpoint_request_id') },
+                [pscustomobject]@{ Admission = @('checkpoint_generation'); Candidate = @('source_checkpoint_generation', 'checkpoint_generation') },
+                [pscustomobject]@{ Admission = @('data_session_identity'); Candidate = @('source_data_session_identity', 'data_session_identity') },
+                [pscustomobject]@{ Admission = @('data_session_generation'); Candidate = @('source_data_session_generation') })) {
+            $admissionValue = Get-ResponderOptionalScopeField -Event $Admission -Names $fieldPair.Admission
+            $candidateValue = Get-ResponderOptionalScopeField -Event $Candidate -Names $fieldPair.Candidate
+            if ($admissionValue -eq '(missing)' -or
+                $candidateValue -eq '(missing)' -or
+                -not [string]::Equals($admissionValue, $candidateValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
     function Get-ResponderPeerReceiptSemanticKey {
         param($Receipt)
 
@@ -45701,6 +46124,64 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
             }
         }
         return $true
+    }
+
+    function Test-ResponderSemanticAnswerAckLineageUnique {
+        param(
+            $ExpectedAnswerAck,
+            [int64]$StartSequence,
+            [int64]$EndSequence,
+            [string]$Writer)
+
+        $expectedMessageId = Get-ResponderProbeField `
+            -Event $ExpectedAnswerAck `
+            -Names @('ack_message_id', 'answer_ack_message_id', 'msg_id')
+        $expectedCorrelationId = Get-ResponderProbeField `
+            -Event $ExpectedAnswerAck `
+            -Names @('ack_correlation_id', 'correlation_id', 'request_correlation_id')
+        if ([string]::IsNullOrWhiteSpace($expectedMessageId) -or
+            [string]::IsNullOrWhiteSpace($expectedCorrelationId)) {
+            return $false
+        }
+        [object[]]$lineage = @($acceptedAnswerAcks | Where-Object {
+            [int64]$_.Sequence -gt $StartSequence -and
+            [int64]$_.Sequence -lt $EndSequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $Writer -and
+            ((Get-ResponderProbeField -Event $_ -Names @(
+                        'ack_message_id',
+                        'answer_ack_message_id',
+                        'msg_id')) -eq $expectedMessageId -or
+                (Get-ResponderProbeField -Event $_ -Names @(
+                        'ack_correlation_id',
+                        'correlation_id',
+                        'request_correlation_id')) -eq $expectedCorrelationId)
+        })
+        [object[]]$lineageKeys = @($lineage | ForEach-Object {
+            ((@(
+                (Get-ResponderProbeField -Event $_ -Names @(
+                        'ack_message_id',
+                        'answer_ack_message_id',
+                        'msg_id')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @(
+                        'ack_correlation_id',
+                        'correlation_id',
+                        'request_correlation_id')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @(
+                        'ack_frame_fingerprint',
+                        'frame_fingerprint',
+                        'payload_fingerprint')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @(
+                        'ack_source_fingerprint',
+                        'source_fingerprint',
+                        'source_identity')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @('session_id')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @('payer_decision_id')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @('pending_answer_ack_generation')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @('authority_mode')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @('lanes'))
+            )) -join '|').ToLowerInvariant()
+        } | Sort-Object -Unique)
+        return $lineage.Count -gt 0 -and $lineageKeys.Count -eq 1
     }
 
     function Get-ResponderExactAnswerSentEvidence {
@@ -46376,6 +46857,18 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
         (Get-FileTransferEventField -Event $_ -Name 'probe_state' -Default '') -ieq 'acked' -and
         (Get-FileTransferEventField -Event $_ -Name 'received_transport' -Default '') -ieq 'tuna'
     })
+    [object[]]$peerCoreProbeAcks = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_precommit_probe_acked' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -ieq 'outbound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'probe_state' -Default '') -ieq 'acked' -and
+        (Get-FileTransferEventField -Event $_ -Name 'received_transport' -Default '') -ieq 'tuna'
+    })
+    [object[]]$tunaProbeAckReceipts = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_tuna_probe_ack_received' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -ieq 'outbound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'transport' -Default '') -ieq 'tuna' -and
+        (Get-FileTransferEventField -Event $_ -Name 'accepted' -Default '0') -eq '1'
+    })
     [object[]]$pendingAnswerAcks = @($orderedEvents | Where-Object {
         $_.EventName -eq 'tuna_acceleration_answer_ack_pending'
     })
@@ -46401,6 +46894,26 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
     })
     [object[]]$peerPreCommitAnswerAcceptanceDecisions = @($orderedEvents | Where-Object {
         $_.EventName -eq 'runtime_unlock_peer_precommit_answer_acceptance_decided'
+    })
+    [object[]]$peerPreCommitAnswerAcceptanceObservations = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_peer_precommit_answer_acceptance_observed'
+    })
+    [object[]]$peerProbeReceiveDispatches = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_precommit_probe_receive_dispatched'
+    })
+    [object[]]$tunaProbeReceipts = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_tuna_probe_received'
+    })
+    [object[]]$peerProbeAckDeliveryResults = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_precommit_probe_ack_delivery_result'
+    })
+    [object[]]$peerProbeAckSends = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_precommit_probe_ack_sent'
+    })
+    [object[]]$pairedCommitConfirmations = @($orderedEvents | Where-Object {
+        $_.EventName -in @(
+            'runtime_unlock_precommit_probe_paired_commit_confirmed',
+            'runtime_unlock_paired_commit_confirmed')
     })
     [object[]]$runtimeUnlockAdmissions = @($orderedEvents | Where-Object {
         $_.EventName -eq 'filetransfer_runtime_unlock_admission_granted' -and
@@ -46433,6 +46946,11 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
         $_.EventName -eq 'filetransfer_route_transition_prepared' -and
         (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -ieq 'inbound' -and
         (Get-FileTransferEventField -Event $_ -Name 'transition_kind' -Default '') -eq 'PostTunaFallbackV6ToTunaV4'
+    })
+    [object[]]$initialPrepared = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_prepared' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -ieq 'inbound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'transition_kind' -Default '') -eq 'RegularV4ToTunaV4'
     })
     [object[]]$draining = @($orderedEvents | Where-Object {
         $_.EventName -eq 'filetransfer_route_transition_draining' -and
@@ -46500,7 +47018,8 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
             [string]$TransferId,
             [string]$LocalOfferGeneration,
             [string]$Payer,
-            [string]$PendingAckGeneration)
+            [string]$PendingAckGeneration,
+            $InitialAdmission = $null)
 
         [object[]]$matchingLaunchDecisions = @($launchHandoffDecisions | Where-Object {
             [int64]$_.Sequence -gt [int64]$Bound.Sequence -and
@@ -46560,6 +47079,276 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
         }
         else {
             $Bound
+        }
+
+        $boundTransitionMode = Get-ResponderProbeField `
+            -Event $Bound `
+            -Names @('responder_transition_mode')
+        if ($boundTransitionMode -eq 'initial_regular_v4') {
+            $initialRecovered = $false
+            [object[]]$initialResponderDecisions = @(if (
+                $null -ne $InitialAdmission -and
+                (Test-ResponderInitialAdmissionScopeShape -Admission $InitialAdmission)) {
+                $exactResponderDecisions | Where-Object {
+                    (Get-ResponderProbeField -Event $_ -Names @('status', 'decision_status')) -in @(
+                        'Accepted', 'Idempotent') -and
+                    (Get-ResponderProbeField -Event $_ -Names @('responder_transition_mode')) -eq
+                        'initial_regular_v4' -and
+                    (Get-ResponderProbeField -Event $_ -Names @('activation_authority_mode')) -eq
+                        'initial_responder' -and
+                    (Get-ResponderProbeField -Event $_ -Names @('route', 'source_route')) -ieq
+                        'regular_nkn_v4_fast' -and
+                    (Get-ResponderProbeField -Event $_ -Names @(
+                            'protocol_version',
+                            'source_protocol_version')) -eq '4' -and
+                    (Get-ResponderProbeField -Event $_ -Names @('target_route')) -ieq 'file_tuna_v4' -and
+                    (Get-ResponderProbeField -Event $_ -Names @('target_protocol_version')) -eq '4' -and
+                    (Get-ResponderProbeField -Event $_ -Names @('target_transport')) -ieq 'tuna' -and
+                    (Get-ResponderOptionalScopeField -Event $_ -Names @('pair_state')) -in @(
+                        '(missing)', '(none)') -and
+                    (Get-ResponderProbeField -Event $_ -Names @('pairing_generation')) -in @('', '0') -and
+                    (Get-ResponderOptionalScopeField -Event $_ -Names @('pair_key')) -in @(
+                        '(missing)', '(none)') -and
+                    (Get-ResponderProbeField -Event $_ -Names @(
+                            'fallback_yield_generation',
+                            'paired_fallback_yield_generation')) -in @('', '0') -and
+                    (Get-ResponderProbeField -Event $_ -Names @('pending_precommit_generation')) -in @('', '0') -and
+                    (Get-ResponderOptionalScopeField -Event $_ -Names @(
+                            'responder_handoff_authority_id')) -eq '(none)' -and
+                    (Get-ResponderProbeField -Event $_ -Names @('responder_handoff_generation')) -in @('', '0') -and
+                    [int64](Get-FileTransferEventField `
+                        -Event $_ `
+                        -Name 'retry_install_generation' `
+                        -Default '0') -eq 0 -and
+                    (Test-ResponderInitialAdmissionPropagation `
+                        -Admission $InitialAdmission `
+                        -Candidate $_)
+                }
+            })
+            foreach ($initialResponderDecision in $initialResponderDecisions) {
+                $initialTerminalBeforeDecision = @($terminalEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$Bound.Sequence -and
+                    [int64]$_.Sequence -lt [int64]$initialResponderDecision.Sequence -and
+                    (Test-ResponderInboundTerminalMatch `
+                        -Decision $InitialAdmission `
+                        -Candidate $_ `
+                        -Writer $Writer `
+                        -SessionId $SessionId `
+                        -TransferId $TransferId)
+                }).Count -gt 0
+                $initialScopeReplacedBeforeDecision = @($scopeReplacementEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$Bound.Sequence -and
+                    [int64]$_.Sequence -lt [int64]$initialResponderDecision.Sequence -and
+                    (Test-ResponderRecoveryReplacementMatch `
+                        -Decision $InitialAdmission `
+                        -Candidate $_ `
+                        -Writer $Writer `
+                        -SessionId $SessionId `
+                        -TransferId $TransferId)
+                }).Count -gt 0
+                if ($initialTerminalBeforeDecision -or $initialScopeReplacedBeforeDecision) {
+                    continue
+                }
+                [object[]]$initialMatchingPrepared = @($initialPrepared | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$initialResponderDecision.Sequence -and
+                    (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $Writer -and
+                    (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $SessionId -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $TransferId -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transaction_generation')) -eq
+                        (Get-ResponderProbeField -Event $Boundary -Names @('transaction_generation')) -and
+                    (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -eq
+                        $LocalOfferGeneration -and
+                    (Get-ResponderProbeField -Event $_ -Names @('launch_generation')) -eq
+                        (Get-ResponderProbeField -Event $Launch -Names @('launch_generation')) -and
+                    (Get-ResponderProbeField -Event $_ -Names @(
+                            'tuna_path_lease_generation',
+                            'path_lease_generation')) -eq
+                        (Get-ResponderProbeField -Event $Launch -Names @(
+                                'tuna_path_lease_generation',
+                                'path_lease_generation')) -and
+                    (Get-ResponderProbeField -Event $_ -Names @('responder_transition_mode')) -eq
+                        'initial_regular_v4' -and
+                    (Get-ResponderProbeField -Event $_ -Names @('activation_authority_mode')) -eq
+                        'initial_responder' -and
+                    (Get-ResponderProbeField -Event $_ -Names @('target_route')) -ieq 'file_tuna_v4' -and
+                    (Get-ResponderProbeField -Event $_ -Names @('target_protocol_version')) -eq '4' -and
+                    (Get-ResponderProbeField -Event $_ -Names @('target_transport')) -ieq 'tuna' -and
+                    [int64](Get-FileTransferEventField `
+                        -Event $_ `
+                        -Name 'retry_install_generation' `
+                        -Default '0') -eq 0 -and
+                    -not [string]::IsNullOrWhiteSpace(
+                        (Get-ResponderProbeField -Event $_ -Names @('authority_id'))) -and
+                    [int64](Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -gt 0 -and
+                    (Test-ResponderInitialSourceScopeMatch `
+                        -Admission $InitialAdmission `
+                        -Candidate $_)
+                } | Sort-Object Sequence, LineNumber)
+                foreach ($initialPrepare in $initialMatchingPrepared) {
+                    $initialAuthority = Get-ResponderProbeField -Event $initialPrepare -Names @('authority_id')
+                    $initialTransitionGeneration = Get-ResponderProbeField `
+                        -Event $initialPrepare `
+                        -Names @('transition_generation')
+                    $initialDrain = @($draining | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$initialPrepare.Sequence -and
+                        (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $Writer -and
+                        (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $SessionId -and
+                        (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $TransferId -and
+                        (Get-ResponderProbeField -Event $_ -Names @('transition_kind')) -eq
+                            'RegularV4ToTunaV4' -and
+                        (Get-ResponderProbeField -Event $_ -Names @('authority_id')) -eq $initialAuthority -and
+                        (Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -eq
+                            $initialTransitionGeneration -and
+                        (Get-ResponderProbeField -Event $_ -Names @('responder_transition_mode')) -eq
+                            'initial_regular_v4' -and
+                        (Get-ResponderProbeField -Event $_ -Names @('activation_authority_mode')) -eq
+                            'initial_responder' -and
+                        [int64](Get-FileTransferEventField `
+                            -Event $_ `
+                            -Name 'retry_install_generation' `
+                            -Default '0') -eq 0 -and
+                        (Test-ResponderInitialSourceScopeMatch `
+                            -Admission $InitialAdmission `
+                            -Candidate $_)
+                    } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+                    if ($initialDrain.Count -eq 0) { continue }
+                    $initialCommit = @($committed | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$initialDrain[0].Sequence -and
+                        (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $Writer -and
+                        (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $SessionId -and
+                        (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $TransferId -and
+                        (Get-ResponderProbeField -Event $_ -Names @('transition_kind')) -eq
+                            'RegularV4ToTunaV4' -and
+                        (Get-ResponderProbeField -Event $_ -Names @('authority_id')) -eq $initialAuthority -and
+                        (Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -eq
+                            $initialTransitionGeneration -and
+                        (Get-ResponderProbeField -Event $_ -Names @('responder_transition_mode')) -eq
+                            'initial_regular_v4' -and
+                        (Get-ResponderProbeField -Event $_ -Names @('activation_authority_mode')) -eq
+                            'initial_responder' -and
+                        [int64](Get-FileTransferEventField `
+                            -Event $_ `
+                            -Name 'retry_install_generation' `
+                            -Default '0') -eq 0 -and
+                        (Test-ResponderInitialSourceScopeMatch `
+                            -Admission $InitialAdmission `
+                            -Candidate $_)
+                    } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+                    if ($initialCommit.Count -eq 0) { continue }
+                    $initialDisposition = @($dispositions | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$initialCommit[0].Sequence -and
+                        (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $Writer -and
+                        (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $SessionId -and
+                        (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $TransferId -and
+                        (Get-ResponderProbeField -Event $_ -Names @('transition_kind')) -eq
+                            'RegularV4ToTunaV4' -and
+                        (Get-ResponderProbeField -Event $_ -Names @('authority_id')) -eq $initialAuthority -and
+                        (Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -eq
+                            $initialTransitionGeneration -and
+                        (Get-ResponderProbeField -Event $_ -Names @('responder_transition_mode')) -eq
+                            'initial_regular_v4' -and
+                        (Get-ResponderProbeField -Event $_ -Names @('activation_authority_mode')) -eq
+                            'initial_responder' -and
+                        [int64](Get-FileTransferEventField `
+                            -Event $_ `
+                            -Name 'retry_install_generation' `
+                            -Default '0') -eq 0 -and
+                        (Test-ResponderInitialSourceScopeMatch `
+                            -Admission $InitialAdmission `
+                            -Candidate $_)
+                    } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+                    if ($initialDisposition.Count -eq 0) { continue }
+                    $initialPublication = @($routePublications | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$initialDisposition[0].Sequence -and
+                        (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $Writer -and
+                        (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $SessionId -and
+                        (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $TransferId -and
+                        (Get-ResponderProbeField -Event $_ -Names @(
+                                'transition_authority_id',
+                                'authority_id')) -eq $initialAuthority -and
+                        (Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -eq
+                            $initialTransitionGeneration -and
+                        (Test-ResponderDispositionPublicationResultMatch `
+                            -Disposition $initialDisposition[0] `
+                            -Publication $_)
+                    } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+                    if ($initialPublication.Count -eq 0) { continue }
+                    $initialTerminalBeforePublication = @($terminalEvents | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$Bound.Sequence -and
+                        [int64]$_.Sequence -lt [int64]$initialPublication[0].Sequence -and
+                        (Test-ResponderInboundTerminalMatch `
+                            -Decision $InitialAdmission `
+                            -Candidate $_ `
+                            -Writer $Writer `
+                            -SessionId $SessionId `
+                            -TransferId $TransferId)
+                    }).Count -gt 0
+                    $initialScopeReplacedBeforePublication = @($scopeReplacementEvents | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$initialResponderDecision.Sequence -and
+                        [int64]$_.Sequence -lt [int64]$initialPublication[0].Sequence -and
+                        (Test-ResponderRecoveryReplacementMatch `
+                            -Decision $InitialAdmission `
+                            -Candidate $_ `
+                            -Writer $Writer `
+                            -SessionId $SessionId `
+                            -TransferId $TransferId)
+                    }).Count -gt 0
+                    $initialLocalAnswerReplacedBeforePublication = @($transactionAnswers | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$Bound.Sequence -and
+                        [int64]$_.Sequence -lt [int64]$initialPublication[0].Sequence -and
+                        (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $Writer -and
+                        (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $SessionId -and
+                        (Get-ResponderOptionalScopeField -Event $_ -Names @('transfer_id')) -in @(
+                            '(missing)', '(none)', $TransferId) -and
+                        (-not (Test-ResponderLocalTupleMatch -Boundary $Boundary -Candidate $_) -or
+                            -not (Test-ResponderProbeFieldEqual `
+                                -Left $Boundary `
+                                -Right $_ `
+                                -Names @(
+                                    'tuna_path_lease_listener_run_id',
+                                    'path_lease_listener_run_id')))
+                    }).Count -gt 0
+                    $initialPendingAckReplacedBeforePublication = @($pendingAnswerAcks | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$Bound.Sequence -and
+                        [int64]$_.Sequence -lt [int64]$initialPublication[0].Sequence -and
+                        (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $Writer -and
+                        (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $SessionId -and
+                        (Get-ResponderOptionalScopeField -Event $_ -Names @('transfer_id')) -in @(
+                            '(missing)', '(none)', $TransferId) -and
+                        ((Get-ResponderProbeField -Event $_ -Names @('generation')) -ne $PendingAckGeneration -or
+                            (Get-ResponderProbeField -Event $_ -Names @('payer_decision_id')) -ne $Payer -or
+                            (Get-ResponderProbeField -Event $_ -Names @('lanes')) -ine 'file')
+                    }).Count -gt 0
+                    $initialUnexpectedPairReleaseOrInstall = @($orderedEvents | Where-Object {
+                        $_.EventName -in @(
+                            'filetransfer_fallback_tail_pairing_committed',
+                            'filetransfer_fallback_tail_paired_release_reserved',
+                            'filetransfer_fallback_tail_paired_release_consumed',
+                            'runtime_unlock_retry_dispatch_install_committed') -and
+                        [int64]$_.Sequence -gt [int64]$Bound.Sequence -and
+                        [int64]$_.Sequence -lt [int64]$initialPublication[0].Sequence -and
+                        (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $Writer -and
+                        (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $SessionId -and
+                        (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $TransferId -and
+                        (Get-ResponderProbeField -Event $_ -Names @('direction')) -ieq 'inbound'
+                    }).Count -gt 0
+                    if (-not $initialTerminalBeforePublication -and
+                        -not $initialScopeReplacedBeforePublication -and
+                        -not $initialLocalAnswerReplacedBeforePublication -and
+                        -not $initialPendingAckReplacedBeforePublication -and
+                        -not $initialUnexpectedPairReleaseOrInstall) {
+                        $initialRecovered = $true
+                        break
+                    }
+                }
+                if ($initialRecovered) { break }
+            }
+            return [pscustomobject]@{
+                Event = $incidentEvent
+                Recovered = $initialRecovered
+                Reason = 'bound_responder_acked_peer_probe_route_transition_handoff_missing'
+                Variant = 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe'
+            }
         }
 
         $recovered = $false
@@ -46760,6 +47549,8 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
         }
     }
 
+    $initialScopeRejectedRawCandidates = New-Object System.Collections.Generic.List[object]
+    $initialScopeRejectedRecords = New-Object System.Collections.Generic.List[object]
     $bindingRawCandidates = New-Object System.Collections.Generic.List[object]
     $bindingRecords = New-Object System.Collections.Generic.List[object]
     $afterBoundRawCandidates = New-Object System.Collections.Generic.List[object]
@@ -46774,6 +47565,954 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
         (Get-FileTransferEventField -Event $_ -Name 'route_commit_pending' -Default '0') -eq '0' -and
         (Get-FileTransferEventField -Event $_ -Name 'route_committed' -Default '0') -eq '0'
     })
+
+    foreach ($initialScopeRejection in @($peerPreCommitAnswerAcceptanceObservations | Where-Object {
+            (Get-ResponderProbeField -Event $_ -Names @('status', 'decision_status')) -eq 'Rejected' -and
+            (Get-ResponderProbeField -Event $_ -Names @('direction')) -ieq 'inbound'
+        } | Sort-Object Sequence, LineNumber)) {
+        $initialWriter = Get-ResponderProbeField -Event $initialScopeRejection -Names @('log_writer_id')
+        $initialSessionId = Get-ResponderProbeField -Event $initialScopeRejection -Names @('session_id')
+        $initialTransferId = Get-ResponderProbeField -Event $initialScopeRejection -Names @('transfer_id')
+        $initialPeerTransaction = Get-ResponderProbeField `
+            -Event $initialScopeRejection `
+            -Names @('peer_transaction_generation', 'transaction_generation')
+        $initialPeerOffer = Get-ResponderProbeField `
+            -Event $initialScopeRejection `
+            -Names @('peer_offer_generation', 'offer_generation')
+        $initialPeerLease = Get-ResponderProbeField `
+            -Event $initialScopeRejection `
+            -Names @('peer_tuna_path_lease_generation', 'tuna_path_lease_generation')
+        $initialProbeId = Get-ResponderProbeField `
+            -Event $initialScopeRejection `
+            -Names @('probe_id', 'path_probe_id')
+        $initialDecisionReason = Get-ResponderProbeField `
+            -Event $initialScopeRejection `
+            -Names @('decision_reason', 'reason')
+        $initialObservedMode = Get-ResponderOptionalScopeField `
+            -Event $initialScopeRejection `
+            -Names @('responder_transition_mode')
+        $initialHistoricalReason = $initialDecisionReason -eq 'current' -and
+            $initialObservedMode -eq '(missing)'
+        $initialModernReason = $initialDecisionReason -in @(
+                'runtime_unlock_peer_precommit_answer_acceptance_scope_mode_invalid',
+                'runtime_unlock_peer_precommit_answer_acceptance_scope_not_current') -and
+            $initialObservedMode -eq 'initial_regular_v4'
+        if ([string]::IsNullOrWhiteSpace($initialWriter) -or
+            [string]::IsNullOrWhiteSpace($initialSessionId) -or
+            [string]::IsNullOrWhiteSpace($initialTransferId) -or
+            $initialPeerTransaction -notmatch '^[1-9][0-9]*$' -or
+            $initialPeerOffer -notmatch '^[1-9][0-9]*$' -or
+            $initialPeerLease -notmatch '^[1-9][0-9]*$' -or
+            [string]::IsNullOrWhiteSpace($initialProbeId) -or
+            (-not $initialHistoricalReason -and -not $initialModernReason)) {
+            continue
+        }
+        [object[]]$initialAckSendLineage = @($peerProbeAckSends | Where-Object {
+            [int64]$_.Sequence -lt [int64]$initialScopeRejection.Sequence -and
+            (Test-ResponderInitialProbeLogicalLineageMatch `
+                -Anchor $initialScopeRejection `
+                -Candidate $_)
+        })
+        [object[]]$initialAckSendKeys = @($initialAckSendLineage | ForEach-Object {
+            Get-ResponderInitialProbeIngressSemanticKey -Event $_
+        } | Sort-Object -Unique)
+        [object[]]$initialAckSendCandidates = @($initialAckSendLineage | Where-Object {
+            (Get-ResponderProbeField -Event $_ -Names @('direction')) -ieq 'inbound' -and
+            (Get-ResponderProbeField -Event $_ -Names @('received_transport')) -ieq 'tuna' -and
+            (Test-ResponderInitialPeerTupleMatch -Boundary $initialScopeRejection -Candidate $_)
+        } | Sort-Object Sequence, LineNumber)
+        if ($initialAckSendCandidates.Count -eq 0 -or $initialAckSendKeys.Count -ne 1) {
+            continue
+        }
+        $initialAckSend = $initialAckSendCandidates[-1]
+        [object[]]$initialSameProbeRejections = @($peerPreCommitAnswerAcceptanceObservations | Where-Object {
+            (Get-ResponderProbeField -Event $_ -Names @('status', 'decision_status')) -eq 'Rejected' -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialWriter -and
+            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $initialSessionId -and
+            (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $initialTransferId -and
+            (Get-ResponderProbeField -Event $_ -Names @('probe_id', 'path_probe_id')) -eq $initialProbeId
+        })
+        [object[]]$initialSameProbeRejectionKeys = @($initialSameProbeRejections | ForEach-Object {
+            ((@(
+                (Get-ResponderProbeField -Event $_ -Names @('peer_transaction_generation', 'transaction_generation')),
+                (Get-ResponderProbeField -Event $_ -Names @('peer_offer_generation', 'offer_generation')),
+                (Get-ResponderProbeField -Event $_ -Names @('peer_tuna_path_lease_generation', 'tuna_path_lease_generation')),
+                (Get-ResponderProbeField -Event $_ -Names @('decision_reason', 'reason')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @('responder_transition_mode'))
+            )) -join '|').ToLowerInvariant()
+        } | Sort-Object -Unique)
+        if ($initialSameProbeRejectionKeys.Count -ne 1) {
+            continue
+        }
+        [object[]]$initialAckDeliveryLineage = @($peerProbeAckDeliveryResults | Where-Object {
+            [int64]$_.Sequence -lt [int64]$initialAckSend.Sequence -and
+            (Test-ResponderInitialProbeLogicalLineageMatch `
+                -Anchor $initialScopeRejection `
+                -Candidate $_)
+        })
+        [object[]]$initialAckDeliveryKeys = @($initialAckDeliveryLineage | ForEach-Object {
+            Get-ResponderInitialProbeIngressSemanticKey -Event $_
+        } | Sort-Object -Unique)
+        [object[]]$initialAckDeliveryCandidates = @($initialAckDeliveryLineage | Where-Object {
+            (Get-ResponderProbeField -Event $_ -Names @('delivery_result')) -eq 'sent' -and
+            (Get-ResponderProbeField -Event $_ -Names @('intended_transport')) -ieq 'tuna' -and
+            (Get-ResponderProbeField -Event $_ -Names @('actual_transport')) -ieq 'tuna' -and
+            (Test-ResponderInitialPeerTupleMatch -Boundary $initialScopeRejection -Candidate $_)
+        } | Sort-Object Sequence, LineNumber)
+        [object[]]$initialTunaReceiptLineage = @($tunaProbeReceipts | Where-Object {
+            [int64]$_.Sequence -lt [int64]$initialAckSend.Sequence -and
+            (Test-ResponderInitialProbeLogicalLineageMatch `
+                -Anchor $initialScopeRejection `
+                -Candidate $_)
+        })
+        [object[]]$initialTunaReceiptKeys = @($initialTunaReceiptLineage | ForEach-Object {
+            Get-ResponderInitialProbeIngressSemanticKey -Event $_
+        } | Sort-Object -Unique)
+        [object[]]$initialTunaReceiptCandidates = @($initialTunaReceiptLineage | Where-Object {
+            (Get-ResponderProbeField -Event $_ -Names @('direction')) -ieq 'inbound' -and
+            (Get-ResponderProbeField -Event $_ -Names @('transport')) -ieq 'tuna' -and
+            (Get-ResponderProbeField -Event $_ -Names @('target_transport')) -ieq 'tuna' -and
+            (Test-ResponderInitialPeerTupleMatch -Boundary $initialScopeRejection -Candidate $_)
+        } | Sort-Object Sequence, LineNumber)
+        if ($initialAckDeliveryCandidates.Count -eq 0 -or
+            $initialAckDeliveryKeys.Count -ne 1 -or
+            $initialTunaReceiptCandidates.Count -eq 0 -or
+            $initialTunaReceiptKeys.Count -ne 1) {
+            continue
+        }
+        $initialAckDelivery = $initialAckDeliveryCandidates[-1]
+        $initialTunaReceipt = $initialTunaReceiptCandidates[-1]
+        if ([int64]$initialAckDelivery.Sequence -lt [int64]$initialTunaReceipt.Sequence) {
+            continue
+        }
+
+        [object[]]$initialDispatchLineage = @($peerProbeReceiveDispatches | Where-Object {
+            [int64]$_.Sequence -lt [int64]$initialTunaReceipt.Sequence -and
+            (Test-ResponderInitialProbeLogicalLineageMatch `
+                -Anchor $initialScopeRejection `
+                -Candidate $_)
+        })
+        [object[]]$initialDispatchKeys = @($initialDispatchLineage | ForEach-Object {
+            Get-ResponderInitialProbeIngressSemanticKey -Event $_
+        } | Sort-Object -Unique)
+        [object[]]$initialDispatchCandidates = @($initialDispatchLineage | Where-Object {
+            (Get-ResponderProbeField -Event $_ -Names @('direction')) -ieq 'inbound' -and
+            (Get-ResponderProbeField -Event $_ -Names @('actual_transport')) -ieq 'tuna' -and
+            (Get-ResponderProbeField -Event $_ -Names @('delivery_transport')) -ieq 'tuna' -and
+            (Get-ResponderProbeField -Event $_ -Names @('route')) -ieq 'regular_nkn_v4_fast' -and
+            (Get-ResponderProbeField -Event $_ -Names @('protocol_version')) -eq '4' -and
+            (Get-ResponderProbeField -Event $_ -Names @('live_route_epoch')) -eq '0' -and
+            (Test-ResponderInitialPeerTupleMatch -Boundary $initialScopeRejection -Candidate $_)
+        } | Sort-Object Sequence, LineNumber)
+        if ($initialDispatchCandidates.Count -eq 0 -or $initialDispatchKeys.Count -ne 1) {
+            continue
+        }
+        $initialDispatch = $initialDispatchCandidates[-1]
+
+        [object[]]$initialAdmissionCandidates = @($runtimeUnlockAdmissions | Where-Object {
+            [int64]$_.Sequence -gt [int64]$initialTunaReceipt.Sequence -and
+            [int64]$_.Sequence -lt [int64]$initialAckSend.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialWriter -and
+            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $initialSessionId -and
+            (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $initialTransferId -and
+            (Test-ResponderInitialAdmissionScopeShape -Admission $_) -and
+            (Test-ResponderInitialRouteScopeMatch -Admission $_ -RouteSnapshot $initialDispatch)
+        } | Sort-Object Sequence, LineNumber)
+        [object[]]$initialAdmissionKeys = @($initialAdmissionCandidates | ForEach-Object {
+            Get-ResponderAdmissionSemanticKey -Admission $_
+        } | Sort-Object -Unique)
+        if ($initialAdmissionCandidates.Count -eq 0 -or $initialAdmissionKeys.Count -ne 1) {
+            continue
+        }
+        $initialAdmission = $initialAdmissionCandidates[-1]
+        [object[]]$initialRouteScopeCandidates = @($routeScopeSnapshots | Where-Object {
+            [int64]$_.Sequence -lt [int64]$initialAdmission.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialWriter -and
+            (Test-ResponderInitialRouteScopeMatch -Admission $initialAdmission -RouteSnapshot $_)
+        } | Sort-Object Sequence, LineNumber)
+        if ($initialRouteScopeCandidates.Count -eq 0) {
+            continue
+        }
+
+        [object[]]$initialWaitingCandidates = @($launches | Where-Object {
+            [int64]$_.Sequence -lt [int64]$initialDispatch.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialWriter -and
+            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $initialSessionId -and
+            (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $initialTransferId -and
+            (Get-ResponderProbeField -Event $_ -Names @('transaction_generation')) -match '^[1-9][0-9]*$' -and
+            (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -match '^[1-9][0-9]*$' -and
+            (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -ne $initialPeerOffer -and
+            (Get-ResponderProbeField -Event $_ -Names @('launch_role')) -eq 'ResponderWaitingForPeerProbe' -and
+            (Get-ResponderProbeField -Event $_ -Names @('responder_waiting_for_peer_probe')) -eq '1' -and
+            (Get-ResponderProbeField -Event $_ -Names @('peer_probe_adoption')) -eq '0' -and
+            (Get-ResponderProbeField -Event $_ -Names @('duplicate')) -eq '0' -and
+            (Get-ResponderProbeField -Event $_ -Names @('tuple_mutation')) -eq '0' -and
+            (Get-ResponderProbeField -Event $_ -Names @('path_probe_state', 'probe_state')) -in @('', 'none', '(none)')
+        } | Sort-Object Sequence, LineNumber)
+        if ($initialWaitingCandidates.Count -eq 0) {
+            continue
+        }
+        $initialWaitingLaunch = $initialWaitingCandidates[-1]
+        $initialLocalTransaction = Get-ResponderProbeField `
+            -Event $initialWaitingLaunch `
+            -Names @('transaction_generation')
+        $initialLocalOffer = Get-ResponderProbeField -Event $initialWaitingLaunch -Names @('offer_generation')
+        $initialLocalLease = Get-ResponderProbeField `
+            -Event $initialWaitingLaunch `
+            -Names @('tuna_path_lease_generation', 'path_lease_generation')
+        $initialLocalRun = Get-ResponderProbeField `
+            -Event $initialWaitingLaunch `
+            -Names @('tuna_path_lease_listener_run_id', 'path_lease_listener_run_id')
+        $initialLaunchGeneration = Get-ResponderProbeField `
+            -Event $initialWaitingLaunch `
+            -Names @('launch_generation')
+
+        [object[]]$initialHeldConvergenceCandidates = @($responderAnswerProbeConvergenceDecisions | Where-Object {
+            [int64]$_.Sequence -lt [int64]$initialWaitingLaunch.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialWriter -and
+            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $initialSessionId -and
+            (Get-ResponderProbeField -Event $_ -Names @('direction')) -ieq 'inbound' -and
+            (Get-ResponderProbeField -Event $_ -Names @('status', 'decision_status')) -eq 'Held' -and
+            (Get-ResponderProbeField -Event $_ -Names @('substate', 'state')) -eq 'AwaitingPeerProbe' -and
+            (Get-ResponderProbeField -Event $_ -Names @('authority_mode')) -ceq 'InitialActivation' -and
+            (Get-ResponderProbeField -Event $_ -Names @('transaction_generation')) -eq $initialLocalTransaction -and
+            (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -eq $initialLocalOffer -and
+            (Get-ResponderProbeField -Event $_ -Names @('tuna_path_lease_generation', 'path_lease_generation')) -eq $initialLocalLease -and
+            (Get-ResponderProbeField -Event $_ -Names @('tuna_path_lease_listener_run_id', 'path_lease_listener_run_id')) -eq $initialLocalRun -and
+            (Get-ResponderProbeField -Event $_ -Names @('pending_answer_ack_generation')) -match '^[1-9][0-9]*$' -and
+            (Get-ResponderProbeField -Event $_ -Names @('payer_decision_id')) -match '^[1-9][0-9]*$' -and
+            (Get-ResponderProbeField -Event $_ -Names @('lanes')) -ieq 'file' -and
+            (Get-ResponderProbeField -Event $_ -Names @('peer_transaction_generation')) -eq '0' -and
+            (Get-ResponderProbeField -Event $_ -Names @('peer_offer_generation')) -eq '0' -and
+            (Get-ResponderProbeField -Event $_ -Names @('probe_state')) -in @('', 'none', '(none)')
+        } | Sort-Object Sequence, LineNumber)
+        if ($initialHeldConvergenceCandidates.Count -eq 0) {
+            continue
+        }
+        $initialHeldConvergence = $initialHeldConvergenceCandidates[-1]
+        [object[]]$initialHeldConvergenceLineage = @(
+            $responderAnswerProbeConvergenceDecisions | Where-Object {
+                [int64]$_.Sequence -lt [int64]$initialWaitingLaunch.Sequence -and
+                (Test-ResponderInitialConvergenceLogicalLineageMatch `
+                    -Anchor $initialHeldConvergence `
+                    -Candidate $_)
+            })
+        [object[]]$initialHeldConvergenceKeys = @(
+            $initialHeldConvergenceLineage | ForEach-Object {
+                Get-ResponderInitialConvergenceSemanticKey -Decision $_
+            } | Sort-Object -Unique)
+        if ($initialHeldConvergenceKeys.Count -ne 1) {
+            continue
+        }
+        $initialPendingGeneration = Get-ResponderProbeField `
+            -Event $initialHeldConvergence `
+            -Names @('pending_answer_ack_generation')
+        $initialPayer = Get-ResponderProbeField `
+            -Event $initialHeldConvergence `
+            -Names @('payer_decision_id')
+
+        [object[]]$initialAcceptedAckCandidates = @($acceptedAnswerAcks | Where-Object {
+            [int64]$_.Sequence -lt [int64]$initialHeldConvergence.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialWriter -and
+            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $initialSessionId -and
+            (Get-ResponderProbeField -Event $_ -Names @('payer_decision_id')) -eq $initialPayer -and
+            (Get-ResponderProbeField -Event $_ -Names @('pending_answer_ack_generation')) -eq $initialPendingGeneration -and
+            (Get-ResponderProbeField -Event $_ -Names @('authority_mode')) -ceq 'InitialActivation' -and
+            (Get-ResponderProbeField -Event $_ -Names @('lanes')) -ieq 'file' -and
+            (Test-ResponderModernSemanticAnswerAckShape -AcceptedAnswerAck $_)
+        } | Sort-Object Sequence, LineNumber)
+        [object[]]$initialAcceptedAckKeys = @($initialAcceptedAckCandidates | ForEach-Object {
+            ((@(
+                (Get-ResponderProbeField -Event $_ -Names @('ack_message_id')),
+                (Get-ResponderProbeField -Event $_ -Names @('ack_correlation_id')),
+                (Get-ResponderProbeField -Event $_ -Names @('ack_frame_fingerprint')),
+                (Get-ResponderProbeField -Event $_ -Names @('ack_source_fingerprint')),
+                (Get-ResponderProbeField -Event $_ -Names @('pending_answer_ack_generation')),
+                (Get-ResponderProbeField -Event $_ -Names @('authority_mode'))
+            )) -join '|').ToLowerInvariant()
+        } | Sort-Object -Unique)
+        if ($initialAcceptedAckCandidates.Count -eq 0 -or $initialAcceptedAckKeys.Count -ne 1) {
+            continue
+        }
+        $initialAcceptedAck = $initialAcceptedAckCandidates[-1]
+        [object[]]$initialPendingCandidates = @($pendingAnswerAcks | Where-Object {
+            [int64]$_.Sequence -lt [int64]$initialAcceptedAck.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialWriter -and
+            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $initialSessionId -and
+            (Get-ResponderProbeField -Event $_ -Names @('generation')) -eq $initialPendingGeneration -and
+            (Get-ResponderProbeField -Event $_ -Names @('payer_decision_id')) -eq $initialPayer -and
+            (Get-ResponderProbeField -Event $_ -Names @('lanes')) -ieq 'file'
+        } | Sort-Object Sequence, LineNumber)
+        if ($initialPendingCandidates.Count -eq 0) {
+            continue
+        }
+        $initialPendingAck = $initialPendingCandidates[-1]
+        $initialAnswerSent = Get-ResponderExactAnswerSentEvidence `
+            -PendingAnswerAck $initialPendingAck `
+            -AcceptedAnswerAck $initialAcceptedAck `
+            -Writer $initialWriter `
+            -SessionId $initialSessionId
+        if ($null -eq $initialAnswerSent) {
+            continue
+        }
+        $initialHeldTransfer = Get-ResponderOptionalScopeField `
+            -Event $initialHeldConvergence `
+            -Names @('transfer_id')
+        if ($initialHeldTransfer -notin @('(missing)', '(none)', $initialTransferId) -or
+            (Get-ResponderProbeField -Event $initialHeldConvergence -Names @('decision_reason', 'reason')) -ne
+                'semantic_answer_ack_retained_waiting_for_peer_probe' -or
+            (Get-ResponderProbeField -Event $initialHeldConvergence -Names @('answer_message_id')) -ne
+                (Get-ResponderProbeField -Event $initialAnswerSent -Names @('msg_id', 'answer_message_id')) -or
+            (Get-ResponderProbeField -Event $initialHeldConvergence -Names @('answer_deadline_utc_ms')) -ne
+                (Get-ResponderProbeField -Event $initialAnswerSent -Names @('reply_deadline_utc_ms', 'answer_deadline_utc_ms')) -or
+            (Get-ResponderProbeField -Event $initialHeldConvergence -Names @('ack_message_id')) -ne
+                (Get-ResponderProbeField -Event $initialAcceptedAck -Names @('ack_message_id')) -or
+            (Get-ResponderProbeField -Event $initialHeldConvergence -Names @('ack_source_fingerprint')) -ne
+                (Get-ResponderProbeField -Event $initialAcceptedAck -Names @('ack_source_fingerprint')) -or
+            (Get-ResponderProbeField -Event $initialHeldConvergence -Names @('ack_frame_fingerprint')) -ne
+                (Get-ResponderProbeField -Event $initialAcceptedAck -Names @('ack_frame_fingerprint')) -or
+            (Get-ResponderProbeField -Event $initialHeldConvergence -Names @('launch_generation')) -notin @('0', $initialLaunchGeneration)) {
+            continue
+        }
+        [object[]]$initialLocalAnswerCandidates = @($transactionAnswers | Where-Object {
+            [int64]$_.Sequence -lt [int64]$initialPendingAck.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialWriter -and
+            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $initialSessionId -and
+            (Get-ResponderProbeField -Event $_ -Names @('transaction_generation')) -eq $initialLocalTransaction -and
+            (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -eq $initialLocalOffer -and
+            (Get-ResponderProbeField -Event $_ -Names @('tuna_path_lease_generation')) -eq $initialLocalLease -and
+            (Get-ResponderProbeField -Event $_ -Names @('tuna_path_lease_listener_run_id')) -eq $initialLocalRun
+        } | Sort-Object Sequence, LineNumber)
+        if ($initialLocalAnswerCandidates.Count -eq 0) {
+            continue
+        }
+
+        $initialAckMessageId = Get-ResponderProbeField `
+            -Event $initialAcceptedAck `
+            -Names @('ack_message_id', 'answer_ack_message_id', 'msg_id')
+        $initialAckCorrelationId = Get-ResponderProbeField `
+            -Event $initialAcceptedAck `
+            -Names @('ack_correlation_id', 'correlation_id', 'request_correlation_id')
+        [object[]]$initialRawAckCandidates = @($rawAnswerAcks | Where-Object {
+            [int64]$_.Sequence -gt [int64]$initialPendingAck.Sequence -and
+            [int64]$_.Sequence -lt [int64]$initialScopeRejection.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialWriter -and
+            ((Get-ResponderProbeField -Event $_ -Names @('msg_id', 'answer_ack_message_id')) -eq
+                    $initialAckMessageId -or
+                (Get-ResponderProbeField -Event $_ -Names @(
+                        'ack_correlation_id',
+                        'correlation_id',
+                        'request_correlation_id')) -eq $initialAckCorrelationId)
+        })
+        [object[]]$initialRawAckKeys = @($initialRawAckCandidates | ForEach-Object {
+            ((@(
+                (Get-ResponderProbeField -Event $_ -Names @('msg_id', 'answer_ack_message_id')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @(
+                        'ack_correlation_id',
+                        'correlation_id',
+                        'request_correlation_id')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @(
+                        'ack_frame_fingerprint',
+                        'frame_fingerprint',
+                        'payload_fingerprint')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @(
+                        'ack_source_fingerprint',
+                        'source_fingerprint',
+                        'source_identity')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @('session_id')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @('payer_decision_id'))
+            )) -join '|').ToLowerInvariant()
+        } | Sort-Object -Unique)
+        [object[]]$initialSemanticAckCandidates = @($acceptedAnswerAcks | Where-Object {
+            [int64]$_.Sequence -gt [int64]$initialPendingAck.Sequence -and
+            [int64]$_.Sequence -lt [int64]$initialScopeRejection.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialWriter -and
+            ((Get-ResponderProbeField -Event $_ -Names @(
+                        'ack_message_id',
+                        'answer_ack_message_id',
+                        'msg_id')) -eq $initialAckMessageId -or
+                (Get-ResponderProbeField -Event $_ -Names @(
+                        'ack_correlation_id',
+                        'correlation_id',
+                        'request_correlation_id')) -eq $initialAckCorrelationId)
+        })
+        [object[]]$initialSemanticAckKeys = @($initialSemanticAckCandidates | ForEach-Object {
+            ((@(
+                (Get-ResponderProbeField -Event $_ -Names @(
+                        'ack_message_id',
+                        'answer_ack_message_id',
+                        'msg_id')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @(
+                        'ack_correlation_id',
+                        'correlation_id',
+                        'request_correlation_id')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @(
+                        'ack_frame_fingerprint',
+                        'frame_fingerprint',
+                        'payload_fingerprint')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @(
+                        'ack_source_fingerprint',
+                        'source_fingerprint',
+                        'source_identity')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @('session_id')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @('payer_decision_id')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @('pending_answer_ack_generation')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @('authority_mode')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @('lanes'))
+            )) -join '|').ToLowerInvariant()
+        } | Sort-Object -Unique)
+        [object[]]$initialEnvelopeCandidates = @($rawAnswerAckEnvelopes | Where-Object {
+            [int64]$_.Sequence -gt [int64]$initialPendingAck.Sequence -and
+            [int64]$_.Sequence -lt [int64]$initialScopeRejection.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialWriter -and
+            ((Get-ResponderProbeField -Event $_ -Names @('msg_id')) -eq $initialAckMessageId -or
+                (Get-ResponderProbeField -Event $_ -Names @(
+                        'ack_correlation_id',
+                        'correlation_id',
+                        'request_correlation_id')) -eq $initialAckCorrelationId)
+        })
+        [object[]]$initialEnvelopeKeys = @($initialEnvelopeCandidates | ForEach-Object {
+            ((@(
+                (Get-ResponderProbeField -Event $_ -Names @('msg_id')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @(
+                        'ack_correlation_id',
+                        'correlation_id',
+                        'request_correlation_id')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @(
+                        'ack_frame_fingerprint',
+                        'frame_fingerprint',
+                        'payload_fingerprint')),
+                (Get-ResponderOptionalScopeField -Event $_ -Names @(
+                        'ack_source_fingerprint',
+                        'source_fingerprint',
+                        'source_identity')),
+                (Get-ResponderProbeField -Event $_ -Names @('source_matches_expected'))
+            )) -join '|').ToLowerInvariant()
+        } | Sort-Object -Unique)
+        if ($initialRawAckCandidates.Count -eq 0 -or
+            $initialRawAckKeys.Count -ne 1 -or
+            $initialSemanticAckCandidates.Count -eq 0 -or
+            $initialSemanticAckKeys.Count -ne 1 -or
+            $initialEnvelopeCandidates.Count -eq 0 -or
+            $initialEnvelopeKeys.Count -ne 1) {
+            continue
+        }
+        $initialRawAck = @($initialRawAckCandidates | Sort-Object Sequence, LineNumber)[0]
+        $initialEnvelope = @($initialEnvelopeCandidates | Sort-Object Sequence, LineNumber)[0]
+        if (-not (Test-ResponderModernAnswerAckEvidence `
+                -RawAnswerAck $initialRawAck `
+                -AnswerAckEnvelope $initialEnvelope `
+                -AcceptedAnswerAck $initialAcceptedAck `
+                -Writer $initialWriter `
+                -SessionId $initialSessionId `
+                -Payer $initialPayer `
+                -PendingAckGeneration $initialPendingGeneration)) {
+            continue
+        }
+        [object[]]$initialBarrierCandidates = @($answerAckBarriers | Where-Object {
+            [int64]$_.Sequence -gt [int64]$initialAcceptedAck.Sequence -and
+            [int64]$_.Sequence -lt [int64]$initialWaitingLaunch.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialWriter -and
+            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $initialSessionId -and
+            (Get-ResponderProbeField -Event $_ -Names @('payer_decision_id')) -eq $initialPayer -and
+            (Get-ResponderProbeField -Event $_ -Names @('lanes')) -ieq 'file' -and
+            (Get-ResponderProbeField -Event $_ -Names @('reason', 'decision_reason')) -eq
+                'answer_ack_received_before_tuna_probe'
+        })
+        [object[]]$initialBoundaryCandidates = @($answerReceivedBoundaries | Where-Object {
+            [int64]$_.Sequence -gt [int64]$initialAcceptedAck.Sequence -and
+            [int64]$_.Sequence -lt [int64]$initialWaitingLaunch.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialWriter -and
+            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $initialSessionId -and
+            (Get-ResponderProbeField -Event $_ -Names @('transaction_generation')) -eq $initialLocalTransaction -and
+            (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -eq $initialLocalOffer
+        })
+        if ($initialBarrierCandidates.Count -eq 0 -or $initialBoundaryCandidates.Count -eq 0) {
+            continue
+        }
+        $initialScopeReplaced = @($terminalEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$initialWaitingLaunch.Sequence -and
+            [int64]$_.Sequence -lt [int64]$initialScopeRejection.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialWriter -and
+            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $initialSessionId -and
+            (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $initialTransferId
+        }).Count -gt 0 -or @($runtimeUnlockAdmissions | Where-Object {
+            [int64]$_.Sequence -gt [int64]$initialAdmission.Sequence -and
+            [int64]$_.Sequence -lt [int64]$initialScopeRejection.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialWriter -and
+            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $initialSessionId -and
+            (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $initialTransferId -and
+            (Get-ResponderAdmissionSemanticKey -Admission $_) -ne
+                (Get-ResponderAdmissionSemanticKey -Admission $initialAdmission)
+        }).Count -gt 0 -or @($scopeReplacementEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$initialAdmission.Sequence -and
+            [int64]$_.Sequence -lt [int64]$initialScopeRejection.Sequence -and
+            (Test-ResponderRecoveryReplacementMatch `
+                -Decision $initialAdmission `
+                -Candidate $_ `
+                -Writer $initialWriter `
+                -SessionId $initialSessionId `
+                -TransferId $initialTransferId)
+        }).Count -gt 0 -or @($transactionAnswers | Where-Object {
+            [int64]$_.Sequence -gt [int64]$initialWaitingLaunch.Sequence -and
+            [int64]$_.Sequence -lt [int64]$initialScopeRejection.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialWriter -and
+            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $initialSessionId -and
+            ((Get-ResponderProbeField -Event $_ -Names @('transaction_generation')) -ne $initialLocalTransaction -or
+                (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -ne $initialLocalOffer -or
+                (Get-ResponderProbeField -Event $_ -Names @('tuna_path_lease_generation')) -ne $initialLocalLease -or
+                (Get-ResponderProbeField -Event $_ -Names @('tuna_path_lease_listener_run_id')) -ne $initialLocalRun)
+        }).Count -gt 0 -or @($pendingAnswerAcks | Where-Object {
+            [int64]$_.Sequence -gt [int64]$initialPendingAck.Sequence -and
+            [int64]$_.Sequence -lt [int64]$initialScopeRejection.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialWriter -and
+            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $initialSessionId -and
+            ((Get-ResponderProbeField -Event $_ -Names @('generation')) -ne $initialPendingGeneration -or
+                (Get-ResponderProbeField -Event $_ -Names @('payer_decision_id')) -ne $initialPayer -or
+                (Get-ResponderProbeField -Event $_ -Names @('lanes')) -ine 'file')
+        }).Count -gt 0
+        if ($initialScopeReplaced) {
+            continue
+        }
+        $initialPeerAckedCorroborated = $false
+        [object[]]$initialPeerAckReceiptCandidates = @($tunaProbeAckReceipts | Where-Object {
+                [int64]$_.Sequence -gt [int64]$initialAckSend.Sequence -and
+                (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -ne $initialWriter -and
+                (Test-ResponderInitialPeerTupleMatch `
+                    -Boundary $initialScopeRejection `
+                    -Candidate $_ `
+                    -IgnoreWriter)
+        } | Sort-Object Sequence, LineNumber)
+        foreach ($initialPeerAckReceipt in $initialPeerAckReceiptCandidates) {
+            $initialPeerWriter = Get-ResponderProbeField `
+                -Event $initialPeerAckReceipt `
+                -Names @('log_writer_id')
+            [object[]]$initialPeerPathAcks = @($pathProbeAcks | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$initialPeerAckReceipt.Sequence -and
+                    (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialPeerWriter -and
+                    (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $initialSessionId -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transaction_generation')) -eq $initialPeerTransaction -and
+                    (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -eq $initialPeerOffer -and
+                    (Get-ResponderProbeField -Event $_ -Names @('tuna_path_lease_generation')) -eq $initialPeerLease -and
+                    (Get-ResponderProbeField -Event $_ -Names @('path_probe_id', 'probe_id')) -eq $initialProbeId -and
+                    [int64](Get-ResponderProbeField -Event $_ -Names @('path_probe_acked_utc_ms')) -gt 0
+            } | Sort-Object Sequence, LineNumber)
+            if ($initialPeerPathAcks.Count -eq 0) { continue }
+            [object[]]$initialPeerCoreAcks = @($peerCoreProbeAcks | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$initialPeerPathAcks[0].Sequence -and
+                    (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialPeerWriter -and
+                    (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $initialSessionId -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $initialTransferId -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transaction_generation')) -eq $initialPeerTransaction -and
+                    (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -eq $initialPeerOffer -and
+                    (Get-ResponderProbeField -Event $_ -Names @('tuna_path_lease_generation')) -eq $initialPeerLease -and
+                    (Get-ResponderProbeField -Event $_ -Names @('probe_id', 'path_probe_id')) -eq $initialProbeId
+            } | Sort-Object Sequence, LineNumber)
+            if ($initialPeerCoreAcks.Count -gt 0) {
+                $initialPeerAckedCorroborated = $true
+                break
+            }
+        }
+        if (-not $initialPeerAckedCorroborated) {
+            continue
+        }
+        $initialKey = ((@(
+            $initialWriter,
+            $initialSessionId,
+            $initialTransferId,
+            $initialLocalTransaction,
+            $initialLocalOffer,
+            $initialPeerOffer,
+            $initialPayer,
+            $initialPendingGeneration,
+            $initialLocalLease,
+            $initialLocalRun,
+            $initialProbeId
+        )) -join '|').ToLowerInvariant()
+        if ($seen.ContainsKey($initialKey)) {
+            continue
+        }
+        $seen[$initialKey] = $true
+
+        $initialRecovered = $false
+        $initialTuplePoisoned = $false
+        $initialAdoptionRecheckEvent = $null
+        $initialBindingEvent = $null
+        $initialAfterBoundOutcome = $null
+        [object[]]$initialReceiptCandidates = @($peerPreCommitAnswerAcceptanceDecisions | Where-Object {
+            [int64]$_.Sequence -gt [int64]$initialScopeRejection.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('status', 'decision_status')) -in @('Held', 'Idempotent') -and
+            (Get-ResponderProbeField -Event $_ -Names @('decision_reason', 'reason')) -in @(
+                'runtime_unlock_peer_precommit_semantic_answer_ack_pending',
+                'runtime_unlock_peer_precommit_probe_ack_pending') -and
+            (Get-ResponderProbeField -Event $_ -Names @('direction')) -ieq 'inbound' -and
+            (Get-ResponderProbeField -Event $_ -Names @('received_transport')) -ieq 'tuna' -and
+            (Get-ResponderProbeField -Event $_ -Names @('probe_frame_fingerprint')) -notin @('', '(none)', 'none') -and
+            (Get-ResponderProbeField -Event $_ -Names @('received_utc_ms')) -match '^[1-9][0-9]*$' -and
+            (Get-ResponderProbeField -Event $_ -Names @('probe_ack_sent_utc_ms')) -match '^[1-9][0-9]*$' -and
+            [int64](Get-ResponderProbeField -Event $_ -Names @('probe_ack_sent_utc_ms')) -ge
+                [int64](Get-ResponderProbeField -Event $_ -Names @('received_utc_ms')) -and
+            (Get-ResponderProbeField -Event $_ -Names @('local_transaction_generation')) -eq $initialLocalTransaction -and
+            (Get-ResponderProbeField -Event $_ -Names @('local_offer_generation')) -eq $initialLocalOffer -and
+            (Get-ResponderProbeField -Event $_ -Names @('local_tuna_path_lease_generation')) -eq $initialLocalLease -and
+            (Get-ResponderProbeField -Event $_ -Names @('pending_answer_ack_generation')) -eq $initialPendingGeneration -and
+            (Get-ResponderProbeField -Event $_ -Names @('launch_generation')) -eq $initialLaunchGeneration -and
+            (Test-ResponderInitialPeerTupleMatch -Boundary $initialScopeRejection -Candidate $_) -and
+            (Test-ResponderInitialPeerScopeMatch -Admission $initialAdmission -Candidate $_)
+        } | Sort-Object Sequence, LineNumber)
+        if ($initialReceiptCandidates.Count -gt 0) {
+            $initialReceiptAnchor = $initialReceiptCandidates[-1]
+            [object[]]$initialReceiptLineage = @(
+                $peerPreCommitAnswerAcceptanceDecisions | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$initialScopeRejection.Sequence -and
+                    (Test-ResponderInitialProbeLogicalLineageMatch `
+                        -Anchor $initialReceiptAnchor `
+                        -Candidate $_)
+                })
+            [object[]]$initialReceiptKeys = @($initialReceiptLineage | ForEach-Object {
+                Get-ResponderInitialPeerReceiptSemanticKey -Receipt $_
+            } | Sort-Object -Unique)
+            if ($initialReceiptKeys.Count -ne 1) {
+                $initialTuplePoisoned = $true
+            }
+            else {
+                $initialReceiptCandidates = @($initialReceiptAnchor)
+            }
+        }
+        if ($initialTuplePoisoned) {
+            continue
+        }
+        foreach ($initialReceipt in $initialReceiptCandidates) {
+            [object[]]$initialStartedConvergence = @($responderAnswerProbeConvergenceDecisions | Where-Object {
+                [int64]$_.Sequence -gt [int64]$initialReceipt.Sequence -and
+                (Get-ResponderProbeField -Event $_ -Names @('status', 'decision_status')) -in @('Held', 'Idempotent') -and
+                (Get-ResponderProbeField -Event $_ -Names @('substate', 'state')) -eq 'AwaitingProbeAck' -and
+                (Get-ResponderProbeField -Event $_ -Names @('probe_state')) -ieq 'started' -and
+                (Get-ResponderProbeField -Event $_ -Names @('probe_transport', 'received_transport')) -ieq 'tuna' -and
+                (Get-ResponderProbeField -Event $_ -Names @('transaction_generation')) -eq $initialLocalTransaction -and
+                (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -eq $initialLocalOffer -and
+                (Get-ResponderProbeField -Event $_ -Names @('pending_answer_ack_generation')) -eq $initialPendingGeneration -and
+                (Get-ResponderProbeField -Event $_ -Names @('launch_generation')) -eq $initialLaunchGeneration -and
+                (Get-ResponderProbeField -Event $_ -Names @('ack_message_id')) -eq $initialAckMessageId -and
+                (Get-ResponderProbeField -Event $_ -Names @('ack_source_fingerprint')) -eq
+                    (Get-ResponderProbeField -Event $initialAcceptedAck -Names @('ack_source_fingerprint')) -and
+                (Get-ResponderProbeField -Event $_ -Names @('ack_frame_fingerprint')) -eq
+                    (Get-ResponderProbeField -Event $initialAcceptedAck -Names @('ack_frame_fingerprint')) -and
+                (Get-ResponderProbeField -Event $_ -Names @('peer_probe_frame_fingerprint')) -eq
+                    (Get-ResponderProbeField -Event $initialReceipt -Names @('probe_frame_fingerprint')) -and
+                (Test-ResponderInitialPeerTupleMatch -Boundary $initialScopeRejection -Candidate $_) -and
+                (Test-ResponderInitialPeerScopeMatch -Admission $initialAdmission -Candidate $_)
+            } | Sort-Object Sequence, LineNumber)
+            if ($initialStartedConvergence.Count -eq 0) { continue }
+            $initialStartedAnchor = $initialStartedConvergence[-1]
+            [object[]]$initialStartedLineage = @(
+                $responderAnswerProbeConvergenceDecisions | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$initialReceipt.Sequence -and
+                    [int64]$_.Sequence -le [int64]$initialStartedAnchor.Sequence -and
+                    (Test-ResponderInitialConvergenceLogicalLineageMatch `
+                        -Anchor $initialStartedAnchor `
+                        -Candidate $_)
+                })
+            [object[]]$initialStartedKeys = @($initialStartedLineage | ForEach-Object {
+                Get-ResponderInitialConvergenceSemanticKey -Decision $_
+            } | Sort-Object -Unique)
+            if ($initialStartedKeys.Count -ne 1) {
+                $initialTuplePoisoned = $true
+                break
+            }
+            $initialStartedConvergence = @($initialStartedAnchor)
+            [object[]]$initialPairedConfirmations = @($pairedCommitConfirmations | Where-Object {
+                [int64]$_.Sequence -gt [int64]$initialStartedConvergence[0].Sequence -and
+                (Get-ResponderProbeField -Event $_ -Names @('direction')) -ieq 'inbound' -and
+                (Test-ResponderInitialPeerTupleMatch -Boundary $initialScopeRejection -Candidate $_)
+            } | Sort-Object Sequence, LineNumber)
+            if ($initialPairedConfirmations.Count -eq 0) { continue }
+            $initialPairedAnchor = $initialPairedConfirmations[-1]
+            [object[]]$initialPairedLineage = @($pairedCommitConfirmations | Where-Object {
+                [int64]$_.Sequence -gt [int64]$initialStartedConvergence[0].Sequence -and
+                (Test-ResponderInitialProbeLogicalLineageMatch `
+                    -Anchor $initialPairedAnchor `
+                    -Candidate $_)
+            })
+            [object[]]$initialPairedKeys = @($initialPairedLineage | ForEach-Object {
+                Get-ResponderInitialProbeIngressSemanticKey -Event $_
+            } | Sort-Object -Unique)
+            if ($initialPairedKeys.Count -ne 1) {
+                $initialTuplePoisoned = $true
+                break
+            }
+            $initialPairedConfirmations = @($initialPairedAnchor)
+            [object[]]$initialCompleteConvergence = @($responderAnswerProbeConvergenceDecisions | Where-Object {
+                [int64]$_.Sequence -gt [int64]$initialStartedConvergence[0].Sequence -and
+                [int64]$_.Sequence -le [int64]$initialPairedConfirmations[0].Sequence -and
+                (Get-ResponderProbeField -Event $_ -Names @('status', 'decision_status')) -in @('Accepted', 'Idempotent') -and
+                (Get-ResponderProbeField -Event $_ -Names @('substate', 'state')) -eq 'Complete' -and
+                (Get-ResponderProbeField -Event $_ -Names @('probe_state')) -ieq 'acked' -and
+                (Get-ResponderProbeField -Event $_ -Names @('probe_transport', 'received_transport')) -ieq 'tuna' -and
+                (Get-ResponderProbeField -Event $_ -Names @('transaction_generation')) -eq $initialLocalTransaction -and
+                (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -eq $initialLocalOffer -and
+                (Get-ResponderProbeField -Event $_ -Names @('pending_answer_ack_generation')) -eq $initialPendingGeneration -and
+                (Get-ResponderProbeField -Event $_ -Names @('launch_generation')) -eq $initialLaunchGeneration -and
+                (Get-ResponderProbeField -Event $_ -Names @('ack_message_id')) -eq $initialAckMessageId -and
+                (Get-ResponderProbeField -Event $_ -Names @('ack_source_fingerprint')) -eq
+                    (Get-ResponderProbeField -Event $initialAcceptedAck -Names @('ack_source_fingerprint')) -and
+                (Get-ResponderProbeField -Event $_ -Names @('ack_frame_fingerprint')) -eq
+                    (Get-ResponderProbeField -Event $initialAcceptedAck -Names @('ack_frame_fingerprint')) -and
+                (Get-ResponderProbeField -Event $_ -Names @('peer_probe_frame_fingerprint')) -eq
+                    (Get-ResponderProbeField -Event $initialReceipt -Names @('probe_frame_fingerprint')) -and
+                (Test-ResponderInitialPeerTupleMatch -Boundary $initialScopeRejection -Candidate $_) -and
+                (Test-ResponderInitialPeerScopeMatch -Admission $initialAdmission -Candidate $_)
+            } | Sort-Object Sequence, LineNumber)
+            if ($initialCompleteConvergence.Count -eq 0) { continue }
+            $initialCompleteAnchor = $initialCompleteConvergence[-1]
+            [object[]]$initialCompleteLineage = @(
+                $responderAnswerProbeConvergenceDecisions | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$initialStartedConvergence[0].Sequence -and
+                    [int64]$_.Sequence -le [int64]$initialPairedConfirmations[0].Sequence -and
+                    (Test-ResponderInitialConvergenceLogicalLineageMatch `
+                        -Anchor $initialCompleteAnchor `
+                        -Candidate $_)
+                })
+            [object[]]$initialCompleteKeys = @($initialCompleteLineage | ForEach-Object {
+                Get-ResponderInitialConvergenceSemanticKey -Decision $_
+            } | Sort-Object -Unique)
+            if ($initialCompleteKeys.Count -ne 1) {
+                $initialTuplePoisoned = $true
+                break
+            }
+            $initialCompleteConvergence = @($initialCompleteAnchor)
+            [object[]]$initialAdoptingLaunches = @($launches | Where-Object {
+                [int64]$_.Sequence -gt [int64]$initialCompleteConvergence[0].Sequence -and
+                (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialWriter -and
+                (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $initialSessionId -and
+                (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $initialTransferId -and
+                (Get-ResponderProbeField -Event $_ -Names @('transaction_generation')) -eq $initialLocalTransaction -and
+                (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -eq $initialLocalOffer -and
+                (Get-ResponderProbeField -Event $_ -Names @('launch_generation')) -eq $initialLaunchGeneration -and
+                (Get-ResponderProbeField -Event $_ -Names @('probe_id', 'path_probe_id')) -eq $initialProbeId -and
+                (Get-ResponderProbeField -Event $_ -Names @('launch_role')) -eq 'ResponderAdoptingAckedPeerProbe' -and
+                (Get-ResponderProbeField -Event $_ -Names @('peer_probe_adoption')) -eq '1' -and
+                (Get-ResponderProbeField -Event $_ -Names @('probe_state', 'path_probe_state')) -ieq 'acked'
+            } | Sort-Object Sequence, LineNumber)
+            [object[]]$initialAdoptingLaunchKeys = @($initialAdoptingLaunches | ForEach-Object {
+                Get-ResponderInitialAdoptingLaunchSemanticKey -Launch $_
+            } | Sort-Object -Unique)
+            if ($initialAdoptingLaunchKeys.Count -gt 1) {
+                $initialTuplePoisoned = $true
+                break
+            }
+            if ($initialAdoptingLaunches.Count -gt 0) {
+                $initialAdoptingLaunches = @($initialAdoptingLaunches[0])
+            }
+            if ($initialAdoptingLaunches.Count -eq 0) {
+                [object[]]$initialMissingAdoptionPathAcks = @($pathProbeAcks | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$initialStartedConvergence[0].Sequence -and
+                    [int64]$_.Sequence -le [int64]$initialPairedConfirmations[0].Sequence -and
+                    (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialWriter -and
+                    (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $initialSessionId -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transaction_generation')) -eq
+                        $initialLocalTransaction -and
+                    (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -eq
+                        $initialLocalOffer -and
+                    (Get-ResponderProbeField -Event $_ -Names @(
+                            'tuna_path_lease_generation',
+                            'path_lease_generation')) -eq $initialLocalLease -and
+                    (Get-ResponderProbeField -Event $_ -Names @(
+                            'tuna_path_lease_listener_run_id',
+                            'path_lease_listener_run_id')) -eq $initialLocalRun -and
+                    (Get-ResponderProbeField -Event $_ -Names @('probe_id', 'path_probe_id')) -eq
+                        $initialProbeId
+                } | Sort-Object Sequence, LineNumber)
+                [object[]]$initialMissingAdoptionCoreAcks = @($coreProbeAcks | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$initialCompleteConvergence[0].Sequence -and
+                    (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialWriter -and
+                    (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $initialSessionId -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $initialTransferId -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transaction_generation')) -eq
+                        $initialPeerTransaction -and
+                    (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -eq
+                        $initialPeerOffer -and
+                    (Get-ResponderProbeField -Event $_ -Names @(
+                            'tuna_path_lease_generation',
+                            'path_lease_generation')) -eq $initialPeerLease -and
+                    (Get-ResponderProbeField -Event $_ -Names @('probe_id', 'path_probe_id')) -eq
+                        $initialProbeId
+                } | Sort-Object Sequence, LineNumber)
+                [object[]]$initialMissingAdoptionPathAckKeys = @(
+                    $initialMissingAdoptionPathAcks | ForEach-Object {
+                        Get-ResponderInitialProbeAckSemanticKey -ProbeAck $_
+                    } | Sort-Object -Unique)
+                [object[]]$initialMissingAdoptionCoreAckKeys = @(
+                    $initialMissingAdoptionCoreAcks | ForEach-Object {
+                        Get-ResponderInitialProbeAckSemanticKey -ProbeAck $_
+                    } | Sort-Object -Unique)
+                if ($initialMissingAdoptionPathAckKeys.Count -gt 1 -or
+                    $initialMissingAdoptionCoreAckKeys.Count -gt 1) {
+                    $initialTuplePoisoned = $true
+                    break
+                }
+                if ($initialMissingAdoptionPathAcks.Count -gt 0 -and
+                    $initialMissingAdoptionPathAckKeys.Count -eq 1 -and
+                    $initialMissingAdoptionCoreAcks.Count -gt 0 -and
+                    $initialMissingAdoptionCoreAckKeys.Count -eq 1) {
+                    $initialAdoptionRecheckEvent = $initialMissingAdoptionCoreAcks[0]
+                    break
+                }
+                continue
+            }
+            if ($initialAdoptingLaunches.Count -ne 1) {
+                $initialBindingEvent = $initialAdoptingLaunches[0]
+                break
+            }
+            $initialBindingEvent = $initialAdoptingLaunches[0]
+            [object[]]$initialBounds = @($boundLaunches | Where-Object {
+                [int64]$_.Sequence -gt [int64]$initialAdoptingLaunches[0].Sequence -and
+                (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialWriter -and
+                (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $initialSessionId -and
+                (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $initialTransferId -and
+                (Get-ResponderProbeField -Event $_ -Names @('transaction_generation')) -eq $initialLocalTransaction -and
+                (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -eq $initialLocalOffer -and
+                (Get-ResponderProbeField -Event $_ -Names @('launch_generation')) -eq $initialLaunchGeneration -and
+                (Get-ResponderProbeField -Event $_ -Names @('probe_id', 'path_probe_id')) -eq $initialProbeId -and
+                (Get-ResponderProbeField -Event $_ -Names @('responder_transition_mode')) -eq 'initial_regular_v4' -and
+                (Get-ResponderProbeField -Event $_ -Names @('launch_role')) -eq
+                    'ResponderAdoptingAckedPeerProbe' -and
+                (Get-ResponderProbeField -Event $_ -Names @('answer_acceptance_source')) -eq 'SemanticAnswerAck' -and
+                (Get-ResponderProbeField -Event $_ -Names @('probe_state')) -ieq 'acked' -and
+                (Get-ResponderProbeField -Event $_ -Names @('probe_transport', 'received_transport')) -ieq 'tuna' -and
+                [int64](Get-ResponderProbeField -Event $_ -Names @(
+                        'probe_acked_utc_ms',
+                        'path_probe_acked_utc_ms')) -gt 0 -and
+                (Get-ResponderProbeField -Event $_ -Names @('normalized_reason')) -eq
+                    'exact_responder_peer_probe_adopted' -and
+                (Get-ResponderProbeField -Event $_ -Names @('ack_message_id')) -eq $initialAckMessageId -and
+                (Get-ResponderProbeField -Event $_ -Names @('ack_source_fingerprint')) -eq
+                    (Get-ResponderProbeField -Event $initialAcceptedAck -Names @('ack_source_fingerprint')) -and
+                (Get-ResponderProbeField -Event $_ -Names @('peer_probe_frame_fingerprint')) -eq
+                    (Get-ResponderProbeField -Event $initialReceipt -Names @('probe_frame_fingerprint')) -and
+                (Test-ResponderInitialPeerScopeMatch -Admission $initialAdmission -Candidate $_)
+            } | Sort-Object Sequence, LineNumber)
+            [object[]]$initialBoundKeys = @($initialBounds | ForEach-Object {
+                Get-ResponderBoundSemanticKey `
+                    -Bound $_ `
+                    -EvidenceMode (Get-ResponderBoundEvidenceMode `
+                        -Bound $_ `
+                        -RawAnswerAck $initialRawAck `
+                        -AcceptedAnswerAck $initialAcceptedAck `
+                        -PathProbe $initialCompleteConvergence[0] `
+                        -CoreProbe $initialCompleteConvergence[0])
+            } | Sort-Object -Unique)
+            if ($initialBoundKeys.Count -gt 1) {
+                $initialTuplePoisoned = $true
+                break
+            }
+            if ($initialBounds.Count -eq 0) { break }
+            $initialBounds = @($initialBounds[0])
+            $initialBindingEvent = $null
+            [object[]]$initialCallbackPathAcks = @($pathProbeAcks | Where-Object {
+                [int64]$_.Sequence -gt [int64]$initialStartedConvergence[0].Sequence -and
+                [int64]$_.Sequence -le [int64]$initialPairedConfirmations[0].Sequence -and
+                (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialWriter -and
+                (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $initialSessionId -and
+                (Get-ResponderProbeField -Event $_ -Names @('transaction_generation')) -eq
+                    $initialLocalTransaction -and
+                (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -eq $initialLocalOffer -and
+                (Get-ResponderProbeField -Event $_ -Names @(
+                        'tuna_path_lease_generation',
+                        'path_lease_generation')) -eq $initialLocalLease -and
+                (Get-ResponderProbeField -Event $_ -Names @(
+                        'tuna_path_lease_listener_run_id',
+                        'path_lease_listener_run_id')) -eq $initialLocalRun -and
+                (Get-ResponderProbeField -Event $_ -Names @('probe_id', 'path_probe_id')) -eq $initialProbeId
+            } | Sort-Object Sequence, LineNumber)
+            [object[]]$initialCallbackCoreAcks = @($coreProbeAcks | Where-Object {
+                [int64]$_.Sequence -gt [int64]$initialBounds[0].Sequence -and
+                (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $initialWriter -and
+                (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $initialSessionId -and
+                (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $initialTransferId -and
+                (Get-ResponderProbeField -Event $_ -Names @('transaction_generation')) -eq
+                    $initialPeerTransaction -and
+                (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -eq $initialPeerOffer -and
+                (Get-ResponderProbeField -Event $_ -Names @(
+                        'tuna_path_lease_generation',
+                        'path_lease_generation')) -eq $initialPeerLease -and
+                (Get-ResponderProbeField -Event $_ -Names @('probe_id', 'path_probe_id')) -eq $initialProbeId
+            } | Sort-Object Sequence, LineNumber)
+            [object[]]$initialCallbackPathAckKeys = @($initialCallbackPathAcks | ForEach-Object {
+                Get-ResponderInitialProbeAckSemanticKey -ProbeAck $_
+            } | Sort-Object -Unique)
+            [object[]]$initialCallbackCoreAckKeys = @($initialCallbackCoreAcks | ForEach-Object {
+                Get-ResponderInitialProbeAckSemanticKey -ProbeAck $_
+            } | Sort-Object -Unique)
+            if ($initialCallbackPathAckKeys.Count -gt 1 -or $initialCallbackCoreAckKeys.Count -gt 1) {
+                $initialTuplePoisoned = $true
+                break
+            }
+            if ($initialCallbackPathAcks.Count -eq 0 -or $initialCallbackCoreAcks.Count -eq 0) {
+                $initialAfterBoundOutcome = [pscustomobject]@{
+                    Event = $initialBounds[0]
+                    Recovered = $false
+                    Reason = 'bound_responder_acked_peer_probe_route_transition_handoff_missing'
+                    Variant = 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe'
+                }
+                break
+            }
+            $initialCallbackPathAcks = @($initialCallbackPathAcks[0])
+            $initialCallbackCoreAcks = @($initialCallbackCoreAcks[0])
+            $initialAfterBoundOutcome = Get-ResponderAfterBoundOutcome `
+                -Boundary $initialCallbackPathAcks[0] `
+                -PathProbeAck $initialCallbackPathAcks[0] `
+                -CoreProbeAck $initialCallbackCoreAcks[0] `
+                -RawAnswerAck $initialRawAck `
+                -AcceptedAnswerAck $initialAcceptedAck `
+                -Launch $initialAdoptingLaunches[0] `
+                -Bound $initialBounds[0] `
+                -Writer $initialWriter `
+                -SessionId $initialSessionId `
+                -TransferId $initialTransferId `
+                -LocalOfferGeneration $initialLocalOffer `
+                -Payer $initialPayer `
+                -PendingAckGeneration $initialPendingGeneration `
+                -InitialAdmission $initialAdmission
+            break
+        }
+
+        if ($initialTuplePoisoned) {
+            continue
+        }
+        if ($null -ne $initialAdoptionRecheckEvent) {
+            $ackBeforeProbeRawCandidates.Add($initialAdoptionRecheckEvent) | Out-Null
+            $ackBeforeProbeRecords.Add([pscustomobject]@{
+                Event = $initialAdoptionRecheckEvent
+                Recovered = $false
+                Reason = 'answer_ack_before_probe_acked_peer_probe_not_rechecked_into_responder_adopting_launch'
+                Variant = 'runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe'
+            }) | Out-Null
+            continue
+        }
+        if ($null -ne $initialBindingEvent) {
+            $bindingRawCandidates.Add($initialBindingEvent) | Out-Null
+            $bindingRecords.Add([pscustomobject]@{
+                Event = $initialBindingEvent
+                Recovered = $false
+                Reason = 'accepted_responder_answer_ack_did_not_bind_acked_peer_probe'
+                Variant = 'runtime_unlock_responder_acked_probe_binding_missing'
+            }) | Out-Null
+            continue
+        }
+        if ($null -ne $initialAfterBoundOutcome) {
+            $afterBoundRawCandidates.Add($initialAfterBoundOutcome.Event) | Out-Null
+            $afterBoundRecords.Add($initialAfterBoundOutcome) | Out-Null
+            continue
+        }
+        $initialScopeRejectedRawCandidates.Add($initialScopeRejection) | Out-Null
+        $initialScopeRejectedRecords.Add([pscustomobject]@{
+            Event = $initialScopeRejection
+            Recovered = $false
+            Reason = 'initial_activation_zero_transport_epoch_peer_acceptance_scope_rejected_before_responder_convergence'
+            Variant = 'runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected'
+        }) | Out-Null
+    }
 
     foreach ($lateCoreProbeAck in $coreProbeAcks) {
         $lateWriter = Get-ResponderProbeField -Event $lateCoreProbeAck -Names @('log_writer_id')
@@ -46843,6 +48582,15 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
                         continue
                     }
                     $lateAcceptedCandidate = $lateAcceptedIdentityCandidates[0]
+                    if ((Test-ResponderModernSemanticAnswerAckShape `
+                            -AcceptedAnswerAck $lateAcceptedCandidate) -and
+                        -not (Test-ResponderSemanticAnswerAckLineageUnique `
+                            -ExpectedAnswerAck $lateAcceptedCandidate `
+                            -StartSequence ([int64]$latePendingCandidate.Sequence) `
+                            -EndSequence ([int64]$lateCoreProbeAck.Sequence) `
+                            -Writer $lateWriter)) {
+                        continue
+                    }
                     $lateAcceptedMessageId = Get-ResponderProbeField `
                         -Event $lateAcceptedCandidate `
                         -Names @('ack_message_id', 'answer_ack_message_id', 'msg_id')
@@ -47641,6 +49389,17 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
                             (Get-ResponderProbeField -Event $_ -Names @('lanes')) -ieq 'file'
                         } | Sort-Object Sequence, LineNumber -Descending)
                         foreach ($acceptedCandidate in $acceptedCandidates) {
+                            if ((Test-ResponderModernSemanticAnswerAckShape `
+                                    -AcceptedAnswerAck $acceptedCandidate) -and
+                                -not (Test-ResponderSemanticAnswerAckLineageUnique `
+                                    -ExpectedAnswerAck $acceptedCandidate `
+                                    -StartSequence ([int64]$pendingCandidate.Sequence) `
+                                    -EndSequence ([int64]$boundary.Sequence) `
+                                    -Writer (Get-ResponderProbeField `
+                                        -Event $boundary `
+                                        -Names @('log_writer_id')))) {
+                                continue
+                            }
                             $answerSentCandidate = if (
                                 Test-ResponderModernSemanticAnswerAckShape `
                                     -AcceptedAnswerAck $acceptedCandidate) {
@@ -48057,6 +49816,9 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
         }) | Out-Null
     }
 
+    [object[]]$initialScopeRejectedDistinct = @($initialScopeRejectedRecords.ToArray() | ForEach-Object { $_.Event })
+    [object[]]$initialScopeRejectedRecovered = @($initialScopeRejectedRecords.ToArray() | Where-Object { $_.Recovered } | ForEach-Object { $_.Event })
+    [object[]]$initialScopeRejectedUnresolved = @($initialScopeRejectedRecords.ToArray() | Where-Object { -not $_.Recovered } | ForEach-Object { $_.Event })
     [object[]]$bindingDistinct = @($bindingRecords.ToArray() | ForEach-Object { $_.Event })
     [object[]]$bindingRecovered = @($bindingRecords.ToArray() | Where-Object { $_.Recovered } | ForEach-Object { $_.Event })
     [object[]]$bindingUnresolved = @($bindingRecords.ToArray() | Where-Object { -not $_.Recovered } | ForEach-Object { $_.Event })
@@ -48067,15 +49829,17 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
     [object[]]$ackBeforeProbeRecovered = @($ackBeforeProbeRecords.ToArray() | Where-Object { $_.Recovered } | ForEach-Object { $_.Event })
     [object[]]$ackBeforeProbeUnresolved = @($ackBeforeProbeRecords.ToArray() | Where-Object { -not $_.Recovered } | ForEach-Object { $_.Event })
     [object[]]$rawCandidates = @(
+        @($initialScopeRejectedRawCandidates.ToArray()) +
         @($ackBeforeProbeRawCandidates.ToArray()) +
         @($bindingRawCandidates.ToArray()) +
         @($afterBoundRawCandidates.ToArray()) |
             Sort-Object Sequence, LineNumber
     )
-    [object[]]$distinct = @($ackBeforeProbeDistinct + $bindingDistinct + $afterBoundDistinct | Sort-Object Sequence, LineNumber)
-    [object[]]$recoveredEvents = @($ackBeforeProbeRecovered + $bindingRecovered + $afterBoundRecovered | Sort-Object Sequence, LineNumber)
-    [object[]]$unresolved = @($ackBeforeProbeUnresolved + $bindingUnresolved + $afterBoundUnresolved | Sort-Object Sequence, LineNumber)
+    [object[]]$distinct = @($initialScopeRejectedDistinct + $ackBeforeProbeDistinct + $bindingDistinct + $afterBoundDistinct | Sort-Object Sequence, LineNumber)
+    [object[]]$recoveredEvents = @($initialScopeRejectedRecovered + $ackBeforeProbeRecovered + $bindingRecovered + $afterBoundRecovered | Sort-Object Sequence, LineNumber)
+    [object[]]$unresolved = @($initialScopeRejectedUnresolved + $ackBeforeProbeUnresolved + $bindingUnresolved + $afterBoundUnresolved | Sort-Object Sequence, LineNumber)
     [object[]]$unresolvedRecords = @(
+        @($initialScopeRejectedRecords.ToArray()) +
         @($ackBeforeProbeRecords.ToArray()) +
         @($bindingRecords.ToArray()) +
         @($afterBoundRecords.ToArray()) |
@@ -48093,6 +49857,15 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
         RecoveredCandidateEvents = $recoveredEvents
         UnresolvedCandidateEvents = $unresolved
         UnresolvedCandidateRecords = $unresolvedRecords
+        InitialActivationPeerAcceptanceScopeRejectedRawCount = $initialScopeRejectedRawCandidates.Count
+        InitialActivationPeerAcceptanceScopeRejectedDistinctCount = $initialScopeRejectedDistinct.Count
+        InitialActivationPeerAcceptanceScopeRejectedRecoveredCount = $initialScopeRejectedRecovered.Count
+        InitialActivationPeerAcceptanceScopeRejectedUnresolvedCount = $initialScopeRejectedUnresolved.Count
+        InitialActivationPeerAcceptanceScopeRejectedVerdict = if ($initialScopeRejectedUnresolved.Count -gt 0) { 'fail' } elseif ($initialScopeRejectedDistinct.Count -gt 0) { 'pass' } else { 'none' }
+        InitialActivationPeerAcceptanceScopeRejectedRawCandidateEvents = @($initialScopeRejectedRawCandidates.ToArray())
+        InitialActivationPeerAcceptanceScopeRejectedDistinctCandidateEvents = $initialScopeRejectedDistinct
+        InitialActivationPeerAcceptanceScopeRejectedRecoveredCandidateEvents = $initialScopeRejectedRecovered
+        InitialActivationPeerAcceptanceScopeRejectedUnresolvedCandidateEvents = $initialScopeRejectedUnresolved
         AckBeforeProbeAdoptionRecheckMissingRawCount = $ackBeforeProbeRawCandidates.Count
         AckBeforeProbeAdoptionRecheckMissingDistinctCount = $ackBeforeProbeDistinct.Count
         AckBeforeProbeAdoptionRecheckMissingRecoveredCount = $ackBeforeProbeRecovered.Count
@@ -55507,6 +57280,11 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockResponderPeerProbeHandoffMissingRecoveredCount = $runtimeUnlockResponderPeerProbeHandoffProof.RecoveredCount
         RuntimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount = $runtimeUnlockResponderPeerProbeHandoffProof.UnresolvedCount
         RuntimeUnlockResponderPeerProbeHandoffVerdict = $runtimeUnlockResponderPeerProbeHandoffProof.Verdict
+        RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRawCount = $runtimeUnlockResponderPeerProbeHandoffProof.InitialActivationPeerAcceptanceScopeRejectedRawCount
+        RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedDistinctCount = $runtimeUnlockResponderPeerProbeHandoffProof.InitialActivationPeerAcceptanceScopeRejectedDistinctCount
+        RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRecoveredCount = $runtimeUnlockResponderPeerProbeHandoffProof.InitialActivationPeerAcceptanceScopeRejectedRecoveredCount
+        RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedUnresolvedCount = $runtimeUnlockResponderPeerProbeHandoffProof.InitialActivationPeerAcceptanceScopeRejectedUnresolvedCount
+        RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedVerdict = $runtimeUnlockResponderPeerProbeHandoffProof.InitialActivationPeerAcceptanceScopeRejectedVerdict
         RuntimeUnlockResponderPeerProbeAckBeforeProbeAdoptionRecheckMissingRawCount = $runtimeUnlockResponderPeerProbeHandoffProof.AckBeforeProbeAdoptionRecheckMissingRawCount
         RuntimeUnlockResponderPeerProbeAckBeforeProbeAdoptionRecheckMissingDistinctCount = $runtimeUnlockResponderPeerProbeHandoffProof.AckBeforeProbeAdoptionRecheckMissingDistinctCount
         RuntimeUnlockResponderPeerProbeAckBeforeProbeAdoptionRecheckMissingRecoveredCount = $runtimeUnlockResponderPeerProbeHandoffProof.AckBeforeProbeAdoptionRecheckMissingRecoveredCount
@@ -56485,6 +58263,11 @@ function New-FileTransferInvariantLedgerObject {
         runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count = [string]$recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingRecoveredCount
         runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count = [string]$recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount
         runtime_unlock_responder_acked_probe_route_transition_handoff_verdict = $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffVerdict
+        runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_raw_count = [string]$recoveryClassification.RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRawCount
+        runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_distinct_count = [string]$recoveryClassification.RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedDistinctCount
+        runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_recovered_count = [string]$recoveryClassification.RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRecoveredCount
+        runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_unresolved_count = [string]$recoveryClassification.RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedUnresolvedCount
+        runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_verdict = $recoveryClassification.RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedVerdict
         runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_raw_count = [string]$recoveryClassification.RuntimeUnlockResponderPeerProbeAckBeforeProbeAdoptionRecheckMissingRawCount
         runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_distinct_count = [string]$recoveryClassification.RuntimeUnlockResponderPeerProbeAckBeforeProbeAdoptionRecheckMissingDistinctCount
         runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_recovered_count = [string]$recoveryClassification.RuntimeUnlockResponderPeerProbeAckBeforeProbeAdoptionRecheckMissingRecoveredCount
@@ -56923,6 +58706,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingRecoveredCount),
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount),
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_verdict={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeHandoffVerdict),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_raw_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRawCount),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedDistinctCount),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRecoveredCount),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedUnresolvedCount),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_verdict={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedVerdict),
         ("runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_raw_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeAckBeforeProbeAdoptionRecheckMissingRawCount),
         ("runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeAckBeforeProbeAdoptionRecheckMissingDistinctCount),
         ("runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockResponderPeerProbeAckBeforeProbeAdoptionRecheckMissingRecoveredCount),

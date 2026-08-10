@@ -1024,9 +1024,12 @@ function Complete-RouteAcceptanceRunEvidence {
             (Test-RouteAcceptanceFakeSyntheticTrustedEvidenceEnabled) -or
             ($script:RouteAcceptanceExecutionMode -eq 'fake' -and
                 @($effectiveScenarioNames).Count -eq 1 -and
-                (Test-RouteAcceptanceScenarioEnvEnabled `
-                    -ScenarioName ([string]@($effectiveScenarioNames)[0]) `
-                    -Suffix 'RESPONDER_ACKED_PROBE_HANDOFF_SUMMARY_FIXTURE'))
+                ((Test-RouteAcceptanceScenarioEnvEnabled `
+                        -ScenarioName ([string]@($effectiveScenarioNames)[0]) `
+                        -Suffix 'RESPONDER_ACKED_PROBE_HANDOFF_SUMMARY_FIXTURE') -or
+                    (Test-RouteAcceptanceScenarioEnvEnabled `
+                        -ScenarioName ([string]@($effectiveScenarioNames)[0]) `
+                        -Suffix 'RESPONDER_INITIAL_PEER_ACCEPTANCE_SCOPE_REJECTED_SUMMARY_FIXTURE')))
         $finalGitState = Get-RouteAcceptanceEvidenceGitState -RepoRoot $RepoRoot
         if ($fixtureSynthesizesLiveEvidence) {
             $finalGitState = [pscustomobject][ordered]@{
@@ -1633,6 +1636,11 @@ function New-RouteAcceptanceRunResult {
         runtimeUnlockResponderPeerProbeHandoffMissingRecoveredCount = 0
         runtimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount = 0
         runtimeUnlockResponderPeerProbeHandoffVerdict = 'none'
+        runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRawCount = 0
+        runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedDistinctCount = 0
+        runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRecoveredCount = 0
+        runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedUnresolvedCount = 0
+        runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedVerdict = 'none'
         runtimeUnlockResponderPeerProbeBindingMissingRawCount = 0
         runtimeUnlockResponderPeerProbeBindingMissingDistinctCount = 0
         runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount = 0
@@ -3657,6 +3665,11 @@ function Assert-Phase4OperatorVerdict {
     $Result.runtimeUnlockResponderPeerProbeHandoffMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count' -DefaultValue '0')
     $Result.runtimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count' -DefaultValue '0')
     $Result.runtimeUnlockResponderPeerProbeHandoffVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_route_transition_handoff_verdict' -DefaultValue 'none'
+    $Result.runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_raw_count' -DefaultValue '0')
+    $Result.runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_distinct_count' -DefaultValue '0')
+    $Result.runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_recovered_count' -DefaultValue '0')
+    $Result.runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_unresolved_count' -DefaultValue '0')
+    $Result.runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_verdict' -DefaultValue 'none'
     $Result.runtimeUnlockResponderPeerProbeBindingMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_binding_missing_raw_count' -DefaultValue '0')
     $Result.runtimeUnlockResponderPeerProbeBindingMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_binding_missing_distinct_count' -DefaultValue '0')
     $Result.runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_responder_acked_probe_binding_missing_recovered_count' -DefaultValue '0')
@@ -5876,21 +5889,30 @@ function Write-RouteAcceptanceFakePhase4Run {
 
     }
 
-    if (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RESPONDER_ACKED_PROBE_HANDOFF_SUMMARY_FIXTURE') {
+    $responderInitialScopeFixture = Test-RouteAcceptanceScenarioEnvEnabled `
+        -ScenarioName $scenarioName `
+        -Suffix 'RESPONDER_INITIAL_PEER_ACCEPTANCE_SCOPE_REJECTED_SUMMARY_FIXTURE'
+    if ($responderInitialScopeFixture -or
+        (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RESPONDER_ACKED_PROBE_HANDOFF_SUMMARY_FIXTURE')) {
         $responderAckedProbeHandoffFixtureLines = @(
             'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_raw_count=1',
             'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_distinct_count=1',
             'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count=0',
             'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count=1',
             'runtime_unlock_responder_acked_probe_route_transition_handoff_verdict=fail',
+            ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_raw_count={0}" -f $(if ($responderInitialScopeFixture) { 1 } else { 0 })),
+            ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_distinct_count={0}" -f $(if ($responderInitialScopeFixture) { 1 } else { 0 })),
+            'runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_recovered_count=0',
+            ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_unresolved_count={0}" -f $(if ($responderInitialScopeFixture) { 1 } else { 0 })),
+            ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_verdict={0}" -f $(if ($responderInitialScopeFixture) { 'fail' } else { 'none' })),
             'runtime_unlock_responder_acked_probe_binding_missing_raw_count=0',
             'runtime_unlock_responder_acked_probe_binding_missing_distinct_count=0',
             'runtime_unlock_responder_acked_probe_binding_missing_recovered_count=0',
             'runtime_unlock_responder_acked_probe_binding_missing_unresolved_count=0',
-            'runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_raw_count=1',
-            'runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_distinct_count=1',
+            ("runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_raw_count={0}" -f $(if ($responderInitialScopeFixture) { 0 } else { 1 })),
+            ("runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_distinct_count={0}" -f $(if ($responderInitialScopeFixture) { 0 } else { 1 })),
             'runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_recovered_count=0',
-            'runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_unresolved_count=1',
+            ("runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_unresolved_count={0}" -f $(if ($responderInitialScopeFixture) { 0 } else { 1 })),
             'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_raw_count=0',
             'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_distinct_count=0',
             'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_recovered_count=0',
@@ -5902,13 +5924,13 @@ function Write-RouteAcceptanceFakePhase4Run {
             'filetransfer_bridge_recovery_execution_payload_hold_verdict=fail',
             'runtime_failure_candidate=runtime_unlock_responder_acked_probe_route_transition_handoff_missing',
             'first_proof_chain_failure_class=runtime_unlock_responder_acked_probe_route_transition_handoff_missing',
-            'failure_variant=runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe',
-            'first_proof_chain_failure_event=runtime_unlock_precommit_probe_acked',
-            'first_proof_chain_failure_reason=answer_ack_before_probe_acked_peer_probe_not_rechecked_into_responder_adopting_launch',
-            'first_proof_chain_failure_sequence=85724',
+            ("failure_variant={0}" -f $(if ($responderInitialScopeFixture) { 'runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected' } else { 'runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe' })),
+            ("first_proof_chain_failure_event={0}" -f $(if ($responderInitialScopeFixture) { 'runtime_unlock_peer_precommit_answer_acceptance_observed' } else { 'runtime_unlock_precommit_probe_acked' })),
+            ("first_proof_chain_failure_reason={0}" -f $(if ($responderInitialScopeFixture) { 'initial_activation_zero_transport_epoch_peer_acceptance_scope_rejected_before_responder_convergence' } else { 'answer_ack_before_probe_acked_peer_probe_not_rechecked_into_responder_adopting_launch' })),
+            ("first_proof_chain_failure_sequence={0}" -f $(if ($responderInitialScopeFixture) { 20396 } else { 85724 })),
             'first_proof_chain_failure_source_path=filetransfer-retained-log-slice.log',
-            'first_proof_chain_failure_line_number=85724',
-            'first_proof_chain_failure_writer_sequence=37479',
+            ("first_proof_chain_failure_line_number={0}" -f $(if ($responderInitialScopeFixture) { 20396 } else { 85724 })),
+            ("first_proof_chain_failure_writer_sequence={0}" -f $(if ($responderInitialScopeFixture) { 7493 } else { 37479 })),
             'semantic_failure_domain=route_runtime'
         )
         foreach ($reportName in @('filetransfer-route-consistency-summary.txt', 'filetransfer-operator-verdict.txt')) {
@@ -6051,9 +6073,12 @@ function Write-RouteAcceptanceFakePhase4Run {
     $mirrorResponderHandoffCompactFixture =
         (Test-RouteAcceptanceFakeSyntheticTrustedEvidenceEnabled) -or
         ($script:RouteAcceptanceExecutionMode -eq 'fake' -and
-            (Test-RouteAcceptanceScenarioEnvEnabled `
-                -ScenarioName $scenarioName `
-                -Suffix 'RESPONDER_ACKED_PROBE_HANDOFF_SUMMARY_FIXTURE'))
+            ((Test-RouteAcceptanceScenarioEnvEnabled `
+                    -ScenarioName $scenarioName `
+                    -Suffix 'RESPONDER_ACKED_PROBE_HANDOFF_SUMMARY_FIXTURE') -or
+                (Test-RouteAcceptanceScenarioEnvEnabled `
+                    -ScenarioName $scenarioName `
+                    -Suffix 'RESPONDER_INITIAL_PEER_ACCEPTANCE_SCOPE_REJECTED_SUMMARY_FIXTURE')))
     if ($mirrorResponderHandoffCompactFixture) {
         $compactSummaryPath = Join-Path $ArtifactDir 'filetransfer-retained-compact-summary.json'
         $operatorVerdictPath = Join-Path $ArtifactDir 'filetransfer-operator-verdict.txt'
@@ -6400,9 +6425,12 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
     $responderHandoffCompactFixture =
         $script:RouteAcceptanceExecutionMode -eq 'fake' -and
         @($script:RouteAcceptanceEvidenceScenarioNames).Count -eq 1 -and
-        (Test-RouteAcceptanceScenarioEnvEnabled `
-            -ScenarioName ([string]@($script:RouteAcceptanceEvidenceScenarioNames)[0]) `
-            -Suffix 'RESPONDER_ACKED_PROBE_HANDOFF_SUMMARY_FIXTURE')
+        ((Test-RouteAcceptanceScenarioEnvEnabled `
+                -ScenarioName ([string]@($script:RouteAcceptanceEvidenceScenarioNames)[0]) `
+                -Suffix 'RESPONDER_ACKED_PROBE_HANDOFF_SUMMARY_FIXTURE') -or
+            (Test-RouteAcceptanceScenarioEnvEnabled `
+                -ScenarioName ([string]@($script:RouteAcceptanceEvidenceScenarioNames)[0]) `
+                -Suffix 'RESPONDER_INITIAL_PEER_ACCEPTANCE_SCOPE_REJECTED_SUMMARY_FIXTURE'))
     if ($script:RouteAcceptanceExecutionMode -eq 'live' -or $responderHandoffCompactFixture) {
         $startInfo.Environment['NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT'] = '1'
     }
@@ -10026,6 +10054,11 @@ function New-RouteAcceptanceSummaryRunDto {
         runtimeUnlockResponderPeerProbeHandoffMissingRecoveredCount = [int]$Result.runtimeUnlockResponderPeerProbeHandoffMissingRecoveredCount
         runtimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount = [int]$Result.runtimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount
         runtimeUnlockResponderPeerProbeHandoffVerdict = [string]$Result.runtimeUnlockResponderPeerProbeHandoffVerdict
+        runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRawCount = [int]$Result.runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRawCount
+        runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedDistinctCount = [int]$Result.runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedDistinctCount
+        runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRecoveredCount = [int]$Result.runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRecoveredCount
+        runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedUnresolvedCount = [int]$Result.runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedUnresolvedCount
+        runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedVerdict = [string]$Result.runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedVerdict
         runtimeUnlockResponderPeerProbeBindingMissingRawCount = [int]$Result.runtimeUnlockResponderPeerProbeBindingMissingRawCount
         runtimeUnlockResponderPeerProbeBindingMissingDistinctCount = [int]$Result.runtimeUnlockResponderPeerProbeBindingMissingDistinctCount
         runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount = [int]$Result.runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount
@@ -10538,6 +10571,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $runtimeUnlockResponderPeerProbeHandoffMissingDistinctCount = 0
     $runtimeUnlockResponderPeerProbeHandoffMissingRecoveredCount = 0
     $runtimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount = 0
+    $runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRawCount = 0
+    $runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedDistinctCount = 0
+    $runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRecoveredCount = 0
+    $runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedUnresolvedCount = 0
     $runtimeUnlockResponderPeerProbeBindingMissingRawCount = 0
     $runtimeUnlockResponderPeerProbeBindingMissingDistinctCount = 0
     $runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount = 0
@@ -10636,6 +10673,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $runtimeUnlockResponderPeerProbeHandoffMissingDistinctCount += [int]$runDto.runtimeUnlockResponderPeerProbeHandoffMissingDistinctCount
         $runtimeUnlockResponderPeerProbeHandoffMissingRecoveredCount += [int]$runDto.runtimeUnlockResponderPeerProbeHandoffMissingRecoveredCount
         $runtimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount += [int]$runDto.runtimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount
+        $runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRawCount += [int]$runDto.runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRawCount
+        $runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedDistinctCount += [int]$runDto.runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedDistinctCount
+        $runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRecoveredCount += [int]$runDto.runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRecoveredCount
+        $runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedUnresolvedCount += [int]$runDto.runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedUnresolvedCount
         $runtimeUnlockResponderPeerProbeBindingMissingRawCount += [int]$runDto.runtimeUnlockResponderPeerProbeBindingMissingRawCount
         $runtimeUnlockResponderPeerProbeBindingMissingDistinctCount += [int]$runDto.runtimeUnlockResponderPeerProbeBindingMissingDistinctCount
         $runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount += [int]$runDto.runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount
@@ -11017,6 +11058,22 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     else {
         'none'
     }
+    $runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedVerdict = if (
+        $runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedUnresolvedCount -gt 0 -or
+        @($runDtos | Where-Object {
+                [string]$_.runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedVerdict -eq 'fail'
+            }).Count -gt 0) {
+        'fail'
+    }
+    elseif ($runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedDistinctCount -gt 0 -or
+        @($runDtos | Where-Object {
+                [string]$_.runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedVerdict -eq 'pass'
+            }).Count -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
+    }
     $runtimeUnlockRetryDispatchInstallGrantEvidenceVerdict = if (
         $runtimeUnlockRetryDispatchInstallGrantEvidenceIncompleteUnresolvedCount -gt 0 -or
         @($runDtos | Where-Object { [string]$_.runtimeUnlockRetryDispatchInstallGrantEvidenceVerdict -eq 'fail' }).Count -gt 0) {
@@ -11293,6 +11350,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffMissingRecoveredCount),
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount),
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_verdict={0}" -f $runtimeUnlockResponderPeerProbeHandoffVerdict),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_raw_count={0}" -f $runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRawCount),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_distinct_count={0}" -f $runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedDistinctCount),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_recovered_count={0}" -f $runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRecoveredCount),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_unresolved_count={0}" -f $runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedUnresolvedCount),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_verdict={0}" -f $runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedVerdict),
         ("runtime_unlock_responder_acked_probe_binding_missing_raw_count={0}" -f $runtimeUnlockResponderPeerProbeBindingMissingRawCount),
         ("runtime_unlock_responder_acked_probe_binding_missing_distinct_count={0}" -f $runtimeUnlockResponderPeerProbeBindingMissingDistinctCount),
         ("runtime_unlock_responder_acked_probe_binding_missing_recovered_count={0}" -f $runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount),
@@ -11730,6 +11792,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeHandoffMissingRecoveredCount)
         $textLines += ("{0}.runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount)
         $textLines += ("{0}.runtime_unlock_responder_acked_probe_route_transition_handoff_verdict={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeHandoffVerdict)
+        $textLines += ("{0}.runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_raw_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRawCount)
+        $textLines += ("{0}.runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_distinct_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedDistinctCount)
+        $textLines += ("{0}.runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_recovered_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRecoveredCount)
+        $textLines += ("{0}.runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_unresolved_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedUnresolvedCount)
+        $textLines += ("{0}.runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_verdict={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedVerdict)
         $textLines += ("{0}.runtime_unlock_responder_acked_probe_binding_missing_raw_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeBindingMissingRawCount)
         $textLines += ("{0}.runtime_unlock_responder_acked_probe_binding_missing_distinct_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeBindingMissingDistinctCount)
         $textLines += ("{0}.runtime_unlock_responder_acked_probe_binding_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount)
@@ -12095,6 +12162,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         runtimeUnlockResponderPeerProbeHandoffMissingRecoveredCount = $runtimeUnlockResponderPeerProbeHandoffMissingRecoveredCount
         runtimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount = $runtimeUnlockResponderPeerProbeHandoffMissingUnresolvedCount
         runtimeUnlockResponderPeerProbeHandoffVerdict = $runtimeUnlockResponderPeerProbeHandoffVerdict
+        runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRawCount = $runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRawCount
+        runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedDistinctCount = $runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedDistinctCount
+        runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRecoveredCount = $runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedRecoveredCount
+        runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedUnresolvedCount = $runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedUnresolvedCount
+        runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedVerdict = $runtimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejectedVerdict
         runtimeUnlockResponderPeerProbeBindingMissingRawCount = $runtimeUnlockResponderPeerProbeBindingMissingRawCount
         runtimeUnlockResponderPeerProbeBindingMissingDistinctCount = $runtimeUnlockResponderPeerProbeBindingMissingDistinctCount
         runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount = $runtimeUnlockResponderPeerProbeBindingMissingRecoveredCount
@@ -12742,9 +12814,12 @@ try {
             (Test-RouteAcceptanceFakeSyntheticTrustedEvidenceEnabled) -or
             ($script:RouteAcceptanceExecutionMode -eq 'fake' -and
                 @($script:RouteAcceptanceEvidenceScenarioNames).Count -eq 1 -and
-                (Test-RouteAcceptanceScenarioEnvEnabled `
-                    -ScenarioName ([string]@($script:RouteAcceptanceEvidenceScenarioNames)[0]) `
-                    -Suffix 'RESPONDER_ACKED_PROBE_HANDOFF_SUMMARY_FIXTURE'))
+                ((Test-RouteAcceptanceScenarioEnvEnabled `
+                        -ScenarioName ([string]@($script:RouteAcceptanceEvidenceScenarioNames)[0]) `
+                        -Suffix 'RESPONDER_ACKED_PROBE_HANDOFF_SUMMARY_FIXTURE') -or
+                    (Test-RouteAcceptanceScenarioEnvEnabled `
+                        -ScenarioName ([string]@($script:RouteAcceptanceEvidenceScenarioNames)[0]) `
+                        -Suffix 'RESPONDER_INITIAL_PEER_ACCEPTANCE_SCOPE_REJECTED_SUMMARY_FIXTURE')))
         if ($fixtureSynthesizesLiveEvidence) {
             $script:RouteAcceptanceInitialGitState = [pscustomobject][ordered]@{
                 gitCommitSha = [string]$script:RouteAcceptanceInitialGitState.gitCommitSha

@@ -3165,6 +3165,346 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeFailureClassification_InitialResponderPeerAcceptanceScopeRejectionUsesEarliestExactStage()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFileTransferFailureClassificationResult", "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            function Test-TunaGuiBridgeBootstrapNotReadyEvidence { return $false }
+            function Test-TunaGuiLatestFallbackFrontierRequestDispatchMissing { return $false }
+            function Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing { return $false }
+            function Test-TunaGuiLogLinesContain { return $false }
+            function Get-TunaGuiReadinessStateAfterBookmark {
+                return [pscustomobject]@{ ListenerUnavailable = $false; ListenerReady = $false; TunaActive = $false }
+            }
+            function Resolve-TunaGuiFailureClassification {
+                param($ErrorMessage, $HistoricalPhase, $HistoricalReason)
+                return [pscustomobject]@{ Phase = $HistoricalPhase; Reason = $HistoricalReason }
+            }
+            function Assert-InitialScopeFailure {
+                param($Result, [string]$Case)
+                if ($Result.Phase -ne 'route_runtime' -or
+                    $Result.Reason -ne 'initial_activation_zero_transport_epoch_peer_acceptance_scope_rejected_before_responder_convergence' -or
+                    -not $Result.RuntimeUnlockResponderPeerProbeHandoffMissing -or
+                    -not $Result.RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejected -or
+                    $Result.RuntimeUnlockResponderPeerProbeBindingMissing -or
+                    $Result.RuntimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbe -or
+                    $Result.RuntimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbe -or
+                    $Result.FailureVariant -ne 'runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected' -or
+                    $Result.ClassificationSource -ne 'immutable_evidence_responder_peer_probe_index') {
+                    throw "$Case did not identify the initial responder peer-acceptance scope edge: $($Result | ConvertTo-Json -Compress)"
+                }
+            }
+            function Assert-ResponderStageFailure {
+                param(
+                    $Result,
+                    [string]$Case,
+                    [string]$ExpectedStage,
+                    [string]$ExpectedReason,
+                    [string]$ExpectedVariant)
+                $expectedAdoption = $ExpectedStage -eq 'adoption'
+                $expectedBinding = $ExpectedStage -eq 'binding'
+                $expectedAfterBound = $ExpectedStage -eq 'after_bound'
+                if ($Result.Phase -ne 'route_runtime' -or
+                    $Result.Reason -ne $ExpectedReason -or
+                    -not $Result.RuntimeUnlockResponderPeerProbeHandoffMissing -or
+                    $Result.RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejected -or
+                    ([bool]$Result.RuntimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbe -ne $expectedAdoption) -or
+                    ([bool]$Result.RuntimeUnlockResponderPeerProbeBindingMissing -ne $expectedBinding) -or
+                    ([bool]$Result.RuntimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbe -ne $expectedAfterBound) -or
+                    $Result.FailureVariant -ne $ExpectedVariant -or
+                    $Result.ClassificationSource -ne 'immutable_evidence_responder_peer_probe_index') {
+                    throw "$Case did not identify the exclusive $ExpectedStage responder stage: $($Result | ConvertTo-Json -Compress)"
+                }
+            }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-initial-peer-scope-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                $initialScope = 'runtime_owner_session_id=sess; runtime_owner_transfer_id=transfer; runtime_owner_direction=inbound; runtime_owner_route=regularnknv4fast; runtime_owner_route_token=regular_nkn_v4_fast; runtime_owner_protocol_version=4; runtime_owner_live_route_epoch=0; runtime_generation=1; runtime_owner_terminal_generation=0; route_publication_session_id=sess; route_publication_transfer_id=transfer; route_publication_direction=inbound; route_publication_route=regularnknv4fast; route_publication_route_token=regular_nkn_v4_fast; route_publication_protocol_version=4; route_publication_live_route_epoch=0; route_publication_runtime_generation=1; route_publication_terminal_generation=0; route_publication_leg_generation=1; route_publication_commit_generation=0; route_publication_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; checkpoint_request_id=(none); checkpoint_generation=0; data_session_identity=data-session; data_session_generation=1'
+                $prefix = @(
+                    'event=runtime_unlock_transaction_answer_received; session_id=sess; transaction_generation=1; offer_generation=6; answer_received=1; tuna_path_lease_generation=1; tuna_path_lease_current=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; log_writer_id=responder',
+                    'event=tuna_acceleration_answer_ack_pending; session_id=sess; payer_decision_id=4; generation=6; log_writer_id=responder',
+                    'event=tuna_acceleration_answer_sent; accepted=1; lanes=file; payer_decision_id=4; generation=6; msg_id=answer-message; reply_deadline_utc_ms=1200; log_writer_id=responder',
+                    'event=tuna_acceleration_answer_ack_received; session_id=sess; lanes=file; payer_decision_id=4; ack_message_id=answer-ack; ack_correlation_id=ack-correlation; ack_frame_fingerprint=ack-frame; ack_source_fingerprint=ack-fingerprint; pending_answer_ack_generation=6; authority_mode=InitialActivation; log_writer_id=responder',
+                    'event=runtime_unlock_responder_answer_probe_convergence_decided; status=Held; decision_status=Held; substate=AwaitingPeerProbe; decision_reason=semantic_answer_ack_retained_waiting_for_peer_probe; direction=inbound; session_id=sess; transfer_id=transfer; transaction_generation=1; offer_generation=6; pending_answer_ack_generation=6; payer_decision_id=4; lanes=file; authority_mode=InitialActivation; nonce=ack-correlation; answer_message_id=answer-message; answer_deadline_utc_ms=1200; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; responder_transition_mode=initial_regular_v4; ack_message_id=answer-ack; ack_source_fingerprint=ack-fingerprint; ack_frame_fingerprint=ack-frame; peer_transaction_generation=0; peer_offer_generation=0; probe_state=None; probe_transport=unknown; probe_acked_utc_ms=0; launch_generation=0; log_writer_id=responder',
+                    'event=runtime_unlock_answer_ack_probe_barrier_received; session_id=sess; lanes=file; payer_decision_id=4; reason=answer_ack_received_before_tuna_probe; log_writer_id=responder',
+                    'event=filetransfer_runtime_unlock_handoff_pending_route_commit; session_id=sess; reason=runtime_unlock_answer_ack_probe_ready; lanes=file; transaction_generation=1; offer_generation=6; state=answerreceived; path_probe_state=none; route_commit_pending=0; route_committed=0; log_writer_id=responder',
+                    'event=runtime_unlock_precommit_probe_launch_requested; session_id=sess; transfer_id=transfer; lanes=file; transaction_generation=1; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; path_probe_id=none; path_probe_state=none; duplicate=0; tuple_mutation=0; responder_waiting_for_peer_probe=1; launch_role=ResponderWaitingForPeerProbe; peer_probe_adoption=0; log_writer_id=responder',
+                    'event=runtime_unlock_precommit_probe_receive_dispatched; direction=inbound; transfer_id=transfer; session_id=sess; frame_type=filetransfer.runtime_unlock.precommit_probe; transaction_generation=1; offer_generation=1; tuna_path_lease_generation=1; probe_id=peer-probe; actual_transport=tuna; delivery_transport=tuna; lane=bulk; priority=1; queued_frames=0; queued_bytes=0; decision_reason=dispatched; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; route_publication_generation=1; route_commit_generation=0; terminal_generation=0; leg_generation=1; log_writer_id=responder',
+                    'event=runtime_unlock_tuna_probe_received; transport=tuna; direction=inbound; transfer_id=transfer; session_id=sess; transaction_generation=1; offer_generation=1; tuna_path_lease_generation=1; probe_id=peer-probe; target_transport=tuna; log_writer_id=responder',
+                    "event=filetransfer_runtime_unlock_admission_granted; session_id=sess; transfer_id=transfer; direction=inbound; source=precommit_probe_received; admission_generation=1; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; $initialScope; log_writer_id=responder",
+                    'event=runtime_unlock_precommit_probe_ack_delivery_result; session_id=sess; transfer_id=transfer; frame_type=filetransfer.runtime_unlock.precommit_probe_ack; transaction_generation=1; offer_generation=1; tuna_path_lease_generation=1; probe_id=peer-probe; ack_authority_source=runtime_unlock_precommit_ack_authority; ack_authority_generation=1; intended_transport=tuna; actual_transport=tuna; lane=bulk; payload_bytes=512; delivery_result=sent; rejection_reason=(none); log_writer_id=responder',
+                    'event=runtime_unlock_precommit_probe_ack_sent; direction=inbound; transfer_id=transfer; session_id=sess; transaction_generation=1; offer_generation=1; tuna_path_lease_generation=1; probe_id=peer-probe; received_transport=tuna; log_writer_id=responder',
+                    'event=runtime_unlock_peer_precommit_answer_acceptance_observed; status=Rejected; direction=inbound; transfer_id=transfer; session_id=sess; peer_transaction_generation=1; peer_offer_generation=1; peer_tuna_path_lease_generation=1; probe_id=peer-probe; decision_reason=current; log_writer_id=responder',
+                    'event=runtime_unlock_tuna_probe_ack_received; transport=tuna; direction=outbound; transfer_id=transfer; session_id=sess; transaction_generation=1; offer_generation=1; tuna_path_lease_generation=1; probe_id=peer-probe; accepted=1; reason=precommit_probe_commit_confirmed; log_writer_id=initiator',
+                    'event=runtime_unlock_transaction_path_probe_acked; session_id=sess; transaction_generation=1; offer_generation=1; path_probe_id=peer-probe; path_probe_state=acked; path_probe_transport=tuna; path_probe_acked_utc_ms=1300; tuna_path_lease_generation=1; log_writer_id=initiator',
+                    'event=runtime_unlock_precommit_probe_acked; direction=outbound; transfer_id=transfer; session_id=sess; transaction_generation=1; offer_generation=1; launch_generation=1; tuna_path_lease_generation=1; probe_id=peer-probe; probe_state=Acked; received_transport=tuna; log_writer_id=initiator',
+                    'event=nkn_inbound_envelope_received; envelope_type=TransportAccelerationAnswerAck; source_matches_expected=1; msg_id=answer-ack; ack_correlation_id=ack-correlation; ack_frame_fingerprint=ack-frame; ack_source_fingerprint=ack-fingerprint; log_writer_id=responder',
+                    'event=tuna_acceleration_answer_ack_received_raw; msg_id=answer-ack; ack_correlation_id=ack-correlation; ack_frame_fingerprint=ack-frame; ack_source_fingerprint=ack-fingerprint; session_id=sess; payer_decision_id=4; log_writer_id=responder'
+                )
+                $prefix | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'evidence_enrichment_timeout' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                Assert-InitialScopeFailure -Result $result -Case 'historical epoch-zero scope rejection'
+
+                foreach ($requiredIngressEvent in @(
+                        'runtime_unlock_precommit_probe_receive_dispatched',
+                        'runtime_unlock_precommit_probe_ack_delivery_result')) {
+                    @($prefix | Where-Object { $_ -notlike "event=$requiredIngressEvent;*" }) |
+                        Set-Content -LiteralPath $path
+                    $missingIngress = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'evidence_enrichment_timeout' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                    if ($missingIngress.RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejected) {
+                        throw "missing $requiredIngressEvent was classified: $($missingIngress | ConvertTo-Json -Compress)"
+                    }
+                }
+
+                $ingressMutations = [ordered]@{
+                    runtime_unlock_precommit_probe_receive_dispatched = @('live_route_epoch=0', 'live_route_epoch=9')
+                    runtime_unlock_precommit_probe_ack_delivery_result = @('actual_transport=tuna', 'actual_transport=nkn')
+                }
+                foreach ($ingressMutation in $ingressMutations.GetEnumerator()) {
+                    $mutatedIngress = @($prefix | ForEach-Object {
+                            $_
+                            if ($_ -like "event=$($ingressMutation.Key);*") {
+                                $_.Replace($ingressMutation.Value[0], $ingressMutation.Value[1])
+                            }
+                        })
+                    $mutatedIngress | Set-Content -LiteralPath $path
+                    $mutatedIngressResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'evidence_enrichment_timeout' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                    if ($mutatedIngressResult.RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejected) {
+                        throw "mutated duplicate $($ingressMutation.Key) was classified: $($mutatedIngressResult | ConvertTo-Json -Compress)"
+                    }
+                }
+
+                @($prefix | Where-Object { $_ -notlike 'event=runtime_unlock_precommit_probe_acked; direction=outbound*' }) |
+                    Set-Content -LiteralPath $path
+                $uncorroborated = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'evidence_enrichment_timeout' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($uncorroborated.RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejected) {
+                    throw "historical current without the peer ACKed callback was classified: $($uncorroborated | ConvertTo-Json -Compress)"
+                }
+
+                $modern = @($prefix | ForEach-Object {
+                    if ($_ -like 'event=runtime_unlock_peer_precommit_answer_acceptance_observed;*') {
+                        $_ -replace 'decision_reason=current', 'decision_reason=runtime_unlock_peer_precommit_answer_acceptance_scope_mode_invalid; responder_transition_mode=initial_regular_v4'
+                    }
+                    else { $_ }
+                })
+                $modern | Set-Content -LiteralPath $path
+                $modernResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'failure_class=regular_v4_frontier_repair_settlement_disposition_unverifiable' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                Assert-InitialScopeFailure -Result $modernResult -Case 'modern typed scope rejection before later fallback'
+
+                foreach ($peerAckEvent in @(
+                        'runtime_unlock_tuna_probe_ack_received',
+                        'runtime_unlock_transaction_path_probe_acked',
+                        'runtime_unlock_precommit_probe_acked')) {
+                    @($modern | Where-Object { $_ -notlike "event=$peerAckEvent;*" }) |
+                        Set-Content -LiteralPath $path
+                    $missingPeerAck = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'evidence_enrichment_timeout' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                    if ($missingPeerAck.RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejected) {
+                        throw "modern typed rejection without $peerAckEvent was classified: $($missingPeerAck | ConvertTo-Json -Compress)"
+                    }
+                    $peerAckLine = @($prefix | Where-Object {
+                            $_ -like "event=$peerAckEvent;*"
+                        } | Select-Object -First 1)[0]
+                    @($prefix) + @($peerAckLine) | Set-Content -LiteralPath $path
+                    Assert-InitialScopeFailure `
+                        -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'evidence_enrichment_timeout' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
+                        -Case "exact duplicate $peerAckEvent corroboration"
+                }
+
+                $peerAckMutations = [ordered]@{
+                    runtime_unlock_tuna_probe_ack_received = @('accepted=1', 'accepted=0')
+                    runtime_unlock_transaction_path_probe_acked = @('path_probe_acked_utc_ms=1300', 'path_probe_acked_utc_ms=1301')
+                    runtime_unlock_precommit_probe_acked = @('transfer_id=transfer', 'transfer_id=mutated-transfer')
+                }
+                foreach ($peerAckMutation in $peerAckMutations.GetEnumerator()) {
+                    $peerAckLine = @($prefix | Where-Object {
+                            $_ -like "event=$($peerAckMutation.Key);*"
+                        } | Select-Object -First 1)[0]
+                    $mutatedPeerAck = $peerAckLine.Replace(
+                        [string]$peerAckMutation.Value[0], [string]$peerAckMutation.Value[1])
+                    @($prefix) + @($mutatedPeerAck) | Set-Content -LiteralPath $path
+                    $mutatedPeerAckResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'evidence_enrichment_timeout' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                    if ($mutatedPeerAckResult.RuntimeUnlockResponderPeerProbeHandoffMissing) {
+                        throw "mutated $($peerAckMutation.Key) corroboration retained responder evidence: $($mutatedPeerAckResult | ConvertTo-Json -Compress)"
+                    }
+                }
+
+                $replacedScope = @($prefix | ForEach-Object {
+                    $_
+                    if ($_ -like 'event=filetransfer_runtime_unlock_admission_granted;*') {
+                        'event=filetransfer_runtime_owner_changed; direction=inbound; session_id=sess; transfer_id=transfer; route=file_tuna_v4; protocol_version=4; live_route_epoch=1; runtime_generation=2; route_publication_generation=2; terminal_generation=0; leg_generation=2; transport_epoch=0; bridge_recovery_generation=0; checkpoint_request_id=(none); checkpoint_generation=0; data_session_identity=data-session; data_session_generation=1; log_writer_id=responder'
+                    }
+                })
+                $replacedScope | Set-Content -LiteralPath $path
+                $replacedResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'evidence_enrichment_timeout' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($replacedResult.RuntimeUnlockResponderPeerProbeInitialActivationPeerAcceptanceScopeRejected) {
+                    throw "replaced initial scope was classified: $($replacedResult | ConvertTo-Json -Compress)"
+                }
+
+                $initialPeerScope = 'peer_runtime_owner_session_id=sess; peer_runtime_owner_transfer_id=transfer; peer_runtime_owner_direction=inbound; peer_runtime_owner_route=regularnknv4fast; peer_runtime_owner_route_token=regular_nkn_v4_fast; peer_runtime_owner_protocol_version=4; peer_runtime_owner_live_route_epoch=0; peer_runtime_generation=1; peer_runtime_owner_terminal_generation=0; peer_route_publication_session_id=sess; peer_route_publication_transfer_id=transfer; peer_route_publication_direction=inbound; peer_route_publication_route=regularnknv4fast; peer_route_publication_route_token=regular_nkn_v4_fast; peer_route_publication_protocol_version=4; peer_route_publication_live_route_epoch=0; peer_route_publication_runtime_generation=1; peer_route_publication_terminal_generation=0; peer_route_publication_leg_generation=1; peer_route_publication_commit_generation=0; peer_route_publication_generation=1; peer_terminal_generation=0; peer_leg_generation=1; peer_transport_epoch=0; peer_bridge_recovery_generation=0; peer_checkpoint_request_id=(none); peer_checkpoint_generation=0; peer_data_session_identity=data-session; peer_data_session_generation=1'
+                $initialTransitionScope = 'session_id=sess; transfer_id=transfer; direction=inbound; transaction_generation=1; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; responder_transition_mode=initial_regular_v4; source_route=regular_nkn_v4_fast; source_protocol_version=4; source_transport=regular_nkn; source_live_route_epoch=0; source_runtime_generation=1; source_route_publication_generation=1; source_route_commit_generation=0; source_terminal_generation=0; source_leg_generation=1; source_transport_epoch=0; source_bridge_recovery_generation=0; source_data_session_generation=1; data_session_identity=data-session; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; activation_authority_mode=initial_responder; retry_install_generation=0; admission_generation=1; pending_precommit_generation=1; responder_handoff_generation=0; fallback_yield_generation=0; pairing_generation=0; checkpoint_generation=0; checkpoint_request_id=(none)'
+                $exactRecovery = @(
+                    "event=runtime_unlock_peer_precommit_answer_acceptance_decided; status=Held; decision_status=Held; session_id=sess; transfer_id=transfer; direction=inbound; peer_transaction_generation=1; peer_offer_generation=1; peer_tuna_path_lease_generation=1; local_transaction_generation=1; local_offer_generation=6; local_tuna_path_lease_generation=1; pending_answer_ack_generation=6; launch_generation=1; probe_id=peer-probe; probe_frame_fingerprint=probe-fingerprint; received_transport=tuna; received_utc_ms=1250; probe_ack_sent_utc_ms=1275; peer_admission_generation=1; $initialPeerScope; data_session_generation=1; responder_transition_mode=initial_regular_v4; decision_reason=runtime_unlock_peer_precommit_probe_ack_pending; log_writer_id=responder",
+                    "event=runtime_unlock_responder_answer_probe_convergence_decided; status=Held; decision_status=Held; substate=AwaitingProbeAck; decision_reason=semantic_answer_ack_joined_waiting_for_probe_ack; direction=inbound; session_id=sess; transfer_id=transfer; transaction_generation=1; offer_generation=6; pending_answer_ack_generation=6; payer_decision_id=4; lanes=file; authority_mode=InitialActivation; nonce=ack-correlation; answer_message_id=answer-message; answer_deadline_utc_ms=1200; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; responder_transition_mode=initial_regular_v4; ack_message_id=answer-ack; ack_source_fingerprint=ack-fingerprint; ack_frame_fingerprint=ack-frame; peer_transaction_generation=1; peer_offer_generation=1; peer_tuna_path_lease_generation=1; probe_id=peer-probe; peer_probe_frame_fingerprint=probe-fingerprint; received_transport=tuna; received_utc_ms=1250; probe_ack_sent_utc_ms=1275; peer_admission_generation=1; $initialPeerScope; data_session_generation=1; probe_state=Started; probe_transport=tuna; probe_acked_utc_ms=0; launch_generation=1; log_writer_id=responder",
+                    'event=runtime_unlock_transaction_path_probe_acked; session_id=sess; transaction_generation=1; offer_generation=6; path_probe_id=peer-probe; path_probe_state=acked; path_probe_transport=tuna; path_probe_acked_utc_ms=1300; tuna_path_lease_generation=1; log_writer_id=responder',
+                    "event=runtime_unlock_responder_answer_probe_convergence_decided; status=Accepted; decision_status=Accepted; substate=Complete; decision_reason=runtime_unlock_responder_answer_probe_completed; direction=inbound; session_id=sess; transfer_id=transfer; transaction_generation=1; offer_generation=6; pending_answer_ack_generation=6; payer_decision_id=4; lanes=file; authority_mode=InitialActivation; nonce=ack-correlation; answer_message_id=answer-message; answer_deadline_utc_ms=1200; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; responder_transition_mode=initial_regular_v4; ack_message_id=answer-ack; ack_source_fingerprint=ack-fingerprint; ack_frame_fingerprint=ack-frame; peer_transaction_generation=1; peer_offer_generation=1; peer_tuna_path_lease_generation=1; probe_id=peer-probe; peer_probe_frame_fingerprint=probe-fingerprint; received_transport=tuna; received_utc_ms=1250; probe_ack_sent_utc_ms=1275; peer_admission_generation=1; $initialPeerScope; data_session_generation=1; probe_state=Acked; probe_transport=tuna; probe_acked_utc_ms=1300; launch_generation=1; log_writer_id=responder",
+                    'event=runtime_unlock_paired_commit_confirmed; direction=inbound; transfer_id=transfer; session_id=sess; transaction_generation=1; offer_generation=1; tuna_path_lease_generation=1; probe_id=peer-probe; reason=precommit_probe_commit_confirmed; log_writer_id=responder',
+                    'event=runtime_unlock_precommit_probe_acked; direction=inbound; transfer_id=transfer; session_id=sess; transaction_generation=1; offer_generation=1; launch_generation=1; tuna_path_lease_generation=1; probe_id=peer-probe; probe_state=Acked; received_transport=tuna; log_writer_id=responder',
+                    'event=runtime_unlock_precommit_probe_launch_requested; session_id=sess; transfer_id=transfer; transaction_generation=1; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; path_probe_id=peer-probe; path_probe_state=acked; duplicate=0; tuple_mutation=0; responder_waiting_for_peer_probe=0; launch_role=ResponderAdoptingAckedPeerProbe; peer_probe_adoption=1; peer_transaction_generation=1; peer_offer_generation=1; peer_tuna_path_lease_generation=1; log_writer_id=responder',
+                    "event=runtime_unlock_precommit_responder_peer_probe_handoff_bound; status=Accepted; decision_status=Accepted; direction=inbound; session_id=sess; transfer_id=transfer; transaction_generation=1; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; probe_id=peer-probe; probe_state=Acked; probe_transport=tuna; probe_acked_utc_ms=1300; ack_message_id=answer-ack; ack_source_fingerprint=ack-fingerprint; peer_probe_frame_fingerprint=probe-fingerprint; responder_transition_mode=initial_regular_v4; peer_transaction_generation=1; peer_offer_generation=1; peer_tuna_path_lease_generation=1; peer_admission_generation=1; $initialPeerScope; launch_role=ResponderAdoptingAckedPeerProbe; answer_acceptance_source=SemanticAnswerAck; normalized_reason=exact_responder_peer_probe_adopted; log_writer_id=responder",
+                    'event=filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided; status=Accepted; decision_status=Accepted; decision_reason=runtime_unlock_responder_peer_probe_route_transition_handoff_accepted; direction=inbound; session_id=sess; transfer_id=transfer; transaction_generation=1; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; lanes=file; payer_decision_id=4; pending_answer_ack_generation=6; answer_acceptance_source=SemanticAnswerAck; ack_message_id=answer-ack; ack_source_fingerprint=ack-fingerprint; peer_probe_frame_fingerprint=probe-fingerprint; probe_id=peer-probe; probe_state=Acked; probe_transport=tuna; probe_acked_utc_ms=1300; transition_authority_id=(none); transition_generation=0; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; route_publication_generation=1; route_commit_generation=0; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; checkpoint_request_id=(none); checkpoint_generation=0; data_session_identity=data-session; data_session_generation=1; admission_generation=1; pending_precommit_generation=1; fallback_yield_authority_id=(none); fallback_yield_generation=0; pairing_generation=0; pair_key=(none); responder_handoff_authority_id=(none); responder_handoff_generation=0; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; log_writer_id=responder',
+                    "event=filetransfer_route_transition_prepared; transition_kind=RegularV4ToTunaV4; authority_id=transition-1; transition_generation=1; $initialTransitionScope; log_writer_id=responder",
+                    "event=filetransfer_route_transition_draining; transition_kind=RegularV4ToTunaV4; authority_id=transition-1; transition_generation=1; $initialTransitionScope; log_writer_id=responder",
+                    "event=filetransfer_route_transition_committed; transition_kind=RegularV4ToTunaV4; authority_id=transition-1; transition_generation=1; $initialTransitionScope; log_writer_id=responder",
+                    "event=filetransfer_route_transition_disposition_applied; transition_kind=RegularV4ToTunaV4; authority_id=transition-1; transition_generation=1; apply_status=Applied; resulting_live_route_epoch=1; resulting_runtime_generation=2; resulting_route_publication_generation=2; resulting_route_commit_generation=1; resulting_terminal_generation=0; resulting_leg_generation=2; $initialTransitionScope; log_writer_id=responder",
+                    'event=filetransfer_live_route_epoch_recovered; session_id=sess; transfer_id=transfer; direction=inbound; transition_authority_id=transition-1; transition_generation=1; route=file_tuna_v4; protocol_version=4; live_route_epoch=1; runtime_generation=2; route_publication_generation=2; route_commit_generation=1; terminal_generation=0; leg_generation=2; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; route_publication_action_kind=RoutePublication; coordinator_decision_reason=filetransfer_route_transition_committed; projection_source=coordinator_route_transition; log_writer_id=responder'
+                )
+                $missingConvergenceChains = [ordered]@{
+                    awaiting_peer_probe = @($prefix | Where-Object {
+                            $_ -notlike '*substate=AwaitingPeerProbe*'
+                        }) + @($exactRecovery)
+                    awaiting_probe_ack = @($prefix) + @($exactRecovery | Where-Object {
+                            $_ -notlike '*substate=AwaitingProbeAck*'
+                        })
+                    paired_commit_confirmation = @($prefix) + @($exactRecovery | Where-Object {
+                            $_ -notlike 'event=runtime_unlock_paired_commit_confirmed;*'
+                        })
+                }
+                foreach ($missingConvergenceChain in $missingConvergenceChains.GetEnumerator()) {
+                    @($missingConvergenceChain.Value) | Set-Content -LiteralPath $path
+                    Assert-InitialScopeFailure `
+                        -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'evidence_enrichment_timeout' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
+                        -Case "missing $($missingConvergenceChain.Key) convergence proof"
+                }
+
+                $awaitingPeerProbeHold = @($prefix | Where-Object {
+                        $_ -like '*substate=AwaitingPeerProbe*'
+                    } | Select-Object -First 1)[0]
+                @($prefix) + @($exactRecovery) + @(
+                    $awaitingPeerProbeHold,
+                    $exactRecovery[1],
+                    $exactRecovery[4]) | Set-Content -LiteralPath $path
+                $duplicateConvergenceResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'evidence_enrichment_timeout' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($duplicateConvergenceResult.RuntimeUnlockResponderPeerProbeHandoffMissing) {
+                    throw "exact duplicate convergence callbacks remained unresolved: $($duplicateConvergenceResult | ConvertTo-Json -Compress)"
+                }
+
+                $convergenceMutations = @(
+                    $awaitingPeerProbeHold.Replace('launch_generation=0', 'launch_generation=9'),
+                    $exactRecovery[1].Replace(
+                        'peer_probe_frame_fingerprint=probe-fingerprint',
+                        'peer_probe_frame_fingerprint=mutated-probe-fingerprint'),
+                    $exactRecovery[4].Replace('offer_generation=1', 'offer_generation=9'))
+                foreach ($convergenceMutation in $convergenceMutations) {
+                    @($prefix) + @($exactRecovery) + @($convergenceMutation) |
+                        Set-Content -LiteralPath $path
+                    $mutatedConvergenceResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'evidence_enrichment_timeout' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                    if ($mutatedConvergenceResult.RuntimeUnlockResponderPeerProbeHandoffMissing) {
+                        throw "mutated convergence callback retained responder evidence: $($mutatedConvergenceResult | ConvertTo-Json -Compress)"
+                    }
+                }
+
+                $scopeInvalidators = @(
+                    'event=filetransfer_route_hint_authorized_publication_accepted; direction=inbound; session_id=sess; transfer_id=transfer; route=file_tuna_v4; protocol_version=4; live_route_epoch=1; route_publication_generation=9; runtime_generation=2; terminal_generation=0; leg_generation=2; log_writer_id=responder',
+                    'event=filetransfer_terminalized_by_peer_down; direction=inbound; session_id=sess; transfer_id=transfer; reason=peer_down; terminal_state=failed; log_writer_id=responder',
+                    'event=filetransfer_live_route_epoch_terminal; direction=inbound; session_id=sess; transfer_id=transfer; live_route_epoch=0; route=regular_nkn_v4_fast; protocol_version=4; terminal_state=failed; reason=route_terminal; log_writer_id=responder',
+                    'event=filetransfer_v6_epoch_terminal; direction=inbound; session_id=sess; transfer_id=transfer; transport_epoch=0; reason=v6_terminal; log_writer_id=responder')
+                foreach ($scopeInvalidator in $scopeInvalidators) {
+                    @($prefix) + @($scopeInvalidator) | Set-Content -LiteralPath $path
+                    $invalidatedScopeResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'evidence_enrichment_timeout' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                    if ($invalidatedScopeResult.RuntimeUnlockResponderPeerProbeHandoffMissing) {
+                        throw "terminal or publication scope replacement retained responder evidence: $($invalidatedScopeResult | ConvertTo-Json -Compress)"
+                    }
+                }
+
+                $stageCases = @(
+                    [pscustomobject]@{
+                        Name = 'exact ACKed convergence without adopting recheck'
+                        LastRecoveryIndex = 5
+                        Stage = 'adoption'
+                        Reason = 'answer_ack_before_probe_acked_peer_probe_not_rechecked_into_responder_adopting_launch'
+                        Variant = 'runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe'
+                    },
+                    [pscustomobject]@{
+                        Name = 'exact adopting recheck without accepted binding'
+                        LastRecoveryIndex = 6
+                        Stage = 'binding'
+                        Reason = 'late_answer_ack_did_not_bind_acked_peer_probe_to_responder_route_transition'
+                        Variant = 'runtime_unlock_responder_acked_probe_binding_missing'
+                    },
+                    [pscustomobject]@{
+                        Name = 'accepted binding without current handoff transition'
+                        LastRecoveryIndex = 7
+                        Stage = 'after_bound'
+                        Reason = 'bound_responder_acked_peer_probe_route_transition_handoff_invalidated_as_transfer_context_replaced'
+                        Variant = 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe'
+                    }
+                )
+                foreach ($stageCase in $stageCases) {
+                    @($prefix) + @($exactRecovery[0..([int]$stageCase.LastRecoveryIndex)]) |
+                        Set-Content -LiteralPath $path
+                    Assert-ResponderStageFailure `
+                        -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'evidence_enrichment_timeout' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
+                        -Case $stageCase.Name `
+                        -ExpectedStage $stageCase.Stage `
+                        -ExpectedReason $stageCase.Reason `
+                        -ExpectedVariant $stageCase.Variant
+                }
+
+                @($prefix) + @($exactRecovery) | Set-Content -LiteralPath $path
+                $recoveredResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'evidence_enrichment_timeout' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($recoveredResult.RuntimeUnlockResponderPeerProbeHandoffMissing) {
+                    throw "exact initial responder recovery remained unresolved: $($recoveredResult | ConvertTo-Json -Compress)"
+                }
+
+                $mutatedPeerProbe = @($prefix | Where-Object {
+                        $_ -like 'event=runtime_unlock_tuna_probe_received;*'
+                    } | Select-Object -First 1)[0].Replace('offer_generation=1', 'offer_generation=9')
+                @($prefix) + @($mutatedPeerProbe) + @($exactRecovery) | Set-Content -LiteralPath $path
+                $mutatedThenRecovered = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'evidence_enrichment_timeout' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                Assert-InitialScopeFailure -Result $mutatedThenRecovered -Case 'mutated duplicate before otherwise exact recovery'
+
+                @($prefix) + @($prefix[3]) | Set-Content -LiteralPath $path
+                Assert-InitialScopeFailure `
+                    -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'evidence_enrichment_timeout' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
+                    -Case 'exact duplicate initial semantic ACK remains idempotent'
+
+                foreach ($semanticMutation in @(
+                        @('ack_message_id=answer-ack', 'ack_message_id=mutated-answer-ack'),
+                        @('ack_correlation_id=ack-correlation', 'ack_correlation_id=mutated-correlation'),
+                        @('payer_decision_id=4', 'payer_decision_id=9'),
+                        @('pending_answer_ack_generation=6', 'pending_answer_ack_generation=9'),
+                        @('lanes=file', 'lanes=screen'))) {
+                    $mutatedSemanticAck = $prefix[3].Replace(
+                        [string]$semanticMutation[0], [string]$semanticMutation[1])
+                    @($prefix) + @($mutatedSemanticAck) | Set-Content -LiteralPath $path
+                    $mutatedSemanticResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'evidence_enrichment_timeout' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                    if ($mutatedSemanticResult.RuntimeUnlockResponderPeerProbeHandoffMissing) {
+                        throw "same-lineage initial semantic ACK mutation retained responder evidence ($($semanticMutation[0])): $($mutatedSemanticResult | ConvertTo-Json -Compress)"
+                    }
+                }
+                Write-Output 'gui-initial-peer-acceptance-scope-rejection-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(result.ExitCode == 0, $"Initial responder scope GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-initial-peer-acceptance-scope-rejection-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GuiSmokeFailureClassification_AnswerAckBeforeProbeUsesAdoptionRecheckStage()
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
@@ -3460,6 +3800,21 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 Assert-AdoptionRecheckFailure `
                     -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
                     -Case 'exact duplicate semantic ACK and probe callbacks preserve first chronology'
+
+                foreach ($semanticMutation in @(
+                        @('ack_message_id=answer-ack', 'ack_message_id=mutated-answer-ack'),
+                        @('ack_correlation_id=ack-correlation', 'ack_correlation_id=mutated-correlation'),
+                        @('payer_decision_id=7', 'payer_decision_id=9'),
+                        @('pending_answer_ack_generation=17', 'pending_answer_ack_generation=19'),
+                        @('lanes=file', 'lanes=screen'))) {
+                    $mutatedSemanticAck = $prefix[5].Replace(
+                        [string]$semanticMutation[0], [string]$semanticMutation[1])
+                    @($prefix) + @($mutatedSemanticAck) | Set-Content -LiteralPath $path
+                    $mutatedSemanticResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                    if ($mutatedSemanticResult.RuntimeUnlockResponderPeerProbeHandoffMissing) {
+                        throw "same-lineage post-fallback semantic ACK mutation retained responder evidence ($($semanticMutation[0])): $($mutatedSemanticResult | ConvertTo-Json -Compress)"
+                    }
+                }
 
                 $combinedRawMutation = @($prefix) + @(
                     $prefix[4].Replace('msg_id=answer-ack', 'msg_id=mutated-answer-ack').Replace(

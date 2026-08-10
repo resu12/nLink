@@ -402,6 +402,567 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(false, "rejected")]
+    [InlineData(true, "rejected")]
+    [InlineData(false, "recovered")]
+    [InlineData(true, "recovered")]
+    [InlineData(false, "recovered_exact_duplicates")]
+    [InlineData(true, "recovered_exact_duplicates")]
+    [InlineData(false, "recovered_mutated_duplicate")]
+    [InlineData(true, "recovered_mutated_duplicate")]
+    [InlineData(false, "recovered_then_replaced")]
+    [InlineData(true, "recovered_then_replaced")]
+    [InlineData(false, "retry_acked_no_adopting")]
+    [InlineData(true, "retry_acked_no_adopting")]
+    [InlineData(false, "retry_adopting")]
+    [InlineData(true, "retry_adopting")]
+    [InlineData(false, "retry_bound")]
+    [InlineData(true, "retry_bound")]
+    [InlineData(false, "retry_handoff")]
+    [InlineData(true, "retry_handoff")]
+    [InlineData(false, "retry_prepare")]
+    [InlineData(true, "retry_prepare")]
+    [InlineData(false, "retry_commit")]
+    [InlineData(true, "retry_commit")]
+    [InlineData(false, "retry_publication")]
+    [InlineData(true, "retry_publication")]
+    [InlineData(false, "missing_peer_ack")]
+    [InlineData(true, "missing_peer_ack")]
+    [InlineData(false, "modern_missing_peer_ack")]
+    [InlineData(true, "modern_missing_peer_ack")]
+    [InlineData(false, "initial_ingress_exact_duplicates")]
+    [InlineData(true, "initial_ingress_exact_duplicates")]
+    [InlineData(false, "initial_dispatch_mutation")]
+    [InlineData(true, "initial_dispatch_mutation")]
+    [InlineData(false, "initial_tuna_receipt_mutation")]
+    [InlineData(true, "initial_tuna_receipt_mutation")]
+    [InlineData(false, "initial_ack_delivery_mutation")]
+    [InlineData(true, "initial_ack_delivery_mutation")]
+    [InlineData(false, "initial_ack_send_mutation")]
+    [InlineData(true, "initial_ack_send_mutation")]
+    [InlineData(false, "initial_held_convergence_mutation")]
+    [InlineData(true, "initial_held_convergence_mutation")]
+    [InlineData(false, "retry_peer_receipt_mutation")]
+    [InlineData(true, "retry_peer_receipt_mutation")]
+    [InlineData(false, "retry_started_convergence_mutation")]
+    [InlineData(true, "retry_started_convergence_mutation")]
+    [InlineData(false, "retry_complete_convergence_mutation")]
+    [InlineData(true, "retry_complete_convergence_mutation")]
+    [InlineData(false, "retry_paired_confirmation_mutation")]
+    [InlineData(true, "retry_paired_confirmation_mutation")]
+    [InlineData(false, "scope_mutation")]
+    [InlineData(true, "scope_mutation")]
+    [InlineData(false, "wrong_writer")]
+    [InlineData(true, "wrong_writer")]
+    [InlineData(false, "non_tuna")]
+    [InlineData(true, "non_tuna")]
+    [InlineData(false, "non_initial_epoch")]
+    [InlineData(true, "non_initial_epoch")]
+    [InlineData(false, "duplicate")]
+    [InlineData(true, "duplicate")]
+    [InlineData(false, "mutated_duplicate")]
+    [InlineData(true, "mutated_duplicate")]
+    [InlineData(false, "same_msg_ack_mutation")]
+    [InlineData(true, "same_msg_ack_mutation")]
+    [InlineData(false, "same_correlation_ack_mutation")]
+    [InlineData(true, "same_correlation_ack_mutation")]
+    [InlineData(false, "local_offer_mismatch")]
+    [InlineData(true, "local_offer_mismatch")]
+    [InlineData(false, "terminal_before")]
+    [InlineData(true, "terminal_before")]
+    [InlineData(false, "data_session_replacement")]
+    [InlineData(true, "data_session_replacement")]
+    [InlineData(false, "later_settlement")]
+    [InlineData(true, "later_settlement")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_ResponderInitialActivationPeerAcceptanceScopeRejectedUsesEarliestExclusiveStage(
+        bool compact,
+        string mode)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildResponderInitialActivationPeerAcceptanceScopeFixture(mode),
+            environment: compact
+                ? new Dictionary<string, string> { ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1" }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        var initialStage = mode is
+            "rejected" or
+            "duplicate" or
+            "later_settlement" or
+            "initial_ingress_exact_duplicates";
+        var adoptionStage = string.Equals(mode, "retry_acked_no_adopting", StringComparison.Ordinal);
+        var bindingStage = string.Equals(mode, "retry_adopting", StringComparison.Ordinal);
+        var afterBoundStage = mode is
+            "recovered" or
+            "recovered_exact_duplicates" or
+            "recovered_then_replaced" or
+            "retry_bound" or
+            "retry_handoff" or
+            "retry_prepare" or
+            "retry_commit" or
+            "retry_publication";
+        var detected = initialStage || adoptionStage || bindingStage || afterBoundStage;
+        var recovered = mode is "recovered" or "recovered_exact_duplicates";
+
+        Assert.Equal(detected ? "1" : "0", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_raw_count"]);
+        Assert.Equal(detected ? "1" : "0", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_distinct_count"]);
+        Assert.Equal(recovered ? "1" : "0", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count"]);
+        Assert.Equal(detected && !recovered ? "1" : "0", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count"]);
+        Assert.Equal(initialStage ? "1" : "0", verdict["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_raw_count"]);
+        Assert.Equal(initialStage ? "1" : "0", verdict["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_recovered_count"]);
+        Assert.Equal(initialStage ? "1" : "0", verdict["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_unresolved_count"]);
+        Assert.Equal(adoptionStage ? "1" : "0", verdict["runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_raw_count"]);
+        Assert.Equal(adoptionStage ? "1" : "0", verdict["runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_recovered_count"]);
+        Assert.Equal(adoptionStage ? "1" : "0", verdict["runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_unresolved_count"]);
+        Assert.Equal(bindingStage ? "1" : "0", verdict["runtime_unlock_responder_acked_probe_binding_missing_raw_count"]);
+        Assert.Equal(bindingStage ? "1" : "0", verdict["runtime_unlock_responder_acked_probe_binding_missing_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_responder_acked_probe_binding_missing_recovered_count"]);
+        Assert.Equal(bindingStage ? "1" : "0", verdict["runtime_unlock_responder_acked_probe_binding_missing_unresolved_count"]);
+        Assert.Equal(afterBoundStage ? "1" : "0", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_raw_count"]);
+        Assert.Equal(afterBoundStage ? "1" : "0", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_distinct_count"]);
+        Assert.Equal(recovered ? "1" : "0", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_recovered_count"]);
+        Assert.Equal(afterBoundStage && !recovered ? "1" : "0", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_unresolved_count"]);
+
+        if (initialStage)
+        {
+            Assert.Equal(
+                "runtime_unlock_responder_acked_probe_route_transition_handoff_missing",
+                verdict["first_proof_chain_failure_class"]);
+            Assert.Equal(
+                "runtime_unlock_peer_precommit_answer_acceptance_observed",
+                verdict["first_proof_chain_failure_event"]);
+            Assert.Equal(
+                "initial_activation_zero_transport_epoch_peer_acceptance_scope_rejected_before_responder_convergence",
+                verdict["first_proof_chain_failure_reason"]);
+            Assert.Equal("7493", verdict["first_proof_chain_failure_writer_sequence"]);
+            Assert.Equal(
+                "runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected",
+                verdict["failure_variant"]);
+        }
+        else if (adoptionStage)
+        {
+            Assert.Equal(
+                "runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe",
+                verdict["failure_variant"]);
+        }
+        else if (bindingStage)
+        {
+            Assert.Equal(
+                "runtime_unlock_responder_acked_probe_binding_missing",
+                verdict["failure_variant"]);
+        }
+        else if (afterBoundStage && !recovered)
+        {
+            Assert.Equal(
+                "runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe",
+                verdict["failure_variant"]);
+        }
+
+        if (string.Equals(mode, "later_settlement", StringComparison.Ordinal))
+        {
+            Assert.Equal(
+                "1",
+                verdict["regular_v4_frontier_repair_settlement_disposition_unverifiable_unresolved_count"]);
+        }
+    }
+
+    private static IReadOnlyList<string> BuildResponderInitialActivationPeerAcceptanceScopeFixture(
+        string mode)
+    {
+        const string sessionId = "sess_initial_responder_scope";
+        const string transferId = "transfer_initial_responder_scope";
+        const string writerId = "writer_initial_responder_scope";
+        const string peerWriterId = "writer_initial_responder_peer";
+        const string probeId = "runtime-unlock-precommit:1:1:initial-probe";
+        const string directScope =
+            "route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; " +
+            "route_publication_generation=1; route_commit_generation=0; terminal_generation=0; leg_generation=1; " +
+            "transport_epoch=0; bridge_recovery_generation=0; checkpoint_request_id=(none); checkpoint_generation=0; " +
+            "data_session_identity=data-session-initial; data_session_generation=1";
+        const string initialAdmissionScope =
+            "admission_generation=1; runtime_generation=1; route_publication_generation=1; " +
+            "route_publication_commit_generation=0; terminal_generation=0; leg_generation=1; transport_epoch=0; " +
+            "bridge_recovery_generation=0; checkpoint_request_id=(none); checkpoint_generation=0; " +
+            "data_session_identity=data-session-initial; data_session_generation=1";
+        const string sourceScope =
+            "source_route=regular_nkn_v4_fast; source_protocol_version=4; source_live_route_epoch=0; " +
+            "source_runtime_generation=1; source_route_publication_generation=1; source_route_commit_generation=0; " +
+            "source_terminal_generation=0; source_leg_generation=1; source_transport_epoch=0; " +
+            "source_bridge_recovery_generation=0; source_checkpoint_request_id=(none); source_checkpoint_generation=0; " +
+            "source_data_session_identity=data-session-initial; source_data_session_generation=1";
+        const string peerScope =
+            "admission_generation=1; peer_admission_generation=1; " +
+            "peer_runtime_owner_session_id=sess_initial_responder_scope; " +
+            "peer_runtime_owner_transfer_id=transfer_initial_responder_scope; peer_runtime_owner_direction=inbound; " +
+            "peer_runtime_owner_route=regularnknv4fast; peer_runtime_owner_route_token=regular_nkn_v4_fast; " +
+            "peer_runtime_owner_protocol_version=4; peer_runtime_owner_live_route_epoch=0; peer_runtime_generation=1; " +
+            "peer_runtime_owner_terminal_generation=0; peer_route_publication_session_id=sess_initial_responder_scope; " +
+            "peer_route_publication_transfer_id=transfer_initial_responder_scope; peer_route_publication_direction=inbound; " +
+            "peer_route_publication_route=regularnknv4fast; peer_route_publication_route_token=regular_nkn_v4_fast; " +
+            "peer_route_publication_protocol_version=4; peer_route_publication_live_route_epoch=0; " +
+            "peer_route_publication_runtime_generation=1; peer_route_publication_terminal_generation=0; " +
+            "peer_route_publication_leg_generation=1; peer_route_publication_commit_generation=0; " +
+            "peer_route_publication_generation=1; peer_terminal_generation=0; peer_leg_generation=1; " +
+            "peer_transport_epoch=0; peer_bridge_recovery_generation=0; peer_checkpoint_request_id=(none); " +
+            "peer_checkpoint_generation=0; peer_data_session_identity=data-session-initial; peer_data_session_generation=1";
+        const string peerTuple =
+            "peer_transaction_generation=1; peer_offer_generation=1; peer_tuna_path_lease_generation=1; " +
+            "probe_id=runtime-unlock-precommit:1:1:initial-probe";
+        const string localAnswerProof =
+            "transaction_generation=2; offer_generation=6; pending_answer_ack_generation=6; authority_mode=InitialActivation; " +
+            "payer_decision_id=4; lanes=file; answer_message_id=answer-message-initial; answer_deadline_utc_ms=1786311755330; " +
+            "ack_message_id=answer-ack-initial; ack_source_fingerprint=ack-source-initial; " +
+            "ack_frame_fingerprint=ack-frame-initial; launch_generation=1; tuna_path_lease_generation=1; " +
+            "tuna_path_lease_listener_run_id=peer-offer-dialer-1";
+        var admissionTransportEpoch = string.Equals(mode, "scope_mutation", StringComparison.Ordinal)
+            ? "1"
+            : "0";
+        var recoveryLineageMutation = mode is
+            "retry_peer_receipt_mutation" or
+            "retry_started_convergence_mutation" or
+            "retry_complete_convergence_mutation" or
+            "retry_paired_confirmation_mutation";
+        var retryMode = mode is
+            "recovered" or
+            "recovered_exact_duplicates" or
+            "recovered_mutated_duplicate" or
+            "recovered_then_replaced" or
+            "retry_acked_no_adopting" or
+            "retry_adopting" or
+            "retry_bound" or
+            "retry_handoff" or
+            "retry_prepare" or
+            "retry_commit" or
+            "retry_publication" ||
+            recoveryLineageMutation;
+        var includeAdopting = retryMode &&
+            !string.Equals(mode, "retry_acked_no_adopting", StringComparison.Ordinal);
+        var includeBound = includeAdopting &&
+            !string.Equals(mode, "retry_adopting", StringComparison.Ordinal);
+        var includeHandoff = mode is
+            "recovered" or
+            "recovered_exact_duplicates" or
+            "recovered_mutated_duplicate" or
+            "recovered_then_replaced" or
+            "retry_handoff" or
+            "retry_prepare" or
+            "retry_commit" or
+            "retry_publication" ||
+            recoveryLineageMutation;
+        var includePrepare = mode is
+            "recovered" or
+            "recovered_exact_duplicates" or
+            "recovered_mutated_duplicate" or
+            "recovered_then_replaced" or
+            "retry_prepare" or
+            "retry_commit" or
+            "retry_publication" ||
+            recoveryLineageMutation;
+        var includeCommit = mode is
+            "recovered" or
+            "recovered_exact_duplicates" or
+            "recovered_mutated_duplicate" or
+            "recovered_then_replaced" or
+            "retry_commit" or
+            "retry_publication" ||
+            recoveryLineageMutation;
+        var includeFullDisposition = mode is
+            "recovered" or
+            "recovered_exact_duplicates" or
+            "recovered_mutated_duplicate" or
+            "recovered_then_replaced" ||
+            recoveryLineageMutation;
+        var includePublication = mode is
+            "recovered" or
+            "recovered_exact_duplicates" or
+            "recovered_mutated_duplicate" or
+            "recovered_then_replaced" or
+            "retry_publication" ||
+            recoveryLineageMutation;
+        var rejectionReason = retryMode ||
+            string.Equals(mode, "modern_missing_peer_ack", StringComparison.Ordinal)
+            ? "runtime_unlock_peer_precommit_answer_acceptance_scope_not_current; responder_transition_mode=initial_regular_v4"
+            : "current";
+
+        var lines = new List<string>
+        {
+            LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id={sessionId}; {directScope}; target_route=regular_nkn_v4_fast; target_protocol_version=4; target_transport=regular_nkn; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted; log_writer_id={writerId}", secondsOffset: 0),
+            LogLine($"event=runtime_unlock_transaction_answer_received; session_id={sessionId}; transaction_generation=2; offer_generation=6; answer_received=1; tuna_path_lease_generation=1; tuna_path_lease_current=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; log_writer_id={writerId}", secondsOffset: 1),
+            LogLine($"event=tuna_acceleration_answer_ack_pending; session_id={sessionId}; lanes=file; payer_decision_id=4; generation=6; log_writer_id={writerId}", secondsOffset: 2),
+            LogLine($"event=tuna_acceleration_answer_sent; accepted=1; lanes=file; payer_decision_id=4; generation=6; msg_id=answer-message-initial; reply_deadline_utc_ms=1786311755330; log_writer_id={writerId}", secondsOffset: 3),
+            LogLine($"event=nkn_inbound_envelope_received; envelope_type=TransportAccelerationAnswerAck; msg_id=answer-ack-initial; source_matches_expected=1; log_writer_id={writerId}", secondsOffset: 4),
+            LogLine($"event=tuna_acceleration_answer_ack_received_raw; msg_id=answer-ack-initial; ack_correlation_id=ack-correlation-initial; ack_frame_fingerprint=ack-frame-initial; ack_source_fingerprint=ack-source-initial; session_id={sessionId}; payer_decision_id=4; log_writer_id={writerId}", secondsOffset: 5),
+            LogLine($"event=tuna_acceleration_answer_ack_received; session_id={sessionId}; lanes=file; payer_decision_id=4; ack_message_id=answer-ack-initial; ack_correlation_id=ack-correlation-initial; ack_frame_fingerprint=ack-frame-initial; ack_source_fingerprint=ack-source-initial; pending_answer_ack_generation=6; authority_mode=InitialActivation; log_writer_id={writerId}", secondsOffset: 6),
+            LogLine($"event=runtime_unlock_responder_answer_probe_convergence_decided; status=Held; decision_status=Held; substate=AwaitingPeerProbe; direction=inbound; session_id={sessionId}; transfer_id=(none); {localAnswerProof}; peer_transaction_generation=0; peer_offer_generation=0; probe_state=None; decision_reason=semantic_answer_ack_retained_waiting_for_peer_probe; log_writer_id={writerId}", secondsOffset: 7),
+            LogLine($"event=runtime_unlock_answer_ack_probe_barrier_received; session_id={sessionId}; lanes=file; payer_decision_id=4; reason=answer_ack_received_before_tuna_probe; log_writer_id={writerId}", secondsOffset: 8),
+            LogLine($"event=filetransfer_runtime_unlock_handoff_pending_route_commit; session_id={sessionId}; transaction_generation=2; offer_generation=6; state=answerreceived; path_probe_state=none; route_commit_pending=0; route_committed=0; log_writer_id={writerId}", secondsOffset: 9),
+            LogLine($"event=runtime_unlock_precommit_probe_launch_requested; session_id={sessionId}; transfer_id={transferId}; transaction_generation=2; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; path_probe_id=none; path_probe_state=none; duplicate=0; tuple_mutation=0; responder_waiting_for_peer_probe=1; launch_role=ResponderWaitingForPeerProbe; peer_probe_adoption=0; log_writer_id={writerId}", secondsOffset: 10),
+            LogLine($"event=runtime_unlock_precommit_probe_receive_dispatched; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=1; offer_generation=1; tuna_path_lease_generation=1; probe_id={probeId}; actual_transport=tuna; delivery_transport=tuna; {directScope}; log_writer_id={writerId}", secondsOffset: 11),
+            LogLine($"event=runtime_unlock_tuna_probe_received; transport=tuna; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=1; offer_generation=1; tuna_path_lease_generation=1; probe_id={probeId}; target_transport=tuna; log_writer_id={writerId}", secondsOffset: 12),
+            LogLine($"event=filetransfer_runtime_unlock_admission_granted; direction=inbound; transfer_id={transferId}; session_id={sessionId}; source=precommit_probe_received; admission_generation=1; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; runtime_owner_session_id={sessionId}; runtime_owner_transfer_id={transferId}; runtime_owner_direction=inbound; runtime_owner_route=regularnknv4fast; runtime_owner_route_token=regular_nkn_v4_fast; runtime_owner_protocol_version=4; runtime_owner_live_route_epoch=0; runtime_owner_terminal_generation=0; route_publication_session_id={sessionId}; route_publication_transfer_id={transferId}; route_publication_direction=inbound; route_publication_route=regularnknv4fast; route_publication_route_token=regular_nkn_v4_fast; route_publication_protocol_version=4; route_publication_live_route_epoch=0; route_publication_runtime_generation=1; route_publication_terminal_generation=0; route_publication_leg_generation=1; route_publication_commit_generation=0; route_publication_generation=1; transport_epoch={admissionTransportEpoch}; bridge_recovery_generation=0; checkpoint_request_id=(none); checkpoint_generation=0; data_session_identity=data-session-initial; data_session_generation=1; log_writer_id={writerId}", secondsOffset: 13),
+            LogLine($"event=runtime_unlock_precommit_probe_ack_delivery_result; session_id={sessionId}; transfer_id={transferId}; transaction_generation=1; offer_generation=1; tuna_path_lease_generation=1; probe_id={probeId}; intended_transport=tuna; actual_transport=tuna; delivery_result=sent; log_writer_id={writerId}", secondsOffset: 14),
+            LogLine($"event=runtime_unlock_precommit_probe_ack_sent; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=1; offer_generation=1; tuna_path_lease_generation=1; probe_id={probeId}; received_transport=tuna; log_writer_id={writerId}", secondsOffset: 15),
+            LogLine($"event=runtime_unlock_peer_precommit_answer_acceptance_observed; status=Rejected; direction=inbound; transfer_id={transferId}; session_id={sessionId}; {peerTuple}; decision_reason={rejectionReason}; log_writer_id={writerId}; log_writer_sequence=7493", secondsOffset: 16)
+        };
+
+        void InsertInitialLineageCopy(
+            string marker,
+            string? oldValue = null,
+            string? newValue = null)
+        {
+            var index = lines.FindIndex(line => line.Contains(marker, StringComparison.Ordinal));
+            Assert.True(index >= 0, $"Missing initial-lineage fixture marker: {marker}");
+            var copy = oldValue is null
+                ? lines[index]
+                : lines[index].Replace(oldValue, newValue!, StringComparison.Ordinal);
+            lines.Insert(index + 1, copy);
+        }
+
+        if (string.Equals(mode, "initial_ingress_exact_duplicates", StringComparison.Ordinal))
+        {
+            InsertInitialLineageCopy("event=runtime_unlock_precommit_probe_receive_dispatched");
+            InsertInitialLineageCopy("event=runtime_unlock_tuna_probe_received");
+            InsertInitialLineageCopy("event=runtime_unlock_precommit_probe_ack_delivery_result");
+            InsertInitialLineageCopy("event=runtime_unlock_precommit_probe_ack_sent");
+            InsertInitialLineageCopy("substate=AwaitingPeerProbe");
+        }
+        else if (string.Equals(mode, "initial_dispatch_mutation", StringComparison.Ordinal))
+        {
+            InsertInitialLineageCopy(
+                "event=runtime_unlock_precommit_probe_receive_dispatched",
+                "offer_generation=1",
+                "offer_generation=2");
+        }
+        else if (string.Equals(mode, "initial_tuna_receipt_mutation", StringComparison.Ordinal))
+        {
+            InsertInitialLineageCopy(
+                "event=runtime_unlock_tuna_probe_received",
+                "target_transport=tuna",
+                "target_transport=regular_nkn");
+        }
+        else if (string.Equals(mode, "initial_ack_delivery_mutation", StringComparison.Ordinal))
+        {
+            InsertInitialLineageCopy(
+                "event=runtime_unlock_precommit_probe_ack_delivery_result",
+                "actual_transport=tuna",
+                "actual_transport=regular_nkn");
+        }
+        else if (string.Equals(mode, "initial_ack_send_mutation", StringComparison.Ordinal))
+        {
+            InsertInitialLineageCopy(
+                "event=runtime_unlock_precommit_probe_ack_sent",
+                "received_transport=tuna",
+                "received_transport=regular_nkn");
+        }
+        else if (string.Equals(mode, "initial_held_convergence_mutation", StringComparison.Ordinal))
+        {
+            InsertInitialLineageCopy(
+                "substate=AwaitingPeerProbe",
+                "pending_answer_ack_generation=6",
+                "pending_answer_ack_generation=7");
+        }
+
+        if (string.Equals(mode, "local_offer_mismatch", StringComparison.Ordinal))
+        {
+            for (var index = 0; index < lines.Count; index++)
+            {
+                lines[index] = lines[index].Replace("offer_generation=6", "offer_generation=1", StringComparison.Ordinal);
+            }
+        }
+        if (string.Equals(mode, "non_initial_epoch", StringComparison.Ordinal))
+        {
+            for (var index = 0; index < lines.Count; index++)
+            {
+                lines[index] = lines[index].Replace("live_route_epoch=0", "live_route_epoch=1", StringComparison.Ordinal);
+            }
+        }
+        if (string.Equals(mode, "non_tuna", StringComparison.Ordinal))
+        {
+            for (var index = 0; index < lines.Count; index++)
+            {
+                if (lines[index].Contains("event=runtime_unlock_precommit_probe_ack_sent", StringComparison.Ordinal))
+                {
+                    lines[index] = lines[index].Replace("received_transport=tuna", "received_transport=regular_nkn", StringComparison.Ordinal);
+                }
+            }
+        }
+        if (mode is "terminal_before" or "data_session_replacement")
+        {
+            var replacement = string.Equals(mode, "terminal_before", StringComparison.Ordinal)
+                ? $"event=file_transfer_inbound_terminal; session_id={sessionId}; transfer_id={transferId}; direction=inbound; status=failed; log_writer_id={writerId}"
+                : $"event=filetransfer_data_session_recreated; session_id={sessionId}; transfer_id={transferId}; direction=inbound; data_session_identity=data-session-replaced; data_session_generation=2; log_writer_id={writerId}";
+            lines.Insert(lines.Count - 1, LogLine(replacement, secondsOffset: 15));
+        }
+        if (mode is "duplicate" or "mutated_duplicate")
+        {
+            var duplicatePeerOffer = string.Equals(mode, "mutated_duplicate", StringComparison.Ordinal) ? "2" : "1";
+            lines.Add(LogLine($"event=runtime_unlock_peer_precommit_answer_acceptance_observed; status=Rejected; direction=inbound; transfer_id={transferId}; session_id={sessionId}; peer_transaction_generation=1; peer_offer_generation={duplicatePeerOffer}; peer_tuna_path_lease_generation=1; probe_id={probeId}; decision_reason=current; log_writer_id={writerId}; log_writer_sequence=7494", secondsOffset: 16));
+        }
+        if (string.Equals(mode, "same_msg_ack_mutation", StringComparison.Ordinal))
+        {
+            lines.Insert(
+                lines.Count - 1,
+                LogLine($"event=tuna_acceleration_answer_ack_received; session_id={sessionId}; lanes=file; payer_decision_id=5; ack_message_id=answer-ack-initial; ack_correlation_id=ack-correlation-initial; ack_frame_fingerprint=ack-frame-initial; ack_source_fingerprint=ack-source-initial; pending_answer_ack_generation=6; authority_mode=InitialActivation; log_writer_id={writerId}", secondsOffset: 6));
+        }
+        if (string.Equals(mode, "same_correlation_ack_mutation", StringComparison.Ordinal))
+        {
+            lines.Insert(
+                lines.Count - 1,
+                LogLine($"event=tuna_acceleration_answer_ack_received_raw; msg_id=answer-ack-mutated; ack_correlation_id=ack-correlation-initial; ack_frame_fingerprint=ack-frame-mutated; ack_source_fingerprint=ack-source-initial; session_id={sessionId}; payer_decision_id=4; log_writer_id={writerId}", secondsOffset: 5));
+        }
+
+        if (mode is not "missing_peer_ack" and not "modern_missing_peer_ack")
+        {
+            var corroboratingWriter = string.Equals(mode, "wrong_writer", StringComparison.Ordinal)
+                ? writerId
+                : peerWriterId;
+            lines.Add(LogLine($"event=runtime_unlock_tuna_probe_ack_received; transport=tuna; direction=outbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=1; offer_generation=1; tuna_path_lease_generation=1; probe_id={probeId}; accepted=1; log_writer_id={corroboratingWriter}", secondsOffset: 17));
+            lines.Add(LogLine($"event=runtime_unlock_transaction_path_probe_acked; session_id={sessionId}; transaction_generation=1; offer_generation=1; path_probe_id={probeId}; path_probe_state=acked; path_probe_transport=tuna; path_probe_acked_utc_ms=200; tuna_path_lease_generation=1; log_writer_id={corroboratingWriter}", secondsOffset: 18));
+            lines.Add(LogLine($"event=runtime_unlock_precommit_probe_acked; direction=outbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=1; offer_generation=1; tuna_path_lease_generation=1; probe_id={probeId}; probe_state=Acked; received_transport=tuna; log_writer_id={corroboratingWriter}", secondsOffset: 19));
+        }
+
+        if (retryMode)
+        {
+            const string convergencePeerProof =
+                "peer_transaction_generation=1; peer_offer_generation=1; peer_tuna_path_lease_generation=1; " +
+                "probe_id=runtime-unlock-precommit:1:1:initial-probe; peer_probe_frame_fingerprint=probe-frame-initial; " +
+                "received_transport=tuna; received_utc_ms=200; probe_ack_sent_utc_ms=201";
+            var peerReceipt = LogLine($"event=runtime_unlock_peer_precommit_answer_acceptance_decided; status=Held; decision_reason=runtime_unlock_peer_precommit_semantic_answer_ack_pending; direction=inbound; transfer_id={transferId}; session_id={sessionId}; local_transaction_generation=2; local_offer_generation=6; local_tuna_path_lease_generation=1; pending_answer_ack_generation=6; launch_generation=1; {peerTuple}; probe_frame_fingerprint=probe-frame-initial; received_transport=tuna; received_utc_ms=200; probe_ack_sent_utc_ms=201; responder_transition_mode=initial_regular_v4; {peerScope}; log_writer_id={writerId}", secondsOffset: 20);
+            lines.Add(peerReceipt);
+            if (string.Equals(mode, "recovered_exact_duplicates", StringComparison.Ordinal))
+            {
+                lines.Add(peerReceipt.Replace("status=Held", "status=Idempotent", StringComparison.Ordinal));
+            }
+            else if (string.Equals(mode, "retry_peer_receipt_mutation", StringComparison.Ordinal))
+            {
+                lines.Add(peerReceipt.Replace("local_offer_generation=6", "local_offer_generation=7", StringComparison.Ordinal));
+            }
+            var startedConvergence = LogLine($"event=runtime_unlock_responder_answer_probe_convergence_decided; status=Held; decision_status=Held; substate=AwaitingProbeAck; direction=inbound; session_id={sessionId}; transfer_id={transferId}; {localAnswerProof}; {convergencePeerProof}; probe_state=Started; probe_transport=tuna; responder_transition_mode=initial_regular_v4; {peerScope}; log_writer_id={writerId}", secondsOffset: 21);
+            lines.Add(startedConvergence);
+            if (string.Equals(mode, "recovered_exact_duplicates", StringComparison.Ordinal))
+            {
+                lines.Add(startedConvergence.Replace(
+                    "status=Held; decision_status=Held",
+                    "status=Idempotent; decision_status=Idempotent",
+                    StringComparison.Ordinal));
+            }
+            else if (string.Equals(mode, "retry_started_convergence_mutation", StringComparison.Ordinal))
+            {
+                lines.Add(startedConvergence.Replace(
+                    "pending_answer_ack_generation=6",
+                    "pending_answer_ack_generation=7",
+                    StringComparison.Ordinal));
+            }
+            var callbackPathAck = LogLine($"event=runtime_unlock_transaction_path_probe_acked; direction=inbound; session_id={sessionId}; transfer_id={transferId}; transaction_generation=2; offer_generation=6; path_probe_id={probeId}; path_probe_state=Acked; path_probe_transport=tuna; path_probe_acked_utc_ms=202; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; peer_probe_frame_fingerprint=probe-frame-initial; log_writer_id={writerId}", secondsOffset: 22);
+            lines.Add(callbackPathAck);
+            if (string.Equals(mode, "recovered_exact_duplicates", StringComparison.Ordinal))
+            {
+                lines.Add(callbackPathAck);
+            }
+            else if (string.Equals(mode, "recovered_mutated_duplicate", StringComparison.Ordinal))
+            {
+                lines.Add(callbackPathAck.Replace(
+                    "path_probe_acked_utc_ms=202",
+                    "path_probe_acked_utc_ms=203",
+                    StringComparison.Ordinal));
+            }
+            var completeConvergence = LogLine($"event=runtime_unlock_responder_answer_probe_convergence_decided; status=Accepted; decision_status=Accepted; substate=Complete; direction=inbound; session_id={sessionId}; transfer_id={transferId}; {localAnswerProof}; {convergencePeerProof}; probe_state=Acked; probe_transport=tuna; probe_acked_utc_ms=202; responder_transition_mode=initial_regular_v4; {peerScope}; log_writer_id={writerId}", secondsOffset: 23);
+            lines.Add(completeConvergence);
+            if (string.Equals(mode, "recovered_exact_duplicates", StringComparison.Ordinal))
+            {
+                lines.Add(completeConvergence.Replace(
+                    "status=Accepted; decision_status=Accepted",
+                    "status=Idempotent; decision_status=Idempotent",
+                    StringComparison.Ordinal));
+            }
+            else if (string.Equals(mode, "retry_complete_convergence_mutation", StringComparison.Ordinal))
+            {
+                lines.Add(completeConvergence.Replace(
+                    "probe_acked_utc_ms=202",
+                    "probe_acked_utc_ms=203",
+                    StringComparison.Ordinal));
+            }
+            if (includeAdopting)
+            {
+                var adoptingLaunch = LogLine($"event=runtime_unlock_precommit_probe_launch_requested; session_id={sessionId}; transfer_id={transferId}; transaction_generation=2; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; probe_id={probeId}; probe_state=Acked; launch_role=ResponderAdoptingAckedPeerProbe; peer_probe_adoption=1; responder_waiting_for_peer_probe=0; duplicate=0; tuple_mutation=0; log_writer_id={writerId}", secondsOffset: 24);
+                lines.Add(adoptingLaunch);
+                if (string.Equals(mode, "recovered_exact_duplicates", StringComparison.Ordinal))
+                {
+                    lines.Add(adoptingLaunch);
+                }
+            }
+            if (includeBound)
+            {
+                var bound = LogLine($"event=runtime_unlock_precommit_responder_peer_probe_handoff_bound; status=Accepted; session_id={sessionId}; transfer_id={transferId}; transaction_generation=2; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; probe_id={probeId}; probe_state=Acked; probe_transport=tuna; probe_acked_utc_ms=202; launch_role=ResponderAdoptingAckedPeerProbe; normalized_reason=exact_responder_peer_probe_adopted; answer_acceptance_source=SemanticAnswerAck; ack_message_id=answer-ack-initial; ack_source_fingerprint=ack-source-initial; peer_probe_frame_fingerprint=probe-frame-initial; responder_transition_mode=initial_regular_v4; {peerScope}; log_writer_id={writerId}", secondsOffset: 25);
+                lines.Add(bound);
+                if (string.Equals(mode, "recovered_exact_duplicates", StringComparison.Ordinal))
+                {
+                    lines.Add(bound.Replace("status=Accepted", "status=Idempotent", StringComparison.Ordinal));
+                }
+            }
+            if (includeHandoff)
+            {
+                lines.Add(LogLine($"event=filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided; status=Accepted; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=2; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; {peerTuple}; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; lanes=file; answer_acceptance_source=SemanticAnswerAck; probe_state=Acked; probe_transport=tuna; probe_acked_utc_ms=202; payer_decision_id=4; pending_answer_ack_generation=6; ack_message_id=answer-ack-initial; ack_source_fingerprint=ack-source-initial; peer_probe_frame_fingerprint=probe-frame-initial; pair_state=(none); pairing_generation=0; pair_key=(none); fallback_yield_generation=0; pending_precommit_generation=0; retry_install_generation=0; responder_handoff_authority_id=(none); responder_handoff_generation=0; transition_authority_id=(none); transition_generation=0; route=regular_nkn_v4_fast; protocol_version=4; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; {initialAdmissionScope}; log_writer_id={writerId}", secondsOffset: 27));
+            }
+            var pairedConfirmation = LogLine($"event=runtime_unlock_paired_commit_confirmed; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=1; offer_generation=1; tuna_path_lease_generation=1; probe_id={probeId}; log_writer_id={writerId}", secondsOffset: 25);
+            lines.Add(pairedConfirmation);
+            if (string.Equals(mode, "recovered_exact_duplicates", StringComparison.Ordinal))
+            {
+                lines.Add(pairedConfirmation);
+            }
+            else if (string.Equals(mode, "retry_paired_confirmation_mutation", StringComparison.Ordinal))
+            {
+                lines.Add(pairedConfirmation.Replace("offer_generation=1", "offer_generation=2", StringComparison.Ordinal));
+            }
+            var coreProbeAck = LogLine($"event=runtime_unlock_precommit_probe_acked; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=1; offer_generation=1; tuna_path_lease_generation=1; probe_id={probeId}; probe_state=Acked; received_transport=tuna; probe_acked_utc_ms=202; peer_probe_frame_fingerprint=probe-frame-initial; log_writer_id={writerId}", secondsOffset: 26);
+            lines.Add(coreProbeAck);
+            if (string.Equals(mode, "recovered_exact_duplicates", StringComparison.Ordinal))
+            {
+                lines.Add(coreProbeAck);
+            }
+            if (includePrepare)
+            {
+                lines.Add(LogLine($"event=filetransfer_route_transition_prepared; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=2; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; transition_kind=RegularV4ToTunaV4; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; retry_install_generation=0; authority_id=fta2-initial-responder; transition_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; {sourceScope}; log_writer_id={writerId}", secondsOffset: 28));
+            }
+            if (includeCommit)
+            {
+                lines.Add(LogLine($"event=filetransfer_route_transition_draining; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transition_kind=RegularV4ToTunaV4; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; retry_install_generation=0; authority_id=fta2-initial-responder; transition_generation=1; {sourceScope}; log_writer_id={writerId}", secondsOffset: 29));
+                lines.Add(LogLine($"event=filetransfer_route_transition_committed; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transition_kind=RegularV4ToTunaV4; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; retry_install_generation=0; authority_id=fta2-initial-responder; transition_generation=1; {sourceScope}; log_writer_id={writerId}", secondsOffset: 30));
+            }
+            if (includeFullDisposition)
+            {
+                lines.Add(LogLine($"event=filetransfer_route_transition_disposition_applied; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transition_kind=RegularV4ToTunaV4; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; retry_install_generation=0; authority_id=fta2-initial-responder; transition_generation=1; decision_status=Applied; resulting_live_route_epoch=1; resulting_runtime_generation=2; resulting_route_publication_generation=2; resulting_route_commit_generation=1; resulting_terminal_generation=0; resulting_leg_generation=2; {sourceScope}; log_writer_id={writerId}", secondsOffset: 31));
+            }
+            if (string.Equals(mode, "recovered_then_replaced", StringComparison.Ordinal))
+            {
+                lines.Add(LogLine($"event=filetransfer_data_session_recreated; direction=inbound; transfer_id={transferId}; session_id={sessionId}; data_session_identity=data-session-replaced; data_session_generation=2; log_writer_id={writerId}", secondsOffset: 30));
+            }
+            if (includePublication)
+            {
+                lines.Add(LogLine($"event=filetransfer_live_route_epoch_recovered; direction=inbound; transfer_id={transferId}; session_id={sessionId}; route=file_tuna_v4; protocol_version=4; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; projection_source=coordinator_route_transition; route_publication_action_kind=RoutePublication; coordinator_decision_reason=filetransfer_route_transition_committed; transition_authority_id=fta2-initial-responder; transition_generation=1; live_route_epoch=1; runtime_generation=2; route_publication_generation=2; route_commit_generation=1; terminal_generation=0; leg_generation=2; log_writer_id={writerId}", secondsOffset: 32));
+            }
+        }
+
+        if (string.Equals(mode, "later_settlement", StringComparison.Ordinal))
+        {
+            lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_settlement_accepted; source=nkn_bridge_pressure; stage=settlement; session_id={sessionId}; transfer_id={transferId}; direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn; repair_request_key=894:12:894:12; frontier_chunk_index=894; durable_received_highest_chunk_index=893; requested_chunk_count=12; decision_generation=48; authority_id=repair-later; successor_authority_id=(none); successor_install_generation=48; outcome=StaleRejected; settlement_reason=filetransfer_route_transition_pressure_handoff; settlement_disposition=accepted; cleared_pressure=1; log_writer_id=writer_later_settlement; log_writer_sequence=13036", secondsOffset: 35));
+        }
+
+        return lines;
+    }
+
+    [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]
     [InlineData(false, true)]
@@ -8037,6 +8598,10 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     [InlineData(true, "answer_sent_duplicate")]
     [InlineData(false, "pending_generation_mutation")]
     [InlineData(true, "pending_generation_mutation")]
+    [InlineData(false, "semantic_same_msg_mutation")]
+    [InlineData(true, "semantic_same_msg_mutation")]
+    [InlineData(false, "semantic_same_correlation_mutation")]
+    [InlineData(true, "semantic_same_correlation_mutation")]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_ResponderAnswerAckBeforeProbeUsesFurthestExclusiveStage(
         bool compact,
@@ -8081,7 +8646,9 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             "answer_sent_missing" or
             "answer_sent_message_mutation" or
             "answer_sent_deadline_mutation" or
-            "pending_generation_mutation";
+            "pending_generation_mutation" or
+            "semantic_same_msg_mutation" or
+            "semantic_same_correlation_mutation";
         var newVariant = mode is "missing" or "modern_missing" or "delayed_raw" or "raw_duplicate" or "answer_sent_duplicate" or "recovered" or "recovered_delayed_raw" or "initial_activation_recovered";
         var recovered = mode is "recovered" or "recovered_delayed_raw" or "initial_activation_recovered";
         var bindingMissing = string.Equals(mode, "binding", StringComparison.Ordinal);
@@ -8289,6 +8856,14 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
                 ? $"event=tuna_acceleration_answer_ack_received; session_id={sessionId}; lanes=file; payer_decision_id=7; ack_message_id=answer-ack-late; ack_correlation_id=ack-correlation-late; ack_frame_fingerprint=ack-frame-late; ack_source_fingerprint=ack-source-late; pending_answer_ack_generation=17; authority_mode={answerAckAuthorityMode}; log_writer_id={writerId}"
                 : $"event=tuna_acceleration_answer_ack_received; session_id={sessionId}; lanes=file; payer_decision_id=7; log_writer_id={writerId}",
             secondsOffset: 4));
+        if (string.Equals(mode, "semantic_same_msg_mutation", StringComparison.Ordinal))
+        {
+            lines.Add(LogLine($"event=tuna_acceleration_answer_ack_received; session_id={sessionId}; lanes=file; payer_decision_id=8; ack_message_id=answer-ack-late; ack_correlation_id=ack-correlation-late; ack_frame_fingerprint=ack-frame-late; ack_source_fingerprint=ack-source-late; pending_answer_ack_generation=17; authority_mode={answerAckAuthorityMode}; log_writer_id={writerId}", secondsOffset: 4));
+        }
+        if (string.Equals(mode, "semantic_same_correlation_mutation", StringComparison.Ordinal))
+        {
+            lines.Add(LogLine($"event=tuna_acceleration_answer_ack_received; session_id={sessionId}; lanes=file; payer_decision_id=8; ack_message_id=answer-ack-mutated; ack_correlation_id=ack-correlation-late; ack_frame_fingerprint=ack-frame-mutated; ack_source_fingerprint=ack-source-late; pending_answer_ack_generation=17; authority_mode={answerAckAuthorityMode}; log_writer_id={writerId}", secondsOffset: 4));
+        }
         lines.Add(LogLine($"event=runtime_unlock_answer_ack_probe_barrier_received; session_id={sessionId}; lanes=file; payer_decision_id=7; reason=answer_ack_received_before_tuna_probe; log_writer_id={writerId}", secondsOffset: 5));
         lines.Add(LogLine($"event=filetransfer_runtime_unlock_handoff_pending_route_commit; session_id={sessionId}; transaction_generation=1; offer_generation=11; state=answerreceived; path_probe_state=none; route_commit_pending=0; route_committed=0; log_writer_id={writerId}", secondsOffset: 6));
         lines.Add(LogLine($"event=runtime_unlock_precommit_probe_launch_requested; session_id={sessionId}; transfer_id={transferId}; transaction_generation=1; offer_generation=11; launch_generation=6; tuna_path_lease_generation=3; tuna_path_lease_listener_run_id=peer-offer-dialer-3; path_probe_id=none; path_probe_state=none; launch_role=ResponderWaitingForPeerProbe; peer_probe_adoption=0; responder_waiting_for_peer_probe=1; duplicate=0; tuple_mutation=0; log_writer_id={writerId}", secondsOffset: 7));

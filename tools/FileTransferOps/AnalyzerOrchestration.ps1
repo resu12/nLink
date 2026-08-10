@@ -1264,7 +1264,15 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_transaction_answer_received') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_transaction_path_probe_acked') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_acked') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_peer_precommit_answer_acceptance_observed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_peer_precommit_answer_acceptance_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_receive_dispatched') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_tuna_probe_received') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_ack_delivery_result') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_ack_sent') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_tuna_probe_ack_received') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_paired_commit_confirmed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_paired_commit_confirmed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_answer_ack_pending') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_answer_sent') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'nkn_inbound_envelope_received') +
@@ -3609,6 +3617,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.RecoveredCount),
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.UnresolvedCount),
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_verdict={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.Verdict),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_raw_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.InitialActivationPeerAcceptanceScopeRejectedRawCount),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_distinct_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.InitialActivationPeerAcceptanceScopeRejectedDistinctCount),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_recovered_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.InitialActivationPeerAcceptanceScopeRejectedRecoveredCount),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_unresolved_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.InitialActivationPeerAcceptanceScopeRejectedUnresolvedCount),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_verdict={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.InitialActivationPeerAcceptanceScopeRejectedVerdict),
         ("runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_raw_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.AckBeforeProbeAdoptionRecheckMissingRawCount),
         ("runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_distinct_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.AckBeforeProbeAdoptionRecheckMissingDistinctCount),
         ("runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_recovered_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.AckBeforeProbeAdoptionRecheckMissingRecoveredCount),
@@ -4906,6 +4919,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.RecoveredCount),
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.UnresolvedCount),
         ("runtime_unlock_responder_acked_probe_route_transition_handoff_verdict={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.Verdict),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_raw_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.InitialActivationPeerAcceptanceScopeRejectedRawCount),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_distinct_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.InitialActivationPeerAcceptanceScopeRejectedDistinctCount),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_recovered_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.InitialActivationPeerAcceptanceScopeRejectedRecoveredCount),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_unresolved_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.InitialActivationPeerAcceptanceScopeRejectedUnresolvedCount),
+        ("runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_verdict={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.InitialActivationPeerAcceptanceScopeRejectedVerdict),
         ("runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_raw_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.AckBeforeProbeAdoptionRecheckMissingRawCount),
         ("runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_distinct_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.AckBeforeProbeAdoptionRecheckMissingDistinctCount),
         ("runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_recovered_count={0}" -f $runtimeUnlockResponderPeerProbeHandoffProof.AckBeforeProbeAdoptionRecheckMissingRecoveredCount),
@@ -5333,6 +5351,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count = $runtimeUnlockResponderPeerProbeHandoffProof.RecoveredCount
         runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count = $runtimeUnlockResponderPeerProbeHandoffProof.UnresolvedCount
         runtime_unlock_responder_acked_probe_route_transition_handoff_verdict = $runtimeUnlockResponderPeerProbeHandoffProof.Verdict
+        runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_raw_count = $runtimeUnlockResponderPeerProbeHandoffProof.InitialActivationPeerAcceptanceScopeRejectedRawCount
+        runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_distinct_count = $runtimeUnlockResponderPeerProbeHandoffProof.InitialActivationPeerAcceptanceScopeRejectedDistinctCount
+        runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_recovered_count = $runtimeUnlockResponderPeerProbeHandoffProof.InitialActivationPeerAcceptanceScopeRejectedRecoveredCount
+        runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_unresolved_count = $runtimeUnlockResponderPeerProbeHandoffProof.InitialActivationPeerAcceptanceScopeRejectedUnresolvedCount
+        runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_verdict = $runtimeUnlockResponderPeerProbeHandoffProof.InitialActivationPeerAcceptanceScopeRejectedVerdict
         runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_raw_count = $runtimeUnlockResponderPeerProbeHandoffProof.AckBeforeProbeAdoptionRecheckMissingRawCount
         runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_distinct_count = $runtimeUnlockResponderPeerProbeHandoffProof.AckBeforeProbeAdoptionRecheckMissingDistinctCount
         runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_recovered_count = $runtimeUnlockResponderPeerProbeHandoffProof.AckBeforeProbeAdoptionRecheckMissingRecoveredCount
